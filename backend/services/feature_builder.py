@@ -1,8 +1,12 @@
 from __future__ import annotations
 
-from services import clip_similarity, profile_config, semantic_service
-from services.timeline_types import Candidate, CandidateFeatures
+import re
+
+from services import chapter_segmenter, clip_similarity, profile_config, semantic_service, trend_prior
+from services.timeline_types import Candidate, CandidateFeatures, Chapter
 from services.transcriber import RichSegment
+
+_TOKEN_RE = re.compile(r"[a-zA-Z0-9']+")
 
 
 def build_features(
@@ -12,7 +16,10 @@ def build_features(
     use_llm_semantics: bool = True,
     llm_candidate_ids: set[str] | None = None,
     llm_provider: str | None = None,
+    chapters: list[Chapter] | None = None,
 ) -> list[CandidateFeatures]:
+    resolved_chapters = chapters if chapters is not None else chapter_segmenter.segment_chapters(segments)
+    chapter_contexts = _prepare_chapter_contexts(candidates, segments, resolved_chapters)
     return [
         _build_candidate_features(
             candidate,
@@ -21,6 +28,7 @@ def build_features(
             use_llm_semantics=use_llm_semantics,
             llm_candidate_ids=llm_candidate_ids,
             llm_provider=llm_provider,
+            chapter_context=chapter_contexts.get(candidate.id, _empty_chapter_context()),
         )
         for candidate in candidates
     ]
@@ -34,7 +42,9 @@ def _build_candidate_features(
     use_llm_semantics: bool = True,
     llm_candidate_ids: set[str] | None = None,
     llm_provider: str | None = None,
+    chapter_context: dict | None = None,
 ) -> CandidateFeatures:
+    chapter_context = chapter_context or _empty_chapter_context()
     window = [seg for seg in segments if seg.end > candidate.start and seg.start < candidate.end]
     if not window:
         return CandidateFeatures(
@@ -70,15 +80,23 @@ def _build_candidate_features(
             loser_similarity_max=0.0,
             similarity_margin=0.0,
             neighbor_quality_score=0.0,
-            vod_progress=0.0,
-            boundary_left_context_sec=0.0,
-            boundary_right_context_sec=0.0,
+            vod_progress=chapter_context["vod_progress"],
+            boundary_left_context_sec=chapter_context["boundary_left_context_sec"],
+            boundary_right_context_sec=chapter_context["boundary_right_context_sec"],
             neighbor_positive_density=0.0,
-            clip_overlap_count=0.0,
+            clip_overlap_count=chapter_context["clip_overlap_count"],
+            chapter_position=chapter_context["chapter_position"],
+            topic_shift_strength=chapter_context["topic_shift_strength"],
+            chapter_local_density=chapter_context["chapter_local_density"],
+            chapter_boundary_distance=chapter_context["chapter_boundary_distance"],
+            chapter_coherence_score=chapter_context["chapter_coherence_score"],
+            trend_hook_score=0.0,
+            trend_topic_score=0.0,
+            trend_prior_score=0.0,
             has_llm_semantics=False,
             has_chat_features=False,
             has_vector_similarity=False,
-            feature_build_version=2,
+            feature_build_version=4,
             source=candidate.source,
         )
 
@@ -140,6 +158,7 @@ def _build_candidate_features(
         profile_weights,
     )
     similarity = clip_similarity.score_candidate_window(window, candidate.anchor_time, profile)
+    trend_scores = trend_prior.score_candidate_window(window, profile)
     has_chat_features = any(
         abs(float(getattr(seg, "chat_spike_score", 0.0) or 0.0)) > 1e-9
         for seg in window
@@ -188,17 +207,135 @@ def _build_candidate_features(
         loser_similarity_max=similarity["loser_similarity_max"],
         similarity_margin=similarity["similarity_margin"],
         neighbor_quality_score=similarity["neighbor_quality_score"],
-        vod_progress=0.0,
-        boundary_left_context_sec=0.0,
-        boundary_right_context_sec=0.0,
+        vod_progress=chapter_context["vod_progress"],
+        boundary_left_context_sec=chapter_context["boundary_left_context_sec"],
+        boundary_right_context_sec=chapter_context["boundary_right_context_sec"],
         neighbor_positive_density=0.0,
-        clip_overlap_count=0.0,
+        clip_overlap_count=chapter_context["clip_overlap_count"],
+        chapter_position=chapter_context["chapter_position"],
+        topic_shift_strength=chapter_context["topic_shift_strength"],
+        chapter_local_density=chapter_context["chapter_local_density"],
+        chapter_boundary_distance=chapter_context["chapter_boundary_distance"],
+        chapter_coherence_score=chapter_context["chapter_coherence_score"],
+        trend_hook_score=float(trend_scores["trend_hook_score"]),
+        trend_topic_score=float(trend_scores["trend_topic_score"]),
+        trend_prior_score=float(trend_scores["trend_prior_score"]),
         has_llm_semantics=bool(sem.get("llm_used", False)),
         has_chat_features=has_chat_features,
         has_vector_similarity=has_vector_similarity,
-        feature_build_version=2,
+        feature_build_version=4,
         source=candidate.source,
     )
+
+
+def _prepare_chapter_contexts(
+    candidates: list[Candidate],
+    segments: list[RichSegment],
+    chapters: list[Chapter],
+) -> dict[str, dict]:
+    if not candidates or not segments:
+        return {}
+
+    if not chapters:
+        chapters = chapter_segmenter.segment_chapters(segments)
+    if not chapters:
+        return {candidate.id: _empty_chapter_context() for candidate in candidates}
+
+    total_duration = max(segments[-1].end - segments[0].start, 1.0)
+    chapter_tokens = {
+        chapter.id: _tokens_for_text(
+            " ".join(seg.text.strip() for seg in chapter_segmenter.segments_for_chapter(segments, chapter))
+        )
+        for chapter in chapters
+    }
+    chapter_assignments: dict[str, Chapter] = {}
+    chapter_counts: dict[str, int] = {chapter.id: 0 for chapter in chapters}
+    for candidate in candidates:
+        center = (candidate.start + candidate.end) / 2.0
+        chapter = chapter_segmenter.chapter_for_time(chapters, center)
+        if chapter is None:
+            continue
+        chapter_assignments[candidate.id] = chapter
+        chapter_counts[chapter.id] = chapter_counts.get(chapter.id, 0) + 1
+
+    overlaps_by_candidate: dict[str, float] = {}
+    for candidate in candidates:
+        chapter = chapter_assignments.get(candidate.id)
+        same_chapter = [
+            other for other in candidates
+            if other.id != candidate.id and chapter_assignments.get(other.id) == chapter
+        ]
+        overlap_count = 0.0
+        for other in same_chapter:
+            overlap = min(candidate.end, other.end) - max(candidate.start, other.start)
+            if overlap > 0:
+                overlap_count += 1.0
+        overlaps_by_candidate[candidate.id] = overlap_count
+
+    contexts: dict[str, dict] = {}
+    for candidate in candidates:
+        chapter = chapter_assignments.get(candidate.id)
+        if chapter is None:
+            contexts[candidate.id] = _empty_chapter_context()
+            continue
+        chapter_duration = max(chapter.end - chapter.start, 0.1)
+        center = (candidate.start + candidate.end) / 2.0
+        left_context = max(candidate.start - chapter.start, 0.0)
+        right_context = max(chapter.end - candidate.end, 0.0)
+        chapter_position = _clamp01((center - chapter.start) / chapter_duration)
+        chapter_boundary_distance = min(left_context, right_context)
+        boundary_proximity = 1.0 - min(chapter_boundary_distance / 30.0, 1.0)
+        has_neighboring_chapters = 1.0 if len(chapters) > 1 else 0.0
+        topic_shift_strength = round(chapter.confidence * boundary_proximity * has_neighboring_chapters, 3)
+        candidates_per_minute = chapter_counts.get(chapter.id, 0) / max(chapter_duration / 60.0, 0.5)
+        chapter_local_density = round(min(candidates_per_minute / 6.0, 1.0), 3)
+        candidate_tokens = _tokens_for_text("")
+        candidate_window = [seg for seg in segments if seg.end > candidate.start and seg.start < candidate.end]
+        if candidate_window:
+            candidate_tokens = _tokens_for_text(" ".join(seg.text.strip() for seg in candidate_window))
+        chapter_coherence = round(_jaccard_similarity(candidate_tokens, chapter_tokens.get(chapter.id, set())), 3)
+        vod_progress = round((center - segments[0].start) / total_duration, 3)
+
+        contexts[candidate.id] = {
+            "vod_progress": vod_progress,
+            "boundary_left_context_sec": round(left_context, 3),
+            "boundary_right_context_sec": round(right_context, 3),
+            "clip_overlap_count": overlaps_by_candidate.get(candidate.id, 0.0),
+            "chapter_position": round(chapter_position, 3),
+            "topic_shift_strength": topic_shift_strength,
+            "chapter_local_density": chapter_local_density,
+            "chapter_boundary_distance": round(chapter_boundary_distance, 3),
+            "chapter_coherence_score": chapter_coherence,
+        }
+    return contexts
+
+
+def _empty_chapter_context() -> dict:
+    return {
+        "vod_progress": 0.0,
+        "boundary_left_context_sec": 0.0,
+        "boundary_right_context_sec": 0.0,
+        "clip_overlap_count": 0.0,
+        "chapter_position": 0.0,
+        "topic_shift_strength": 0.0,
+        "chapter_local_density": 0.0,
+        "chapter_boundary_distance": 0.0,
+        "chapter_coherence_score": 0.0,
+    }
+
+
+def _tokens_for_text(text: str) -> set[str]:
+    return set(_TOKEN_RE.findall(text.lower()))
+
+
+def _jaccard_similarity(left: set[str], right: set[str]) -> float:
+    if not left or not right:
+        return 0.0
+    return len(left & right) / max(len(left | right), 1)
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, value))
 
 
 def _payoff_score(window: list[RichSegment], anchor_time: float) -> float:

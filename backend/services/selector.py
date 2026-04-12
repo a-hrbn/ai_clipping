@@ -6,10 +6,9 @@ from services.timeline_types import Candidate, CandidateFeatures, RankedCandidat
 from services.ranker import Ranker
 
 
-def select_top_candidates(
+def rank_candidates(
     candidates: list[Candidate],
     features: list[CandidateFeatures],
-    top_k: int,
     profile: str = "gaming",
 ) -> list[RankedCandidate]:
     feature_map = {feature.candidate_id: feature for feature in features}
@@ -27,12 +26,21 @@ def select_top_candidates(
         ranked.append(RankedCandidate(candidate=candidate, features=feature, rank_score=rank_score, rationale=rationale))
 
     ranked.sort(key=lambda item: item.rank_score, reverse=True)
-    return _select_diverse_ranked_candidates(ranked, top_k=top_k)
+    return ranked
 
 
-def _select_diverse_ranked_candidates(
+def select_top_candidates(
+    candidates: list[Candidate],
+    features: list[CandidateFeatures],
+    top_k: int,
+    profile: str = "gaming",
+) -> list[RankedCandidate]:
+    ranked = rank_candidates(candidates, features, profile=profile)
+    return select_diverse_ranked_candidates(ranked, top_k=top_k)
+
+
+def select_diverse_ranked_candidates(
     ranked: list[RankedCandidate],
-    *,
     top_k: int,
     min_gap_sec: float = 20.0,
 ) -> list[RankedCandidate]:

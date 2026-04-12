@@ -18,6 +18,19 @@ class Candidate:
 
 
 @dataclass
+class Chapter:
+    id: str
+    start: float
+    end: float
+    index: int
+    label: str = "mixed"
+    confidence: float = 0.0
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
 class SegmentScore:
     segment_index: int
     start: float
@@ -87,6 +100,14 @@ class CandidateFeatures:
     boundary_right_context_sec: float = 0.0
     neighbor_positive_density: float = 0.0
     clip_overlap_count: float = 0.0
+    chapter_position: float = 0.0
+    topic_shift_strength: float = 0.0
+    chapter_local_density: float = 0.0
+    chapter_boundary_distance: float = 0.0
+    chapter_coherence_score: float = 0.0
+    trend_hook_score: float = 0.0
+    trend_topic_score: float = 0.0
+    trend_prior_score: float = 0.0
     has_llm_semantics: bool = False
     has_chat_features: bool = False
     has_vector_similarity: bool = False
@@ -103,6 +124,8 @@ class RankedCandidate:
     features: CandidateFeatures | None
     rank_score: float
     rationale: list[str] = field(default_factory=list)
+    base_rank_score: float | None = None
+    judge_result: "JudgeResult | None" = None
 
     def to_dict(self) -> dict:
         return {
@@ -110,4 +133,23 @@ class RankedCandidate:
             "features": self.features.to_dict() if self.features is not None else None,
             "rank_score": self.rank_score,
             "rationale": list(self.rationale),
+            "base_rank_score": self.base_rank_score,
+            "judge_result": self.judge_result.to_dict() if self.judge_result is not None else None,
         }
+
+
+@dataclass
+class JudgeResult:
+    judge_score: float
+    scroll_stop_power: float
+    standalone_clarity: float
+    payoff_strength: float
+    narrative_completeness: float
+    platform_fit_shortform: float
+    judge_reason: str
+    judge_confidence: float
+    provider: str = "heuristic"
+    llm_used: bool = False
+
+    def to_dict(self) -> dict:
+        return asdict(self)

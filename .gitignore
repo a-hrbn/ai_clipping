@@ -17,6 +17,7 @@ backend/tests/__pycache__/
 backend/ml/artifacts/
 
 frontend/node_modules/
+frontend/node_modules.bad/
 frontend/.next/
 frontend/out/
 frontend/build/
@@ -25,8 +26,8 @@ frontend/.git.local-backup/
 frontend/next-env.d.ts
 frontend/*.tsbuildinfo
 
-graphify-out/
 transcripts/
+backend/=*
 
 npm-debug.log*
 yarn-debug.log*

@@ -4,7 +4,10 @@ import json
 import math
 import pathlib
 
-import joblib
+try:
+    import joblib
+except ModuleNotFoundError:  # pragma: no cover - optional when only heuristic/linear artifacts are used
+    joblib = None
 
 from services import profile_config
 from services.timeline_types import CandidateFeatures
@@ -78,6 +81,11 @@ class Ranker:
             visual_reaction = max(feature.motion_peak, feature.face_reaction_peak) * 10.0
             dialogue_dynamism = min(feature.speaker_turns * 2.0, 10.0)
             chat_alignment = feature.chat_peak * 10.0
+            chapter_coherence = feature.chapter_coherence_score * 10.0
+            topic_shift = feature.topic_shift_strength * 10.0
+            chapter_density = feature.chapter_local_density * 10.0
+            trend_prior = feature.trend_prior_score * 10.0
+            overlap_risk = min(feature.clip_overlap_count / 3.0, 1.0) * 10.0
             semantic_score = (
                 feature.quoteability_score
                 + feature.surprise_score
@@ -99,6 +107,11 @@ class Ranker:
                 + hw["semantic"]         * semantic_score * profile_weights.get("semantic_weight", 1.0)
                 + hw["context_efficiency"] * context_efficiency
                 + hw["profile_fit"]      * profile_fit
+                + hw.get("chapter_coherence", 0.0) * chapter_coherence
+                + hw.get("topic_shift", 0.0) * topic_shift
+                + hw.get("chapter_density", 0.0) * chapter_density
+                + hw.get("trend_prior", 0.0) * trend_prior
+                + hw.get("overlap_penalty", 0.0) * overlap_risk
                 + hw["context_cost"]     * (feature.context_cost * 10.0)
             )
 
@@ -121,6 +134,16 @@ class Ranker:
                 rationale.append("standalone")
             if feature.profile_fit_score >= 0.55:
                 rationale.append(f"profile_fit:{profile}")
+            if feature.chapter_coherence_score >= 0.6:
+                rationale.append("chapter_coherent")
+            if feature.topic_shift_strength >= 0.45:
+                rationale.append("topic_shift_hook")
+            if feature.chapter_local_density >= 0.5:
+                rationale.append("chapter_dense")
+            if feature.trend_prior_score >= 0.55:
+                rationale.append("trend_aligned")
+            if feature.clip_overlap_count >= 2.0:
+                rationale.append("overlap_risk")
 
             scored.append((round(rank_score, 3), rationale))
         return scored
@@ -183,7 +206,7 @@ class Ranker:
         model_type: str,
     ) -> list[float]:
         model_path = str(artifact.get("model_path") or "").strip()
-        if not model_path:
+        if not model_path or joblib is None:
             return [0.0 for _ in features]
         try:
             model = joblib.load(self.artifact_dir / model_path)

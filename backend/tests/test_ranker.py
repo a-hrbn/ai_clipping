@@ -3,8 +3,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import joblib
-from sklearn.ensemble import GradientBoostingClassifier
+try:
+    import joblib
+except ModuleNotFoundError:  # pragma: no cover - optional ML deps in test env
+    joblib = None
+
+try:
+    from sklearn.ensemble import GradientBoostingClassifier
+except ModuleNotFoundError:  # pragma: no cover - optional ML deps in test env
+    GradientBoostingClassifier = None
 
 from services import selector
 from services.ranker import Ranker
@@ -165,6 +172,7 @@ class RankerTests(unittest.TestCase):
 
         self.assertGreater(score, 1.0)
 
+    @unittest.skipUnless(joblib is not None, "joblib is required for artifact tests")
     def test_ranker_ignores_undertrained_artifact(self) -> None:
         feature = CandidateFeatures(
             candidate_id="ml",
@@ -220,6 +228,7 @@ class RankerTests(unittest.TestCase):
 
         self.assertGreater(score, 1.0)
 
+    @unittest.skipUnless(joblib is not None, "joblib is required for artifact tests")
     def test_ranker_rejects_high_ndcg_artifact_when_accuracy_is_low(self) -> None:
         feature = CandidateFeatures(
             candidate_id="ml",
@@ -275,6 +284,7 @@ class RankerTests(unittest.TestCase):
 
         self.assertGreater(score, 1.0)
 
+    @unittest.skipUnless(joblib is not None and GradientBoostingClassifier is not None, "joblib and sklearn are required for artifact tests")
     def test_ranker_scores_with_gradient_boosting_artifact(self) -> None:
         model = GradientBoostingClassifier(random_state=0)
         model.fit([[-3.0], [-2.0], [-1.0], [1.0], [2.0], [3.0]], [0, 0, 0, 1, 1, 1])
@@ -335,6 +345,7 @@ class RankerTests(unittest.TestCase):
 
         self.assertGreater(score, 1.0)
 
+    @unittest.skipUnless(joblib is not None, "joblib is required for artifact tests")
     def test_ranker_scores_with_lightgbm_ranker_artifact(self) -> None:
         feature = CandidateFeatures(
             candidate_id="ml",
@@ -391,6 +402,78 @@ class RankerTests(unittest.TestCase):
             score = Ranker(artifact_dir=artifact_dir).score([feature], profile="gaming")[0][1]
 
         self.assertGreater(score, 1.0)
+
+    def test_ranker_rewards_chapter_coherence_and_topic_shift(self) -> None:
+        coherent = CandidateFeatures(
+            candidate_id="coherent",
+            hook_strength=0.5,
+            payoff_score=4.0,
+            max_hype=4.0,
+            context_efficiency=0.6,
+            standalone_score=0.6,
+            profile_fit_score=0.6,
+            chapter_coherence_score=0.85,
+            topic_shift_strength=0.7,
+            chapter_local_density=0.6,
+            clip_overlap_count=0.0,
+            source="reaction",
+        )
+        fragmented = CandidateFeatures(
+            candidate_id="fragmented",
+            hook_strength=0.5,
+            payoff_score=4.0,
+            max_hype=4.0,
+            context_efficiency=0.6,
+            standalone_score=0.6,
+            profile_fit_score=0.6,
+            chapter_coherence_score=0.2,
+            topic_shift_strength=0.1,
+            chapter_local_density=0.2,
+            clip_overlap_count=2.5,
+            source="reaction",
+        )
+
+        scored = Ranker().score_with_rationale([coherent, fragmented], profile="general")
+        score_map = {candidate_id: (score, rationale) for candidate_id, score, rationale in scored}
+
+        self.assertGreater(score_map["coherent"][0], score_map["fragmented"][0])
+        self.assertIn("chapter_coherent", score_map["coherent"][1])
+        self.assertIn("topic_shift_hook", score_map["coherent"][1])
+        self.assertIn("overlap_risk", score_map["fragmented"][1])
+
+    def test_ranker_rewards_trend_aligned_candidates(self) -> None:
+        trend_aligned = CandidateFeatures(
+            candidate_id="trend",
+            hook_strength=0.4,
+            payoff_score=3.5,
+            max_hype=3.5,
+            context_efficiency=0.55,
+            standalone_score=0.55,
+            profile_fit_score=0.55,
+            trend_hook_score=0.72,
+            trend_topic_score=0.6,
+            trend_prior_score=0.8,
+            source="reaction",
+        )
+        plain = CandidateFeatures(
+            candidate_id="plain",
+            hook_strength=0.4,
+            payoff_score=3.5,
+            max_hype=3.5,
+            context_efficiency=0.55,
+            standalone_score=0.55,
+            profile_fit_score=0.55,
+            trend_hook_score=0.0,
+            trend_topic_score=0.0,
+            trend_prior_score=0.0,
+            source="reaction",
+        )
+
+        scored = Ranker().score_with_rationale([trend_aligned, plain], profile="general")
+        score_map = {candidate_id: (score, rationale) for candidate_id, score, rationale in scored}
+
+        self.assertGreater(score_map["trend"][0], score_map["plain"][0])
+        self.assertIn("trend_aligned", score_map["trend"][1])
 
 
 if __name__ == "__main__":

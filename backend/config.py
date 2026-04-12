@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     ollama_model: str = "llama3.2"
     storage_dir: str = "/tmp/ai_clipping"
     max_clip_duration: int = 90
-    max_upload_size_bytes: int = 4_000_000_000
+    max_upload_size_bytes: int | None = None
     clip_profile: str = "general"
     profiles_path: str | None = None  # Optional path to a JSON file with custom profile overrides
     hf_token: str | None = None  # HuggingFace token for pyannote diarization (optional)
@@ -29,6 +29,15 @@ class Settings(BaseSettings):
     shortlist_face_reaction_top_k: int = 12
     shortlist_face_reaction_sample_sec: int = 1
     shortlist_llm_top_k: int = 12
+    enable_clip_judge: bool = True
+    shortlist_judge_top_k: int = 24
+    judge_blend_weight: float = 0.65
+    judge_context_lookback_sec: float = 120.0
+    enable_multimodal_clip_judge: bool = True
+    judge_keyframes_per_candidate: int = 4
+    judge_keyframe_width: int = 640
+    enable_trend_prior: bool = True
+    trend_prior_data_path: str | None = None
 
 
 settings = Settings()

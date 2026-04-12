@@ -4,9 +4,10 @@ import unittest
 from unittest.mock import patch
 
 sys.modules.setdefault("whisper", types.SimpleNamespace(load_model=lambda *_args, **_kwargs: None))
+sys.modules.setdefault("ollama", types.SimpleNamespace(Client=lambda *_args, **_kwargs: None))
 
 from services import feature_builder
-from services.timeline_types import Candidate
+from services.timeline_types import Candidate, Chapter
 from services.transcriber import RichSegment
 
 
@@ -40,7 +41,9 @@ class FeatureBuilderTests(unittest.TestCase):
         self.assertGreater(features.hook_strength, 0.2)
         self.assertGreaterEqual(features.standalone_score, 0.4)
         self.assertGreaterEqual(features.semantic_density, 0.0)
-        self.assertEqual(features.feature_build_version, 2)
+        self.assertGreater(features.trend_hook_score, 0.0)
+        self.assertGreater(features.trend_prior_score, 0.0)
+        self.assertEqual(features.feature_build_version, 4)
 
     def test_build_features_includes_similarity_features(self) -> None:
         candidate = Candidate(id="x", start=0.0, end=10.0, source="reaction", anchor_time=2.5)
@@ -132,6 +135,43 @@ class FeatureBuilderTests(unittest.TestCase):
             feature_builder.build_features([candidate], segments, "gaming", llm_provider="ollama")
 
         self.assertEqual(score_window_mock.call_args.kwargs["llm_provider"], "ollama")
+
+    def test_build_features_populates_chapter_features(self) -> None:
+        candidates = [
+            Candidate(id="a", start=2.0, end=8.0, source="reaction", anchor_time=4.0),
+            Candidate(id="b", start=6.0, end=12.0, source="reaction", anchor_time=8.0),
+        ]
+        segments = [
+            RichSegment(start=0.0, end=3.0, text="setup before a big reveal", speaker="STREAMER", hype_score=2.0),
+            RichSegment(
+                start=3.0,
+                end=6.0,
+                text="big reveal payoff moment",
+                speaker="STREAMER",
+                hype_score=5.0,
+                chat_spike_score=0.6,
+                has_scene_change=True,
+            ),
+            RichSegment(start=6.0, end=10.0, text="new topic starts here", speaker="GUEST_1", hype_score=3.0),
+            RichSegment(start=10.0, end=14.0, text="follow up on the new topic", speaker="GUEST_1", hype_score=2.5),
+        ]
+        chapters = [
+            Chapter(id="chapter_00", start=0.0, end=10.0, index=0, label="reaction", confidence=0.8),
+            Chapter(id="chapter_01", start=10.0, end=14.0, index=1, label="discussion", confidence=0.7),
+        ]
+
+        features = feature_builder.build_features(candidates, segments, chapters=chapters)
+
+        self.assertEqual(len(features), 2)
+        self.assertGreater(features[0].chapter_position, 0.0)
+        self.assertLess(features[0].chapter_position, 1.0)
+        self.assertGreater(features[0].topic_shift_strength, 0.0)
+        self.assertGreater(features[0].chapter_local_density, 0.0)
+        self.assertGreater(features[0].chapter_boundary_distance, 0.0)
+        self.assertGreater(features[0].chapter_coherence_score, 0.0)
+        self.assertGreater(features[0].clip_overlap_count, 0.0)
+        self.assertGreaterEqual(features[0].trend_prior_score, 0.0)
+        self.assertGreater(features[1].vod_progress, features[0].vod_progress)
 
 
 if __name__ == "__main__":

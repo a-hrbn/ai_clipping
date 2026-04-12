@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "updated_at": "2026-04-12",
+  "source_note": "Hand-curated short-form hook and topic priors derived from common patterns across gaming, reaction, podcast, and just-chatting clips. Used only as a lightweight runtime prior, not as a hard filter.",
+  "global": {
+    "hook_patterns": [
+      {"label": "immediate_question", "patterns": ["what happened", "how did", "why did", "did you see", "what if"], "weight": 0.62},
+      {"label": "disbelief_reaction", "patterns": ["no way", "ain't no way", "you won't believe", "bro what", "nah"], "weight": 0.72},
+      {"label": "high_stakes_claim", "patterns": ["this is crazy", "this is insane", "biggest", "worst", "best ever"], "weight": 0.58},
+      {"label": "challenge_setup", "patterns": ["if i lose", "if you lose", "winner gets", "loser has to", "bet"], "weight": 0.64}
+    ],
+    "topic_patterns": [
+      {"label": "conflict_or_take", "patterns": ["argue", "disagree", "controversial", "hot take", "wrong"], "weight": 0.52},
+      {"label": "reveal_or_twist", "patterns": ["turns out", "actually", "secret", "reveal", "plot twist"], "weight": 0.6},
+      {"label": "punishment_or_forfeit", "patterns": ["forfeit", "punishment", "challenge", "bet", "punished"], "weight": 0.57},
+      {"label": "social_proof_reaction", "patterns": ["chat went crazy", "everyone laughed", "crowd", "blew up", "went wild"], "weight": 0.54}
+    ]
+  },
+  "profiles": {
+    "gaming": {
+      "hook_patterns": [
+        {"label": "clutch_or_throw", "patterns": ["clutch", "threw", "sold", "1v", "ranked game"], "weight": 0.65},
+        {"label": "rage_or_popoff", "patterns": ["he's trolling", "locked in", "let's go", "i'm done", "uninstall"], "weight": 0.59}
+      ],
+      "topic_patterns": [
+        {"label": "competitive_stakes", "patterns": ["ranked", "championship", "final round", "1v1", "clutch"], "weight": 0.61},
+        {"label": "unexpected_gameplay", "patterns": ["glitch", "bug", "cheater", "wallbang", "one tap"], "weight": 0.56}
+      ]
+    },
+    "just_chatting": {
+      "hook_patterns": [
+        {"label": "story_tease", "patterns": ["so basically", "let me tell you", "the craziest part", "story time"], "weight": 0.56}
+      ],
+      "topic_patterns": [
+        {"label": "personal_reveal", "patterns": ["i never told", "truth is", "honestly", "embarrassing", "confession"], "weight": 0.62},
+        {"label": "drama_context", "patterns": ["beef", "drama", "called me", "texted me", "exposed"], "weight": 0.59}
+      ]
+    },
+    "podcast": {
+      "hook_patterns": [
+        {"label": "strong_claim_open", "patterns": ["the problem is", "people don't realize", "the truth is", "here's why"], "weight": 0.61}
+      ],
+      "topic_patterns": [
+        {"label": "insight_or_framework", "patterns": ["lesson", "framework", "mindset", "principle", "strategy"], "weight": 0.58},
+        {"label": "counterintuitive_take", "patterns": ["counterintuitive", "most people think", "actually the opposite", "misunderstand"], "weight": 0.63}
+      ]
+    }
+  }
+}

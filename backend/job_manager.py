@@ -14,17 +14,20 @@ _jobs: Dict[str, JobStatus] = {}
 _job_created_at: Dict[str, float] = {}   # job_id → creation timestamp (epoch seconds)
 _lock = threading.RLock()
 _jobs_file = pathlib.Path(settings.storage_dir) / "jobs.json"
+_last_persisted_at = 0.0
 
 _JOB_TTL_SECONDS = 2 * 3600  # evict in-memory records after 2 hours
+_PERSIST_INTERVAL_SECONDS = 5.0
 
 
-def _evict_expired() -> None:
+def _evict_expired(now: float | None = None) -> bool:
     """Remove jobs older than _JOB_TTL_SECONDS from the in-memory store."""
-    now = time.monotonic()
+    now = time.monotonic() if now is None else now
     expired = [jid for jid, ts in _job_created_at.items() if now - ts > _JOB_TTL_SECONDS]
     for jid in expired:
         _jobs.pop(jid, None)
         _job_created_at.pop(jid, None)
+    return bool(expired)
 
 
 def _load_jobs() -> None:
@@ -56,9 +59,20 @@ def _load_jobs() -> None:
 
 
 def _persist_jobs() -> None:
+    global _last_persisted_at
     _jobs_file.parent.mkdir(parents=True, exist_ok=True)
     payload = [job.model_dump(mode="json") for job in _jobs.values()]
     _jobs_file.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+    _last_persisted_at = time.monotonic()
+
+
+def _should_persist_update(kwargs: dict, now: float) -> bool:
+    status = kwargs.get("status")
+    if status in {"done", "failed"}:
+        return True
+    if any(key in kwargs for key in {"clips", "error", "profile"}):
+        return True
+    return now - _last_persisted_at >= _PERSIST_INTERVAL_SECONDS
 
 
 _load_jobs()
@@ -76,12 +90,17 @@ def create_job(job_id: str, profile: str = "general") -> JobStatus:
 
 def get_job(job_id: str) -> JobStatus | None:
     with _lock:
+        if _evict_expired():
+            _persist_jobs()
         return _jobs.get(job_id)
 
 
 def update_job(job_id: str, **kwargs) -> None:
     with _lock:
+        now = time.monotonic()
+        evicted = _evict_expired(now)
         job = _jobs[job_id]
         for k, v in kwargs.items():
             setattr(job, k, v)
-        _persist_jobs()
+        if evicted or _should_persist_update(kwargs, now):
+            _persist_jobs()

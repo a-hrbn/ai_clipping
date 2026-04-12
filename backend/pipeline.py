@@ -22,6 +22,9 @@ from services import (
     selector,
     feedback_store,
     peak_detector,
+    clip_judge,
+    keyframe_sampler,
+    chapter_segmenter,
 )
 
 logger = logging.getLogger(__name__)
@@ -34,7 +37,7 @@ async def run_pipeline(
     profile: str | None = None,
 ) -> None:
     effective_profile = profile or settings.clip_profile
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     try:
         if video_path is None:
             update_job(job_id, status="downloading", progress_pct=5)
@@ -111,6 +114,11 @@ async def run_pipeline(
 
         # Attach composite hype scores before saving or analyzing
         transcript = scorer.score_segments(transcript)
+        chapters = await loop.run_in_executor(
+            None,
+            chapter_segmenter.segment_chapters,
+            transcript,
+        )
         score_timeline = scorer.build_score_timeline(transcript)
         detected_peaks = await loop.run_in_executor(None, peak_detector.detect_peaks, score_timeline)
         peak_candidates = await loop.run_in_executor(
@@ -125,6 +133,7 @@ async def run_pipeline(
             None,
             candidate_generators.generate_semantic_candidates,
             transcript,
+            chapters,
         )
         fallback_candidates = []
         if not peak_candidates:
@@ -132,6 +141,7 @@ async def run_pipeline(
                 None,
                 candidate_generators.generate_fallback_candidates,
                 transcript,
+                chapters,
             )
         candidates = await loop.run_in_executor(
             None,
@@ -154,13 +164,14 @@ async def run_pipeline(
             effective_profile,
             False,
             None,
+            None,
+            chapters,
         )
         ranked_candidates = await loop.run_in_executor(
             None,
-            selector.select_top_candidates,
+            selector.rank_candidates,
             normalized_candidates,
             candidate_features,
-            12,
             effective_profile,
         )
         shortlist_top_k = min(max(settings.shortlist_face_reaction_top_k, 0), len(ranked_candidates))
@@ -185,15 +196,54 @@ async def run_pipeline(
                 effective_profile,
                 True,
                 llm_candidate_ids,
+                None,
+                chapters,
             )
             ranked_candidates = await loop.run_in_executor(
                 None,
-                selector.select_top_candidates,
+                selector.rank_candidates,
                 normalized_candidates,
                 candidate_features,
-                12,
                 effective_profile,
             )
+        ranked_candidates_pre_judge = list(ranked_candidates)
+        judged_ranked_candidates = list(ranked_candidates)
+        judge_top_k = min(max(settings.shortlist_judge_top_k, 0), len(ranked_candidates))
+        job_dir = pathlib.Path(settings.storage_dir) / job_id
+        debug_dir = job_dir / "debug"
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        sampled_keyframes: dict[str, list[keyframe_sampler.SampledKeyframe]] = {}
+        if (
+            settings.enable_clip_judge
+            and settings.enable_multimodal_clip_judge
+            and settings.gemini_api_key
+            and judge_top_k > 0
+        ):
+            sampled_keyframes = await loop.run_in_executor(
+                None,
+                keyframe_sampler.sample_candidate_keyframes,
+                video_path,
+                ranked_candidates[:judge_top_k],
+                debug_dir,
+                settings.judge_keyframes_per_candidate,
+            )
+        if settings.enable_clip_judge and judge_top_k > 0:
+            judged_ranked_candidates = await loop.run_in_executor(
+                None,
+                clip_judge.rerank_candidates,
+                ranked_candidates,
+                transcript,
+                effective_profile,
+                judge_top_k,
+                None,
+                sampled_keyframes,
+            )
+        ranked_candidates = await loop.run_in_executor(
+            None,
+            selector.select_diverse_ranked_candidates,
+            judged_ranked_candidates,
+            12,
+        )
         moments = await loop.run_in_executor(
             None,
             analyzer.refine_candidates,
@@ -202,10 +252,6 @@ async def run_pipeline(
             5,
             effective_profile,
         )
-
-        job_dir = pathlib.Path(settings.storage_dir) / job_id
-        debug_dir = job_dir / "debug"
-        debug_dir.mkdir(parents=True, exist_ok=True)
 
         transcripts_dir = pathlib.Path(__file__).parents[1] / "transcripts"
         transcripts_dir.mkdir(exist_ok=True)
@@ -216,6 +262,7 @@ async def run_pipeline(
             transcriber.format_jsonl(transcript), encoding="utf-8"
         )
         _write_jsonl(debug_dir / "segments.jsonl", _segment_records(transcript))
+        _write_jsonl(debug_dir / "chapters.jsonl", [chapter.to_dict() for chapter in chapters])
         _write_jsonl(debug_dir / "segment_scores.jsonl", _score_records(score_timeline))
         _write_jsonl(debug_dir / "detected_peaks.jsonl", [peak.to_dict() for peak in detected_peaks])
         _write_jsonl(debug_dir / "candidates_peak.jsonl", [candidate.to_dict() for candidate in peak_candidates])
@@ -230,6 +277,26 @@ async def run_pipeline(
         _write_jsonl(
             debug_dir / "candidate_features.jsonl",
             [feature.to_dict() for feature in candidate_features],
+        )
+        _write_jsonl(
+            debug_dir / "ranked_candidates_pre_judge.jsonl",
+            [ranked.to_dict() for ranked in ranked_candidates_pre_judge],
+        )
+        _write_jsonl(
+            debug_dir / "judged_candidates.jsonl",
+            [
+                ranked.to_dict()
+                for ranked in judged_ranked_candidates
+                if ranked.judge_result is not None
+            ],
+        )
+        _write_jsonl(
+            debug_dir / "judge_keyframes.jsonl",
+            [
+                frame.to_dict()
+                for frames in sampled_keyframes.values()
+                for frame in frames
+            ],
         )
         _write_jsonl(
             debug_dir / "ranked_candidates.jsonl",

@@ -4,34 +4,40 @@ import { useEffect, useState } from "react";
 import { getAIStatus } from "@/lib/api";
 import { AIProviderStatus, ProviderInfo } from "@/lib/types";
 
-type DotState = "active" | "error" | "inactive";
+type DotState = "active" | "fallback" | "error" | "inactive";
 
 function getDotState(info: ProviderInfo): DotState {
-  if (info.active) return "active";
+  if (info.mode === "fallback") return "fallback";
+  if (info.mode === "active") return "active";
+  if (info.mode === "error") return "error";
   if (info.error) return "error";
   return "inactive";
 }
 
 const DOT_COLOR: Record<DotState, string> = {
   active:   "var(--accent)",
+  fallback: "var(--warn)",
   error:    "var(--warn)",
   inactive: "var(--text-muted)",
 };
 
 const BADGE_BG: Record<DotState, string> = {
   active:   "rgba(188,255,87,0.08)",
+  fallback: "rgba(255,178,64,0.08)",
   error:    "rgba(255,178,64,0.08)",
   inactive: "rgba(255,255,255,0.04)",
 };
 
 const BADGE_COLOR: Record<DotState, string> = {
   active:   "var(--accent)",
+  fallback: "var(--warn)",
   error:    "var(--warn)",
   inactive: "var(--text-muted)",
 };
 
 const BADGE_BORDER: Record<DotState, string> = {
   active:   "rgba(188,255,87,0.2)",
+  fallback: "rgba(255,178,64,0.25)",
   error:    "rgba(255,178,64,0.25)",
   inactive: "var(--border)",
 };
@@ -71,10 +77,16 @@ function ProviderPill({ label, info }: { label: string; info: ProviderInfo }) {
         </span>
       </div>
 
+      {state === "fallback" && (
+        <p className="ml-3 text-xs font-mono" style={{ color: "var(--warn)" }}>
+          {info.error ? `Fallback aktiv: ${info.error}` : "Lokaler Fallback aktiv"}
+        </p>
+      )}
+
       {/* Inline error hint */}
       {state === "error" && info.error && (
         <p className="ml-3 text-xs font-mono" style={{ color: "var(--warn)" }}>
-          ⚠ {info.error} — Fallback: Ollama
+          {info.error}
         </p>
       )}
     </div>

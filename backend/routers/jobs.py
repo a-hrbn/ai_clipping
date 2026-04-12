@@ -61,6 +61,49 @@ def _check_gemini(api_key: str, model: str) -> tuple[bool, str | None]:
         return False, "Gemini nicht erreichbar"
 
 
+def _provider_payload(
+    *,
+    configured: bool,
+    provider_name: str,
+    provider_model: str,
+    fallback_name: str,
+    fallback_model: str,
+    ok: bool,
+    error: str | None,
+) -> dict[str, str | bool | None]:
+    if configured and ok:
+        return {
+            "name": provider_name,
+            "model": provider_model,
+            "active": True,
+            "error": None,
+            "mode": "active",
+        }
+    if configured and error:
+        return {
+            "name": fallback_name,
+            "model": fallback_model,
+            "active": True,
+            "error": error,
+            "mode": "fallback",
+        }
+    if not configured:
+        return {
+            "name": fallback_name,
+            "model": fallback_model,
+            "active": True,
+            "error": None,
+            "mode": "fallback",
+        }
+    return {
+        "name": provider_name,
+        "model": provider_model,
+        "active": False,
+        "error": error,
+        "mode": "error",
+    }
+
+
 @status_router.get("/status")
 async def get_status():
     global _status_cache
@@ -72,7 +115,7 @@ async def get_status():
         result.pop("_ts", None)
         return result
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     groq_configured = bool(settings.groq_api_key)
     gemini_configured = bool(settings.gemini_api_key)
 
@@ -94,18 +137,24 @@ async def get_status():
 
     result = {
         "providers": {
-            "semantic": {
-                "name": "Groq" if groq_configured else "Ollama",
-                "model": settings.groq_model if groq_configured else settings.ollama_model,
-                "active": groq_configured and groq_ok,
-                "error": groq_err if groq_configured else None,
-            },
-            "refinement": {
-                "name": "Gemini" if gemini_configured else "Ollama",
-                "model": settings.gemini_model if gemini_configured else settings.ollama_model,
-                "active": gemini_configured and gemini_ok,
-                "error": gemini_err if gemini_configured else None,
-            },
+            "semantic": _provider_payload(
+                configured=groq_configured,
+                provider_name="Groq",
+                provider_model=settings.groq_model,
+                fallback_name="Ollama",
+                fallback_model=settings.ollama_model,
+                ok=groq_ok,
+                error=groq_err,
+            ),
+            "refinement": _provider_payload(
+                configured=gemini_configured,
+                provider_name="Gemini",
+                provider_model=settings.gemini_model,
+                fallback_name="Ollama",
+                fallback_model=settings.ollama_model,
+                ok=gemini_ok,
+                error=gemini_err,
+            ),
         }
     }
 
@@ -132,6 +181,19 @@ async def upload_job(file: UploadFile = File(...), profile: str | None = Form(No
     if suffix and suffix not in allowed_suffixes:
         raise HTTPException(status_code=400, detail="Nicht unterstütztes Dateiformat")
 
+    spooled = file.file
+    size_limit = settings.max_upload_size_bytes
+    if size_limit is not None and size_limit > 0:
+        spooled.seek(0, io.SEEK_END)
+        size_bytes = spooled.tell()
+        spooled.seek(0)
+        if size_bytes > size_limit:
+            try:
+                spooled.close()
+            except Exception:
+                pass
+            raise HTTPException(status_code=413, detail="Datei ist zu groß")
+
     job_id = str(uuid.uuid4())
     effective_profile = profile or settings.clip_profile
     job = create_job(job_id, profile=effective_profile)
@@ -142,12 +204,6 @@ async def upload_job(file: UploadFile = File(...), profile: str | None = Form(No
 
     # Detach the SpooledTemporaryFile from FastAPI's lifecycle so we can copy
     # it in the background without blocking the HTTP response.
-    spooled = file.file
-    spooled.seek(0, io.SEEK_END)
-    size_bytes = spooled.tell()
-    spooled.seek(0)
-    if size_bytes > settings.max_upload_size_bytes:
-        raise HTTPException(status_code=413, detail="Datei ist zu groß")
     file.file = io.BytesIO()  # replace so FastAPI cleanup doesn't touch our file
 
     async def _save_and_run():

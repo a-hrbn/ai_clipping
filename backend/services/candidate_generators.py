@@ -1,17 +1,34 @@
 from __future__ import annotations
 
-from services.timeline_types import Candidate
+from services.timeline_types import Candidate, Chapter
 from services.transcriber import RichSegment
+from services import chapter_segmenter
 
 _DENSE_TARGET_DURATIONS = (9.0, 16.0, 28.0, 45.0)
 _DENSE_PER_DURATION = 12
 
 
-def generate_candidates(segments: list[RichSegment]) -> list[Candidate]:
-    return generate_semantic_candidates(segments)
+def generate_candidates(
+    segments: list[RichSegment],
+    chapters: list[Chapter] | None = None,
+) -> list[Candidate]:
+    return generate_semantic_candidates(segments, chapters=chapters)
 
 
-def generate_semantic_candidates(segments: list[RichSegment]) -> list[Candidate]:
+def generate_semantic_candidates(
+    segments: list[RichSegment],
+    chapters: list[Chapter] | None = None,
+) -> list[Candidate]:
+    if chapters:
+        candidates: list[Candidate] = []
+        for chapter in chapters:
+            chapter_segments = chapter_segmenter.segments_for_chapter(segments, chapter)
+            candidates.extend(_generate_semantic_candidates_for_segments(chapter_segments))
+        return candidates
+    return _generate_semantic_candidates_for_segments(segments)
+
+
+def _generate_semantic_candidates_for_segments(segments: list[RichSegment]) -> list[Candidate]:
     candidates: list[Candidate] = []
     candidates.extend(_generate_quote_candidates(segments))
     candidates.extend(_generate_tension_build_candidates(segments))
@@ -20,7 +37,20 @@ def generate_semantic_candidates(segments: list[RichSegment]) -> list[Candidate]
     return candidates
 
 
-def generate_fallback_candidates(segments: list[RichSegment]) -> list[Candidate]:
+def generate_fallback_candidates(
+    segments: list[RichSegment],
+    chapters: list[Chapter] | None = None,
+) -> list[Candidate]:
+    if chapters:
+        candidates: list[Candidate] = []
+        for chapter in chapters:
+            chapter_segments = chapter_segmenter.segments_for_chapter(segments, chapter)
+            candidates.extend(_generate_fallback_candidates_for_segments(chapter_segments))
+        return candidates
+    return _generate_fallback_candidates_for_segments(segments)
+
+
+def _generate_fallback_candidates_for_segments(segments: list[RichSegment]) -> list[Candidate]:
     candidates: list[Candidate] = []
     candidates.extend(_generate_hype_peak_candidates(segments))
     candidates.extend(_generate_chat_sync_candidates(segments))

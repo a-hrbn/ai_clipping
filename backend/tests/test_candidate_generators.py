@@ -1,10 +1,12 @@
 import sys
 import types
 import unittest
+from unittest.mock import patch
 
 sys.modules.setdefault("whisper", types.SimpleNamespace(load_model=lambda *_args, **_kwargs: None))
 
 from services import candidate_generators
+from services.timeline_types import Chapter
 from services.transcriber import RichSegment
 
 
@@ -122,6 +124,28 @@ class CandidateGeneratorTests(unittest.TestCase):
         self.assertIn("hype_peak", sources)
         self.assertIn("chat_sync", sources)
         self.assertIn("reaction", sources)
+
+    def test_generate_semantic_candidates_runs_per_chapter_when_provided(self) -> None:
+        segments = [
+            RichSegment(start=0.0, end=2.0, text="first chapter"),
+            RichSegment(start=2.0, end=4.0, text="still first chapter"),
+            RichSegment(start=10.0, end=12.0, text="second chapter"),
+            RichSegment(start=12.0, end=14.0, text="still second chapter"),
+        ]
+        chapters = [
+            Chapter(id="chapter_00", start=0.0, end=4.0, index=0),
+            Chapter(id="chapter_01", start=10.0, end=14.0, index=1),
+        ]
+
+        with patch("services.candidate_generators._generate_semantic_candidates_for_segments") as helper_mock:
+            helper_mock.side_effect = [
+                [candidate_generators.Candidate(id="quote:0:100", start=0.0, end=4.0, source="quote", anchor_time=1.0)],
+                [candidate_generators.Candidate(id="quote:1:1100", start=10.0, end=14.0, source="quote", anchor_time=11.0)],
+            ]
+            candidates = candidate_generators.generate_semantic_candidates(segments, chapters=chapters)
+
+        self.assertEqual(len(candidates), 2)
+        self.assertEqual(helper_mock.call_count, 2)
 
 
 if __name__ == "__main__":

@@ -44,6 +44,7 @@ export interface ProviderInfo {
   model: string;
   active: boolean;
   error: string | null;
+  mode: "active" | "fallback" | "error" | "inactive";
 }
 
 export interface AIProviderStatus {

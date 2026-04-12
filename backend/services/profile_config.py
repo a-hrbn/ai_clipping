@@ -159,7 +159,7 @@ _init()
 # ---------------------------------------------------------------------------
 # Heuristic scoring weights
 # ---------------------------------------------------------------------------
-# These 11 coefficients control the relative importance of each signal in
+# These coefficients control the relative importance of each signal in
 # the heuristic rank formula inside ranker.py.  They can be overridden via
 # the same JSON config file under the key ``"heuristic_weights"``.
 
@@ -174,6 +174,11 @@ HEURISTIC_WEIGHTS: dict[str, float] = {
     "semantic":           0.08,   # raised: quoteable/surprising content is a core viral signal
     "context_efficiency": 0.03,
     "profile_fit":        0.06,   # raised: profile fit should meaningfully influence ranking
+    "chapter_coherence":  0.05,   # reward candidates that stay semantically inside a coherent chapter
+    "topic_shift":        0.04,   # topic pivots near a hook can be strong short-form entry points
+    "chapter_density":    0.03,   # dense chapters tend to contain more clip-worthy beats
+    "trend_prior":        0.05,   # lightweight prior from common viral hooks/topics
+    "overlap_penalty":   -0.04,   # penalize candidates that heavily overlap nearby alternatives
     "context_cost":      -0.05,   # penalty — negative keeps the sign clear
 }
 
@@ -222,6 +227,13 @@ def get_effective_heuristic_weights(profile: str) -> dict[str, float]:
     """
     base = dict(HEURISTIC_WEIGHTS)
     overrides = STREAMER_HEURISTIC_OVERRIDES.get(profile.lower().strip(), {})
+    ignored = sorted(key for key in overrides if key not in base)
+    if ignored:
+        logger.warning(
+            "Ignoring unknown heuristic override keys for profile '%s': %s",
+            profile,
+            ignored,
+        )
     for key, value in overrides.items():
         if key in base:
             base[key] = float(value)
