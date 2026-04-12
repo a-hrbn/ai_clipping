@@ -1,0 +1,27 @@
+# Viral Streamer Clips — Training Data
+# ======================================
+# Add one YouTube Shorts or TikTok URL per line.
+# Lines starting with # are ignored.
+#
+# Ziel: Clips mit vielen Views von bekannten Streamern.
+# Je mehr, desto besser — 30+ Clips empfohlen für gute Ergebnisse.
+#
+# Beispiel-Quellen:
+#   - YouTube: Suche nach "[Streamer] clips" → Shorts-Tab → nach Views sortieren
+#   - TikTok:  Streamer-Account → Videos mit höchsten Views
+#
+# Format A: plain URLs
+#   https://www.youtube.com/shorts/VIDEO_ID
+#   https://www.tiktok.com/@username/video/VIDEO_ID
+#
+# Format B: CSV/TSV with metadata and optional label
+#   url,streamer,platform,language,tags,label,notes
+#   https://www.youtube.com/shorts/VIDEO_ID,shroud,youtube,en,"fps,clutch",1,"viral short"
+#   https://www.tiktok.com/@username/video/VIDEO_ID,tarik,tiktok,en,"reaction,chatting",0,"flat weak short"
+#
+# Empfehlung:
+# - mehrere Streamer mischen
+# - nicht nur einen Creator sammeln
+# - pro Creator möglichst mehrere Clips
+# - Themen/Genres in `tags` markieren
+# - echte schwache Shorts als `label=0` mitsammeln, statt nur synthetische Negatives zu nutzen

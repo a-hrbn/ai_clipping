@@ -1,0 +1,534 @@
+import json
+import importlib
+import sys
+import tempfile
+import time
+import unittest
+from contextlib import ExitStack
+from pathlib import Path
+from unittest.mock import patch
+
+import types
+
+sys.modules.setdefault("whisper", types.SimpleNamespace(load_model=lambda *_args, **_kwargs: None))
+
+
+class _FFmpegStub:
+    def input(self, *_args, **_kwargs):
+        return self
+
+    def output(self, *_args, **_kwargs):
+        return self
+
+    def overwrite_output(self):
+        return self
+
+    def run(self, **_kwargs):
+        return None
+
+
+sys.modules.setdefault("ffmpeg", _FFmpegStub())
+sys.modules.setdefault("ollama", types.SimpleNamespace(Client=lambda *_args, **_kwargs: None))
+sys.modules.setdefault("librosa", types.SimpleNamespace())
+
+from models import ClipResult
+from services.timeline_types import Candidate, CandidateFeatures, RankedCandidate
+from services.transcriber import RichSegment
+
+
+def _identity(*args, **kwargs):
+    return args[0]
+
+
+class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_run_pipeline_prefers_peak_path_and_writes_debug_artifacts(self) -> None:
+        pipeline = _import_pipeline_with_stubs()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            video_path = tmp_path / "video.mp4"
+            audio_path = tmp_path / "audio.wav"
+            video_path.write_bytes(b"video")
+            audio_path.write_bytes(b"audio")
+
+            job_updates: list[dict] = []
+            cleanup_coroutines = []
+
+            transcript = [
+                RichSegment(start=0.0, end=2.0, text="quiet setup", words_per_second=1.0),
+                RichSegment(
+                    start=2.0,
+                    end=4.0,
+                    text="wait what happened?!",
+                    emotions=["exclamation", "question", "audio_laughter", "face_reaction"],
+                    words_per_second=3.6,
+                    laughter_prob=0.6,
+                    chat_spike_score=0.7,
+                    max_face_reaction=0.5,
+                ),
+                RichSegment(start=4.0, end=6.0, text="payoff lands", emotions=["laughter"], words_per_second=2.0),
+            ]
+
+            semantic_candidates = [
+                Candidate(
+                    id="quote:0:250",
+                    start=1.5,
+                    end=9.5,
+                    source="quote",
+                    anchor_time=2.5,
+                    score_hint=4.0,
+                )
+            ]
+
+            def fake_update_job(job_id: str, **kwargs) -> None:
+                job_updates.append({"job_id": job_id, **kwargs})
+
+            build_feature_calls: list[tuple[bool, set[str] | None]] = []
+
+            def fake_build_features(candidates, _segments, _profile, use_llm_semantics=True, llm_candidate_ids=None):
+                build_feature_calls.append((use_llm_semantics, llm_candidate_ids))
+                return [
+                    CandidateFeatures(
+                        candidate_id=candidate.id,
+                        hook_strength=0.9 if candidate.source == "peak" else 0.5,
+                        max_hype=6.0,
+                        payoff_score=5.0,
+                        context_efficiency=0.8,
+                        source=candidate.source,
+                    )
+                    for candidate in candidates
+                ]
+
+            def fake_select_top_candidates(candidates, features, top_k, profile="general"):
+                feature_map = {feature.candidate_id: feature for feature in features}
+                ranked = [
+                    RankedCandidate(
+                        candidate=candidate,
+                        features=feature_map[candidate.id],
+                        rank_score=9.0 if candidate.source == "peak" else 5.0,
+                        rationale=["peak_first" if candidate.source == "peak" else "semantic"],
+                    )
+                    for candidate in candidates[:top_k]
+                ]
+                ranked.sort(key=lambda item: item.rank_score, reverse=True)
+                return ranked
+
+            def fake_refine_candidates(ranked_candidates, _segments, limit=5, profile="general"):
+                moments = []
+                for index, ranked in enumerate(ranked_candidates[:limit], start=1):
+                    moments.append(
+                        {
+                            "start_time": ranked.candidate.start,
+                            "end_time": ranked.candidate.end,
+                            "viral_score": 9.0 if ranked.candidate.source == "peak" else 6.0,
+                            "reason": f"{ranked.candidate.source} moment",
+                            "rank": index,
+                            "ranking_mode": "heuristic",
+                            "candidate_id": ranked.candidate.id,
+                        }
+                    )
+                return moments
+
+            def fake_cut_clips(_video_path, moments, job_id):
+                return [
+                    ClipResult(
+                        candidate_id=moment["candidate_id"],
+                        filename=f"clip_{idx:02d}.mp4",
+                        download_url=f"/static/{job_id}/clips/clip_{idx:02d}.mp4",
+                        start_time=moment["start_time"],
+                        end_time=moment["end_time"],
+                        viral_score=moment["viral_score"],
+                        reason=moment["reason"],
+                        ranking_mode=moment.get("ranking_mode", "heuristic"),
+                    )
+                    for idx, moment in enumerate(moments, start=1)
+                ]
+
+            def fake_create_task(coro):
+                cleanup_coroutines.append(coro)
+                coro.close()
+                return None
+
+            refine_calls: list[list[str]] = []
+
+            def fake_refine_face_reactions(segments, _video_path, candidates, _sample_sec):
+                refine_calls.append([candidate.id for candidate in candidates])
+                return segments
+
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(pipeline.settings, "storage_dir", str(tmp_path)))
+                stack.enter_context(patch.object(pipeline, "update_job", side_effect=fake_update_job))
+                stack.enter_context(patch.object(pipeline.audio_extractor, "extract", return_value=audio_path))
+                stack.enter_context(patch.object(pipeline.transcriber, "transcribe_with_progress", return_value=transcript))
+                stack.enter_context(patch.object(pipeline.audio_features, "extract", return_value=[]))
+                stack.enter_context(patch.object(pipeline.video_features, "extract", return_value=[]))
+                stack.enter_context(patch.object(pipeline.audio_features, "enrich_segments", side_effect=_identity))
+                stack.enter_context(patch.object(pipeline.video_features, "enrich_segments", side_effect=_identity))
+                stack.enter_context(
+                    patch.object(
+                        pipeline.video_features,
+                        "refine_face_reactions",
+                        side_effect=fake_refine_face_reactions,
+                        create=True,
+                    )
+                )
+                stack.enter_context(patch.object(pipeline.audio_features, "diarize_speakers", side_effect=_identity))
+                stack.enter_context(patch.object(pipeline.chat_analyzer, "enrich_segments", side_effect=_identity))
+                stack.enter_context(
+                    patch.object(pipeline.candidate_generators, "generate_semantic_candidates", return_value=semantic_candidates)
+                )
+                stack.enter_context(
+                    patch.object(pipeline.candidate_generators, "generate_fallback_candidates", return_value=[])
+                )
+                stack.enter_context(patch.object(pipeline.feature_builder, "build_features", side_effect=fake_build_features))
+                stack.enter_context(patch.object(pipeline.selector, "select_top_candidates", side_effect=fake_select_top_candidates))
+                stack.enter_context(patch.object(pipeline.analyzer, "refine_candidates", side_effect=fake_refine_candidates))
+                stack.enter_context(patch.object(pipeline.post_processor, "snap_boundaries", side_effect=lambda moments, _segments: moments))
+                stack.enter_context(patch.object(pipeline.post_processor, "enforce_diversity", side_effect=lambda moments: moments))
+                stack.enter_context(patch.object(pipeline.clipper, "cut_clips", side_effect=fake_cut_clips))
+                stack.enter_context(patch.object(pipeline.asyncio, "create_task", side_effect=fake_create_task))
+
+                await pipeline.run_pipeline("job-peak", video_path=video_path, profile="general")
+
+            self.assertTrue(any(update.get("status") == "done" for update in job_updates))
+            self.assertEqual(len(refine_calls), 1)
+            self.assertEqual(len(refine_calls[0]), 1)
+            self.assertTrue(refine_calls[0][0].startswith("peak:"))
+            self.assertEqual(build_feature_calls[0], (False, None))
+            self.assertEqual(build_feature_calls[1][0], True)
+            self.assertEqual(len(build_feature_calls[1][1] or set()), 1)
+            debug_dir = tmp_path / "job-peak" / "debug"
+            peak_rows = _read_jsonl(debug_dir / "candidates_peak.jsonl")
+            semantic_rows = _read_jsonl(debug_dir / "candidates_semantic.jsonl")
+            fallback_rows = _read_jsonl(debug_dir / "candidates_fallback.jsonl")
+            merged_rows = _read_jsonl(debug_dir / "candidates_merged.jsonl")
+            ranked_rows = _read_jsonl(debug_dir / "ranked_candidates.jsonl")
+
+            self.assertTrue(peak_rows)
+            self.assertTrue(semantic_rows)
+            self.assertEqual(fallback_rows, [])
+            self.assertEqual(merged_rows[0]["source"], "peak")
+            self.assertEqual(ranked_rows[0]["candidate"]["source"], "peak")
+
+    async def test_run_pipeline_uses_fallback_candidates_when_no_peaks_exist(self) -> None:
+        pipeline = _import_pipeline_with_stubs()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            video_path = tmp_path / "video.mp4"
+            audio_path = tmp_path / "audio.wav"
+            video_path.write_bytes(b"video")
+            audio_path.write_bytes(b"audio")
+
+            job_updates: list[dict] = []
+
+            transcript = [
+                RichSegment(start=0.0, end=2.0, text="calm intro", words_per_second=0.8),
+                RichSegment(start=2.0, end=4.0, text="plain statement", words_per_second=1.0),
+            ]
+            semantic_candidates: list[Candidate] = []
+            fallback_candidates = [
+                Candidate(
+                    id="reaction:0:200",
+                    start=0.0,
+                    end=10.0,
+                    source="reaction",
+                    anchor_time=2.0,
+                    score_hint=3.0,
+                )
+            ]
+
+            def fake_update_job(job_id: str, **kwargs) -> None:
+                job_updates.append({"job_id": job_id, **kwargs})
+
+            def fake_build_features(candidates, _segments, _profile, use_llm_semantics=True, llm_candidate_ids=None):
+                return [
+                    CandidateFeatures(
+                        candidate_id=candidate.id,
+                        hook_strength=0.4,
+                        max_hype=2.0,
+                        payoff_score=2.0,
+                        context_efficiency=0.5,
+                        source=candidate.source,
+                    )
+                    for candidate in candidates
+                ]
+
+            def fake_select_top_candidates(candidates, features, top_k, profile="general"):
+                feature_map = {feature.candidate_id: feature for feature in features}
+                return [
+                    RankedCandidate(
+                        candidate=candidate,
+                        features=feature_map[candidate.id],
+                        rank_score=4.0,
+                        rationale=["fallback"],
+                    )
+                    for candidate in candidates[:top_k]
+                ]
+
+            def fake_refine_candidates(ranked_candidates, _segments, limit=5, profile="general"):
+                return [
+                    {
+                        "start_time": ranked_candidates[0].candidate.start,
+                        "end_time": ranked_candidates[0].candidate.end,
+                        "viral_score": 4.0,
+                        "reason": "fallback moment",
+                        "rank": 1,
+                        "ranking_mode": "heuristic",
+                        "candidate_id": ranked_candidates[0].candidate.id,
+                    }
+                ]
+
+            def fake_create_task(coro):
+                coro.close()
+                return None
+
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(pipeline.settings, "storage_dir", str(tmp_path)))
+                stack.enter_context(patch.object(pipeline, "update_job", side_effect=fake_update_job))
+                stack.enter_context(patch.object(pipeline.audio_extractor, "extract", return_value=audio_path))
+                stack.enter_context(patch.object(pipeline.transcriber, "transcribe_with_progress", return_value=transcript))
+                stack.enter_context(patch.object(pipeline.audio_features, "extract", return_value=[]))
+                stack.enter_context(patch.object(pipeline.video_features, "extract", return_value=[]))
+                stack.enter_context(patch.object(pipeline.audio_features, "enrich_segments", side_effect=_identity))
+                stack.enter_context(patch.object(pipeline.video_features, "enrich_segments", side_effect=_identity))
+                stack.enter_context(patch.object(pipeline.audio_features, "diarize_speakers", side_effect=_identity))
+                stack.enter_context(patch.object(pipeline.chat_analyzer, "enrich_segments", side_effect=_identity))
+                stack.enter_context(
+                    patch.object(pipeline.peak_detector, "detect_peaks", return_value=[])
+                )
+                stack.enter_context(
+                    patch.object(pipeline.peak_detector, "build_peak_candidates", return_value=[])
+                )
+                stack.enter_context(
+                    patch.object(pipeline.candidate_generators, "generate_semantic_candidates", return_value=semantic_candidates)
+                )
+                stack.enter_context(
+                    patch.object(pipeline.candidate_generators, "generate_fallback_candidates", return_value=fallback_candidates)
+                )
+                stack.enter_context(patch.object(pipeline.feature_builder, "build_features", side_effect=fake_build_features))
+                stack.enter_context(patch.object(pipeline.selector, "select_top_candidates", side_effect=fake_select_top_candidates))
+                stack.enter_context(patch.object(pipeline.analyzer, "refine_candidates", side_effect=fake_refine_candidates))
+                stack.enter_context(patch.object(pipeline.post_processor, "snap_boundaries", side_effect=lambda moments, _segments: moments))
+                stack.enter_context(patch.object(pipeline.post_processor, "enforce_diversity", side_effect=lambda moments: moments))
+                stack.enter_context(
+                    patch.object(
+                        pipeline.clipper,
+                        "cut_clips",
+                        return_value=[
+                            ClipResult(
+                                candidate_id="reaction:0:200",
+                                filename="clip_01.mp4",
+                                download_url="/static/job-fallback/clips/clip_01.mp4",
+                                start_time=0.0,
+                                end_time=10.0,
+                                viral_score=4.0,
+                                reason="fallback moment",
+                                ranking_mode="heuristic",
+                            )
+                        ],
+                    )
+                )
+                stack.enter_context(patch.object(pipeline.asyncio, "create_task", side_effect=fake_create_task))
+
+                await pipeline.run_pipeline("job-fallback", video_path=video_path, profile="general")
+
+            self.assertTrue(any(update.get("status") == "done" for update in job_updates))
+            debug_dir = tmp_path / "job-fallback" / "debug"
+            peak_rows = _read_jsonl(debug_dir / "candidates_peak.jsonl")
+            semantic_rows = _read_jsonl(debug_dir / "candidates_semantic.jsonl")
+            fallback_rows = _read_jsonl(debug_dir / "candidates_fallback.jsonl")
+            merged_rows = _read_jsonl(debug_dir / "candidates_merged.jsonl")
+
+            self.assertEqual(peak_rows, [])
+            self.assertEqual(semantic_rows, [])
+            self.assertTrue(fallback_rows)
+            self.assertEqual(merged_rows[0]["source"], "reaction")
+
+    async def test_run_pipeline_skips_slow_chat_download_without_blocking(self) -> None:
+        pipeline = _import_pipeline_with_stubs()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            video_path = tmp_path / "video.mp4"
+            audio_path = tmp_path / "audio.wav"
+            video_path.write_bytes(b"video")
+            audio_path.write_bytes(b"audio")
+
+            transcript = [
+                RichSegment(start=0.0, end=2.0, text="setup", words_per_second=1.0),
+                RichSegment(start=2.0, end=4.0, text="payoff", words_per_second=2.5, hype_score=4.0),
+            ]
+            fallback_candidates = [
+                Candidate(
+                    id="reaction:0:200",
+                    start=0.0,
+                    end=8.0,
+                    source="reaction",
+                    anchor_time=2.5,
+                    score_hint=3.0,
+                )
+            ]
+            enrich_chat_args: list[Path | None] = []
+            job_updates: list[dict] = []
+
+            def slow_download_chat(_url: str, _job_id: str, _out_dir: Path) -> Path | None:
+                time.sleep(0.2)
+                return tmp_path / "chat.json"
+
+            def fake_build_features(candidates, _segments, _profile, use_llm_semantics=True, llm_candidate_ids=None):
+                return [
+                    CandidateFeatures(
+                        candidate_id=candidate.id,
+                        hook_strength=0.4,
+                        max_hype=2.0,
+                        payoff_score=2.0,
+                        context_efficiency=0.5,
+                        source=candidate.source,
+                    )
+                    for candidate in candidates
+                ]
+
+            def fake_select_top_candidates(candidates, features, top_k, profile="general"):
+                feature_map = {feature.candidate_id: feature for feature in features}
+                return [
+                    RankedCandidate(
+                        candidate=candidate,
+                        features=feature_map[candidate.id],
+                        rank_score=4.0,
+                        rationale=["fallback"],
+                    )
+                    for candidate in candidates[:top_k]
+                ]
+
+            def fake_refine_candidates(ranked_candidates, _segments, limit=5, profile="general"):
+                return [
+                    {
+                        "start_time": ranked_candidates[0].candidate.start,
+                        "end_time": ranked_candidates[0].candidate.end,
+                        "viral_score": 4.0,
+                        "reason": "fallback moment",
+                        "rank": 1,
+                        "ranking_mode": "heuristic",
+                        "candidate_id": ranked_candidates[0].candidate.id,
+                    }
+                ]
+
+            def fake_enrich_chat(segments, chat_path):
+                enrich_chat_args.append(chat_path)
+                return segments
+
+            def fake_update_job(job_id: str, **kwargs) -> None:
+                job_updates.append({"job_id": job_id, **kwargs})
+
+            def fake_create_task(coro):
+                coro.close()
+                return None
+
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(pipeline.settings, "storage_dir", str(tmp_path)))
+                stack.enter_context(patch.object(pipeline.settings, "enable_chat_analysis", True))
+                stack.enter_context(patch.object(pipeline.settings, "chat_join_timeout_sec", 0.01))
+                stack.enter_context(patch.object(pipeline, "update_job", side_effect=fake_update_job))
+                stack.enter_context(patch.object(pipeline.audio_extractor, "extract", return_value=audio_path))
+                stack.enter_context(patch.object(pipeline.transcriber, "transcribe_with_progress", return_value=transcript))
+                stack.enter_context(patch.object(pipeline.audio_features, "extract", return_value=[]))
+                stack.enter_context(patch.object(pipeline.video_features, "extract", return_value=[]))
+                stack.enter_context(patch.object(pipeline.audio_features, "enrich_segments", side_effect=_identity))
+                stack.enter_context(patch.object(pipeline.video_features, "enrich_segments", side_effect=_identity))
+                stack.enter_context(patch.object(pipeline.audio_features, "diarize_speakers", side_effect=_identity))
+                stack.enter_context(patch.object(pipeline.chat_analyzer, "download_chat", side_effect=slow_download_chat))
+                stack.enter_context(patch.object(pipeline.chat_analyzer, "enrich_segments", side_effect=fake_enrich_chat))
+                stack.enter_context(
+                    patch.object(pipeline.peak_detector, "detect_peaks", return_value=[])
+                )
+                stack.enter_context(
+                    patch.object(pipeline.peak_detector, "build_peak_candidates", return_value=[])
+                )
+                stack.enter_context(
+                    patch.object(pipeline.candidate_generators, "generate_semantic_candidates", return_value=[])
+                )
+                stack.enter_context(
+                    patch.object(pipeline.candidate_generators, "generate_fallback_candidates", return_value=fallback_candidates)
+                )
+                stack.enter_context(patch.object(pipeline.feature_builder, "build_features", side_effect=fake_build_features))
+                stack.enter_context(patch.object(pipeline.selector, "select_top_candidates", side_effect=fake_select_top_candidates))
+                stack.enter_context(patch.object(pipeline.analyzer, "refine_candidates", side_effect=fake_refine_candidates))
+                stack.enter_context(patch.object(pipeline.post_processor, "snap_boundaries", side_effect=lambda moments, _segments: moments))
+                stack.enter_context(patch.object(pipeline.post_processor, "enforce_diversity", side_effect=lambda moments: moments))
+                stack.enter_context(
+                    patch.object(
+                        pipeline.clipper,
+                        "cut_clips",
+                        return_value=[
+                            ClipResult(
+                                candidate_id="reaction:0:200",
+                                filename="clip_01.mp4",
+                                download_url="/static/job-slow-chat/clips/clip_01.mp4",
+                                start_time=0.0,
+                                end_time=8.0,
+                                viral_score=4.0,
+                                reason="fallback moment",
+                                ranking_mode="heuristic",
+                            )
+                        ],
+                    )
+                )
+                stack.enter_context(patch.object(pipeline.asyncio, "create_task", side_effect=fake_create_task))
+
+                await pipeline.run_pipeline(
+                    "job-slow-chat",
+                    url="https://www.twitch.tv/videos/123",
+                    video_path=video_path,
+                    profile="general",
+                )
+
+            self.assertEqual(enrich_chat_args, [None])
+            self.assertTrue(any(update.get("status") == "done" for update in job_updates))
+
+
+def _read_jsonl(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line:
+            rows.append(json.loads(line))
+    return rows
+
+
+def _import_pipeline_with_stubs():
+    def _stub_module(name: str, **attrs):
+        module = types.ModuleType(name)
+        for key, value in attrs.items():
+            setattr(module, key, value)
+        sys.modules[name] = module
+
+    _stub_module("services.downloader", download=lambda *_args, **_kwargs: None)
+    _stub_module("services.audio_extractor", extract=lambda *_args, **_kwargs: None)
+    _stub_module(
+        "services.audio_features",
+        extract=lambda *_args, **_kwargs: [],
+        enrich_segments=lambda segments, *_args, **_kwargs: segments,
+        diarize_speakers=lambda segments, *_args, **_kwargs: segments,
+    )
+    _stub_module(
+        "services.video_features",
+        extract=lambda *_args, **_kwargs: [],
+        enrich_segments=lambda segments, *_args, **_kwargs: segments,
+        refine_face_reactions=lambda segments, *_args, **_kwargs: segments,
+    )
+    _stub_module(
+        "services.chat_analyzer",
+        download_chat=lambda *_args, **_kwargs: None,
+        enrich_segments=lambda segments, *_args, **_kwargs: segments,
+    )
+    _stub_module("services.analyzer", refine_candidates=lambda *_args, **_kwargs: [])
+    _stub_module("services.clipper", cut_clips=lambda *_args, **_kwargs: [])
+    _stub_module("services.feature_builder", build_features=lambda *_args, **_kwargs: [])
+    _stub_module("services.selector", select_top_candidates=lambda *_args, **_kwargs: [])
+
+    sys.modules.pop("pipeline", None)
+    return importlib.import_module("pipeline")
+
+
+if __name__ == "__main__":
+    unittest.main()
