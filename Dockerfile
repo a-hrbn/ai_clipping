@@ -1,17 +1,18 @@
 FROM python:3.12-bookworm
 
 ARG NODE_MAJOR=20
+ARG INSTALL_DEV=true
+ARG INSTALL_ML=true
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    VIRTUAL_ENV=/opt/venv \
-    PATH=/opt/venv/bin:/usr/local/bin:$PATH \
     WORKSPACE=/workspace
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         bash \
+        bubblewrap \
         build-essential \
         ca-certificates \
         curl \
@@ -19,6 +20,7 @@ RUN apt-get update \
         git \
         less \
         libsndfile1 \
+        net-tools \
         openssh-server \
         pkg-config \
         procps \
@@ -26,8 +28,6 @@ RUN apt-get update \
     && curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
-
-RUN python -m venv "$VIRTUAL_ENV"
 
 WORKDIR /tmp/build
 
@@ -41,8 +41,14 @@ RUN python -m pip install --upgrade pip \
     && python -m pip install --no-cache-dir "setuptools<81" wheel joblib \
     && python -m pip install --no-build-isolation --no-cache-dir \
         -r backend/requirements-base.txt \
-        -r backend/requirements-ml.txt \
-        -r backend/requirements-dev.txt \
+    && if [ "$INSTALL_ML" = "true" ]; then \
+        python -m pip install --no-build-isolation --no-cache-dir \
+          -r backend/requirements-ml.txt; \
+      fi \
+    && if [ "$INSTALL_DEV" = "true" ]; then \
+        python -m pip install --no-build-isolation --no-cache-dir \
+          -r backend/requirements-dev.txt; \
+      fi \
     && graphify install \
     && cd frontend \
     && npm ci \

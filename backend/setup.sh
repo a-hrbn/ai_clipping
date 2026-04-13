@@ -15,6 +15,6 @@ graphify, then starts:
   - FastAPI on port 8000
   - Next.js on port 3000
 
-Inside the container, backend commands run directly with the global Python
-environment at /opt/venv.
+Inside the container, backend commands run directly with the image's global
+Python environment.
 EOF

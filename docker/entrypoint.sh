@@ -4,12 +4,13 @@ set -euo pipefail
 WORKSPACE="${WORKSPACE:-/workspace}"
 FRONTEND_DIR="$WORKSPACE/frontend"
 DEV_HOME="/home/dev"
+CODEX_DIR="$DEV_HOME/.codex"
 AUTHORIZED_KEYS_SRC="$WORKSPACE/docker/ssh/authorized_keys"
 AUTHORIZED_KEYS_DST="$DEV_HOME/.ssh/authorized_keys"
 LOCKFILE_HASH_FILE="$FRONTEND_DIR/node_modules/.package-lock.sha256"
 
-mkdir -p /run/sshd "$DEV_HOME/.ssh" "$FRONTEND_DIR/node_modules"
-chown -R dev:dev "$DEV_HOME/.ssh" "$FRONTEND_DIR/node_modules"
+mkdir -p /run/sshd "$DEV_HOME/.ssh" "$CODEX_DIR" "$FRONTEND_DIR/node_modules" "$FRONTEND_DIR/.next"
+chown -R dev:dev "$DEV_HOME/.ssh" "$CODEX_DIR" "$FRONTEND_DIR/node_modules" "$FRONTEND_DIR/.next"
 chmod 700 "$DEV_HOME/.ssh"
 
 if [ -f "$AUTHORIZED_KEYS_SRC" ]; then

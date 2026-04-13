@@ -21,9 +21,21 @@ need project-local Python virtualenvs or a host-side frontend install.
 4. Start the container:
    - `docker compose up --build`
 
+You can choose which backend requirement layers are installed at build time:
+
+- `INSTALL_DEV=true|false`
+- `INSTALL_ML=true|false`
+
+Examples:
+
+- `base + dev + ml` (default): `docker compose up --build`
+- `base + dev` only: `INSTALL_ML=false docker compose up --build`
+- `base + ml` only: `INSTALL_DEV=false docker compose up --build`
+- `base` only: `INSTALL_DEV=false INSTALL_ML=false docker compose up --build`
+
 When the container starts it will automatically:
 
-- install backend Python dependencies into `/opt/venv`
+- install backend Python dependencies into the image's global Python environment
 - install frontend dependencies into a container-managed `node_modules` volume
 - install `graphifyy` and run `graphify install`
 - install the OpenAI Codex CLI
@@ -34,6 +46,10 @@ When the container starts it will automatically:
 The entire repository is bind-mounted into `/workspace`, so every file in the
 project is visible inside the Linux container.
 
+The Docker setup also keeps the Codex login state in a dedicated Docker volume
+mounted at `/home/dev/.codex`, so rebuilding the container does not require a
+fresh `codex --login` each time.
+
 ## Backend Requirements Layout
 
 The backend dependencies are split into layered files:
@@ -43,8 +59,8 @@ The backend dependencies are split into layered files:
 - `backend/requirements-dev.txt`: developer tooling such as `pytest` and `graphifyy`
 - `backend/requirements.txt`: aggregate file that includes all three
 
-The Docker build currently installs all three layers so the full app remains
-available inside the container.
+The Docker build always installs `backend/requirements-base.txt`, and
+optionally installs the `ml` and `dev` layers via Docker Compose build args.
 
 ## SSH Development
 
