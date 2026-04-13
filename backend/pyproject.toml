@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-clipping-backend"
+version = "0.1.0"
+description = "Backend services and ML utilities for AI Clipping"
+readme = {text = "Backend services and ML utilities for AI Clipping.", content-type = "text/plain"}
+requires-python = ">=3.11"
+dependencies = [
+  "certifi>=2024.7.4",
+  "fastapi>=0.115.0,<1.0.0",
+  "ffmpeg-python>=0.2.0,<1.0.0",
+  "numpy>=1.26.4,<3.0.0",
+  "ollama>=0.4.7,<1.0.0",
+  "openai>=1.75.0,<2.0.0",
+  "pydantic-settings>=2.6.1,<3.0.0",
+  "python-dotenv>=1.0.1,<2.0.0",
+  "python-multipart>=0.0.12,<1.0.0",
+  "uvicorn[standard]>=0.34.0,<1.0.0",
+  "yt-dlp>=2025.3.31",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.3,<9.0.0",
+]
+ml = [
+  "joblib>=1.4.2,<2.0.0",
+  "librosa>=0.10.2.post1,<1.0.0",
+  "lightgbm>=4.6.0,<5.0.0",
+  "openai-whisper>=20240930",
+  "opencv-python-headless>=4.10.0.84,<5.0.0",
+  "scikit-learn>=1.5.2,<2.0.0",
+  "sentence-transformers>=3.3.1,<4.0.0",
+]
+vision = [
+  "deepface>=0.0.93,<1.0.0",
+  "mediapipe>=0.10.21,<1.0.0",
+  "mtcnn>=1.0.0,<2.0.0",
+  "tf-keras>=2.21.0,<3.0.0",
+]
+
+[tool.setuptools]
+packages = ["ml", "routers", "services"]
+py-modules = ["config", "job_manager", "main", "models", "pipeline"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

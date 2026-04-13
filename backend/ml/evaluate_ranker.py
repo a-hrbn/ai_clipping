@@ -30,7 +30,7 @@ def main() -> int:
 
     ranker = Ranker(artifact_dir=pathlib.Path(args.artifact_dir))
     artifact = ranker._load_artifact(args.profile)
-    features = [CandidateFeatures(**row["features"]) for row in rows]
+    features = [CandidateFeatures.from_dict(row["features"]) for row in rows]
     scores = {candidate_id: score for candidate_id, score in ranker.score(features, args.profile)}
 
     scored_rows: list[dict] = []

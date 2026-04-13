@@ -47,7 +47,7 @@ def _build_candidate_features(
     chapter_context = chapter_context or _empty_chapter_context()
     window = [seg for seg in segments if seg.end > candidate.start and seg.start < candidate.end]
     if not window:
-        return CandidateFeatures(
+        return CandidateFeatures.create(
             candidate_id=candidate.id,
             duration=max(0.0, candidate.end - candidate.start),
             hook_delay_sec=0.0,
@@ -70,6 +70,10 @@ def _build_candidate_features(
             contradiction_score=0.0,
             standalone_score=0.0,
             semantic_density=0.0,
+            payoff_clarity_score=0.0,
+            slow_open_penalty=1.0,
+            context_dependency_score=0.0,
+            weak_resolution_penalty=1.0,
             profile_fit_score=0.0,
             pre_hook_hype=0.0,
             post_hook_hype=0.0,
@@ -96,7 +100,7 @@ def _build_candidate_features(
             has_llm_semantics=False,
             has_chat_features=False,
             has_vector_similarity=False,
-            feature_build_version=4,
+            feature_build_version=5,
             source=candidate.source,
         )
 
@@ -135,6 +139,8 @@ def _build_candidate_features(
     contradiction_score = sem["contradiction"]
     standalone_score = sem["standalone"]
     semantic_density = sem["density"]
+    payoff_clarity_score = sem.get("payoff_clarity", 0.0)
+    semantic_context_dependency = sem.get("context_dependency", 0.0)
     pre_window = [seg for seg in window if seg.end <= candidate.anchor_time]
     post_window = [seg for seg in window if seg.start >= candidate.anchor_time]
     pre_hook_hype = sum(seg.hype_score for seg in pre_window) / len(pre_window) if pre_window else 0.0
@@ -147,6 +153,19 @@ def _build_candidate_features(
     # Blend heuristic (timing/punctuation) with LLM semantic hook score
     hook_llm = sem.get("hook_strength", hook_heuristic)
     hook_strength = round(0.4 * hook_heuristic + 0.6 * hook_llm, 3)
+    slow_open_penalty = _slow_open_penalty(first_segment, hook_delay, hook_strength, window)
+    context_dependency_score = _context_dependency_score(
+        window,
+        hook_delay,
+        standalone_score,
+        semantic_context_dependency,
+    )
+    weak_resolution_penalty = _weak_resolution_penalty(
+        window,
+        payoff_score,
+        payoff_clarity_score,
+        post_hook_hype,
+    )
     profile_fit_score = _profile_fit_score(
         candidate.source,
         chat_peak,
@@ -174,7 +193,7 @@ def _build_candidate_features(
         )
     )
 
-    return CandidateFeatures(
+    return CandidateFeatures.create(
         candidate_id=candidate.id,
         duration=round(duration, 2),
         hook_delay_sec=round(hook_delay, 2),
@@ -197,6 +216,10 @@ def _build_candidate_features(
         contradiction_score=contradiction_score,
         standalone_score=standalone_score,
         semantic_density=semantic_density,
+        payoff_clarity_score=round(payoff_clarity_score, 3),
+        slow_open_penalty=round(slow_open_penalty, 3),
+        context_dependency_score=round(context_dependency_score, 3),
+        weak_resolution_penalty=round(weak_resolution_penalty, 3),
         profile_fit_score=round(profile_fit_score, 3),
         pre_hook_hype=round(pre_hook_hype, 3),
         post_hook_hype=round(post_hook_hype, 3),
@@ -223,9 +246,70 @@ def _build_candidate_features(
         has_llm_semantics=bool(sem.get("llm_used", False)),
         has_chat_features=has_chat_features,
         has_vector_similarity=has_vector_similarity,
-        feature_build_version=4,
+        feature_build_version=5,
         source=candidate.source,
     )
+
+
+def _slow_open_penalty(
+    first_segment: RichSegment,
+    hook_delay: float,
+    hook_strength: float,
+    window: list[RichSegment],
+) -> float:
+    early_peak = max((seg.hype_score for seg in window[:2]), default=0.0)
+    score = 0.0
+    if hook_delay > 2.0:
+        score += min((hook_delay - 2.0) / 6.0, 0.45)
+    if hook_strength < 0.45:
+        score += 0.25
+    if early_peak < 2.0:
+        score += 0.15
+    if not first_segment.text.strip().endswith(("?", "!")) and "exclamation" not in first_segment.emotions:
+        score += 0.1
+    return _clamp01(score)
+
+
+def _context_dependency_score(
+    window: list[RichSegment],
+    hook_delay: float,
+    standalone_score: float,
+    semantic_context_dependency: float,
+) -> float:
+    if not window:
+        return 0.0
+    first = window[0].text.strip().lower()
+    score = semantic_context_dependency * 0.65
+    if standalone_score < 0.45:
+        score += 0.2
+    if hook_delay > 2.5:
+        score += 0.08
+    if first.startswith(("and ", "but ", "so ", "weil ", "aber ", "und ")):
+        score += 0.15
+    if any(token in first for token in ("he ", "she ", "they ", "this ", "that ", "dies", "das ")):
+        score += 0.08
+    return _clamp01(score)
+
+
+def _weak_resolution_penalty(
+    window: list[RichSegment],
+    payoff_score: float,
+    payoff_clarity_score: float,
+    post_hook_hype: float,
+) -> float:
+    if not window:
+        return 1.0
+    score = 0.0
+    if payoff_score < 2.5:
+        score += 0.35
+    if payoff_clarity_score < 0.45:
+        score += 0.35
+    if post_hook_hype < 1.5:
+        score += 0.15
+    tail = window[max(len(window) // 2, 0):] or window
+    if not any(seg.text.strip().endswith(("!", ".", "?")) for seg in tail):
+        score += 0.1
+    return _clamp01(score)
 
 
 def _prepare_chapter_contexts(

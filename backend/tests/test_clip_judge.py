@@ -211,6 +211,54 @@ class ClipJudgeTests(unittest.TestCase):
         self.assertIn("matches proven short-form patterns", strong_result.judge_reason)
         self.assertIn("overlaps nearby candidates", weak_result.judge_reason)
 
+    def test_heuristic_judge_penalizes_slow_context_dependent_clips(self) -> None:
+        risky = RankedCandidate(
+            candidate=Candidate(id="risky", start=0.0, end=24.0, source="quote", anchor_time=8.0),
+            features=CandidateFeatures(
+                candidate_id="risky",
+                hook_strength=0.2,
+                payoff_score=2.0,
+                payoff_clarity_score=0.2,
+                standalone_score=0.25,
+                context_efficiency=0.3,
+                profile_fit_score=0.5,
+                slow_open_penalty=0.8,
+                context_dependency_score=0.75,
+                weak_resolution_penalty=0.7,
+                source="quote",
+            ),
+            rank_score=5.0,
+        )
+        clean = RankedCandidate(
+            candidate=Candidate(id="clean", start=0.0, end=18.0, source="reaction", anchor_time=3.0),
+            features=CandidateFeatures(
+                candidate_id="clean",
+                hook_strength=0.8,
+                payoff_score=6.0,
+                payoff_clarity_score=0.8,
+                standalone_score=0.8,
+                context_efficiency=0.8,
+                profile_fit_score=0.7,
+                slow_open_penalty=0.1,
+                context_dependency_score=0.1,
+                weak_resolution_penalty=0.1,
+                source="reaction",
+            ),
+            rank_score=5.0,
+        )
+        segments = [
+            RichSegment(start=0.0, end=2.0, text="hook", emotions=["question"], hype_score=2.5),
+            RichSegment(start=2.0, end=5.0, text="payoff", emotions=["exclamation"], hype_score=5.0),
+        ]
+
+        with patch("services.clip_judge._call_llm_judge", return_value=None):
+            risky_result = clip_judge.judge_candidate(risky, segments)
+            clean_result = clip_judge.judge_candidate(clean, segments)
+
+        self.assertGreater(clean_result.judge_score, risky_result.judge_score)
+        self.assertIn("slow opening risk", risky_result.judge_reason)
+        self.assertIn("needs prior stream context", risky_result.judge_reason)
+
 
 if __name__ == "__main__":
     unittest.main()

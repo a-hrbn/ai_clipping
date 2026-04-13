@@ -166,6 +166,7 @@ _init()
 HEURISTIC_WEIGHTS: dict[str, float] = {
     "hook":               0.20,
     "payoff":             0.20,
+    "payoff_clarity":     0.06,
     "hype":               0.18,
     "arc":                0.09,   # reduced: arc structure matters less than content quality
     "chat":               0.11,   # raised: chat spike is a reliable virality proxy on Twitch
@@ -179,6 +180,9 @@ HEURISTIC_WEIGHTS: dict[str, float] = {
     "chapter_density":    0.03,   # dense chapters tend to contain more clip-worthy beats
     "trend_prior":        0.05,   # lightweight prior from common viral hooks/topics
     "overlap_penalty":   -0.04,   # penalize candidates that heavily overlap nearby alternatives
+    "slow_open_penalty": -0.07,   # strong penalty — slow first seconds kill short-form performance
+    "context_dependency_penalty": -0.08,  # punish clips that need prior stream context
+    "weak_resolution_penalty": -0.06,  # punish clips without a clean ending/payoff
     "context_cost":      -0.05,   # penalty — negative keeps the sign clear
 }
 

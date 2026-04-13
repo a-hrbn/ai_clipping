@@ -40,7 +40,7 @@ def main() -> int:
         scales,
     )
     baseline_scores = train_ranker._linear_raw_scores(validation, feature_names, weights, scales, 0.0)
-    runtime_features = [CandidateFeatures(**row["features"]) for row in validation]
+    runtime_features = [CandidateFeatures.from_dict(row["features"]) for row in validation]
     runtime_scores = {
         candidate_id: score
         for candidate_id, score in ranker.score(runtime_features, args.profile)

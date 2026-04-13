@@ -43,7 +43,11 @@ class FeatureBuilderTests(unittest.TestCase):
         self.assertGreaterEqual(features.semantic_density, 0.0)
         self.assertGreater(features.trend_hook_score, 0.0)
         self.assertGreater(features.trend_prior_score, 0.0)
-        self.assertEqual(features.feature_build_version, 4)
+        self.assertEqual(features.feature_build_version, 5)
+        self.assertGreaterEqual(features.payoff_clarity_score, 0.0)
+        self.assertGreaterEqual(features.slow_open_penalty, 0.0)
+        self.assertGreaterEqual(features.context_dependency_score, 0.0)
+        self.assertGreaterEqual(features.weak_resolution_penalty, 0.0)
 
     def test_build_features_includes_similarity_features(self) -> None:
         candidate = Candidate(id="x", start=0.0, end=10.0, source="reaction", anchor_time=2.5)
@@ -172,6 +176,32 @@ class FeatureBuilderTests(unittest.TestCase):
         self.assertGreater(features[0].clip_overlap_count, 0.0)
         self.assertGreaterEqual(features[0].trend_prior_score, 0.0)
         self.assertGreater(features[1].vod_progress, features[0].vod_progress)
+
+    def test_build_features_flags_context_dependency_and_slow_open(self) -> None:
+        candidate = Candidate(id="ctx", start=0.0, end=12.0, source="quote", anchor_time=5.0)
+        segments = [
+            RichSegment(start=0.0, end=4.0, text="and then he said this thing", speaker="STREAMER", hype_score=0.8),
+            RichSegment(start=4.0, end=8.0, text="so yeah that's what happened", speaker="STREAMER", hype_score=1.1),
+            RichSegment(start=8.0, end=12.0, text="okay", speaker="STREAMER", hype_score=0.7),
+        ]
+
+        with patch("services.feature_builder.semantic_service.score_window") as score_window_mock:
+            score_window_mock.return_value = {
+                "quoteability": 0.2,
+                "surprise": 0.1,
+                "contradiction": 0.0,
+                "standalone": 0.2,
+                "density": 0.1,
+                "hook_strength": 0.15,
+                "context_dependency": 0.8,
+                "payoff_clarity": 0.1,
+                "llm_used": False,
+            }
+            features = feature_builder.build_features([candidate], segments)[0]
+
+        self.assertGreater(features.slow_open_penalty, 0.4)
+        self.assertGreater(features.context_dependency_score, 0.5)
+        self.assertGreater(features.weak_resolution_penalty, 0.4)
 
 
 if __name__ == "__main__":

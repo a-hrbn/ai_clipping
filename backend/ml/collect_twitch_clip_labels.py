@@ -22,6 +22,8 @@ from config import settings
 _TWITCH_AUTH_URL = "https://id.twitch.tv/oauth2/token"
 _TWITCH_API_URL = "https://api.twitch.tv/helix"
 _NEGATIVE_WINDOW_SECONDS = 45
+_NEGATIVE_WINDOW_MIN_SECONDS = 18
+_NEGATIVE_WINDOW_MAX_SECONDS = 75
 _NEGATIVE_BUFFER_SECONDS = 20
 _HARD_NEGATIVE_OFFSETS = (12.0, 24.0, 40.0)
 
@@ -284,6 +286,7 @@ def _sample_negative_rows(broadcaster: str, vod: dict, positives: list[dict]) ->
     duration = int(vod.get("duration_seconds") or 0)
     if duration <= _NEGATIVE_WINDOW_SECONDS:
         return []
+    target_durations = _negative_target_durations(positives)
     blocked: list[tuple[float, float]] = []
     for row in positives:
         start = float(row["window_start"]) - _NEGATIVE_BUFFER_SECONDS
@@ -294,8 +297,12 @@ def _sample_negative_rows(broadcaster: str, vod: dict, positives: list[dict]) ->
     rows.extend(_mine_interstitial_negatives(broadcaster, vod, positives, blocked))
     cursor = 0.0
     negative_index = 0
-    while cursor + _NEGATIVE_WINDOW_SECONDS <= duration:
-        window = (cursor, cursor + _NEGATIVE_WINDOW_SECONDS)
+    while cursor + min(target_durations) <= duration:
+        target_duration = _cycled_duration(target_durations, negative_index)
+        window_end = min(cursor + target_duration, float(duration))
+        if window_end - cursor < target_duration * 0.8:
+            break
+        window = (cursor, window_end)
         if not _overlaps_any(window, blocked):
             rows.append(
                 {
@@ -318,7 +325,7 @@ def _sample_negative_rows(broadcaster: str, vod: dict, positives: list[dict]) ->
                 }
             )
             negative_index += 1
-        cursor += _NEGATIVE_WINDOW_SECONDS * 3
+        cursor += target_duration * 2.5
     return _dedupe_negative_rows(rows)
 
 
@@ -334,13 +341,14 @@ def _mine_boundary_negatives(
     for positive in positives:
         start = float(positive["window_start"])
         end = float(positive["window_end"])
+        target_duration = _duration_for_positive_window(positive)
         for offset in _HARD_NEGATIVE_OFFSETS:
             candidates = [
-                (max(start - _NEGATIVE_WINDOW_SECONDS - offset, 0.0), max(start - offset, 0.0)),
-                (min(end + offset, duration), min(end + offset + _NEGATIVE_WINDOW_SECONDS, duration)),
+                (max(start - target_duration - offset, 0.0), max(start - offset, 0.0)),
+                (min(end + offset, duration), min(end + offset + target_duration, duration)),
             ]
             for window_start, window_end in candidates:
-                if window_end - window_start < _NEGATIVE_WINDOW_SECONDS * 0.8:
+                if window_end - window_start < target_duration * 0.8:
                     continue
                 window = (window_start, window_end)
                 if _overlaps_any(window, blocked):
@@ -383,15 +391,16 @@ def _mine_interstitial_negatives(
     rows: list[dict] = []
     index = 0
     for left, right in zip(ordered, ordered[1:]):
+        target_duration = _blended_gap_duration(left, right)
         gap_start = float(left["window_end"])
         gap_end = float(right["window_start"])
         gap = gap_end - gap_start
-        if gap < _NEGATIVE_WINDOW_SECONDS * 1.5:
+        if gap < target_duration * 1.35:
             continue
         center = (gap_start + gap_end) / 2.0
-        window_start = max(center - (_NEGATIVE_WINDOW_SECONDS / 2.0), 0.0)
-        window_end = min(window_start + _NEGATIVE_WINDOW_SECONDS, duration)
-        if window_end - window_start < _NEGATIVE_WINDOW_SECONDS * 0.8:
+        window_start = max(center - (target_duration / 2.0), 0.0)
+        window_end = min(window_start + target_duration, duration)
+        if window_end - window_start < target_duration * 0.8:
             continue
         window = (window_start, window_end)
         if _overlaps_any(window, blocked):
@@ -418,6 +427,40 @@ def _mine_interstitial_negatives(
         )
         index += 1
     return rows
+
+
+def _negative_target_durations(positives: list[dict]) -> list[float]:
+    durations = [
+        _clamp_negative_duration(float(row["window_end"]) - float(row["window_start"]))
+        for row in positives
+        if float(row["window_end"]) > float(row["window_start"])
+    ]
+    if not durations:
+        return [float(_NEGATIVE_WINDOW_SECONDS)]
+    return sorted(durations)
+
+
+def _duration_for_positive_window(row: dict) -> float:
+    return _clamp_negative_duration(float(row["window_end"]) - float(row["window_start"]))
+
+
+def _blended_gap_duration(left: dict, right: dict) -> float:
+    left_duration = _duration_for_positive_window(left)
+    right_duration = _duration_for_positive_window(right)
+    return _clamp_negative_duration((left_duration + right_duration) / 2.0)
+
+
+def _clamp_negative_duration(value: float) -> float:
+    return round(
+        min(max(float(value), float(_NEGATIVE_WINDOW_MIN_SECONDS)), float(_NEGATIVE_WINDOW_MAX_SECONDS)),
+        2,
+    )
+
+
+def _cycled_duration(durations: list[float], index: int) -> float:
+    if not durations:
+        return float(_NEGATIVE_WINDOW_SECONDS)
+    return float(durations[index % len(durations)])
 
 
 def _dedupe_negative_rows(rows: list[dict]) -> list[dict]:

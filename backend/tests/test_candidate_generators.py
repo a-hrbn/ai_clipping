@@ -124,6 +124,48 @@ class CandidateGeneratorTests(unittest.TestCase):
         self.assertIn("hype_peak", sources)
         self.assertIn("chat_sync", sources)
         self.assertIn("reaction", sources)
+        self.assertIn("clean_reaction", sources)
+
+    def test_generate_fallback_candidates_adds_new_shortform_sources(self) -> None:
+        segments = [
+            RichSegment(start=0.0, end=3.0, text="setup", speaker="STREAMER", hype_score=1.0),
+            RichSegment(start=3.0, end=6.0, text="bro listen i'm telling you this is insane", speaker="STREAMER", hype_score=2.1, arc_score=2.4),
+            RichSegment(start=6.0, end=9.0, text="wait for it", speaker="STREAMER", hype_score=2.8, arc_score=3.0),
+            RichSegment(start=9.0, end=12.0, text="no way!", speaker="STREAMER", emotions=["exclamation", "laughter"], hype_score=5.8, arc_score=4.1, chat_spike_score=0.6, max_face_reaction=0.7),
+        ]
+
+        candidates = candidate_generators.generate_fallback_candidates(segments)
+        sources = {candidate.source for candidate in candidates}
+
+        self.assertIn("hot_take", sources)
+        self.assertIn("story_payoff", sources)
+
+    def test_window_candidate_adapts_window_for_fast_hook(self) -> None:
+        urgent = RichSegment(
+            start=10.0,
+            end=12.0,
+            text="what?!",
+            emotions=["exclamation"],
+            hype_score=5.5,
+            arc_score=1.0,
+            chat_spike_score=0.8,
+            max_face_reaction=0.7,
+        )
+        slower = RichSegment(
+            start=10.0,
+            end=12.0,
+            text="let me explain what happened here",
+            hype_score=2.5,
+            arc_score=4.0,
+            chat_spike_score=0.0,
+            max_face_reaction=0.0,
+        )
+
+        urgent_candidate = candidate_generators._window_candidate(urgent, 0, "reaction", lead=8.0, tail=12.0)
+        slow_candidate = candidate_generators._window_candidate(slower, 0, "reaction", lead=8.0, tail=12.0)
+
+        self.assertGreater(urgent_candidate.start, slow_candidate.start)
+        self.assertLess(urgent_candidate.end, slow_candidate.end)
 
     def test_generate_semantic_candidates_runs_per_chapter_when_provided(self) -> None:
         segments = [

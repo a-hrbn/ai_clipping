@@ -32,6 +32,21 @@ _QUOTE_PATTERNS = [
         r"\b(remember|listen|truth is|the thing is|merke dir|das ding ist)\b",
     ]
 ]
+_CONTEXT_DEPENDENCY_PATTERNS = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in [
+        r"^(and|but|so|weil|aber|und|also|dann)\b",
+        r"\b(he|she|they|this|that|these|those|er|sie|das|dieser|diese)\b",
+        r"\b(as i said|wie gesagt|remember|wei[ss]t du noch|already told|we talked about)\b",
+    ]
+]
+_PAYOFF_PATTERNS = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in [
+        r"\b(that'?s why|and then|so yeah|there it is|genau das|deshalb|am ende)\b",
+        r"\b(no way|holy|bro|look at that|was zum|krass|insane)\b",
+    ]
+]
 
 # ---------------------------------------------------------------------------
 # Regex baseline (fast, language-limited)
@@ -117,6 +132,48 @@ def semantic_density(window: list[RichSegment]) -> float:
     return round(min((marker_hits * 8) / words, 1.0), 3)
 
 
+def context_dependency_score(window: list[RichSegment], hook_delay_sec: float) -> float:
+    if not window:
+        return 0.0
+    first = window[0].text.strip()
+    score = 0.0
+    if not first:
+        return 0.0
+    if any(pattern.search(first) for pattern in _CONTEXT_DEPENDENCY_PATTERNS):
+        score += 0.45
+    if first.lower().startswith(("and ", "but ", "so ", "weil ", "aber ", "und ")):
+        score += 0.2
+    if hook_delay_sec > 2.5:
+        score += min((hook_delay_sec - 2.5) / 5.0, 0.2)
+    if len(window) == 1:
+        score += 0.1
+    if not first.endswith(("!", "?", ".")):
+        score += 0.1
+    return round(min(score, 1.0), 3)
+
+
+def payoff_clarity_score(window: list[RichSegment]) -> float:
+    if not window:
+        return 0.0
+    tail = window[max(len(window) // 2, 0):] or window
+    score = 0.0
+    for seg in tail:
+        text = seg.text.strip()
+        if any(pattern.search(text) for pattern in _PAYOFF_PATTERNS):
+            score += 0.18
+        if "audio_laughter" in seg.emotions or "laughter" in seg.emotions:
+            score += 0.18
+        if "face_reaction" in seg.emotions or "high_motion" in seg.emotions:
+            score += 0.14
+        if text.endswith(("!", ".", "?")):
+            score += 0.08
+        if seg.chat_spike_score >= 0.45:
+            score += 0.12
+        if seg.max_face_reaction >= 0.35:
+            score += 0.12
+    return round(min(score, 1.0), 3)
+
+
 # ---------------------------------------------------------------------------
 # LLM-backed scoring (optional second pass, language-agnostic)
 # ---------------------------------------------------------------------------
@@ -152,9 +209,11 @@ Score these five dimensions, each a float 0.0–1.0:
   standalone— clip makes complete sense without watching the stream beforehand.
   hook      — the clip opens with something that grabs attention in the first 2 seconds;
               no slow lead-in, no mid-sentence start, immediate payoff or intrigue.
+  context_dependency — high means the clip depends too much on prior stream context.
+  payoff_clarity — high means the clip lands with a clear reaction, reveal, punchline, or conclusion.
 
 Return ONLY valid JSON, no markdown, no explanation:
-{{"virality": X, "surprise": X, "conflict": X, "standalone": X, "hook": X}}
+{{"virality": X, "surprise": X, "conflict": X, "standalone": X, "hook": X, "context_dependency": X, "payoff_clarity": X}}
 
 Transcript:
 {text}
@@ -171,6 +230,8 @@ _LLM_KEY_MAP = {
     "conflict":   "contradiction",
     "standalone": "standalone",
     "hook":       "hook_strength",
+    "context_dependency": "context_dependency",
+    "payoff_clarity": "payoff_clarity",
 }
 
 
@@ -242,6 +303,7 @@ def score_window(
     Compute semantic scores for a candidate window.
 
     Returns keys: quoteability, surprise, contradiction, standalone, density,
+    payoff_clarity, context_dependency,
     hook_strength, llm_used.
 
     Strategy:
@@ -258,6 +320,8 @@ def score_window(
         "contradiction": contradiction_score(window),
         "standalone": standalone_score(window, hook_delay_sec),
         "density": semantic_density(window),
+        "payoff_clarity": payoff_clarity_score(window),
+        "context_dependency": context_dependency_score(window, hook_delay_sec),
     }
 
     transcript_text = format_transcript(window, use_seconds=True)

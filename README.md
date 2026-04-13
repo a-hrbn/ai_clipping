@@ -1,88 +1,55 @@
 # AI Clipping
 
-Full-stack app for generating short-form clips from long-form video. The repo contains:
+Full-stack app for generating short-form clips from long-form video.
 
 - `backend/`: FastAPI pipeline, clip generation services, and ML/training utilities
 - `frontend/`: Next.js UI for submitting jobs and reviewing clips
-- `Dockerfile` + `docker-compose.yml`: Linux development container with SSH, backend, frontend, graphify, and Codex preinstalled
+- `graphify-out/`: generated knowledge-graph output for repo navigation
 
-## Development Setup
+## Local Setup
 
-This repo is intended to run through Docker Compose. The host machine does not
-need project-local Python virtualenvs or a host-side frontend install.
+1. Create local env files from the examples:
+   - `cp backend/.env.example backend/.env`
+   - `cp frontend/.env.example frontend/.env.local`
+2. Create a backend virtual environment:
+   - `python3 -m venv backend/.venv`
+   - `source backend/.venv/bin/activate`
+3. Install backend dependencies:
+   - base runtime: `python -m pip install -e ./backend`
+   - runtime + developer tools: `python -m pip install -e './backend[dev]'`
+   - full local stack with ML extras: `python -m pip install -e './backend[dev,ml]'`
+4. Install frontend dependencies:
+   - `cd frontend && npm install`
 
-1. Clone the repository on a device.
-2. Create local env files from the examples:
-   - `copy backend\.env.example backend\.env`
-   - `copy frontend\.env.example frontend\.env.local`
-3. Add your SSH public key:
-   - copy `docker/ssh/authorized_keys.example` to `docker/ssh/authorized_keys`
-   - replace the placeholder line with your real public key
-4. Start the container:
-   - `docker compose up --build`
+## Running The App
 
-You can choose which backend requirement layers are installed at build time:
-
-- `INSTALL_DEV=true|false`
-- `INSTALL_ML=true|false`
-
-Examples:
-
-- `base + dev + ml` (default): `docker compose up --build`
-- `base + dev` only: `INSTALL_ML=false docker compose up --build`
-- `base + ml` only: `INSTALL_DEV=false docker compose up --build`
-- `base` only: `INSTALL_DEV=false INSTALL_ML=false docker compose up --build`
-
-When the container starts it will automatically:
-
-- install backend Python dependencies into the image's global Python environment
-- install frontend dependencies into a container-managed `node_modules` volume
-- install `graphifyy` and run `graphify install`
-- install the OpenAI Codex CLI
-- start SSH on port `2222`
-- start FastAPI on port `8000`
-- start Next.js on port `3000`
-
-The entire repository is bind-mounted into `/workspace`, so every file in the
-project is visible inside the Linux container.
-
-The Docker setup also keeps the Codex login state in a dedicated Docker volume
-mounted at `/home/dev/.codex`, so rebuilding the container does not require a
-fresh `codex --login` each time.
-
-## Backend Requirements Layout
-
-The backend dependencies are split into layered files:
-
-- `backend/requirements-base.txt`: web app and runtime essentials
-- `backend/requirements-ml.txt`: heavy ML/audio/vision dependencies
-- `backend/requirements-dev.txt`: developer tooling such as `pytest` and `graphifyy`
-- `backend/requirements.txt`: aggregate file that includes all three
-
-The Docker build always installs `backend/requirements-base.txt`, and
-optionally installs the `ml` and `dev` layers via Docker Compose build args.
-
-## SSH Development
-
-Connect to the running container with:
+Backend:
 
 ```bash
-ssh dev@localhost -p 2222
+cd backend
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-The project root inside the container is:
+Frontend:
 
 ```bash
-/workspace
+cd frontend
+npm run dev
 ```
 
-Useful in-container commands:
+## Dependency Layout
+
+Backend dependencies now live in `backend/pyproject.toml`.
+
+- base dependencies: `[project.dependencies]`
+- developer tooling: `[project.optional-dependencies].dev`
+- ML/audio/vision stack: `[project.optional-dependencies].ml`
+
+## Useful Commands
 
 ```bash
-cd /workspace
 python -m pytest backend/tests -q
-python -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('.'))"
-codex --login
+python3 -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('.'))"
 ```
 
 ## Services
@@ -94,15 +61,4 @@ codex --login
 
 - Local secrets and generated artifacts are ignored by the root `.gitignore`.
 - The old nested frontend git metadata was moved to `frontend/.git.local-backup/` so this project can be tracked as one repository.
-- Large local-only paths like temporary virtualenvs, `node_modules`, ML artifacts, transcripts, runtime temp files, SSH keys, and graphify output are excluded from version control.
-
-## Suggested First Push
-
-```bash
-git init
-git add .
-git commit -m "Initial commit"
-git branch -M main
-git remote add origin <your-github-repo-url>
-git push -u origin main
-```
+- Large local-only paths like temporary virtualenvs, `node_modules`, ML artifacts, transcripts, and graphify output are excluded from version control.

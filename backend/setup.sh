@@ -2,19 +2,15 @@
 set -e
 
 cat <<'EOF'
-This repository now uses Docker Compose for development instead of a project-
-local backend virtualenv.
+Local backend setup:
 
-Start the full development stack from the repo root:
+  python3 -m venv backend/.venv
+  source backend/.venv/bin/activate
+  python -m pip install --upgrade pip
+  python -m pip install -e './backend[dev,ml]'
 
-  docker compose up --build
+Run the API:
 
-The Linux container installs backend dependencies, frontend dependencies, and
-graphify, then starts:
-  - sshd on port 2222
-  - FastAPI on port 8000
-  - Next.js on port 3000
-
-Inside the container, backend commands run directly with the image's global
-Python environment.
+  cd backend
+  uvicorn main:app --reload --host 0.0.0.0 --port 8000
 EOF

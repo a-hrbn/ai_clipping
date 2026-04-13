@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 
 
 @dataclass
@@ -85,6 +85,10 @@ class CandidateFeatures:
     contradiction_score: float = 0.0
     standalone_score: float = 0.0
     semantic_density: float = 0.0
+    payoff_clarity_score: float = 0.0
+    slow_open_penalty: float = 0.0
+    context_dependency_score: float = 0.0
+    weak_resolution_penalty: float = 0.0
     profile_fit_score: float = 0.0
     pre_hook_hype: float = 0.0
     post_hook_hype: float = 0.0
@@ -113,6 +117,20 @@ class CandidateFeatures:
     has_vector_similarity: bool = False
     feature_build_version: int = 1
     source: str = ""
+
+    @classmethod
+    def create(cls, **kwargs) -> "CandidateFeatures":
+        known_names = {item.name for item in fields(cls)}
+        accepted = {key: value for key, value in kwargs.items() if key in known_names}
+        extra = {key: value for key, value in kwargs.items() if key not in known_names}
+        instance = cls(**accepted)
+        for key, value in extra.items():
+            setattr(instance, key, value)
+        return instance
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "CandidateFeatures":
+        return cls.create(**data)
 
     def to_dict(self) -> dict:
         return asdict(self)

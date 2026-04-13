@@ -61,6 +61,25 @@ class TwitchClipLabelsTests(unittest.TestCase):
         self.assertTrue(rows)
         self.assertTrue(all(row["negative_source"] == "between_positive_clusters" for row in rows))
 
+    def test_negative_target_durations_follow_positive_window_lengths(self) -> None:
+        positives = [
+            {"window_start": 100.0, "window_end": 126.0},
+            {"window_start": 220.0, "window_end": 278.0},
+        ]
+        durations = collect_twitch_clip_labels._negative_target_durations(positives)
+        self.assertEqual(durations, [26.0, 58.0])
+
+    def test_background_negative_sampling_is_not_fixed_to_45_seconds(self) -> None:
+        vod = {"id": "1", "duration_seconds": 500, "created_at": "2025-01-01T00:00:00Z"}
+        positives = [
+            {"window_start": 100.0, "window_end": 126.0},
+            {"window_start": 220.0, "window_end": 278.0},
+        ]
+        rows = collect_twitch_clip_labels._sample_negative_rows("jynxzi", vod, positives)
+        background = [row for row in rows if row["negative_source"] == "background_sample"]
+        self.assertTrue(background)
+        self.assertGreater(len({round(float(row["window_end"]) - float(row["window_start"]), 2) for row in background}), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

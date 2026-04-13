@@ -55,7 +55,10 @@ def _generate_fallback_candidates_for_segments(segments: list[RichSegment]) -> l
     candidates.extend(_generate_hype_peak_candidates(segments))
     candidates.extend(_generate_chat_sync_candidates(segments))
     candidates.extend(_generate_reaction_candidates(segments))
+    candidates.extend(_generate_clean_reaction_candidates(segments))
     candidates.extend(_generate_dialogue_candidates(segments))
+    candidates.extend(_generate_hot_take_candidates(segments))
+    candidates.extend(_generate_story_payoff_candidates(segments))
     candidates.extend(_generate_dense_window_candidates(segments))
     return candidates
 
@@ -125,6 +128,30 @@ def _generate_reaction_candidates(segments: list[RichSegment]) -> list[Candidate
     return candidates
 
 
+def _generate_clean_reaction_candidates(segments: list[RichSegment]) -> list[Candidate]:
+    candidates: list[Candidate] = []
+    ranked = sorted(
+        [
+            seg for seg in segments
+            if (
+                seg.max_face_reaction >= 0.45
+                or seg.chat_spike_score >= 0.5
+                or "audio_laughter" in seg.emotions
+                or "laughter" in seg.emotions
+            )
+        ],
+        key=lambda seg: (
+            max(seg.max_face_reaction, seg.chat_spike_score)
+            + seg.hype_score * 0.25
+            + (0.2 if "audio_laughter" in seg.emotions or "laughter" in seg.emotions else 0.0)
+        ),
+        reverse=True,
+    )
+    for idx, seg in enumerate(ranked[:10]):
+        candidates.append(_window_candidate(seg, idx, "clean_reaction", lead=5.5, tail=12.0))
+    return candidates
+
+
 def _generate_dialogue_candidates(segments: list[RichSegment]) -> list[Candidate]:
     candidates: list[Candidate] = []
     if len(segments) < 3:
@@ -146,6 +173,53 @@ def _generate_dialogue_candidates(segments: list[RichSegment]) -> list[Candidate
         anchor = window[len(window) // 2]
         candidates.append(_window_candidate(anchor, found, "dialogue", lead=8.0, tail=12.0))
         found += 1
+    return candidates
+
+
+def _generate_hot_take_candidates(segments: list[RichSegment]) -> list[Candidate]:
+    candidates: list[Candidate] = []
+    patterns = (
+        "i think", "i'm telling", "listen", "bro", "that's why", "truth is",
+        "ich finde", "ich sag", "das ding ist", "ehrlich", "eigentlich",
+    )
+    found = 0
+    for seg in segments:
+        if found >= 10:
+            break
+        text = seg.text.strip().lower()
+        words = len(text.split())
+        if words < 5 or words > 28:
+            continue
+        if not any(pattern in text for pattern in patterns) and not text.endswith(("!", "?")):
+            continue
+        if seg.hype_score < 1.5 and seg.arc_score < 2.0 and seg.chat_spike_score < 0.3:
+            continue
+        candidates.append(_window_candidate(seg, found, "hot_take", lead=6.0, tail=13.0))
+        found += 1
+    return candidates
+
+
+def _generate_story_payoff_candidates(segments: list[RichSegment]) -> list[Candidate]:
+    candidates: list[Candidate] = []
+    for idx in range(1, len(segments)):
+        if len(candidates) >= 10:
+            break
+        seg = segments[idx]
+        history = segments[max(0, idx - 3):idx]
+        if not history:
+            continue
+        setup_hype = sum(item.hype_score for item in history) / len(history)
+        payoff_signal = (
+            seg.hype_score
+            + seg.arc_score
+            + seg.chat_spike_score * 2.2
+            + max(seg.max_face_reaction, seg.max_motion_score) * 2.0
+        )
+        if payoff_signal < 5.2:
+            continue
+        if seg.hype_score - setup_hype < 1.8 and seg.arc_score < 3.0:
+            continue
+        candidates.append(_window_candidate(seg, idx, "story_payoff", lead=12.0, tail=18.0))
     return candidates
 
 
@@ -183,6 +257,7 @@ def _window_candidate(
     lead: float,
     tail: float,
 ) -> Candidate:
+    lead, tail = _adaptive_window(anchor, lead, tail)
     return Candidate(
         id=f"{source}:{idx}:{int(anchor.start * 100)}",
         start=max(0.0, anchor.start - lead),
@@ -192,6 +267,27 @@ def _window_candidate(
         score_hint=round(anchor.hype_score + anchor.arc_score + anchor.chat_spike_score * 2.0, 3),
         tags=sorted(set(anchor.emotions)),
     )
+
+
+def _adaptive_window(anchor: RichSegment, lead: float, tail: float) -> tuple[float, float]:
+    hook_urgency = min(
+        1.0,
+        max(
+            anchor.chat_spike_score,
+            anchor.max_face_reaction,
+            min(anchor.hype_score / 6.0, 1.0),
+            1.0 if "exclamation" in anchor.emotions else 0.0,
+            0.85 if anchor.text.strip().endswith(("!", "?")) else 0.0,
+        ),
+    )
+    story_weight = min(max(anchor.arc_score / 5.0, 0.0), 1.0)
+    adaptive_lead = lead * (1.15 - 0.45 * hook_urgency) + story_weight * 2.5
+    adaptive_tail = (
+        tail * (1.05 + 0.25 * story_weight - 0.15 * hook_urgency)
+        + anchor.chat_spike_score * 1.5
+        + anchor.max_face_reaction * 1.5
+    )
+    return round(max(3.0, adaptive_lead), 2), round(max(6.0, adaptive_tail), 2)
 
 
 def _is_quote_like(seg: RichSegment) -> bool:

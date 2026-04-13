@@ -93,12 +93,17 @@ class Ranker:
                 + feature.standalone_score
                 + feature.semantic_density
             ) / 5.0 * 10.0
+            payoff_clarity = feature.payoff_clarity_score * 10.0
             profile_fit = feature.profile_fit_score * 10.0
             context_efficiency = feature.context_efficiency * 10.0
+            slow_open_penalty = feature.slow_open_penalty * 10.0
+            context_dependency_penalty = feature.context_dependency_score * 10.0
+            weak_resolution_penalty = feature.weak_resolution_penalty * 10.0
 
             rank_score = (
                 hw["hook"]               * hook_score * profile_weights["hook_weight"]
                 + hw["payoff"]           * feature.payoff_score
+                + hw.get("payoff_clarity", 0.0) * payoff_clarity
                 + hw["hype"]             * feature.max_hype
                 + hw["arc"]              * feature.arc_score
                 + hw["chat"]             * chat_alignment * profile_weights["chat_weight"]
@@ -112,6 +117,9 @@ class Ranker:
                 + hw.get("chapter_density", 0.0) * chapter_density
                 + hw.get("trend_prior", 0.0) * trend_prior
                 + hw.get("overlap_penalty", 0.0) * overlap_risk
+                + hw.get("slow_open_penalty", 0.0) * slow_open_penalty
+                + hw.get("context_dependency_penalty", 0.0) * context_dependency_penalty
+                + hw.get("weak_resolution_penalty", 0.0) * weak_resolution_penalty
                 + hw["context_cost"]     * (feature.context_cost * 10.0)
             )
 
@@ -132,6 +140,8 @@ class Ranker:
                 rationale.append("surprising")
             if feature.standalone_score >= 0.6:
                 rationale.append("standalone")
+            if feature.payoff_clarity_score >= 0.65:
+                rationale.append("clear_resolution")
             if feature.profile_fit_score >= 0.55:
                 rationale.append(f"profile_fit:{profile}")
             if feature.chapter_coherence_score >= 0.6:
@@ -144,6 +154,12 @@ class Ranker:
                 rationale.append("trend_aligned")
             if feature.clip_overlap_count >= 2.0:
                 rationale.append("overlap_risk")
+            if feature.slow_open_penalty >= 0.45:
+                rationale.append("slow_open_risk")
+            if feature.context_dependency_score >= 0.5:
+                rationale.append("context_dependent")
+            if feature.weak_resolution_penalty >= 0.5:
+                rationale.append("weak_resolution_risk")
 
             scored.append((round(rank_score, 3), rationale))
         return scored

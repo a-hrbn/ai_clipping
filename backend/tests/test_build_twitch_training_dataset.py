@@ -69,6 +69,7 @@ class BuildTwitchTrainingDatasetTests(unittest.TestCase):
         ]
         fake_row = {
             "label": 1,
+            "label_source": "twitch_clip_api",
             "features": {
                 "candidate_id": "x",
                 "duration": 10.0,
@@ -106,9 +107,8 @@ class BuildTwitchTrainingDatasetTests(unittest.TestCase):
             },
         }
         with tempfile.TemporaryDirectory() as tmp, \
-             patch("ml.build_twitch_training_dataset.downloader.download", return_value=Path(tmp) / "vod.mp4"), \
-             patch("ml.build_twitch_training_dataset.collect_viral_clips.cut_video_window", return_value=Path(tmp) / "window.mp4"), \
-             patch("ml.build_twitch_training_dataset.collect_viral_clips.process_local_video", return_value=fake_row):
+             patch("ml.build_twitch_training_dataset._materialize_vod", return_value=Path(tmp) / "vod.mp4"), \
+             patch("ml.build_twitch_training_dataset._build_rows_for_label", return_value=[fake_row]):
             rows = build_twitch_training_dataset.build_dataset(labels, "jynxzi", Path(tmp))
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["label_class"], "positive")
@@ -151,13 +151,13 @@ class BuildTwitchTrainingDatasetTests(unittest.TestCase):
         ]
         fake_row = {
             "label": 1,
+            "label_source": "twitch_clip_api",
             "features": {"candidate_id": "x"},
         }
         with tempfile.TemporaryDirectory() as tmp, \
              patch.object(settings, "storage_dir", tmp), \
              patch.object(settings, "training_vod_cache_ttl_sec", 3600), \
-             patch("ml.build_twitch_training_dataset.collect_viral_clips.cut_video_window", return_value=Path(tmp) / "window.mp4") as cut_mock, \
-             patch("ml.build_twitch_training_dataset.collect_viral_clips.process_local_video", return_value=fake_row), \
+             patch("ml.build_twitch_training_dataset._build_rows_for_label", return_value=[fake_row]) as build_rows_mock, \
              patch("ml.build_twitch_training_dataset.downloader.download") as download_mock:
             cache_path = build_twitch_training_dataset._training_cache_path(labels[0]["vod_url"])
             cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -166,7 +166,7 @@ class BuildTwitchTrainingDatasetTests(unittest.TestCase):
 
         self.assertEqual(len(rows), 1)
         download_mock.assert_not_called()
-        self.assertEqual(cut_mock.call_args.args[0], cache_path)
+        self.assertEqual(build_rows_mock.call_args.kwargs["vod_path"], cache_path)
 
     def test_materialize_vod_writes_training_cache_after_download(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, \
@@ -211,6 +211,7 @@ class BuildTwitchTrainingDatasetTests(unittest.TestCase):
         ]
         fake_row = {
             "label": 0,
+            "label_source": "twitch_clip_api",
             "features": {
                 "candidate_id": "x",
                 "duration": 10.0,
@@ -219,17 +220,97 @@ class BuildTwitchTrainingDatasetTests(unittest.TestCase):
         }
 
         with tempfile.TemporaryDirectory() as tmp, \
-             patch("ml.build_twitch_training_dataset.downloader.download", return_value=Path(tmp) / "vod.mp4"), \
+             patch("ml.build_twitch_training_dataset._materialize_vod", return_value=Path(tmp) / "vod.mp4"), \
              patch(
-                 "ml.build_twitch_training_dataset.collect_viral_clips.cut_video_window",
-                 side_effect=[RuntimeError("ffmpeg failed"), Path(tmp) / "window2.mp4"],
-             ), \
-             patch("ml.build_twitch_training_dataset.collect_viral_clips.process_local_video", return_value=fake_row) as process_mock:
+                 "ml.build_twitch_training_dataset._build_rows_for_label",
+                 side_effect=[RuntimeError("ffmpeg failed"), [fake_row]],
+             ) as build_rows_mock:
             rows = build_twitch_training_dataset.build_dataset(labels, "jynxzi", Path(tmp))
 
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["label_class"], "hard_negative")
-        process_mock.assert_called_once()
+        self.assertEqual(build_rows_mock.call_count, 2)
+
+    def test_refined_candidates_prefer_overlapping_generator_windows(self) -> None:
+        proxy = build_twitch_training_dataset._proxy_candidate(
+            {"window_start": 100.0, "window_end": 132.0},
+            90.0,
+            "job-1",
+        )
+        best = build_twitch_training_dataset._clone_candidate(
+            build_twitch_training_dataset._proxy_candidate(
+                {"window_start": 102.0, "window_end": 126.0},
+                90.0,
+                "seed",
+            ),
+            "job-1",
+            0,
+        )
+        best.source = "story_payoff"
+        best.score_hint = 6.0
+        weaker = build_twitch_training_dataset._clone_candidate(
+            build_twitch_training_dataset._proxy_candidate(
+                {"window_start": 95.0, "window_end": 120.0},
+                90.0,
+                "seed",
+            ),
+            "job-1",
+            1,
+        )
+        weaker.source = "reaction"
+        weaker.score_hint = 3.0
+
+        with patch("services.candidate_generators.generate_semantic_candidates", return_value=[best]), \
+             patch("services.candidate_generators.generate_fallback_candidates", return_value=[weaker]), \
+             patch("services.candidate_generators.merge_prioritized_candidates", return_value=[best, weaker]):
+            selected = build_twitch_training_dataset._refined_candidates_for_label(
+                {"label_class": "positive"},
+                transcript=[],
+                proxy_candidate=proxy,
+                job_prefix="job-1",
+            )
+
+        self.assertEqual(selected[0].source, "story_payoff")
+        self.assertGreaterEqual(len(selected), 2)
+
+    def test_training_row_from_label_uses_refined_candidate_window(self) -> None:
+        candidate = build_twitch_training_dataset._proxy_candidate(
+            {"window_start": 120.0, "window_end": 145.0},
+            100.0,
+            "job-1",
+        )
+        candidate.start = 121.5
+        candidate.end = 139.0
+        candidate.source = "story_payoff"
+
+        class _Features:
+            candidate_id = "feat-1"
+
+            def to_dict(self):
+                return {"candidate_id": "feat-1", "duration": 17.5, "source": "story_payoff"}
+
+        row = build_twitch_training_dataset._training_row_from_label(
+            {
+                "vod_id": "123",
+                "vod_url": "https://www.twitch.tv/videos/123",
+                "broadcaster": "jynxzi",
+                "label_class": "positive",
+                "label_source": "twitch_clip_api",
+                "window_start": 120.0,
+                "window_end": 145.0,
+                "clip_ids": ["a"],
+            },
+            candidate,
+            _Features(),
+            sample_weight_scale=1.0,
+            dataset_source="twitch_vod_primary",
+            supervision_reason_suffix="",
+            window_origin="proxy_label_refined",
+        )
+
+        self.assertEqual(row["window_start"], 121.5)
+        self.assertEqual(row["proxy_window_start"], 120.0)
+        self.assertEqual(row["candidate_source"], "story_payoff")
 
 
 if __name__ == "__main__":

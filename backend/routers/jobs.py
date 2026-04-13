@@ -1,7 +1,12 @@
 import asyncio
+import importlib.util
 import io
+import json
+import os
 import pathlib
 import shutil
+import subprocess
+import sys
 import uuid
 from fastapi import APIRouter, Form, HTTPException, UploadFile, File
 from config import settings
@@ -17,6 +22,8 @@ status_router = APIRouter(prefix="/api", tags=["status"])
 import time as _time
 _status_cache: dict = {}
 _STATUS_TTL = 300
+_SENTENCE_TRANSFORMERS_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
+_PYANNOTE_MODEL = "speaker-diarization-3.1"
 
 
 def _check_groq(api_key: str, model: str) -> tuple[bool, str | None]:
@@ -61,8 +68,32 @@ def _check_gemini(api_key: str, model: str) -> tuple[bool, str | None]:
         return False, "Gemini nicht erreichbar"
 
 
+def _status_payload(
+    *,
+    label: str,
+    name: str,
+    model: str,
+    active: bool,
+    error: str | None,
+    mode: str,
+    fallback_name: str | None = None,
+    fallback_model: str | None = None,
+) -> dict[str, str | bool | None]:
+    return {
+        "label": label,
+        "name": name,
+        "model": model,
+        "active": active,
+        "error": error,
+        "mode": mode,
+        "fallback_name": fallback_name,
+        "fallback_model": fallback_model,
+    }
+
+
 def _provider_payload(
     *,
+    label: str,
     configured: bool,
     provider_name: str,
     provider_model: str,
@@ -72,35 +103,262 @@ def _provider_payload(
     error: str | None,
 ) -> dict[str, str | bool | None]:
     if configured and ok:
-        return {
-            "name": provider_name,
-            "model": provider_model,
-            "active": True,
-            "error": None,
-            "mode": "active",
-        }
+        return _status_payload(
+            label=label,
+            name=provider_name,
+            model=provider_model,
+            active=True,
+            error=None,
+            mode="active",
+        )
     if configured and error:
-        return {
-            "name": fallback_name,
-            "model": fallback_model,
-            "active": True,
-            "error": error,
-            "mode": "fallback",
-        }
+        return _status_payload(
+            label=label,
+            name=provider_name,
+            model=provider_model,
+            active=True,
+            error=error,
+            mode="fallback",
+            fallback_name=fallback_name,
+            fallback_model=fallback_model,
+        )
     if not configured:
-        return {
-            "name": fallback_name,
-            "model": fallback_model,
-            "active": True,
-            "error": None,
-            "mode": "fallback",
-        }
-    return {
-        "name": provider_name,
-        "model": provider_model,
+        return _status_payload(
+            label=label,
+            name=fallback_name,
+            model=fallback_model,
+            active=True,
+            error=None,
+            mode="fallback",
+        )
+    return _status_payload(
+        label=label,
+        name=provider_name,
+        model=provider_model,
+        active=False,
+        error=error,
+        mode="error",
+    )
+
+
+def _package_available(module_name: str) -> bool:
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except ModuleNotFoundError:
+        return False
+
+
+def _probe_face_detection_status() -> dict[str, str | bool | None]:
+    script = f"""
+import json
+import pathlib
+
+mediapipe_error = None
+try:
+    import mediapipe as mp
+    if hasattr(mp, "solutions"):
+        mp.solutions.face_detection.FaceDetection(model_selection=0, min_detection_confidence=0.5)
+    else:
+        from mediapipe.tasks.python.core.base_options import BaseOptions
+        from mediapipe.tasks.python.vision import FaceDetector, FaceDetectorOptions
+
+        model_path = pathlib.Path({str(pathlib.Path(__file__).resolve().parents[1] / "face_detection_short_range.tflite")!r})
+        if not model_path.exists():
+            raise FileNotFoundError(f"MediaPipe face model missing: {{model_path}}")
+        FaceDetector.create_from_options(
+            FaceDetectorOptions(
+                base_options=BaseOptions(
+                    model_asset_path=str(model_path),
+                    delegate=BaseOptions.Delegate.CPU,
+                ),
+                min_detection_confidence=0.5,
+            )
+        )
+    print(json.dumps({{
+        "label": "Face Detection",
+        "name": "MediaPipe",
+        "model": "face_detection",
+        "active": True,
+        "error": None,
+        "mode": "active",
+    }}))
+    raise SystemExit(0)
+except Exception as exc:
+    mediapipe_error = str(exc)
+
+try:
+    from mtcnn import MTCNN
+    MTCNN()
+    print(json.dumps({{
+        "label": "Face Detection",
+        "name": "MTCNN",
+        "model": "mtcnn",
+        "active": True,
+        "error": mediapipe_error or "MediaPipe nicht verfuegbar",
+        "mode": "fallback",
+    }}))
+    raise SystemExit(0)
+except Exception as exc:
+    mtcnn_error = str(exc)
+
+try:
+    import cv2
+    cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+    if cascade.empty():
+        raise RuntimeError("Haar cascade not available")
+    print(json.dumps({{
+        "label": "Face Detection",
+        "name": "OpenCV",
+        "model": "haar cascade",
+        "active": True,
+        "error": mediapipe_error or mtcnn_error,
+        "mode": "fallback",
+    }}))
+except Exception as exc:
+    print(json.dumps({{
+        "label": "Face Detection",
+        "name": "Disabled",
+        "model": "none",
         "active": False,
-        "error": error,
+        "error": str(exc) or mtcnn_error or mediapipe_error,
         "mode": "error",
+    }}))
+"""
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+            env={
+                **os.environ,
+                "MPLCONFIGDIR": os.environ.get("MPLCONFIGDIR", "/tmp/matplotlib"),
+            },
+        )
+        payload = (result.stdout or "").strip().splitlines()
+        if payload:
+            data = json.loads(payload[-1])
+            if isinstance(data, dict):
+                return data
+    except Exception as exc:
+        return _status_payload(
+            label="Face Detection",
+            name="Disabled",
+            model="none",
+            active=False,
+            error=str(exc),
+            mode="error",
+        )
+    return _status_payload(
+        label="Face Detection",
+        name="Disabled",
+        model="none",
+        active=False,
+        error="Face detection probe failed",
+        mode="error",
+    )
+
+
+def _pipeline_component_statuses() -> dict[str, dict[str, str | bool | None]]:
+    whisper_available = _package_available("whisper")
+    sentence_transformers_available = _package_available("sentence_transformers")
+    deepface_available = _package_available("deepface")
+    tf_keras_available = _package_available("tf_keras")
+    pyannote_available = _package_available("pyannote.audio")
+
+    embedding_status = (
+        _status_payload(
+            label="Candidate Embeddings",
+            name="SentenceTransformers",
+            model=_SENTENCE_TRANSFORMERS_MODEL,
+            active=True,
+            error=None,
+            mode="active",
+        )
+        if sentence_transformers_available
+        else _status_payload(
+            label="Candidate Embeddings",
+            name="Regex Fallback",
+            model="heuristic",
+            active=True,
+            error="sentence-transformers nicht installiert",
+            mode="fallback",
+        )
+    )
+
+    expression_status = (
+        _status_payload(
+            label="Expression Analysis",
+            name="DeepFace",
+            model="emotion analyzer",
+            active=True,
+            error=None,
+            mode="active",
+        )
+        if deepface_available and tf_keras_available
+        else _status_payload(
+            label="Expression Analysis",
+            name="Disabled",
+            model="none",
+            active=False,
+            error=(
+                "tf-keras fehlt"
+                if deepface_available and not tf_keras_available
+                else "DeepFace nicht installiert"
+            ),
+            mode="inactive",
+        )
+    )
+
+    diarization_status = (
+        _status_payload(
+            label="Diarization",
+            name="Pyannote",
+            model=_PYANNOTE_MODEL,
+            active=True,
+            error=None,
+            mode="active",
+        )
+        if settings.hf_token and pyannote_available
+        else _status_payload(
+            label="Diarization",
+            name="Disabled",
+            model=_PYANNOTE_MODEL,
+            active=False,
+            error=(
+                "HF token fehlt"
+                if not settings.hf_token
+                else "pyannote.audio nicht installiert"
+            ),
+            mode="inactive",
+        )
+    )
+
+    return {
+        "transcription": (
+            _status_payload(
+                label="Transcription",
+                name="Whisper",
+                model=settings.whisper_model,
+                active=True,
+                error=None,
+                mode="active",
+            )
+            if whisper_available
+            else _status_payload(
+                label="Transcription",
+                name="Disabled",
+                model=settings.whisper_model,
+                active=False,
+                error="openai-whisper nicht installiert",
+                mode="error",
+            )
+        ),
+        "semantic_embeddings": embedding_status,
+        "face_detection": _probe_face_detection_status(),
+        "expression_analysis": expression_status,
+        "diarization": diarization_status,
     }
 
 
@@ -127,6 +385,7 @@ async def get_status():
         checks.append(loop.run_in_executor(None, _check_groq, settings.groq_api_key, settings.groq_model))
     if gemini_configured:
         checks.append(loop.run_in_executor(None, _check_gemini, settings.gemini_api_key, settings.gemini_model))
+    checks.append(loop.run_in_executor(None, _pipeline_component_statuses))
 
     results = await asyncio.gather(*checks)
     idx = 0
@@ -134,10 +393,13 @@ async def get_status():
         groq_ok, groq_err = results[idx]; idx += 1
     if gemini_configured:
         gemini_ok, gemini_err = results[idx]
+        idx += 1
+    pipeline_components = results[idx]
 
     result = {
         "providers": {
             "semantic": _provider_payload(
+                label="Scoring",
                 configured=groq_configured,
                 provider_name="Groq",
                 provider_model=settings.groq_model,
@@ -147,6 +409,7 @@ async def get_status():
                 error=groq_err,
             ),
             "refinement": _provider_payload(
+                label="Refinement",
                 configured=gemini_configured,
                 provider_name="Gemini",
                 provider_model=settings.gemini_model,
@@ -155,7 +418,8 @@ async def get_status():
                 ok=gemini_ok,
                 error=gemini_err,
             ),
-        }
+        },
+        "pipeline": pipeline_components,
     }
 
     _status_cache = {**result, "_ts": now}

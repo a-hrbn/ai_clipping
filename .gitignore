@@ -9,6 +9,7 @@
 .pytest_cache/
 __pycache__/
 *.py[cod]
+*.egg-info/
 
 backend/.venv/
 backend/.venv_fixed/
@@ -28,6 +29,7 @@ frontend/.env.local
 frontend/.git.local-backup/
 frontend/next-env.d.ts
 frontend/*.tsbuildinfo
+graphify-out/cache/
 
 transcripts/
 backend/=*
@@ -35,5 +37,3 @@ backend/=*
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-
-docker/ssh/authorized_keys

@@ -39,19 +39,20 @@ export interface ClipFeedbackPayload {
   observed_view_rate?: number;
 }
 
-export interface ProviderInfo {
+export interface StatusInfo {
+  label?: string;
   name: string;
   model: string;
   active: boolean;
   error: string | null;
   mode: "active" | "fallback" | "error" | "inactive";
+  fallback_name?: string | null;
+  fallback_model?: string | null;
 }
 
 export interface AIProviderStatus {
-  providers: {
-    semantic: ProviderInfo;
-    refinement: ProviderInfo;
-  };
+  providers: Record<string, StatusInfo>;
+  pipeline?: Record<string, StatusInfo>;
 }
 
 export interface JobStatus {

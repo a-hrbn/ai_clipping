@@ -37,7 +37,8 @@ Score each axis from 0.0 to 1.0:
 - narrative_completeness: does it feel like a coherent mini-story rather than a fragment?
 - platform_fit_shortform: is the pacing and shape right for Shorts/Reels/TikTok?
 
-Be strict. Penalize clips with slow setup, missing payoff, or weak standalone clarity.
+Be strict. Penalize clips with slow setup, missing payoff, weak standalone clarity, clips that start mid-thought,
+clips that depend on prior stream context, and clips that fizzle without a clean ending.
 Return raw JSON only:
 {{
   "scroll_stop_power": <float>,
@@ -89,7 +90,7 @@ def rerank_candidates(
             provider=provider,
             keyframes=(keyframes_by_candidate or {}).get(ranked.candidate.id),
         )
-        blended_score = _blend_scores(ranked.rank_score, judge_result.judge_score)
+        blended_score = _blend_scores(ranked.rank_score, judge_result.judge_score, judge_result.judge_confidence)
         rationale = list(ranked.rationale)
         rationale.append("judge_reranked")
         if judge_result.llm_used:
@@ -331,6 +332,7 @@ def _heuristic_judge(ranked: RankedCandidate, window: list[RichSegment]) -> Judg
         + 0.10 * (1.0 if features.question_open else 0.0)
         + 0.05 * (topic_shift * boundary_closeness)
         + 0.05 * trend_hook
+        - 0.18 * features.slow_open_penalty
     )
     standalone = _clamp01(
         0.38 * features.standalone_score
@@ -338,12 +340,15 @@ def _heuristic_judge(ranked: RankedCandidate, window: list[RichSegment]) -> Judg
         + 0.15 * (1.0 - min(features.context_cost, 1.0))
         + 0.10 * min(features.quoteability_score + features.contradiction_score, 1.0)
         + 0.13 * chapter_coherence
+        - 0.22 * features.context_dependency_score
     )
     payoff = _clamp01(
         0.55 * min(features.payoff_score / 8.0, 1.0)
+        + 0.15 * features.payoff_clarity_score
         + 0.15 * min(features.post_hook_hype / 6.0, 1.0)
         + 0.15 * min(features.laughter_count / 2.0, 1.0)
         + 0.15 * max(features.chat_peak, features.face_reaction_peak)
+        - 0.20 * features.weak_resolution_penalty
     )
     narrative = _clamp01(
         0.25 * features.context_efficiency
@@ -354,6 +359,8 @@ def _heuristic_judge(ranked: RankedCandidate, window: list[RichSegment]) -> Judg
         + 0.10 * chapter_coherence
         + 0.07 * (1.0 - overlap_risk)
         + 0.03 * topic_shift
+        - 0.10 * features.context_dependency_score
+        - 0.08 * features.weak_resolution_penalty
     )
     platform_fit = _clamp01(
         0.23 * scroll_stop
@@ -399,6 +406,10 @@ def _feature_summary(ranked: RankedCandidate) -> str:
         f"payoff_score={features.payoff_score:.3f}, "
         f"context_efficiency={features.context_efficiency:.3f}, "
         f"standalone_score={features.standalone_score:.3f}, "
+        f"payoff_clarity_score={features.payoff_clarity_score:.3f}, "
+        f"slow_open_penalty={features.slow_open_penalty:.3f}, "
+        f"context_dependency_score={features.context_dependency_score:.3f}, "
+        f"weak_resolution_penalty={features.weak_resolution_penalty:.3f}, "
         f"chat_peak={features.chat_peak:.3f}, "
         f"face_reaction_peak={features.face_reaction_peak:.3f}, "
         f"motion_peak={features.motion_peak:.3f}, "
@@ -455,9 +466,10 @@ def _axes_to_score(axes: dict[str, float]) -> float:
     return round(weighted * 10.0, 3)
 
 
-def _blend_scores(existing_score: float, judge_score: float) -> float:
+def _blend_scores(existing_score: float, judge_score: float, judge_confidence: float) -> float:
     blend = min(max(float(settings.judge_blend_weight), 0.0), 1.0)
-    return round(existing_score * (1.0 - blend) + judge_score * blend, 3)
+    confidence_scaled = blend * (0.55 + 0.45 * _clamp01(judge_confidence))
+    return round(existing_score * (1.0 - confidence_scaled) + judge_score * confidence_scaled, 3)
 
 
 def _heuristic_reason(strongest: str, weakest: str, features) -> str:
@@ -466,6 +478,14 @@ def _heuristic_reason(strongest: str, weakest: str, features) -> str:
         notes.append("clean chapter coherence")
     elif features.chapter_coherence_score <= 0.35:
         notes.append("weak topic coherence")
+    if features.slow_open_penalty >= 0.45:
+        notes.append("slow opening risk")
+    if features.context_dependency_score >= 0.5:
+        notes.append("needs prior stream context")
+    if features.payoff_clarity_score >= 0.65:
+        notes.append("clear ending payoff")
+    if features.weak_resolution_penalty >= 0.5:
+        notes.append("resolution feels weak")
     if features.topic_shift_strength >= 0.5:
         notes.append("benefits from a topic pivot")
     if features.clip_overlap_count >= 2.0:

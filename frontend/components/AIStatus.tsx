@@ -2,11 +2,11 @@
 
 import { useEffect, useState } from "react";
 import { getAIStatus } from "@/lib/api";
-import { AIProviderStatus, ProviderInfo } from "@/lib/types";
+import { AIProviderStatus, StatusInfo } from "@/lib/types";
 
 type DotState = "active" | "fallback" | "error" | "inactive";
 
-function getDotState(info: ProviderInfo): DotState {
+function getDotState(info: StatusInfo): DotState {
   if (info.mode === "fallback") return "fallback";
   if (info.mode === "active") return "active";
   if (info.mode === "error") return "error";
@@ -42,8 +42,12 @@ const BADGE_BORDER: Record<DotState, string> = {
   inactive: "var(--border)",
 };
 
-function ProviderPill({ label, info }: { label: string; info: ProviderInfo }) {
+function ProviderPill({ info }: { info: StatusInfo }) {
   const state = getDotState(info);
+  const fallbackTarget =
+    info.mode === "fallback" && info.fallback_name && info.fallback_model
+      ? `${info.fallback_name} · ${info.fallback_model}`
+      : null;
 
   return (
     <div className="flex flex-col gap-1">
@@ -61,7 +65,7 @@ function ProviderPill({ label, info }: { label: string; info: ProviderInfo }) {
 
         {/* Label */}
         <span className="text-xs font-medium uppercase tracking-widest text-dim">
-          {label}
+          {info.label}
         </span>
 
         {/* Model badge */}
@@ -79,12 +83,16 @@ function ProviderPill({ label, info }: { label: string; info: ProviderInfo }) {
 
       {state === "fallback" && (
         <p className="ml-3 text-xs font-mono" style={{ color: "var(--warn)" }}>
-          {info.error ? `Fallback aktiv: ${info.error}` : "Lokaler Fallback aktiv"}
+          {fallbackTarget
+            ? `Fallback aktiv: ${fallbackTarget}${info.error ? ` — ${info.error}` : ""}`
+            : info.error
+              ? `Fallback aktiv: ${info.error}`
+              : "Lokaler Fallback aktiv"}
         </p>
       )}
 
       {/* Inline error hint */}
-      {state === "error" && info.error && (
+      {(state === "error" || state === "inactive") && info.error && (
         <p className="ml-3 text-xs font-mono" style={{ color: "var(--warn)" }}>
           {info.error}
         </p>
@@ -104,11 +112,58 @@ export default function AIStatus() {
 
   if (!status) return null;
 
+  const providerLabels: Record<string, string> = {
+    semantic: "Scoring",
+    refinement: "Refinement",
+  };
+  const pipeline = status.pipeline ?? {};
+  const normalizeInfo = (key: string, info: StatusInfo): StatusInfo => ({
+    ...info,
+    label: info.label ?? providerLabels[key] ?? key.replaceAll("_", " "),
+  });
+
+  const providerOrder = ["semantic", "refinement"];
+  const pipelineOrder = [
+    "transcription",
+    "semantic_embeddings",
+    "face_detection",
+    "expression_analysis",
+    "diarization",
+  ];
+  const orderedProviders = [
+    ...providerOrder
+      .filter((key) => status.providers[key])
+      .map((key) => normalizeInfo(key, status.providers[key])),
+    ...Object.entries(status.providers)
+      .filter(([key]) => !providerOrder.includes(key))
+      .map(([key, info]) => normalizeInfo(key, info)),
+  ];
+  const orderedPipeline = [
+    ...pipelineOrder.filter((key) => pipeline[key]).map((key) => normalizeInfo(key, pipeline[key])),
+    ...Object.entries(pipeline)
+      .filter(([key]) => !pipelineOrder.includes(key))
+      .map(([key, info]) => normalizeInfo(key, info)),
+  ];
+
   return (
-    <div className="flex flex-wrap items-start gap-x-5 gap-y-2">
-      <ProviderPill label="Scoring" info={status.providers.semantic} />
-      <span className="text-border select-none hidden sm:block mt-1">·</span>
-      <ProviderPill label="Refinement" info={status.providers.refinement} />
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-start gap-x-5 gap-y-2">
+        {orderedProviders.map((info) => (
+          <ProviderPill key={`${info.label}:${info.model}`} info={info} />
+        ))}
+      </div>
+      {orderedPipeline.length > 0 && (
+        <div className="pt-3 border-t border-border/70">
+          <p className="mb-2 text-[11px] font-medium uppercase tracking-[0.22em] text-muted">
+            Pipeline
+          </p>
+          <div className="flex flex-wrap items-start gap-x-5 gap-y-2">
+            {orderedPipeline.map((info) => (
+              <ProviderPill key={`${info.label}:${info.model}`} info={info} />
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

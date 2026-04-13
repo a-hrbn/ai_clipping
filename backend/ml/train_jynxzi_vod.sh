@@ -6,21 +6,74 @@ BACKEND_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PYTHON_BIN="$BACKEND_DIR/.venv/bin/python"
 export MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp/matplotlib}"
 
-DATE_FROM="${1:-$(date -v-30d +%F)}"
-DATE_TO="${2:-$(date +%F)}"
-
 LABELS_PATH="$BACKEND_DIR/ml/artifacts/jynxzi_twitch_clip_labels.jsonl"
 DATASET_PATH="$BACKEND_DIR/ml/artifacts/jynxzi_vod_training_rows.jsonl"
 SHORT_FORM_PATH="$BACKEND_DIR/ml/artifacts/real_short_form_training_rows.jsonl"
 ARTIFACT_DIR="$BACKEND_DIR/ml/artifacts"
-WORK_DIR="/tmp/ai_clipping_twitch_training"
 
 cd "$BACKEND_DIR"
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
-  PYTHON_BIN="python3"
+  echo "Missing virtualenv interpreter: $PYTHON_BIN" >&2
+  echo "Create backend/.venv and install the backend dependencies before training." >&2
+  exit 1
 fi
 
+mkdir -p "$ARTIFACT_DIR" "$MPLCONFIGDIR"
+
+if [[ $# -ge 1 ]]; then
+  DATE_FROM="$1"
+else
+  DATE_FROM="$("$PYTHON_BIN" -c 'from datetime import date, timedelta; print((date.today() - timedelta(days=30)).isoformat())')"
+fi
+
+if [[ $# -ge 2 ]]; then
+  DATE_TO="$2"
+else
+  DATE_TO="$("$PYTHON_BIN" -c 'from datetime import date; print(date.today().isoformat())')"
+fi
+
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ai_clipping_twitch_training.XXXXXX")"
+
+cleanup() {
+  rm -rf "$WORK_DIR"
+}
+trap cleanup EXIT INT TERM
+
+export DATE_FROM DATE_TO
+"$PYTHON_BIN" - <<'PY'
+from datetime import datetime
+import os
+
+from config import settings
+
+missing = []
+if not settings.twitch_client_id:
+    missing.append("TWITCH_CLIENT_ID")
+if not settings.twitch_client_secret:
+    missing.append("TWITCH_CLIENT_SECRET")
+if missing:
+    raise SystemExit(
+        "Missing required backend/.env settings: " + ", ".join(missing)
+    )
+
+for value, label in (
+    (settings.storage_dir, "STORAGE_DIR"),
+    (settings.whisper_model, "WHISPER_MODEL"),
+):
+    if not str(value).strip():
+        raise SystemExit(f"Missing required backend/.env setting: {label}")
+
+for raw in (os.environ["DATE_FROM"], os.environ["DATE_TO"]):
+    datetime.fromisoformat(raw)
+PY
+
+if [[ ! -f "$SHORT_FORM_PATH" ]]; then
+  echo "Warning: optional short-form dataset not found at $SHORT_FORM_PATH" >&2
+  echo "Training will continue with Twitch VOD labels only." >&2
+fi
+
+echo "Using isolated work dir: $WORK_DIR"
 echo "Collecting Twitch clip labels for jynxzi (${DATE_FROM} to ${DATE_TO})..."
 "$PYTHON_BIN" ml/collect_twitch_clip_labels.py \
   --broadcaster jynxzi \

@@ -18,7 +18,21 @@ class JobsRouterTests(unittest.TestCase):
     def test_status_reports_local_fallback_when_external_keys_are_absent(self) -> None:
         with patch.object(jobs.settings, "groq_api_key", None), \
              patch.object(jobs.settings, "gemini_api_key", None), \
-             patch.object(jobs.settings, "ollama_model", "llama3.2"):
+             patch.object(jobs.settings, "ollama_model", "llama3.2"), \
+             patch.object(
+                 jobs,
+                 "_pipeline_component_statuses",
+                 return_value={
+                     "face_detection": {
+                         "label": "Face Detection",
+                         "name": "MTCNN",
+                         "model": "mtcnn",
+                         "active": True,
+                         "error": "MediaPipe nicht verfuegbar",
+                         "mode": "fallback",
+                     }
+                 },
+             ):
             result = asyncio.run(jobs.get_status())
 
         semantic = result["providers"]["semantic"]
@@ -28,26 +42,32 @@ class JobsRouterTests(unittest.TestCase):
         self.assertEqual(semantic["mode"], "fallback")
         self.assertTrue(semantic["active"])
         self.assertIsNone(semantic["error"])
+        self.assertIsNone(semantic["fallback_name"])
 
         self.assertEqual(refinement["name"], "Ollama")
         self.assertEqual(refinement["mode"], "fallback")
         self.assertTrue(refinement["active"])
         self.assertIsNone(refinement["error"])
+        self.assertIsNone(refinement["fallback_name"])
+        self.assertEqual(result["pipeline"]["face_detection"]["name"], "MTCNN")
 
     def test_status_reports_ollama_fallback_when_groq_check_fails(self) -> None:
         with patch.object(jobs.settings, "groq_api_key", "bad-key"), \
              patch.object(jobs.settings, "gemini_api_key", None), \
              patch.object(jobs.settings, "groq_model", "llama-3.3"), \
              patch.object(jobs.settings, "ollama_model", "llama3.2"), \
-             patch.object(jobs, "_check_groq", return_value=(False, "Ungültiger API Key")):
+             patch.object(jobs, "_check_groq", return_value=(False, "Ungültiger API Key")), \
+             patch.object(jobs, "_pipeline_component_statuses", return_value={}):
             result = asyncio.run(jobs.get_status())
 
         semantic = result["providers"]["semantic"]
-        self.assertEqual(semantic["name"], "Ollama")
-        self.assertEqual(semantic["model"], "llama3.2")
+        self.assertEqual(semantic["name"], "Groq")
+        self.assertEqual(semantic["model"], "llama-3.3")
         self.assertEqual(semantic["mode"], "fallback")
         self.assertTrue(semantic["active"])
         self.assertEqual(semantic["error"], "Ungültiger API Key")
+        self.assertEqual(semantic["fallback_name"], "Ollama")
+        self.assertEqual(semantic["fallback_model"], "llama3.2")
 
     def test_upload_accepts_large_file_when_limit_is_disabled(self) -> None:
         upload = UploadFile(filename="video.mp4", file=io.BytesIO(b"123456"))
