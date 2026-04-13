@@ -1,23 +1,20 @@
 #!/usr/bin/env bash
 set -e
 
-echo "=== AI Clipping Backend Setup ==="
+cat <<'EOF'
+This repository now uses Docker Compose for development instead of a project-
+local backend virtualenv.
 
-# Create virtualenv if not exists
-if [ ! -d ".venv" ]; then
-  python3 -m venv .venv
-  echo "Virtualenv erstellt."
-fi
+Start the full development stack from the repo root:
 
-source .venv/bin/activate
-pip install -r requirements.txt
+  docker compose up --build
 
-echo ""
-echo "=== Setup abgeschlossen ==="
-echo ""
-echo "Backend starten:"
-echo "  source .venv/bin/activate && uvicorn main:app --reload --port 8000"
-echo ""
-echo "Stell sicher, dass Ollama läuft und llama3.2 geladen ist:"
-echo "  ollama serve"
-echo "  ollama pull llama3.2"
+The Linux container installs backend dependencies, frontend dependencies, and
+graphify, then starts:
+  - sshd on port 2222
+  - FastAPI on port 8000
+  - Next.js on port 3000
+
+Inside the container, backend commands run directly with the global Python
+environment at /opt/venv.
+EOF

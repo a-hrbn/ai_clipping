@@ -1,0 +1,5 @@
+# Copy this file to docker/ssh/authorized_keys and replace it with your real
+# SSH public key before starting the container.
+#
+# Example:
+# ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... your-name@machine

@@ -8,6 +8,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+import urllib.error
 from datetime import datetime, timedelta, timezone
 
 import certifi
@@ -47,11 +48,28 @@ class TwitchClient:
             }
         )
         request = urllib.request.Request(
-            f"{_TWITCH_AUTH_URL}?{query}",
+            _TWITCH_AUTH_URL,
+            data=query.encode("utf-8"),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
             method="POST",
         )
-        with self._opener.open(request, timeout=30) as response:
-            data = json.loads(response.read().decode("utf-8"))
+        try:
+            with self._opener.open(request, timeout=30) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = ""
+            try:
+                detail = exc.read().decode("utf-8", "ignore").strip()
+            except Exception:
+                detail = ""
+            if exc.code in {401, 403}:
+                raise RuntimeError(
+                    "Twitch auth failed. Check TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET in backend/.env."
+                ) from exc
+            raise RuntimeError(
+                f"Twitch auth request failed with HTTP {exc.code}"
+                + (f": {detail}" if detail else "")
+            ) from exc
         self._token = str(data["access_token"])
         self._token_expiry = time.time() + int(data.get("expires_in", 3600))
         return self._token

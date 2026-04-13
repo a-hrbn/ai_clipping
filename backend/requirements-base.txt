@@ -1,0 +1,19 @@
+fastapi==0.115.0
+certifi>=2024.0.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.24
+python-dotenv==1.0.1
+pydantic==2.7.4
+pydantic-settings==2.3.4
+
+# Download
+yt-dlp==2024.8.6
+
+# Audio/Video processing
+ffmpeg-python==0.2.0
+
+# Runtime support
+aiofiles==23.2.1
+
+# Local AI fallback / provider clients
+ollama==0.3.3

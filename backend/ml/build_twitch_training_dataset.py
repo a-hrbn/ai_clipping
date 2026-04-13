@@ -66,14 +66,25 @@ def build_dataset(labels: list[dict], profile: str, work_dir: pathlib.Path) -> l
                 clip_dir = vod_dir / f"window_{index:04d}"
                 clip_dir.mkdir(parents=True, exist_ok=True)
                 try:
-                    clip_path = collect_viral_clips.cut_video_window(
-                        vod_path,
-                        clip_dir / "window.mp4",
-                        float(label["window_start"]),
-                        float(label["window_end"]),
-                    )
-                    entry = _entry_from_label(label)
-                    row = collect_viral_clips.process_local_video(entry, f"{job_id}_{index}", clip_dir, clip_path, profile)
+                    try:
+                        clip_path = collect_viral_clips.cut_video_window(
+                            vod_path,
+                            clip_dir / "window.mp4",
+                            float(label["window_start"]),
+                            float(label["window_end"]),
+                        )
+                        entry = _entry_from_label(label)
+                        row = collect_viral_clips.process_local_video(entry, f"{job_id}_{index}", clip_dir, clip_path, profile)
+                    except Exception as exc:
+                        logger.warning(
+                            "Skipping VOD window %s[%s] %.2f-%.2f: %s",
+                            vod_id,
+                            index,
+                            float(label["window_start"]),
+                            float(label["window_end"]),
+                            exc,
+                        )
+                        continue
                     if row:
                         row["label_class"] = label["label_class"]
                         row["label_score"] = float(label.get("label_score", 0.0))

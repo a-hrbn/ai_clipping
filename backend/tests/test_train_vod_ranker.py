@@ -8,6 +8,50 @@ from ml import train_vod_ranker
 
 
 class TrainVodRankerTests(unittest.TestCase):
+    def test_main_builds_dataset_and_trains_without_exercising_downloader(self) -> None:
+        dataset_rows = [
+            {
+                "candidate_id": "vod-1",
+                "label": 1,
+                "label_class": "positive",
+                "dataset_source": "twitch_vod_primary",
+                "supervision_tier": "twitch_clip_proxy",
+                "feature_provenance": {"has_vod_context": True},
+                "features": {"hook_strength": 0.8},
+            }
+        ]
+        labels_path = Path(tempfile.gettempdir()) / "test_labels.jsonl"
+        with tempfile.TemporaryDirectory() as tmp:
+            labels_path = Path(tmp) / "labels.jsonl"
+            labels_path.write_text(json.dumps({"broadcaster": "jynxzi", "vod_id": "123"}) + "\n", encoding="utf-8")
+            dataset_out = Path(tmp) / "dataset.jsonl"
+            artifact_dir = Path(tmp) / "artifacts"
+
+            with patch("ml.train_vod_ranker.build_composite_dataset", return_value=dataset_rows) as build_mock, \
+                 patch("ml.train_vod_ranker.train_ranker.train_from_dataset", return_value=0) as train_mock, \
+                 patch(
+                     "sys.argv",
+                     [
+                         "train_vod_ranker.py",
+                         "--labels", str(labels_path),
+                         "--dataset-out", str(dataset_out),
+                         "--profile", "jynxzi",
+                         "--artifact-dir", str(artifact_dir),
+                         "--work-dir", str(Path(tmp) / "work"),
+                     ],
+                 ):
+                rc = train_vod_ranker.main()
+
+            self.assertEqual(rc, 0)
+            build_mock.assert_called_once()
+            train_mock.assert_called_once_with(dataset_out, "jynxzi", artifact_dir)
+            written_rows = [
+                json.loads(line)
+                for line in dataset_out.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(written_rows, dataset_rows)
+
     def test_build_composite_dataset_marks_short_form_as_supplemental(self) -> None:
         vod_rows = [
             {

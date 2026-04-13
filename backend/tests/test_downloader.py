@@ -16,10 +16,13 @@ class _FakeYoutubeDL:
     def __exit__(self, exc_type, exc, tb):
         return False
 
-    def download(self, urls: list[str]) -> None:
+    def extract_info(self, url: str, download: bool = True):
+        assert download is True
         target = Path(self.opts["outtmpl"])
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(f"downloaded:{urls[0]}".encode("utf-8"))
+        normalized = Path(str(target).replace("%(ext)s", "mp4"))
+        normalized.write_bytes(f"downloaded:{url}".encode("utf-8"))
+        return {"filepath": str(normalized)}
 
 
 class DownloaderTests(unittest.TestCase):
@@ -60,6 +63,41 @@ class DownloaderTests(unittest.TestCase):
             self.assertTrue(output_path.exists())
             self.assertTrue(expected_cache_file.exists())
             self.assertEqual(expected_cache_file.read_bytes(), output_path.read_bytes())
+
+    def test_resolves_downloaded_file_with_nonstandard_extension(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = Path(tmp)
+            expected = job_dir / "video.mp4"
+            actual = job_dir / "video.mkv"
+            actual.write_bytes(b"video-data")
+
+            resolved = downloader._resolve_downloaded_video(job_dir, expected)
+
+            self.assertEqual(resolved, expected)
+            self.assertTrue(expected.exists())
+            self.assertFalse(actual.exists())
+            self.assertEqual(expected.read_bytes(), b"video-data")
+
+    def test_uses_reported_yt_dlp_filepath_when_available(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage_dir = Path(tmp)
+            url = "https://www.twitch.tv/videos/111"
+
+            class _ReportedPathYDL(_FakeYoutubeDL):
+                def extract_info(self, url: str, download: bool = True):
+                    target = storage_dir / "job-reported" / "nested" / "video.mkv"
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(b"reported-video")
+                    return {"requested_downloads": [{"filepath": str(target)}]}
+
+            with patch.object(downloader.settings, "storage_dir", str(storage_dir)), \
+                 patch.object(downloader, "update_job", create=True), \
+                 patch.object(downloader.yt_dlp, "YoutubeDL", _ReportedPathYDL):
+                output_path = downloader.download(url, "job-reported")
+
+            self.assertEqual(output_path, storage_dir / "job-reported" / "video.mp4")
+            self.assertTrue(output_path.exists())
+            self.assertEqual(output_path.read_bytes(), b"reported-video")
 
 
 if __name__ == "__main__":

@@ -332,20 +332,31 @@ def cut_video_window(
 ) -> pathlib.Path:
     import ffmpeg
 
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     duration = max(end - start, 1.0)
-    (
-        ffmpeg
-        .input(str(video_path), ss=max(start, 0.0), t=duration)
-        .output(
-            str(output_path),
-            vcodec="libx264",
-            acodec="aac",
-            preset="veryfast",
-            movflags="+faststart",
+    try:
+        (
+            ffmpeg
+            .input(str(video_path), ss=max(start, 0.0), t=duration)
+            .output(
+                str(output_path),
+                vcodec="libx264",
+                acodec="aac",
+                preset="veryfast",
+                movflags="+faststart",
+            )
+            .overwrite_output()
+            .run(quiet=True, capture_stdout=True, capture_stderr=True)
         )
-        .overwrite_output()
-        .run(quiet=True)
-    )
+    except ffmpeg.Error as exc:
+        stderr = ""
+        if exc.stderr:
+            stderr = exc.stderr.decode("utf-8", "ignore").strip()
+        raise RuntimeError(
+            "ffmpeg failed while cutting training window "
+            f"{video_path} [{max(start, 0.0):.2f}, {max(start, 0.0) + duration:.2f}] -> {output_path}"
+            + (f": {stderr}" if stderr else "")
+        ) from exc
     return output_path
 
 

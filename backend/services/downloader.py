@@ -46,6 +46,27 @@ def _copy_into_job(source: pathlib.Path, target: pathlib.Path) -> pathlib.Path:
     return target
 
 
+def _resolve_downloaded_video(job_dir: pathlib.Path, preferred_path: pathlib.Path) -> pathlib.Path:
+    if preferred_path.exists():
+        return preferred_path
+
+    candidates = [
+        path for path in job_dir.rglob("*")
+        if path.is_file()
+        and path.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov", ".ts", ".m4v"}
+        and not path.name.endswith((".part", ".ytdl"))
+    ]
+    if not candidates:
+        raise FileNotFoundError(
+            f"yt-dlp completed but no video file was found in {job_dir}"
+        )
+
+    chosen = max(candidates, key=lambda path: path.stat().st_size)
+    if chosen != preferred_path:
+        chosen.replace(preferred_path)
+    return preferred_path
+
+
 def download(url: str, job_id: str, proxy: str | None = None) -> pathlib.Path:
     job_dir = pathlib.Path(settings.storage_dir) / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
@@ -101,7 +122,7 @@ def download(url: str, job_id: str, proxy: str | None = None) -> pathlib.Path:
 
     ydl_opts = {
         "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-        "outtmpl": str(output_path),
+        "outtmpl": str(job_dir / "video.%(ext)s"),
         "quiet": True,
         "no_warnings": True,
         "merge_output_format": "mp4",
@@ -112,7 +133,7 @@ def download(url: str, job_id: str, proxy: str | None = None) -> pathlib.Path:
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
+            info = ydl.extract_info(url, download=True)
     except Exception as exc:
         message = str(exc).lower()
         if "tiktok.com" in url.lower() and any(
@@ -128,9 +149,29 @@ def download(url: str, job_id: str, proxy: str | None = None) -> pathlib.Path:
             raise DownloadUnavailableError(str(exc)) from exc
         raise
 
+    reported_paths: list[pathlib.Path] = []
+    if isinstance(info, dict):
+        filepath = info.get("filepath") or info.get("_filename")
+        if filepath:
+            reported_paths.append(pathlib.Path(str(filepath)))
+        for item in info.get("requested_downloads") or []:
+            candidate = item.get("filepath")
+            if candidate:
+                reported_paths.append(pathlib.Path(str(candidate)))
+
+    resolved_output = next((path for path in reported_paths if path.exists()), None)
+    if resolved_output is None:
+        resolved_output = _resolve_downloaded_video(job_dir, output_path)
+    elif resolved_output != output_path:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        if output_path.exists():
+            output_path.unlink(missing_ok=True)
+        resolved_output.replace(output_path)
+        resolved_output = output_path
+
     if use_twitch_cache:
         try:
-            _copy_into_job(output_path, cache_path)
+            _copy_into_job(resolved_output, cache_path)
         except OSError:
             pass
 
@@ -138,4 +179,4 @@ def download(url: str, job_id: str, proxy: str | None = None) -> pathlib.Path:
         update_job(job_id, download_speed=None, download_eta=None, download_cached=False)
     except KeyError:
         pass
-    return output_path
+    return resolved_output

@@ -182,6 +182,55 @@ class BuildTwitchTrainingDatasetTests(unittest.TestCase):
             self.assertEqual(path.read_bytes(), b"video")
             self.assertEqual(path, build_twitch_training_dataset._training_cache_path("https://www.twitch.tv/videos/456"))
 
+    def test_build_dataset_skips_failed_window_and_keeps_processing(self) -> None:
+        labels = [
+            {
+                "broadcaster": "jynxzi",
+                "vod_id": "123",
+                "vod_url": "https://www.twitch.tv/videos/123",
+                "window_start": 10.0,
+                "window_end": 20.0,
+                "label_class": "positive",
+                "label_score": 0.8,
+                "clip_ids": ["c1"],
+                "label_source": "twitch_clip_api",
+                "platform_source": "twitch_clip",
+            },
+            {
+                "broadcaster": "jynxzi",
+                "vod_id": "123",
+                "vod_url": "https://www.twitch.tv/videos/123",
+                "window_start": 30.0,
+                "window_end": 40.0,
+                "label_class": "hard_negative",
+                "label_score": 0.0,
+                "clip_ids": [],
+                "label_source": "twitch_clip_api",
+                "platform_source": "twitch_clip",
+            },
+        ]
+        fake_row = {
+            "label": 0,
+            "features": {
+                "candidate_id": "x",
+                "duration": 10.0,
+                "hook_strength": 0.1,
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch("ml.build_twitch_training_dataset.downloader.download", return_value=Path(tmp) / "vod.mp4"), \
+             patch(
+                 "ml.build_twitch_training_dataset.collect_viral_clips.cut_video_window",
+                 side_effect=[RuntimeError("ffmpeg failed"), Path(tmp) / "window2.mp4"],
+             ), \
+             patch("ml.build_twitch_training_dataset.collect_viral_clips.process_local_video", return_value=fake_row) as process_mock:
+            rows = build_twitch_training_dataset.build_dataset(labels, "jynxzi", Path(tmp))
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["label_class"], "hard_negative")
+        process_mock.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
