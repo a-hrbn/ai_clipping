@@ -24,12 +24,29 @@ import logging
 import pathlib
 import re
 import subprocess
+import sys
 from dataclasses import dataclass, field
 
 from config import settings
 from services.transcriber import RichSegment
 
 logger = logging.getLogger(__name__)
+
+
+def _is_twitch_vod_url(url: str) -> bool:
+    value = url.strip().lower()
+    return "twitch.tv/videos/" in value
+
+
+def _is_missing_twitch_chat_replay(message: str) -> bool:
+    normalized = message.lower()
+    return (
+        "unable to download video subtitles for 'rechat'" in normalized
+        and "http error 404" in normalized
+    ) or (
+        "unable to download video subtitles for 'live_chat'" in normalized
+        and "http error 404" in normalized
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -159,23 +176,32 @@ def download_chat(url: str, job_id: str, out_dir: pathlib.Path) -> pathlib.Path 
     """
     Download live chat replay via yt-dlp (Twitch, YouTube, etc.).
 
-    Writes a json3 subtitle file to *out_dir* and returns its path.
+    Writes a JSON chat export to *out_dir* and returns its path.
     Returns None silently on any failure (network error, no chat available,
     platform does not support chat export, yt-dlp unavailable) so the rest
     of the pipeline is unaffected.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     out_template = str(out_dir / "chat")
+    is_twitch_vod = _is_twitch_vod_url(url)
+
+    if is_twitch_vod:
+        logger.info("Starting Twitch chat download for job %s: %s", job_id, url)
 
     try:
-        subprocess.run(
+        result = subprocess.run(
             [
-                "yt-dlp",
+                sys.executable,
+                "-m",
+                "yt_dlp",
                 "--skip-download",
                 "--write-subs",
-                "--sub-langs", "rechat",
-                "--sub-format", "json3",
-                "-o", out_template,
+                "--sub-langs",
+                "rechat,live_chat",
+                "--sub-format",
+                "json3/json",
+                "-o",
+                out_template,
                 url,
             ],
             capture_output=True,
@@ -183,12 +209,65 @@ def download_chat(url: str, job_id: str, out_dir: pathlib.Path) -> pathlib.Path 
             timeout=settings.chat_download_timeout_sec,
             check=False,          # we handle failure ourselves
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except FileNotFoundError:
+        if is_twitch_vod:
+            logger.warning(
+                "Twitch chat download skipped for job %s because yt-dlp is unavailable",
+                job_id,
+            )
+        return None
+    except subprocess.TimeoutExpired:
+        if is_twitch_vod:
+            logger.warning(
+                "Twitch chat download timed out for job %s after %ss",
+                job_id,
+                settings.chat_download_timeout_sec,
+            )
         return None
 
-    # yt-dlp names the file chat.rechat.json3 (or similar)
+    # yt-dlp names the file chat.rechat.json / chat.live_chat.json3 (or similar)
     candidates = sorted(out_dir.glob("chat*.json*"))
-    return candidates[0] if candidates else None
+    if candidates:
+        if is_twitch_vod:
+            logger.info(
+                "Twitch chat download finished for job %s: %s",
+                job_id,
+                candidates[0],
+            )
+        return candidates[0]
+
+    if not candidates and result.returncode != 0:
+        message = (result.stderr or result.stdout or "").strip()
+        if is_twitch_vod:
+            if _is_missing_twitch_chat_replay(message):
+                logger.info(
+                    "Twitch chat replay unavailable for job %s (exit=%s); continuing without chat enrichment",
+                    job_id,
+                    result.returncode,
+                )
+            else:
+                logger.warning(
+                    "Twitch chat download failed for job %s (exit=%s): %s",
+                    job_id,
+                    result.returncode,
+                    message,
+                )
+        else:
+            logger.info(
+                "Chat download failed for %s (exit=%s): %s",
+                job_id,
+                result.returncode,
+                message,
+            )
+        return None
+
+    if is_twitch_vod:
+        logger.info(
+            "Twitch chat download produced no chat file for job %s (exit=%s)",
+            job_id,
+            result.returncode,
+        )
+    return None
 
 
 # ---------------------------------------------------------------------------

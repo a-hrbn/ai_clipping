@@ -21,10 +21,14 @@ Model: paraphrase-multilingual-MiniLM-L12-v2
 from __future__ import annotations
 
 import logging
+import os
+from pathlib import Path
+import shutil
 import threading
 from typing import TYPE_CHECKING
 
 import numpy as np
+from config import DEFAULT_CACHE_DIR
 
 if TYPE_CHECKING:
     from services.transcriber import RichSegment
@@ -32,6 +36,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _MODEL_NAME = "paraphrase-multilingual-MiniLM-L12-v2"
+_MODEL_REPO_ID = f"sentence-transformers/{_MODEL_NAME}"
 _model = None
 _model_lock = threading.Lock()
 
@@ -187,6 +192,134 @@ _pattern_embeddings: dict[str, np.ndarray] | None = None
 # Model loading
 # ---------------------------------------------------------------------------
 
+def _sentence_transformer_cache_folder() -> Path:
+    configured = (os.environ.get("HF_HOME") or "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return DEFAULT_CACHE_DIR / "huggingface"
+
+
+def _local_sentence_transformer_model_dir(model_repo_id: str) -> Path:
+    return DEFAULT_CACHE_DIR / "sentence_transformers_local" / model_repo_id.replace("/", "--")
+
+
+def _snapshot_dir(cache_namespace: str, model_repo_id: str) -> Path | None:
+    repo_dir_name = f"models--{model_repo_id.replace('/', '--')}"
+    cache_root = _sentence_transformer_cache_folder() / cache_namespace / repo_dir_name
+    refs_main = cache_root / "refs" / "main"
+    if refs_main.exists():
+        revision = refs_main.read_text(encoding="utf-8").strip()
+        if revision:
+            snapshot_dir = cache_root / "snapshots" / revision
+            if snapshot_dir.exists():
+                return snapshot_dir
+
+    snapshots_dir = cache_root / "snapshots"
+    if not snapshots_dir.exists():
+        return None
+
+    snapshot_dirs = sorted(
+        (path for path in snapshots_dir.iterdir() if path.is_dir()),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    return snapshot_dirs[0] if snapshot_dirs else None
+
+
+def _has_sentence_transformer_metadata(snapshot_dir: Path | None) -> bool:
+    if snapshot_dir is None:
+        return False
+    return (
+        (snapshot_dir / "modules.json").exists()
+        and (snapshot_dir / "config_sentence_transformers.json").exists()
+        and (snapshot_dir / "1_Pooling" / "config.json").exists()
+    )
+
+
+def _has_transformer_weights(snapshot_dir: Path | None) -> bool:
+    if snapshot_dir is None:
+        return False
+    has_model = any(
+        (snapshot_dir / name).exists()
+        for name in ("model.safetensors", "pytorch_model.bin")
+    )
+    has_tokenizer = any(
+        (snapshot_dir / name).exists()
+        for name in (
+            "tokenizer.json",
+            "tokenizer.model",
+            "spiece.model",
+            "sentencepiece.bpe.model",
+            "vocab.txt",
+        )
+    )
+    return (
+        (snapshot_dir / "config.json").exists()
+        and (snapshot_dir / "tokenizer_config.json").exists()
+        and has_model
+        and has_tokenizer
+    )
+
+
+def _materialized_model_complete(model_dir: Path) -> bool:
+    has_model = any(
+        (model_dir / name).exists()
+        for name in ("model.safetensors", "pytorch_model.bin")
+    )
+    has_tokenizer = any(
+        (model_dir / name).exists()
+        for name in (
+            "tokenizer.json",
+            "tokenizer.model",
+            "spiece.model",
+            "sentencepiece.bpe.model",
+            "vocab.txt",
+        )
+    )
+    return (
+        (model_dir / "modules.json").exists()
+        and (model_dir / "config_sentence_transformers.json").exists()
+        and (model_dir / "1_Pooling" / "config.json").exists()
+        and (model_dir / "config.json").exists()
+        and (model_dir / "tokenizer_config.json").exists()
+        and has_model
+        and has_tokenizer
+    )
+
+
+def _link_snapshot_contents(source_dir: Path, target_dir: Path) -> None:
+    for source_path in sorted(source_dir.rglob("*")):
+        relative_path = source_path.relative_to(source_dir)
+        target_path = target_dir / relative_path
+        if source_path.is_dir():
+            target_path.mkdir(parents=True, exist_ok=True)
+            continue
+        if target_path.exists():
+            continue
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            target_path.symlink_to(source_path)
+        except OSError:
+            shutil.copy2(source_path, target_path)
+
+
+def _materialize_local_sentence_transformer_model(model_repo_id: str) -> Path | None:
+    hub_snapshot = _snapshot_dir("hub", model_repo_id)
+    transformer_snapshot = _snapshot_dir("transformers", model_repo_id)
+    if not _has_sentence_transformer_metadata(hub_snapshot):
+        return None
+    if not _has_transformer_weights(transformer_snapshot):
+        return None
+
+    model_dir = _local_sentence_transformer_model_dir(model_repo_id)
+    model_dir.mkdir(parents=True, exist_ok=True)
+    _link_snapshot_contents(hub_snapshot, model_dir)
+    _link_snapshot_contents(transformer_snapshot, model_dir)
+    if not _materialized_model_complete(model_dir):
+        return None
+    return model_dir
+
+
 def _get_model():
     global _model
     if _model is not None:
@@ -196,8 +329,21 @@ def _get_model():
             return _model
         try:
             from sentence_transformers import SentenceTransformer
+            cache_folder = str(_sentence_transformer_cache_folder())
+            local_model_dir = _materialize_local_sentence_transformer_model(_MODEL_REPO_ID)
             logger.info("Loading sentence-transformers model '%s'…", _MODEL_NAME)
-            _model = SentenceTransformer(_MODEL_NAME)
+            if local_model_dir is not None:
+                logger.info("Using local sentence-transformers snapshot for '%s'.", _MODEL_NAME)
+                _model = SentenceTransformer(
+                    str(local_model_dir),
+                    local_files_only=True,
+                )
+            else:
+                _model = SentenceTransformer(
+                    _MODEL_NAME,
+                    cache_folder=cache_folder,
+                    local_files_only=False,
+                )
             logger.info("Sentence-transformers model loaded.")
         except Exception as exc:
             logger.warning("Could not load sentence-transformers model: %s", exc)

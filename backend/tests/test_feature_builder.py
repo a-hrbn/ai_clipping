@@ -13,7 +13,7 @@ from services.transcriber import RichSegment
 
 class FeatureBuilderTests(unittest.TestCase):
     def test_build_features_extracts_expected_signals(self) -> None:
-        candidate = Candidate(id="x", start=0.0, end=10.0, source="reaction", anchor_time=2.5)
+        candidate = Candidate(id="x", start=0.0, end=10.0, source="reaction", anchor_time=3.5)
         segments = [
             RichSegment(start=0.0, end=2.0, text="What now?", emotions=["question"], speaker="STREAMER", hype_score=2.0),
             RichSegment(
@@ -31,7 +31,16 @@ class FeatureBuilderTests(unittest.TestCase):
             RichSegment(start=5.0, end=8.0, text="hahaha", emotions=["laughter"], speaker="STREAMER", hype_score=4.0),
         ]
 
-        features = feature_builder.build_features([candidate], segments)[0]
+        features = feature_builder.build_features(
+            [candidate],
+            segments,
+            strategy={
+                "platform": "tiktok",
+                "goal": "funny reaction moment",
+                "clip_style": "aggressive_hook",
+                "must_include": ["happened"],
+            },
+        )[0]
 
         self.assertEqual(features.candidate_id, "x")
         self.assertTrue(features.question_open)
@@ -43,6 +52,12 @@ class FeatureBuilderTests(unittest.TestCase):
         self.assertGreaterEqual(features.semantic_density, 0.0)
         self.assertGreater(features.trend_hook_score, 0.0)
         self.assertGreater(features.trend_prior_score, 0.0)
+        self.assertGreaterEqual(features.goal_relevance_score, 0.0)
+        self.assertGreater(features.platform_relevance_score, 0.0)
+        self.assertGreater(features.visual_hook_score, 0.0)
+        self.assertGreater(features.audio_pop_score, 0.0)
+        self.assertGreater(features.projected_hook_score, 0.0)
+        self.assertGreater(features.projected_retention_score, 0.0)
         self.assertEqual(features.feature_build_version, 5)
         self.assertGreaterEqual(features.payoff_clarity_score, 0.0)
         self.assertGreaterEqual(features.slow_open_penalty, 0.0)
@@ -56,8 +71,9 @@ class FeatureBuilderTests(unittest.TestCase):
             RichSegment(start=2.0, end=5.0, text="payoff text", speaker="STREAMER", hype_score=6.0),
         ]
 
-        with patch(
-            "services.feature_builder.clip_similarity.score_candidate_window",
+        with patch.object(
+            feature_builder.clip_similarity,
+            "score_candidate_window",
             return_value={
                 "winner_similarity_max": 0.91,
                 "winner_similarity_mean": 0.85,
@@ -80,7 +96,7 @@ class FeatureBuilderTests(unittest.TestCase):
             RichSegment(start=2.0, end=5.0, text="payoff text", speaker="STREAMER", hype_score=6.0),
         ]
 
-        with patch("services.feature_builder.semantic_service.score_window") as score_window_mock:
+        with patch.object(feature_builder.semantic_service, "score_window") as score_window_mock:
             score_window_mock.return_value = {
                 "quoteability": 0.1,
                 "surprise": 0.2,
@@ -106,7 +122,7 @@ class FeatureBuilderTests(unittest.TestCase):
             RichSegment(start=2.0, end=5.0, text="payoff text", speaker="STREAMER", hype_score=6.0),
         ]
 
-        with patch("services.feature_builder.semantic_service.score_window") as score_window_mock:
+        with patch.object(feature_builder.semantic_service, "score_window") as score_window_mock:
             score_window_mock.return_value = {
                 "quoteability": 0.1,
                 "surprise": 0.2,
@@ -127,7 +143,7 @@ class FeatureBuilderTests(unittest.TestCase):
             RichSegment(start=2.0, end=5.0, text="payoff text", speaker="STREAMER", hype_score=6.0),
         ]
 
-        with patch("services.feature_builder.semantic_service.score_window") as score_window_mock:
+        with patch.object(feature_builder.semantic_service, "score_window") as score_window_mock:
             score_window_mock.return_value = {
                 "quoteability": 0.1,
                 "surprise": 0.2,
@@ -185,7 +201,7 @@ class FeatureBuilderTests(unittest.TestCase):
             RichSegment(start=8.0, end=12.0, text="okay", speaker="STREAMER", hype_score=0.7),
         ]
 
-        with patch("services.feature_builder.semantic_service.score_window") as score_window_mock:
+        with patch.object(feature_builder.semantic_service, "score_window") as score_window_mock:
             score_window_mock.return_value = {
                 "quoteability": 0.2,
                 "surprise": 0.1,

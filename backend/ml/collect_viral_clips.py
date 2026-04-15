@@ -41,7 +41,7 @@ Options
   --negatives PATH  Optional JSONL of fallback negative rows to merge in only
                     when the manifest does not already provide negatives
                     (default: ml/artifacts/synthetic_training_rows.jsonl if it exists)
-  --work-dir PATH   Temp dir for downloads (default: /tmp/ai_clipping_training)
+  --work-dir PATH   Temp dir for downloads (default: backend/tmp/viral_clip_training)
 """
 from __future__ import annotations
 
@@ -93,7 +93,7 @@ def main() -> int:
     parser.add_argument("--output",    default=str(BACKEND_ROOT / "ml" / "artifacts" / "viral_training_rows.jsonl"))
     parser.add_argument("--profile",   default="gaming")
     parser.add_argument("--negatives", default="")
-    parser.add_argument("--work-dir",  default="/tmp/ai_clipping_training")
+    parser.add_argument("--work-dir",  default=str(BACKEND_ROOT / "tmp" / "viral_clip_training"))
     args = parser.parse_args()
 
     entries = _read_entries(pathlib.Path(args.urls))

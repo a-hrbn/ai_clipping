@@ -16,7 +16,10 @@ from ml import train_ranker
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Evaluate the current ranker artifact on exported training rows.")
-    parser.add_argument("--dataset", default="/tmp/ai_clipping/feedback/training_rows.jsonl")
+    parser.add_argument(
+        "--dataset",
+        default=str(BACKEND_ROOT / "tmp" / "storage" / "feedback" / "training_rows.jsonl"),
+    )
     parser.add_argument("--profile", default="gaming")
     parser.add_argument("--artifact-dir", default=str(BACKEND_ROOT / "ml" / "artifacts"))
     parser.add_argument("--top-groups", type=int, default=5)
@@ -28,21 +31,20 @@ def main() -> int:
         print("No dataset rows found.")
         return 1
 
-    ranker = Ranker(artifact_dir=pathlib.Path(args.artifact_dir))
-    artifact = ranker._load_artifact(args.profile)
+    baseline_ranker = Ranker(artifact_dir=pathlib.Path(args.artifact_dir), enable_trained_model=False)
+    trained_ranker = Ranker(artifact_dir=pathlib.Path(args.artifact_dir), enable_trained_model=True)
+    artifact = trained_ranker._load_artifact(args.profile)
     features = [CandidateFeatures.from_dict(row["features"]) for row in rows]
-    scores = {candidate_id: score for candidate_id, score in ranker.score(features, args.profile)}
+    baseline_scores = {candidate_id: score for candidate_id, score in baseline_ranker.score(features, args.profile)}
+    trained_scores = {candidate_id: score for candidate_id, score in trained_ranker.score(features, args.profile)}
 
-    scored_rows: list[dict] = []
-    for row in rows:
-        scored_rows.append({"label": int(row["label"]), "score": float(scores.get(row["candidate_id"], 0.0))})
-
-    metrics = train_ranker._evaluate_scores(
-        train_ranker.np.array([row["label"] for row in scored_rows], dtype=int),
-        train_ranker.np.array([row["score"] for row in scored_rows], dtype=float),
-        score_kind="margin",
-    )
     split = train_ranker._split_rows(rows)
+    groups = train_ranker._ranking_group_labels(rows, split.get("unit", ""))
+    labels = train_ranker.np.array([int(row["label"]) for row in rows], dtype=int)
+    baseline_score_array = train_ranker.np.array([float(baseline_scores.get(row["candidate_id"], 0.0)) for row in rows], dtype=float)
+    trained_score_array = train_ranker.np.array([float(trained_scores.get(row["candidate_id"], 0.0)) for row in rows], dtype=float)
+    baseline_metrics = train_ranker._evaluate_scores(labels, baseline_score_array, score_kind="margin", groups=groups)
+    trained_metrics = train_ranker._evaluate_scores(labels, trained_score_array, score_kind="margin", groups=groups)
     print(
         json.dumps(
             {
@@ -53,16 +55,24 @@ def main() -> int:
                     "training_stats": artifact.get("training_stats", {}) if artifact else {},
                     "validation": artifact.get("validation", {}) if artifact else {},
                 },
-                "metrics": metrics,
+                "metrics": {
+                    "baseline_heuristic": baseline_metrics,
+                    "trained_runtime": trained_metrics,
+                    "delta": _metric_delta(trained_metrics, baseline_metrics),
+                },
                 "rows": len(rows),
                 "positive_rows": sum(1 for row in rows if int(row["label"]) == 1),
                 "negative_rows": sum(1 for row in rows if int(row["label"]) == 0),
                 "split_strategy": split["strategy"],
                 "split_unit": split.get("unit", ""),
                 "leakage_risk": split.get("leakage_risk", "unknown"),
-                "by_label_class": _bucket_metrics(rows, scores, "label_class"),
-                "by_supervision_tier": _bucket_metrics(rows, scores, "supervision_tier"),
-                "top_groups": _group_metrics(rows, scores, split.get("unit", ""), args.top_groups),
+                "by_label_class": _bucket_metrics(rows, baseline_scores, trained_scores, "label_class"),
+                "by_supervision_tier": _bucket_metrics(rows, baseline_scores, trained_scores, "supervision_tier"),
+                "by_platform": _bucket_metrics(rows, baseline_scores, trained_scores, _bucket_key(rows, "platform_bucket", "publish_platform")),
+                "by_content_bucket": _bucket_metrics(rows, baseline_scores, trained_scores, "content_bucket"),
+                "by_source_bucket": _bucket_metrics(rows, baseline_scores, trained_scores, _bucket_key(rows, "source_bucket", "candidate_source")),
+                "by_variant": _bucket_metrics(rows, baseline_scores, trained_scores, _bucket_key(rows, "variant_bucket", "final_variant_key")),
+                "top_groups": _group_metrics(rows, baseline_scores, trained_scores, split.get("unit", ""), args.top_groups),
             },
             ensure_ascii=True,
         )
@@ -83,21 +93,39 @@ def _read_jsonl(path: pathlib.Path) -> list[dict]:
     return rows
 
 
-def _bucket_metrics(rows: list[dict], scores: dict[str, float], key: str) -> dict[str, dict]:
+def _bucket_key(rows: list[dict], preferred: str, fallback: str) -> str:
+    if any(str(row.get(preferred) or "").strip() for row in rows):
+        return preferred
+    return fallback
+
+
+def _bucket_metrics(rows: list[dict], baseline_scores: dict[str, float], trained_scores: dict[str, float], key: str) -> dict[str, dict]:
     bucketed: dict[str, dict] = {}
     values = sorted({str(row.get(key) or "").strip() for row in rows if str(row.get(key) or "").strip()})
     for value in values:
         subset = [row for row in rows if str(row.get(key) or "").strip() == value]
         labels = train_ranker.np.array([int(row["label"]) for row in subset], dtype=int)
-        subset_scores = train_ranker.np.array([float(scores.get(row["candidate_id"], 0.0)) for row in subset], dtype=float)
+        subset_baseline = train_ranker.np.array([float(baseline_scores.get(row["candidate_id"], 0.0)) for row in subset], dtype=float)
+        subset_trained = train_ranker.np.array([float(trained_scores.get(row["candidate_id"], 0.0)) for row in subset], dtype=float)
+        groups = train_ranker._ranking_group_labels(subset, key if key in {"creator_id", "vod_id", "source_url"} else "")
+        baseline_metrics = train_ranker._evaluate_scores(labels, subset_baseline, score_kind="margin", groups=groups)
+        trained_metrics = train_ranker._evaluate_scores(labels, subset_trained, score_kind="margin", groups=groups)
         bucketed[value] = {
             "rows": len(subset),
-            "metrics": train_ranker._evaluate_scores(labels, subset_scores, score_kind="margin"),
+            "baseline_heuristic": baseline_metrics,
+            "trained_runtime": trained_metrics,
+            "delta": _metric_delta(trained_metrics, baseline_metrics),
         }
     return bucketed
 
 
-def _group_metrics(rows: list[dict], scores: dict[str, float], split_unit: str, top_k: int) -> list[dict]:
+def _group_metrics(
+    rows: list[dict],
+    baseline_scores: dict[str, float],
+    trained_scores: dict[str, float],
+    split_unit: str,
+    top_k: int,
+) -> list[dict]:
     unit = split_unit or "creator_id"
     grouped: dict[str, list[dict]] = {}
     for row in rows:
@@ -107,16 +135,38 @@ def _group_metrics(rows: list[dict], scores: dict[str, float], split_unit: str, 
     summaries: list[dict] = []
     for group, subset in grouped.items():
         labels = train_ranker.np.array([int(row["label"]) for row in subset], dtype=int)
-        subset_scores = train_ranker.np.array([float(scores.get(row["candidate_id"], 0.0)) for row in subset], dtype=float)
+        subset_baseline = train_ranker.np.array([float(baseline_scores.get(row["candidate_id"], 0.0)) for row in subset], dtype=float)
+        subset_trained = train_ranker.np.array([float(trained_scores.get(row["candidate_id"], 0.0)) for row in subset], dtype=float)
+        groups = train_ranker._ranking_group_labels(subset, unit)
+        baseline_metrics = train_ranker._evaluate_scores(labels, subset_baseline, score_kind="margin", groups=groups)
+        trained_metrics = train_ranker._evaluate_scores(labels, subset_trained, score_kind="margin", groups=groups)
         summaries.append(
             {
                 "group": group,
                 "rows": len(subset),
-                "metrics": train_ranker._evaluate_scores(labels, subset_scores, score_kind="margin"),
+                "baseline_heuristic": baseline_metrics,
+                "trained_runtime": trained_metrics,
+                "delta": _metric_delta(trained_metrics, baseline_metrics),
             }
         )
     summaries.sort(key=lambda item: (item["rows"], item["group"]), reverse=True)
     return summaries[: max(int(top_k), 0)]
+
+
+def _metric_delta(current: dict, baseline: dict) -> dict[str, float]:
+    tracked = (
+        "accuracy",
+        "precision",
+        "recall",
+        "f1",
+        "precision_at_5",
+        "recall_at_5",
+        "ndcg_at_5",
+    )
+    delta: dict[str, float] = {}
+    for key in tracked:
+        delta[key] = round(float(current.get(key, 0.0)) - float(baseline.get(key, 0.0)), 3)
+    return delta
 
 
 if __name__ == "__main__":

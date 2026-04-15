@@ -33,6 +33,7 @@ def export_training_rows(storage_dir: pathlib.Path, output_path: pathlib.Path) -
             row = {
                 "job_id": feedback["job_id"],
                 "candidate_id": feature["candidate_id"],
+                "dataset_source": _dataset_source(feedback),
                 "label": label,
                 "selected": feedback["selected"],
                 "exported": feedback["exported"],
@@ -51,11 +52,20 @@ def export_training_rows(storage_dir: pathlib.Path, output_path: pathlib.Path) -
                 "ordinal_label": ordinal_label,
                 "user_feedback_tags": list(feedback.get("user_feedback_tags") or []),
                 "feedback_notes": feedback.get("feedback_notes"),
+                "publish_platform": feedback.get("publish_platform"),
+                "final_variant_key": feedback.get("final_variant_key"),
+                "candidate_source": feature.get("source"),
+                "content_bucket": _content_bucket(feature),
                 "view_count": feedback.get("view_count"),
                 "like_count": feedback.get("like_count"),
                 "comment_count": feedback.get("comment_count"),
                 "share_count": feedback.get("share_count"),
                 "save_count": feedback.get("save_count"),
+                "impressions": feedback.get("impressions"),
+                "avg_watch_time": feedback.get("avg_watch_time"),
+                "retention_3s": feedback.get("retention_3s"),
+                "retention_50pct": feedback.get("retention_50pct"),
+                "completion_rate": feedback.get("completion_rate"),
                 "views_1h": feedback.get("views_1h"),
                 "views_24h": feedback.get("views_24h"),
                 "baseline_view_rate": feedback.get("baseline_view_rate"),
@@ -98,6 +108,11 @@ def _has_real_outcome_feedback(feedback: dict) -> bool:
         "comment_count",
         "share_count",
         "save_count",
+        "impressions",
+        "avg_watch_time",
+        "retention_3s",
+        "retention_50pct",
+        "completion_rate",
         "views_1h",
         "views_24h",
         "baseline_view_rate",
@@ -140,11 +155,30 @@ def _resolved_feedback_label(feedback: dict) -> tuple[int, str, float, float, st
 
     shares = _as_float(feedback.get("share_count"))
     saves = _as_float(feedback.get("save_count"))
+    impressions = max(_as_float(feedback.get("impressions")), 1.0)
     views = max(_as_float(feedback.get("view_count")), 1.0)
     if shares > 0:
         score += min(shares / views, 0.05) * 20.0
     if saves > 0:
         score += min(saves / views, 0.05) * 18.0
+    retention_3s = _as_float(feedback.get("retention_3s"))
+    retention_50pct = _as_float(feedback.get("retention_50pct"))
+    completion_rate = _as_float(feedback.get("completion_rate"))
+    avg_watch_time = _as_float(feedback.get("avg_watch_time"))
+    if retention_3s >= 0.75:
+        score += 0.55
+    elif 0.0 < retention_3s <= 0.45:
+        score -= 0.45
+    if retention_50pct >= 0.4:
+        score += 0.35
+    elif 0.0 < retention_50pct <= 0.18:
+        score -= 0.35
+    if completion_rate >= 0.5:
+        score += 0.4
+    elif 0.0 < completion_rate <= 0.2:
+        score -= 0.35
+    if avg_watch_time > 0 and impressions > 0 and avg_watch_time / max(impressions, 1.0) > 0.02:
+        score += 0.1
 
     if abs(score) >= 0.6:
         label = 1 if score > 0 else 0
@@ -171,4 +205,27 @@ def _feature_provenance(feature: dict) -> dict[str, object]:
         "has_vector_similarity": bool(feature.get("has_vector_similarity", False)),
         "has_vod_context": bool(feature.get("vod_progress", 0.0) or feature.get("clip_overlap_count", 0.0)),
         "feature_build_version": int(feature.get("feature_build_version", 1) or 1),
+        "has_dynamic_trend": bool(feature.get("dynamic_trend_score", 0.0)),
+        "has_variant_projection": bool(feature.get("projected_retention_score", 0.0)),
     }
+
+
+def _dataset_source(feedback: dict) -> str:
+    if _has_real_outcome_feedback(feedback):
+        return "feedback_outcome_export"
+    if bool(feedback.get("selected")):
+        return "feedback_selected_export"
+    return "feedback_low_rank_export"
+
+
+def _content_bucket(feature: dict) -> str:
+    source = str(feature.get("source") or "").strip().lower()
+    if source in {"quote", "hot_take", "dialogue", "controversy"}:
+        return "quote_driven"
+    if source in {"reaction", "clean_reaction", "chat_sync"}:
+        return "reaction"
+    if source in {"visual_reveal", "audio_burst", "hype_peak"}:
+        return "visual_action"
+    if source in {"story_payoff", "narrative_reveal", "dense_window", "tension_build"}:
+        return "story"
+    return "general"

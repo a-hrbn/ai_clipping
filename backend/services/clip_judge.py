@@ -101,6 +101,10 @@ def rerank_candidates(
             rank_score=blended_score,
             rationale=rationale,
             base_rank_score=ranked.base_rank_score if ranked.base_rank_score is not None else ranked.rank_score,
+            heuristic_rank_score=ranked.heuristic_rank_score,
+            trained_rank_score=ranked.trained_rank_score,
+            model_blend=ranked.model_blend,
+            trained_model_used=ranked.trained_model_used,
             judge_result=judge_result,
         )
 

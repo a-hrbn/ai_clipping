@@ -9,7 +9,8 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - optional when only heuristic/linear artifacts are used
     joblib = None
 
-from services import profile_config
+from config import settings
+from services import clip_strategy, profile_config
 from services.timeline_types import CandidateFeatures
 
 
@@ -38,53 +39,100 @@ OFFLINE_ONLY_FEATURE_NAMES = {
 
 
 class Ranker:
-    def __init__(self, artifact_dir: pathlib.Path | None = None):
+    def __init__(
+        self,
+        artifact_dir: pathlib.Path | None = None,
+        *,
+        enable_trained_model: bool | None = None,
+    ):
         self.artifact_dir = artifact_dir or _DEFAULT_ARTIFACT_DIR
+        self.enable_trained_model = settings.enable_trained_ranker_v2 if enable_trained_model is None else bool(enable_trained_model)
 
-    def score(self, features: list[CandidateFeatures], profile: str) -> list[tuple[str, float]]:
-        scored = self.score_with_rationale(features, profile)
-        return [(candidate_id, score) for candidate_id, score, _ in scored]
+    def score(self, features: list[CandidateFeatures], profile: str, strategy: dict | None = None) -> list[tuple[str, float]]:
+        details = self.score_details(features, profile, strategy=strategy)
+        return [(item["candidate_id"], item["score"]) for item in details]
 
     def score_with_rationale(
         self,
         features: list[CandidateFeatures],
         profile: str,
+        strategy: dict | None = None,
     ) -> list[tuple[str, float, list[str]]]:
-        heuristic = self._heuristic_scores(features, profile)
+        details = self.score_details(features, profile, strategy=strategy)
+        return [(item["candidate_id"], item["score"], list(item["rationale"])) for item in details]
+
+    def score_details(
+        self,
+        features: list[CandidateFeatures],
+        profile: str,
+        strategy: dict | None = None,
+    ) -> list[dict[str, object]]:
+        heuristic = self._heuristic_scores(features, profile, strategy=strategy)
         artifact = self._load_artifact(profile)
         if artifact is None:
             return [
-                (feature.candidate_id, score, rationale)
+                {
+                    "candidate_id": feature.candidate_id,
+                    "score": score,
+                    "heuristic_score": score,
+                    "trained_score": None,
+                    "blend": 0.0,
+                    "trained_model_used": False,
+                    "rationale": list(rationale),
+                }
                 for feature, (score, rationale) in zip(features, heuristic)
             ]
 
         trained_scores = self._trained_scores(features, artifact)
         blend = self._safe_blend(artifact)
-        merged: list[tuple[str, float, list[str]]] = []
+        merged: list[dict[str, object]] = []
         for feature, (heur_score, rationale), trained_score in zip(features, heuristic, trained_scores):
             score = round(self._clamp_score(heur_score * (1.0 - blend) + trained_score * blend), 3)
             enriched = list(rationale)
             enriched.append("ml_ranked")
-            merged.append((feature.candidate_id, score, enriched))
+            merged.append(
+                {
+                    "candidate_id": feature.candidate_id,
+                    "score": score,
+                    "heuristic_score": round(float(heur_score), 3),
+                    "trained_score": round(float(trained_score), 3),
+                    "blend": round(float(blend), 3),
+                    "trained_model_used": True,
+                    "rationale": enriched,
+                }
+            )
         return merged
 
     def _heuristic_scores(
         self,
         features: list[CandidateFeatures],
         profile: str,
+        strategy: dict | None = None,
     ) -> list[tuple[float, list[str]]]:
         profile_weights = profile_config.get_profile(profile)
         hw = profile_config.get_effective_heuristic_weights(profile)
+        normalized_strategy = clip_strategy.normalize_strategy(strategy)
+        platform_bias = clip_strategy.platform_biases(normalized_strategy)
         scored: list[tuple[float, list[str]]] = []
         for feature in features:
             hook_score = feature.hook_strength * 10.0
             visual_reaction = max(feature.motion_peak, feature.face_reaction_peak) * 10.0
+            visual_hook_score = feature.visual_hook_score * 10.0
+            audio_pop_score = feature.audio_pop_score * 10.0
+            event_surprise_score = feature.event_surprise_score * 10.0
+            nonverbal_payoff = feature.nonverbal_payoff_score * 10.0
             dialogue_dynamism = min(feature.speaker_turns * 2.0, 10.0)
             chat_alignment = feature.chat_peak * 10.0
             chapter_coherence = feature.chapter_coherence_score * 10.0
             topic_shift = feature.topic_shift_strength * 10.0
             chapter_density = feature.chapter_local_density * 10.0
             trend_prior = feature.trend_prior_score * 10.0
+            dynamic_trend = feature.dynamic_trend_score * 10.0
+            outcome_prior = feature.outcome_prior_score * 10.0
+            goal_relevance = feature.goal_relevance_score * 10.0
+            platform_relevance = feature.platform_relevance_score * 10.0
+            projected_hook = feature.projected_hook_score * 10.0
+            projected_retention = feature.projected_retention_score * 10.0
             overlap_risk = min(feature.clip_overlap_count / 3.0, 1.0) * 10.0
             semantic_score = (
                 feature.quoteability_score
@@ -101,13 +149,13 @@ class Ranker:
             weak_resolution_penalty = feature.weak_resolution_penalty * 10.0
 
             rank_score = (
-                hw["hook"]               * hook_score * profile_weights["hook_weight"]
+                hw["hook"]               * hook_score * profile_weights["hook_weight"] * platform_bias.get("hook", 1.0)
                 + hw["payoff"]           * feature.payoff_score
                 + hw.get("payoff_clarity", 0.0) * payoff_clarity
                 + hw["hype"]             * feature.max_hype
                 + hw["arc"]              * feature.arc_score
                 + hw["chat"]             * chat_alignment * profile_weights["chat_weight"]
-                + hw["visual"]           * visual_reaction * profile_weights["visual_weight"]
+                + hw["visual"]           * visual_reaction * profile_weights["visual_weight"] * platform_bias.get("visual", 1.0)
                 + hw["dialogue"]         * dialogue_dynamism * profile_weights["dialogue_weight"]
                 + hw["semantic"]         * semantic_score * profile_weights.get("semantic_weight", 1.0)
                 + hw["context_efficiency"] * context_efficiency
@@ -116,6 +164,16 @@ class Ranker:
                 + hw.get("topic_shift", 0.0) * topic_shift
                 + hw.get("chapter_density", 0.0) * chapter_density
                 + hw.get("trend_prior", 0.0) * trend_prior
+                + visual_hook_score * 0.05
+                + audio_pop_score * 0.05
+                + event_surprise_score * 0.05
+                + nonverbal_payoff * 0.05
+                + dynamic_trend * 0.04
+                + outcome_prior * 0.05
+                + goal_relevance * 0.06
+                + platform_relevance * 0.05
+                + projected_hook * 0.05
+                + projected_retention * 0.06
                 + hw.get("overlap_penalty", 0.0) * overlap_risk
                 + hw.get("slow_open_penalty", 0.0) * slow_open_penalty
                 + hw.get("context_dependency_penalty", 0.0) * context_dependency_penalty
@@ -152,6 +210,16 @@ class Ranker:
                 rationale.append("chapter_dense")
             if feature.trend_prior_score >= 0.55:
                 rationale.append("trend_aligned")
+            if feature.dynamic_trend_score >= 0.45:
+                rationale.append("trend_feedback_aligned")
+            if feature.goal_relevance_score >= 0.45:
+                rationale.append("goal_aligned")
+            if feature.platform_relevance_score >= 0.5:
+                rationale.append(f"platform_fit:{normalized_strategy['platform']}")
+            if feature.projected_hook_score >= 0.55:
+                rationale.append("projected_strong_open")
+            if feature.projected_retention_score >= 0.55:
+                rationale.append("projected_retention")
             if feature.clip_overlap_count >= 2.0:
                 rationale.append("overlap_risk")
             if feature.slow_open_penalty >= 0.45:
@@ -165,6 +233,8 @@ class Ranker:
         return scored
 
     def _load_artifact(self, profile: str) -> dict | None:
+        if not self.enable_trained_model:
+            return None
         # Level 1: exact artifact (streamer-specific or named profile)
         artifact = self._try_load_artifact_file(profile)
         if artifact is not None:
@@ -307,9 +377,10 @@ class Ranker:
 def score_candidates(
     features: list[CandidateFeatures],
     profile: str = "gaming",
+    strategy: dict | None = None,
 ) -> dict[str, tuple[float, list[str]]]:
     scorer = Ranker()
     return {
         candidate_id: (score, rationale)
-        for candidate_id, score, rationale in scorer.score_with_rationale(features, profile)
+        for candidate_id, score, rationale in scorer.score_with_rationale(features, profile, strategy=strategy)
     }

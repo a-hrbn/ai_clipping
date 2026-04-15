@@ -11,8 +11,8 @@ import uuid
 from fastapi import APIRouter, Form, HTTPException, UploadFile, File
 from config import settings
 from models import JobRequest, JobStatus, ClipFeedbackPayload, ClipFeedbackResponse
-from job_manager import create_job, get_job
-from services import feedback_store
+from job_manager import bind_job_session, cancel_job, create_job, get_job, touch_job_session
+from services import clip_strategy, feedback_store
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
@@ -26,10 +26,24 @@ _SENTENCE_TRANSFORMERS_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
 _PYANNOTE_MODEL = "speaker-diarization-3.1"
 
 
+def _quota_exhausted(message: str) -> bool:
+    normalized = message.lower()
+    return any(
+        marker in normalized
+        for marker in (
+            "quota exceeded",
+            "resource_exhausted",
+            "billing details",
+            "requestsperday",
+            "inputtokenspermodelperminute",
+            "limit: 0",
+        )
+    )
+
+
 def _check_groq(api_key: str, model: str) -> tuple[bool, str | None]:
     try:
         from openai import OpenAI
-        from openai import AuthenticationError, RateLimitError
         client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
         client.chat.completions.create(
             model=model,
@@ -41,8 +55,10 @@ def _check_groq(api_key: str, model: str) -> tuple[bool, str | None]:
         msg = str(e)
         if "401" in msg or "auth" in msg.lower():
             return False, "Ungültiger API Key"
+        if _quota_exhausted(msg):
+            return False, "Groq-Quota erschöpft"
         if "429" in msg:
-            return True, None  # Key is valid, just rate-limited — treat as active
+            return False, "Groq Rate Limit erreicht"
         return False, "Groq nicht erreichbar"
 
 
@@ -63,8 +79,10 @@ def _check_gemini(api_key: str, model: str) -> tuple[bool, str | None]:
         msg = str(e)
         if "401" in msg or "API_KEY_INVALID" in msg:
             return False, "Ungültiger API Key"
-        if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
-            return True, None  # Key is valid, just rate-limited — treat as active
+        if _quota_exhausted(msg):
+            return False, "Gemini-Quota erschöpft"
+        if "429" in msg:
+            return False, "Gemini Rate Limit erreicht"
         return False, "Gemini nicht erreichbar"
 
 
@@ -233,7 +251,10 @@ except Exception as exc:
             check=False,
             env={
                 **os.environ,
-                "MPLCONFIGDIR": os.environ.get("MPLCONFIGDIR", "/tmp/matplotlib"),
+                "MPLCONFIGDIR": os.environ.get(
+                    "MPLCONFIGDIR",
+                    str(pathlib.Path(settings.storage_dir).parent / "matplotlib"),
+                ),
             },
         )
         payload = (result.stdout or "").strip().splitlines()
@@ -426,20 +447,91 @@ async def get_status():
     return result
 
 
+def _request_strategy(
+    *,
+    platform: str | None = None,
+    goal: str | None = None,
+    tone: str | None = None,
+    topic: str | None = None,
+    must_include: list[str] | None = None,
+    exclude: list[str] | None = None,
+    speaker: str | None = None,
+    time_range: dict | None = None,
+    clip_style: str | None = None,
+    variant_count: int | None = None,
+) -> dict:
+    return clip_strategy.normalize_strategy(
+        {
+            "platform": platform,
+            "goal": goal,
+            "tone": tone,
+            "topic": topic,
+            "must_include": must_include or [],
+            "exclude": exclude or [],
+            "speaker": speaker,
+            "time_range": time_range,
+            "clip_style": clip_style,
+            "variant_count": variant_count,
+        }
+    )
+
+
+def _coerce_optional_text(value) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _coerce_optional_number(value) -> float | int | None:
+    return value if isinstance(value, (int, float)) else None
+
+
+def _coerce_csv_list(value) -> list[str]:
+    if not isinstance(value, str):
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
 @router.post("", response_model=JobStatus, status_code=202)
 async def submit_job(request: JobRequest):
     job_id = str(uuid.uuid4())
     effective_profile = request.profile or settings.clip_profile
     job = create_job(job_id, profile=effective_profile)
+    bind_job_session(job_id, request.session_id)
+    strategy = _request_strategy(
+        platform=request.platform,
+        goal=request.goal,
+        tone=request.tone,
+        topic=request.topic,
+        must_include=request.must_include,
+        exclude=request.exclude,
+        speaker=request.speaker,
+        time_range=request.time_range.model_dump(exclude_none=True) if request.time_range else None,
+        clip_style=request.clip_style,
+        variant_count=request.variant_count,
+    )
 
     from pipeline import run_pipeline
-    asyncio.create_task(run_pipeline(job_id, url=request.url, profile=effective_profile))
+    asyncio.create_task(run_pipeline(job_id, url=request.url, profile=effective_profile, strategy=strategy))
 
     return job
 
 
 @router.post("/upload", response_model=JobStatus, status_code=202)
-async def upload_job(file: UploadFile = File(...), profile: str | None = Form(None)):
+async def upload_job(
+    file: UploadFile = File(...),
+    profile: str | None = Form(None),
+    session_id: str | None = Form(None),
+    platform: str | None = Form(None),
+    goal: str | None = Form(None),
+    tone: str | None = Form(None),
+    topic: str | None = Form(None),
+    must_include: str | None = Form(None),
+    exclude: str | None = Form(None),
+    speaker: str | None = Form(None),
+    time_range_start: float | None = Form(None),
+    time_range_end: float | None = Form(None),
+    clip_style: str | None = Form(None),
+    variant_count: int | None = Form(None),
+):
     suffix = pathlib.Path(file.filename or "").suffix.lower()
     allowed_suffixes = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".ts", ".flv"}
     if suffix and suffix not in allowed_suffixes:
@@ -459,8 +551,39 @@ async def upload_job(file: UploadFile = File(...), profile: str | None = Form(No
             raise HTTPException(status_code=413, detail="Datei ist zu groß")
 
     job_id = str(uuid.uuid4())
+    profile = _coerce_optional_text(profile)
+    session_id = _coerce_optional_text(session_id)
+    platform = _coerce_optional_text(platform)
+    goal = _coerce_optional_text(goal)
+    tone = _coerce_optional_text(tone)
+    topic = _coerce_optional_text(topic)
+    speaker = _coerce_optional_text(speaker)
+    clip_style = _coerce_optional_text(clip_style)
+    time_range_start = _coerce_optional_number(time_range_start)
+    time_range_end = _coerce_optional_number(time_range_end)
+    variant_count = _coerce_optional_number(variant_count)
     effective_profile = profile or settings.clip_profile
     job = create_job(job_id, profile=effective_profile)
+    bind_job_session(job_id, session_id)
+    strategy = _request_strategy(
+        platform=platform,
+        goal=goal,
+        tone=tone,
+        topic=topic,
+        must_include=_coerce_csv_list(must_include),
+        exclude=_coerce_csv_list(exclude),
+        speaker=speaker,
+        time_range={
+            key: value
+            for key, value in {
+                "start_sec": time_range_start,
+                "end_sec": time_range_end,
+            }.items()
+            if value is not None
+        } or None,
+        clip_style=clip_style,
+        variant_count=variant_count,
+    )
 
     job_dir = pathlib.Path(settings.storage_dir) / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
@@ -483,7 +606,7 @@ async def upload_job(file: UploadFile = File(...), profile: str | None = Form(No
 
             await asyncio.to_thread(_copy)
             from pipeline import run_pipeline
-            await run_pipeline(job_id, video_path=video_path, profile=effective_profile)
+            await run_pipeline(job_id, video_path=video_path, profile=effective_profile, strategy=strategy)
         except Exception as exc:
             from job_manager import update_job
             update_job(job_id, status="failed", error=str(exc))
@@ -495,8 +618,18 @@ async def upload_job(file: UploadFile = File(...), profile: str | None = Form(No
 
 
 @router.get("/{job_id}", response_model=JobStatus)
-async def get_job_status(job_id: str):
-    job = get_job(job_id)
+async def get_job_status(job_id: str, session_id: str | None = None):
+    job = touch_job_session(job_id, session_id)
+    if job is None:
+        job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+@router.post("/{job_id}/cancel", response_model=JobStatus)
+async def cancel_job_status(job_id: str):
+    job = cancel_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
     return job

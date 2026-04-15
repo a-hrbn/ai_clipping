@@ -50,7 +50,13 @@ def cut_clips(video_path: pathlib.Path, moments: list[Moment], job_id: str) -> l
             end_time=end,
             viral_score=moment["viral_score"],
             reason=moment["reason"],
+            selection_reasons=list(moment.get("selection_reasons") or []),
             ranking_mode=moment.get("ranking_mode", "heuristic"),
+            platform=moment.get("platform", "general"),
+            variant_key=str(moment.get("variant_key") or "balanced"),
+            variant_label=moment.get("variant_label"),
+            projected_hook_score=moment.get("projected_hook_score"),
+            projected_retention_score=moment.get("projected_retention_score"),
         ))
 
     return results

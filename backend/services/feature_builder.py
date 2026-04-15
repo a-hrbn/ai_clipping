@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import re
 
-from services import chapter_segmenter, clip_similarity, profile_config, semantic_service, trend_prior
+from services import chapter_segmenter, clip_similarity, clip_strategy, profile_config, semantic_service, trend_prior
 from services.timeline_types import Candidate, CandidateFeatures, Chapter
 from services.transcriber import RichSegment
 
 _TOKEN_RE = re.compile(r"[a-zA-Z0-9']+")
+FEATURE_BUILD_VERSION = 5
 
 
 def build_features(
@@ -17,9 +18,11 @@ def build_features(
     llm_candidate_ids: set[str] | None = None,
     llm_provider: str | None = None,
     chapters: list[Chapter] | None = None,
+    strategy: dict | None = None,
 ) -> list[CandidateFeatures]:
     resolved_chapters = chapters if chapters is not None else chapter_segmenter.segment_chapters(segments)
     chapter_contexts = _prepare_chapter_contexts(candidates, segments, resolved_chapters)
+    normalized_strategy = clip_strategy.normalize_strategy(strategy)
     return [
         _build_candidate_features(
             candidate,
@@ -29,6 +32,7 @@ def build_features(
             llm_candidate_ids=llm_candidate_ids,
             llm_provider=llm_provider,
             chapter_context=chapter_contexts.get(candidate.id, _empty_chapter_context()),
+            strategy=normalized_strategy,
         )
         for candidate in candidates
     ]
@@ -43,8 +47,10 @@ def _build_candidate_features(
     llm_candidate_ids: set[str] | None = None,
     llm_provider: str | None = None,
     chapter_context: dict | None = None,
+    strategy: dict | None = None,
 ) -> CandidateFeatures:
     chapter_context = chapter_context or _empty_chapter_context()
+    strategy = clip_strategy.normalize_strategy(strategy)
     window = [seg for seg in segments if seg.end > candidate.start and seg.start < candidate.end]
     if not window:
         return CandidateFeatures.create(
@@ -97,10 +103,20 @@ def _build_candidate_features(
             trend_hook_score=0.0,
             trend_topic_score=0.0,
             trend_prior_score=0.0,
+            dynamic_trend_score=0.0,
+            outcome_prior_score=0.0,
+            visual_hook_score=0.0,
+            audio_pop_score=0.0,
+            event_surprise_score=0.0,
+            nonverbal_payoff_score=0.0,
+            goal_relevance_score=0.0,
+            platform_relevance_score=0.0,
+            projected_hook_score=0.0,
+            projected_retention_score=0.0,
             has_llm_semantics=False,
             has_chat_features=False,
             has_vector_similarity=False,
-            feature_build_version=5,
+            feature_build_version=FEATURE_BUILD_VERSION,
             source=candidate.source,
         )
 
@@ -146,6 +162,10 @@ def _build_candidate_features(
     pre_hook_hype = sum(seg.hype_score for seg in pre_window) / len(pre_window) if pre_window else 0.0
     post_hook_hype = sum(seg.hype_score for seg in post_window) / len(post_window) if post_window else 0.0
     hype_delta = max_hype - pre_hook_hype
+    visual_hook_score = _visual_hook_score(window, candidate.anchor_time)
+    audio_pop_score = _audio_pop_score(window, candidate.anchor_time)
+    event_surprise_score = _event_surprise_score(window)
+    nonverbal_payoff_score = _nonverbal_payoff_score(window, candidate.anchor_time)
     local_peak_density = (
         sum(1 for seg in window if seg.hype_score >= max(max_hype - 1.0, 2.5)) / len(window)
         if window else 0.0
@@ -177,7 +197,34 @@ def _build_candidate_features(
         profile_weights,
     )
     similarity = clip_similarity.score_candidate_window(window, candidate.anchor_time, profile)
-    trend_scores = trend_prior.score_candidate_window(window, profile)
+    trend_scores = trend_prior.score_candidate_window(window, profile, strategy=strategy)
+    goal_relevance_score = clip_strategy.text_relevance_score(
+        " ".join(seg.text.strip() for seg in window if seg.text.strip()),
+        strategy,
+    )
+    platform_relevance_score = _platform_relevance_score(
+        duration,
+        hook_strength,
+        context_efficiency,
+        payoff_clarity_score,
+        visual_hook_score,
+        strategy,
+    )
+    projected_hook_score = _projected_hook_score(
+        hook_strength,
+        visual_hook_score,
+        event_surprise_score,
+        strategy,
+    )
+    projected_retention_score = _projected_retention_score(
+        context_efficiency,
+        payoff_clarity_score,
+        nonverbal_payoff_score,
+        goal_relevance_score,
+        platform_relevance_score,
+        float(trend_scores.get("outcome_prior_score", 0.0)),
+        strategy,
+    )
     has_chat_features = any(
         abs(float(getattr(seg, "chat_spike_score", 0.0) or 0.0)) > 1e-9
         for seg in window
@@ -243,10 +290,20 @@ def _build_candidate_features(
         trend_hook_score=float(trend_scores["trend_hook_score"]),
         trend_topic_score=float(trend_scores["trend_topic_score"]),
         trend_prior_score=float(trend_scores["trend_prior_score"]),
+        dynamic_trend_score=float(trend_scores.get("dynamic_trend_score", 0.0)),
+        outcome_prior_score=float(trend_scores.get("outcome_prior_score", 0.0)),
+        visual_hook_score=round(visual_hook_score, 3),
+        audio_pop_score=round(audio_pop_score, 3),
+        event_surprise_score=round(event_surprise_score, 3),
+        nonverbal_payoff_score=round(nonverbal_payoff_score, 3),
+        goal_relevance_score=round(goal_relevance_score, 3),
+        platform_relevance_score=round(platform_relevance_score, 3),
+        projected_hook_score=round(projected_hook_score, 3),
+        projected_retention_score=round(projected_retention_score, 3),
         has_llm_semantics=bool(sem.get("llm_used", False)),
         has_chat_features=has_chat_features,
         has_vector_similarity=has_vector_similarity,
-        feature_build_version=5,
+        feature_build_version=FEATURE_BUILD_VERSION,
         source=candidate.source,
     )
 
@@ -268,6 +325,127 @@ def _slow_open_penalty(
     if not first_segment.text.strip().endswith(("?", "!")) and "exclamation" not in first_segment.emotions:
         score += 0.1
     return _clamp01(score)
+
+
+def _visual_hook_score(window: list[RichSegment], anchor_time: float) -> float:
+    opening = [seg for seg in window if seg.start < min(anchor_time, window[0].start + 3.0)] or window[:2]
+    if not opening:
+        return 0.0
+    score = 0.0
+    for seg in opening:
+        if seg.has_scene_change:
+            score += 0.3
+        score += min(seg.max_motion_score, 1.0) * 0.25
+        score += min(seg.max_face_reaction, 1.0) * 0.25
+        score += min(seg.visual_activity / 6.0, 1.0) * 0.2
+    return _clamp01(score)
+
+
+def _audio_pop_score(window: list[RichSegment], anchor_time: float) -> float:
+    early = [seg for seg in window if seg.end <= anchor_time + 2.0] or window[:2]
+    if not early:
+        return 0.0
+    score = 0.0
+    for seg in early:
+        score += min(seg.laughter_prob, 1.0) * 0.25
+        score += min(max(seg.max_onset_rate, 0.0) / 8.0, 1.0) * 0.2
+        score += min(max(seg.max_pitch_hz, 0.0) / 550.0, 1.0) * 0.15
+        if "audio_laughter" in seg.emotions or "laughter" in seg.emotions:
+            score += 0.18
+        if seg.hype_score >= 4.0:
+            score += 0.12
+    return _clamp01(score)
+
+
+def _event_surprise_score(window: list[RichSegment]) -> float:
+    if not window:
+        return 0.0
+    score = 0.0
+    for prev, seg in zip(window, window[1:]):
+        if seg.has_scene_change:
+            score += 0.18
+        if seg.hype_score - prev.hype_score >= 2.0:
+            score += 0.16
+        if max(seg.max_face_reaction, seg.max_motion_score) - max(prev.max_face_reaction, prev.max_motion_score) >= 0.3:
+            score += 0.12
+        if seg.chat_spike_score - prev.chat_spike_score >= 0.25:
+            score += 0.08
+    return _clamp01(score)
+
+
+def _nonverbal_payoff_score(window: list[RichSegment], anchor_time: float) -> float:
+    tail = [seg for seg in window if seg.start >= anchor_time] or window[-2:]
+    if not tail:
+        return 0.0
+    score = 0.0
+    for seg in tail:
+        score += min(seg.max_face_reaction, 1.0) * 0.3
+        score += min(seg.max_motion_score, 1.0) * 0.2
+        score += min(seg.chat_spike_score, 1.0) * 0.15
+        if "audio_laughter" in seg.emotions or "laughter" in seg.emotions:
+            score += 0.2
+        if seg.has_scene_change:
+            score += 0.1
+    return _clamp01(score)
+
+
+def _platform_relevance_score(
+    duration: float,
+    hook_strength: float,
+    context_efficiency: float,
+    payoff_clarity_score: float,
+    visual_hook_score: float,
+    strategy: dict,
+) -> float:
+    low, high, ideal = clip_strategy.platform_duration_target(strategy)
+    duration_penalty = min(abs(duration - ideal) / max(high - low, 1.0), 1.0)
+    platform_bias = clip_strategy.platform_biases(strategy)
+    score = (
+        hook_strength * platform_bias.get("hook", 1.0) * 0.35
+        + context_efficiency * platform_bias.get("context", 1.0) * 0.2
+        + payoff_clarity_score * platform_bias.get("payoff", 1.0) * 0.25
+        + visual_hook_score * platform_bias.get("visual", 1.0) * 0.2
+    )
+    return max(0.0, min(score - duration_penalty * 0.25, 1.0))
+
+
+def _projected_hook_score(
+    hook_strength: float,
+    visual_hook_score: float,
+    event_surprise_score: float,
+    strategy: dict,
+) -> float:
+    bias = clip_strategy.platform_biases(strategy)
+    return max(
+        0.0,
+        min(
+            hook_strength * bias.get("hook", 1.0) * 0.55
+            + visual_hook_score * bias.get("visual", 1.0) * 0.25
+            + event_surprise_score * 0.2,
+            1.0,
+        ),
+    )
+
+
+def _projected_retention_score(
+    context_efficiency: float,
+    payoff_clarity_score: float,
+    nonverbal_payoff_score: float,
+    goal_relevance_score: float,
+    platform_relevance_score: float,
+    outcome_prior_score: float,
+    strategy: dict,
+) -> float:
+    bias = clip_strategy.platform_biases(strategy)
+    score = (
+        context_efficiency * bias.get("context", 1.0) * 0.22
+        + payoff_clarity_score * bias.get("payoff", 1.0) * 0.24
+        + nonverbal_payoff_score * 0.18
+        + goal_relevance_score * 0.14
+        + platform_relevance_score * 0.12
+        + outcome_prior_score * 0.1
+    )
+    return max(0.0, min(score, 1.0))
 
 
 def _context_dependency_score(

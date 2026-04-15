@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from services.timeline_types import Candidate, Chapter
 from services.transcriber import RichSegment
-from services import chapter_segmenter
+from services import chapter_segmenter, clip_strategy
 
 _DENSE_TARGET_DURATIONS = (9.0, 16.0, 28.0, 45.0)
 _DENSE_PER_DURATION = 12
@@ -11,46 +11,52 @@ _DENSE_PER_DURATION = 12
 def generate_candidates(
     segments: list[RichSegment],
     chapters: list[Chapter] | None = None,
+    strategy: dict | None = None,
 ) -> list[Candidate]:
-    return generate_semantic_candidates(segments, chapters=chapters)
+    return generate_semantic_candidates(segments, chapters=chapters, strategy=strategy)
 
 
 def generate_semantic_candidates(
     segments: list[RichSegment],
     chapters: list[Chapter] | None = None,
+    strategy: dict | None = None,
 ) -> list[Candidate]:
+    normalized_strategy = clip_strategy.normalize_strategy(strategy)
     if chapters:
         candidates: list[Candidate] = []
         for chapter in chapters:
             chapter_segments = chapter_segmenter.segments_for_chapter(segments, chapter)
-            candidates.extend(_generate_semantic_candidates_for_segments(chapter_segments))
-        return candidates
-    return _generate_semantic_candidates_for_segments(segments)
+            candidates.extend(_generate_semantic_candidates_for_segments(chapter_segments, normalized_strategy))
+        return _filter_candidates(candidates, normalized_strategy)
+    return _filter_candidates(_generate_semantic_candidates_for_segments(segments, normalized_strategy), normalized_strategy)
 
 
-def _generate_semantic_candidates_for_segments(segments: list[RichSegment]) -> list[Candidate]:
+def _generate_semantic_candidates_for_segments(segments: list[RichSegment], strategy: dict | None = None) -> list[Candidate]:
     candidates: list[Candidate] = []
     candidates.extend(_generate_quote_candidates(segments))
     candidates.extend(_generate_tension_build_candidates(segments))
     candidates.extend(_generate_narrative_reveal_candidates(segments))
     candidates.extend(_generate_controversy_candidates(segments))
+    candidates.extend(_generate_goal_prompt_candidates(segments, strategy))
     return candidates
 
 
 def generate_fallback_candidates(
     segments: list[RichSegment],
     chapters: list[Chapter] | None = None,
+    strategy: dict | None = None,
 ) -> list[Candidate]:
+    normalized_strategy = clip_strategy.normalize_strategy(strategy)
     if chapters:
         candidates: list[Candidate] = []
         for chapter in chapters:
             chapter_segments = chapter_segmenter.segments_for_chapter(segments, chapter)
-            candidates.extend(_generate_fallback_candidates_for_segments(chapter_segments))
-        return candidates
-    return _generate_fallback_candidates_for_segments(segments)
+            candidates.extend(_generate_fallback_candidates_for_segments(chapter_segments, normalized_strategy))
+        return _filter_candidates(candidates, normalized_strategy)
+    return _filter_candidates(_generate_fallback_candidates_for_segments(segments, normalized_strategy), normalized_strategy)
 
 
-def _generate_fallback_candidates_for_segments(segments: list[RichSegment]) -> list[Candidate]:
+def _generate_fallback_candidates_for_segments(segments: list[RichSegment], strategy: dict | None = None) -> list[Candidate]:
     candidates: list[Candidate] = []
     candidates.extend(_generate_hype_peak_candidates(segments))
     candidates.extend(_generate_chat_sync_candidates(segments))
@@ -59,6 +65,9 @@ def _generate_fallback_candidates_for_segments(segments: list[RichSegment]) -> l
     candidates.extend(_generate_dialogue_candidates(segments))
     candidates.extend(_generate_hot_take_candidates(segments))
     candidates.extend(_generate_story_payoff_candidates(segments))
+    candidates.extend(_generate_visual_reveal_candidates(segments))
+    candidates.extend(_generate_audio_burst_candidates(segments))
+    candidates.extend(_generate_silence_break_candidates(segments))
     candidates.extend(_generate_dense_window_candidates(segments))
     return candidates
 
@@ -68,17 +77,25 @@ def merge_prioritized_candidates(
     supplemental: list[Candidate],
     *,
     supplemental_source_cap: int = 4,
+    strategy: dict | None = None,
 ) -> list[Candidate]:
+    normalized_strategy = clip_strategy.normalize_strategy(strategy)
     merged: list[Candidate] = []
     supplemental_counts: dict[str, int] = {}
+    source_caps = clip_strategy.source_caps(normalized_strategy)
 
     for candidate in primary:
+        if not clip_strategy.candidate_in_time_range(candidate.start, candidate.end, normalized_strategy):
+            continue
         if _is_duplicate_candidate(candidate, merged):
             continue
         merged.append(candidate)
 
     for candidate in supplemental:
-        if supplemental_counts.get(candidate.source, 0) >= supplemental_source_cap:
+        if not clip_strategy.candidate_in_time_range(candidate.start, candidate.end, normalized_strategy):
+            continue
+        effective_cap = source_caps.get(candidate.source, supplemental_source_cap)
+        if supplemental_counts.get(candidate.source, 0) >= effective_cap:
             continue
         if _is_duplicate_candidate(candidate, merged):
             continue
@@ -223,6 +240,84 @@ def _generate_story_payoff_candidates(segments: list[RichSegment]) -> list[Candi
     return candidates
 
 
+def _generate_visual_reveal_candidates(segments: list[RichSegment]) -> list[Candidate]:
+    ranked = sorted(
+        [
+            seg for seg in segments
+            if seg.has_scene_change or seg.max_motion_score >= 0.5 or seg.visual_activity >= 2.4
+        ],
+        key=lambda seg: (
+            (0.4 if seg.has_scene_change else 0.0)
+            + seg.max_motion_score * 0.8
+            + seg.max_face_reaction * 0.7
+            + min(seg.visual_activity / 6.0, 1.0) * 0.5
+        ),
+        reverse=True,
+    )
+    return [
+        _window_candidate(seg, idx, "visual_reveal", lead=6.0, tail=12.0)
+        for idx, seg in enumerate(ranked[:10])
+    ]
+
+
+def _generate_audio_burst_candidates(segments: list[RichSegment]) -> list[Candidate]:
+    ranked = sorted(
+        [
+            seg for seg in segments
+            if seg.laughter_prob >= 0.35 or seg.max_onset_rate >= 3.0 or seg.max_pitch_hz >= 280.0
+        ],
+        key=lambda seg: (
+            seg.laughter_prob * 1.2
+            + min(seg.max_onset_rate / 8.0, 1.0) * 0.8
+            + min(seg.max_pitch_hz / 600.0, 1.0) * 0.5
+            + seg.hype_score * 0.15
+        ),
+        reverse=True,
+    )
+    return [
+        _window_candidate(seg, idx, "audio_burst", lead=5.0, tail=13.0)
+        for idx, seg in enumerate(ranked[:10])
+    ]
+
+
+def _generate_silence_break_candidates(segments: list[RichSegment]) -> list[Candidate]:
+    candidates: list[Candidate] = []
+    for idx in range(1, len(segments)):
+        prev = segments[idx - 1]
+        current = segments[idx]
+        if len(candidates) >= 8:
+            break
+        if prev.mean_rms_db <= 0.0 and prev.hype_score > 1.5:
+            continue
+        if current.hype_score - prev.hype_score < 2.2:
+            continue
+        if max(current.max_motion_score, current.max_face_reaction, current.chat_spike_score) < 0.35:
+            continue
+        candidates.append(_window_candidate(current, idx, "silence_break", lead=4.0, tail=12.0))
+    return candidates
+
+
+def _generate_goal_prompt_candidates(segments: list[RichSegment], strategy: dict | None) -> list[Candidate]:
+    normalized = clip_strategy.normalize_strategy(strategy)
+    if not normalized["keywords"]:
+        return []
+    ranked: list[tuple[float, RichSegment]] = []
+    for seg in segments:
+        text = seg.text.strip()
+        if not text:
+            continue
+        relevance = clip_strategy.text_relevance_score(text, normalized)
+        if relevance <= 0.0:
+            continue
+        score = relevance + seg.hype_score * 0.08 + seg.chat_spike_score * 0.4 + seg.max_face_reaction * 0.35
+        ranked.append((score, seg))
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return [
+        _window_candidate(seg, idx, "goal_prompt", lead=6.0, tail=14.0)
+        for idx, (_score, seg) in enumerate(ranked[:10])
+    ]
+
+
 def _generate_quote_candidates(segments: list[RichSegment]) -> list[Candidate]:
     from services.semantic_candidates import find_semantic_candidates
     sem = find_semantic_candidates(segments)
@@ -313,6 +408,16 @@ def _is_duplicate_candidate(candidate: Candidate, existing: list[Candidate]) -> 
         if shorter > 0 and overlap / shorter >= 0.7:
             return True
     return False
+
+
+def _filter_candidates(candidates: list[Candidate], strategy: dict | None) -> list[Candidate]:
+    normalized = clip_strategy.normalize_strategy(strategy)
+    filtered = [
+        candidate
+        for candidate in candidates
+        if clip_strategy.candidate_in_time_range(candidate.start, candidate.end, normalized)
+    ]
+    return sorted(filtered, key=lambda candidate: (candidate.start, candidate.anchor_time))
 
 
 # ---------------------------------------------------------------------------

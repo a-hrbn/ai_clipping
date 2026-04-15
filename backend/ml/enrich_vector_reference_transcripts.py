@@ -21,7 +21,7 @@ def main() -> int:
     parser.add_argument("--dataset", default=str(BACKEND_ROOT / "ml" / "artifacts" / "jynxzi_training_rows.jsonl"))
     parser.add_argument("--output", default=str(BACKEND_ROOT / "ml" / "artifacts" / "jynxzi_vector_manifest_enriched.jsonl"))
     parser.add_argument("--profile", default="jynxzi")
-    parser.add_argument("--work-dir", default="/tmp/ai_clipping_vector_refs")
+    parser.add_argument("--work-dir", default=str(BACKEND_ROOT / "tmp" / "vector_refs"))
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()

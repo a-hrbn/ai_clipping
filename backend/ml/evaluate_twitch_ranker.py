@@ -29,6 +29,7 @@ def main() -> int:
 
     split = train_ranker._split_rows(rows)
     validation = split["validation"]
+    validation_groups = train_ranker._ranking_group_labels(validation, split.get("unit", ""))
     ranker = Ranker(artifact_dir=pathlib.Path(args.artifact_dir))
     artifact = ranker._load_artifact(args.profile)
     feature_names = train_ranker._numeric_feature_names(validation[0]["features"])
@@ -51,8 +52,13 @@ def main() -> int:
     )
     labels = train_ranker.np.array([int(row["label"]) for row in validation], dtype=int)
     metrics = {
-        "baseline_linear": train_ranker._evaluate_scores(labels, baseline_scores),
-        "runtime_artifact": train_ranker._evaluate_scores(labels, runtime_score_array, score_kind="margin"),
+        "baseline_linear": train_ranker._evaluate_scores(labels, baseline_scores, groups=validation_groups),
+        "runtime_artifact": train_ranker._evaluate_scores(
+            labels,
+            runtime_score_array,
+            score_kind="margin",
+            groups=validation_groups,
+        ),
     }
     bucketed = {}
     for label_class in sorted({str(row.get("label_class", "")) for row in validation}):
@@ -65,10 +71,20 @@ def main() -> int:
             [float(runtime_scores.get(row["candidate_id"], 0.0)) for row in subset],
             dtype=float,
         )
+        subset_groups = train_ranker._ranking_group_labels(subset, split.get("unit", ""))
         bucketed[label_class] = {
             "rows": len(subset),
-            "baseline_linear": train_ranker._evaluate_scores(subset_labels, subset_baseline_scores),
-            "runtime_artifact": train_ranker._evaluate_scores(subset_labels, subset_runtime_scores, score_kind="margin"),
+            "baseline_linear": train_ranker._evaluate_scores(
+                subset_labels,
+                subset_baseline_scores,
+                groups=subset_groups,
+            ),
+            "runtime_artifact": train_ranker._evaluate_scores(
+                subset_labels,
+                subset_runtime_scores,
+                score_kind="margin",
+                groups=subset_groups,
+            ),
         }
     print(
         json.dumps(
@@ -104,11 +120,12 @@ def _group_metrics(rows: list[dict], runtime_scores: dict[str, float], split_uni
     for group, subset in grouped.items():
         labels = train_ranker.np.array([int(row["label"]) for row in subset], dtype=int)
         scores = train_ranker.np.array([float(runtime_scores.get(row["candidate_id"], 0.0)) for row in subset], dtype=float)
+        groups = train_ranker._ranking_group_labels(subset, unit)
         summaries.append(
             {
                 "group": group,
                 "rows": len(subset),
-                "runtime_artifact": train_ranker._evaluate_scores(labels, scores, score_kind="margin"),
+                "runtime_artifact": train_ranker._evaluate_scores(labels, scores, score_kind="margin", groups=groups),
             }
         )
     summaries.sort(key=lambda item: (item["rows"], item["group"]), reverse=True)

@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useCallback } from "react";
-import { submitJob, submitUpload } from "@/lib/api";
+import { useState, useCallback, useEffect } from "react";
+import { cancelJobBeacon, submitJob, submitUpload } from "@/lib/api";
 import { ClipResult, UploadProgress } from "@/lib/types";
 import UrlInput from "@/components/UrlInput";
 import JobStatus from "@/components/JobStatus";
@@ -109,6 +109,23 @@ export default function Home() {
   const [clips, setClips] = useState<ClipResult[]>([]);
   const [error, setError] = useState<string>("");
   const [uploadInfo, setUploadInfo] = useState<UploadProgress | null>(null);
+
+  useEffect(() => {
+    if (!jobId || state !== "polling") {
+      return;
+    }
+
+    const cancelActiveJob = () => {
+      cancelJobBeacon(jobId);
+    };
+
+    window.addEventListener("pagehide", cancelActiveJob);
+    window.addEventListener("beforeunload", cancelActiveJob);
+    return () => {
+      window.removeEventListener("pagehide", cancelActiveJob);
+      window.removeEventListener("beforeunload", cancelActiveJob);
+    };
+  }, [jobId, state]);
 
   async function handleSubmitUrl(url: string, profile: string | null) {
     setState("submitting");

@@ -62,6 +62,78 @@ class DetectedPeak:
 
 
 @dataclass
+class BoundaryPoint:
+    id: str
+    time: float
+    kind: str
+    segment_index: int
+    speaker: str = "UNKNOWN"
+    text_left: str = ""
+    text_right: str = ""
+    is_sentence_end: bool = False
+    is_sentence_start: bool = False
+    is_speaker_turn: bool = False
+    is_scene_cut: bool = False
+    is_pause_break: bool = False
+    pause_before_sec: float = 0.0
+    pause_after_sec: float = 0.0
+    chat_delta: float = 0.0
+    hype_delta: float = 0.0
+    visual_delta: float = 0.0
+    face_reaction_delta: float = 0.0
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class BoundaryFeatures:
+    boundary_id: str
+    candidate_id: str
+    role: str
+    anchor_distance_sec: float = 0.0
+    candidate_left_distance_sec: float = 0.0
+    candidate_right_distance_sec: float = 0.0
+    clean_open_score: float = 0.0
+    closure_score: float = 0.0
+    mid_thought_risk: float = 0.0
+    context_dependency_risk: float = 0.0
+    hook_proximity_score: float = 0.0
+    payoff_capture_score: float = 0.0
+    speaker_transition_score: float = 0.0
+    scene_transition_score: float = 0.0
+    pause_strength_score: float = 0.0
+    lexical_break_score: float = 0.0
+    reaction_tail_score: float = 0.0
+    duration_prior_score: float = 0.0
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class BoundaryPair:
+    id: str
+    candidate_id: str
+    start_boundary_id: str
+    end_boundary_id: str
+    start_time: float
+    end_time: float
+    duration: float
+    pair_score: float
+    start_score: float
+    end_score: float
+    hook_score: float
+    payoff_score: float
+    narrative_score: float
+    penalties: list[str] = field(default_factory=list)
+    reason: str = ""
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
 class CandidateFeatures:
     candidate_id: str
     duration: float = 0.0
@@ -112,6 +184,16 @@ class CandidateFeatures:
     trend_hook_score: float = 0.0
     trend_topic_score: float = 0.0
     trend_prior_score: float = 0.0
+    dynamic_trend_score: float = 0.0
+    outcome_prior_score: float = 0.0
+    visual_hook_score: float = 0.0
+    audio_pop_score: float = 0.0
+    event_surprise_score: float = 0.0
+    nonverbal_payoff_score: float = 0.0
+    goal_relevance_score: float = 0.0
+    platform_relevance_score: float = 0.0
+    projected_hook_score: float = 0.0
+    projected_retention_score: float = 0.0
     has_llm_semantics: bool = False
     has_chat_features: bool = False
     has_vector_similarity: bool = False
@@ -143,6 +225,10 @@ class RankedCandidate:
     rank_score: float
     rationale: list[str] = field(default_factory=list)
     base_rank_score: float | None = None
+    heuristic_rank_score: float | None = None
+    trained_rank_score: float | None = None
+    model_blend: float | None = None
+    trained_model_used: bool = False
     judge_result: "JudgeResult | None" = None
 
     def to_dict(self) -> dict:
@@ -152,6 +238,10 @@ class RankedCandidate:
             "rank_score": self.rank_score,
             "rationale": list(self.rationale),
             "base_rank_score": self.base_rank_score,
+            "heuristic_rank_score": self.heuristic_rank_score,
+            "trained_rank_score": self.trained_rank_score,
+            "model_blend": self.model_blend,
+            "trained_model_used": self.trained_model_used,
             "judge_result": self.judge_result.to_dict() if self.judge_result is not None else None,
         }
 

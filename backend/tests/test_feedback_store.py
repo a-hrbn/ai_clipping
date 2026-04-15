@@ -45,12 +45,23 @@ class FeedbackStoreTests(unittest.TestCase):
         feedback = feedback_store.build_pipeline_feedback(
             "job-1",
             ranked,
-            [{"start_time": 2.0, "end_time": 9.0, "viral_score": 8.0, "reason": "story"}],
+            [
+                {
+                    "start_time": 2.0,
+                    "end_time": 9.0,
+                    "viral_score": 8.0,
+                    "reason": "story",
+                    "platform": "tiktok",
+                    "variant_key": "aggressive_hook",
+                }
+            ],
         )
 
         self.assertEqual(len(feedback), 1)
         self.assertTrue(feedback[0].selected)
         self.assertFalse(feedback[0].exported)
+        self.assertEqual(feedback[0].publish_platform, "tiktok")
+        self.assertEqual(feedback[0].final_variant_key, "aggressive_hook")
 
     def test_update_job_feedback_persists_outcome_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -76,6 +87,12 @@ class FeedbackStoreTests(unittest.TestCase):
                     candidate_id="c1",
                     tags=["strong_hook"],
                     notes="guter opener",
+                    publish_platform="youtube_shorts",
+                    impressions=4000,
+                    avg_watch_time=17.5,
+                    retention_3s=0.82,
+                    retention_50pct=0.46,
+                    completion_rate=0.58,
                     views_1h=1200,
                     views_24h=7200,
                     share_count=12,
@@ -85,8 +102,12 @@ class FeedbackStoreTests(unittest.TestCase):
 
             self.assertEqual(response.candidate_id, "c1")
             self.assertEqual(response.tags, ["strong_hook"])
+            self.assertEqual(response.publish_platform, "youtube_shorts")
+            self.assertEqual(response.retention_3s, 0.82)
             rows = feedback_store._read_feedback_rows(debug / "feedback.jsonl")
             self.assertEqual(rows[0]["views_24h"], 7200)
+            self.assertEqual(rows[0]["impressions"], 4000)
+            self.assertEqual(rows[0]["completion_rate"], 0.58)
 
 
 if __name__ == "__main__":

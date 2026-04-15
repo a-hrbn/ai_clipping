@@ -168,7 +168,7 @@ class RankerTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            score = Ranker(artifact_dir=artifact_dir).score([feature], profile="gaming")[0][1]
+            score = Ranker(artifact_dir=artifact_dir, enable_trained_model=True).score([feature], profile="gaming")[0][1]
 
         self.assertGreater(score, 1.0)
 
@@ -224,7 +224,7 @@ class RankerTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            score = Ranker(artifact_dir=artifact_dir).score([feature], profile="gaming")[0][1]
+            score = Ranker(artifact_dir=artifact_dir, enable_trained_model=True).score([feature], profile="gaming")[0][1]
 
         self.assertGreater(score, 1.0)
 
@@ -280,7 +280,7 @@ class RankerTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            score = Ranker(artifact_dir=artifact_dir).score([feature], profile="gaming")[0][1]
+            score = Ranker(artifact_dir=artifact_dir, enable_trained_model=True).score([feature], profile="gaming")[0][1]
 
         self.assertGreater(score, 1.0)
 
@@ -341,7 +341,7 @@ class RankerTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            score = Ranker(artifact_dir=artifact_dir).score([feature], profile="gaming")[0][1]
+            score = Ranker(artifact_dir=artifact_dir, enable_trained_model=True).score([feature], profile="gaming")[0][1]
 
         self.assertGreater(score, 1.0)
 
@@ -399,9 +399,50 @@ class RankerTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            score = Ranker(artifact_dir=artifact_dir).score([feature], profile="gaming")[0][1]
+            score = Ranker(artifact_dir=artifact_dir, enable_trained_model=True).score([feature], profile="gaming")[0][1]
 
         self.assertGreater(score, 1.0)
+
+    def test_ranker_feature_flag_can_disable_trained_artifact(self) -> None:
+        feature = CandidateFeatures(
+            candidate_id="ml",
+            hook_strength=0.1,
+            payoff_score=1.0,
+            max_hype=1.0,
+            quoteability_score=1.0,
+            standalone_score=1.0,
+            semantic_density=1.0,
+            profile_fit_score=1.0,
+            source="quote",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_dir = Path(tmp)
+            (artifact_dir / "gaming_ranker.json").write_text(
+                json.dumps(
+                    {
+                        "version": 3,
+                        "profile": "gaming",
+                        "model_type": "linear",
+                        "feature_names": ["quoteability_score"],
+                        "weights": {"quoteability_score": 10.0},
+                        "scales": {"quoteability_score": {"mean": 0.0, "std": 1.0}},
+                        "training_stats": {
+                            "rows": 100,
+                            "positive_rows": 40,
+                            "negative_rows": 60,
+                            "train_rows": 80,
+                            "validation_rows": 20,
+                        },
+                        "validation": {"accuracy": 0.7, "ndcg_at_5": 0.8, "precision_at_5": 0.8},
+                        "blend": 1.0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            disabled_score = Ranker(artifact_dir=artifact_dir, enable_trained_model=False).score([feature], profile="gaming")[0][1]
+            enabled_score = Ranker(artifact_dir=artifact_dir, enable_trained_model=True).score([feature], profile="gaming")[0][1]
+
+        self.assertNotEqual(disabled_score, enabled_score)
 
     def test_ranker_rewards_chapter_coherence_and_topic_shift(self) -> None:
         coherent = CandidateFeatures(

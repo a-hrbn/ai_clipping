@@ -9,7 +9,7 @@ import time
 import urllib.parse
 import urllib.request
 import urllib.error
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import certifi
 
@@ -26,6 +26,10 @@ _NEGATIVE_WINDOW_MIN_SECONDS = 18
 _NEGATIVE_WINDOW_MAX_SECONDS = 75
 _NEGATIVE_BUFFER_SECONDS = 20
 _HARD_NEGATIVE_OFFSETS = (12.0, 24.0, 40.0)
+_CLIP_REGION_MERGE_GAP_SECONDS = 5.0
+_CLIP_REGION_AMBIGUOUS_CLIP_COUNT = 5
+_CLIP_REGION_AMBIGUOUS_WINDOW_SECONDS = 95.0
+_CLIP_REGION_STRONG_SHRINK_MAX_SECONDS = 75.0
 
 
 class TwitchClient:
@@ -99,6 +103,21 @@ def main() -> int:
     parser.add_argument("--date-to", required=True, help="YYYY-MM-DD")
     parser.add_argument("--cache-dir", default=str(BACKEND_ROOT / "ml" / "artifacts" / "twitch_cache"))
     parser.add_argument("--output", default=str(BACKEND_ROOT / "ml" / "artifacts" / "twitch_clip_labels.jsonl"))
+    parser.add_argument(
+        "--progress-file",
+        default=str(BACKEND_ROOT / "ml" / "artifacts" / "twitch_clip_label_progress.json"),
+        help="Tracks already collected date ranges per broadcaster for incremental collection.",
+    )
+    parser.add_argument(
+        "--merge-output",
+        action="store_true",
+        help="Merge newly collected labels into an existing output JSONL instead of replacing it.",
+    )
+    parser.add_argument(
+        "--skip-covered",
+        action="store_true",
+        help="Skip already collected date ranges recorded in the progress file.",
+    )
     args = parser.parse_args()
 
     if not settings.twitch_client_id or not settings.twitch_client_secret:
@@ -107,16 +126,62 @@ def main() -> int:
 
     client = TwitchClient(settings.twitch_client_id, settings.twitch_client_secret)
     cache_dir = pathlib.Path(args.cache_dir)
-    rows = collect_clip_labels(
-        client,
-        broadcaster=args.broadcaster,
-        date_from=args.date_from,
-        date_to=args.date_to,
-        cache_dir=cache_dir,
-    )
     output_path = pathlib.Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text("\n".join(json.dumps(row, ensure_ascii=True) for row in rows), encoding="utf-8")
+    progress_path = pathlib.Path(args.progress_file)
+    requested_start = _parse_cli_date(args.date_from)
+    requested_end = _parse_cli_date(args.date_to)
+    if requested_end < requested_start:
+        print("date-to must be on or after date-from.")
+        return 1
+
+    existing_rows = _read_jsonl(output_path) if output_path.exists() else []
+    missing_ranges = [(requested_start, requested_end)]
+    skipped_ranges: list[tuple[date, date]] = []
+    if args.skip_covered and output_path.exists():
+        progress = _read_progress_file(progress_path)
+        covered_ranges = _covered_date_ranges(progress, args.broadcaster)
+        skipped_ranges = _intersecting_date_ranges(requested_start, requested_end, covered_ranges)
+        missing_ranges = _missing_date_ranges(requested_start, requested_end, covered_ranges)
+
+    print(f"Trainiere VOD von {args.date_from} bis {args.date_to}")
+    for skipped_start, skipped_end in skipped_ranges:
+        print(f"Überspringe {skipped_start.isoformat()} bis {skipped_end.isoformat()} (bereits trainiert)")
+    rows = list(existing_rows) if (output_path.exists() and (args.merge_output or args.skip_covered)) else []
+    collected_any = False
+    chunk_ranges = _collection_chunks(missing_ranges)
+    for range_start, range_end in chunk_ranges:
+        print(
+            "Sammle Twitch-Labels für "
+            f"{args.broadcaster}: {range_start.isoformat()} bis {range_end.isoformat()}"
+        )
+        range_rows = collect_clip_labels(
+            client,
+            broadcaster=args.broadcaster,
+            date_from=range_start.isoformat(),
+            date_to=range_end.isoformat(),
+            cache_dir=cache_dir,
+        )
+        before_count = len(rows)
+        rows = _merge_label_rows(rows, range_rows)
+        collected_any = collected_any or bool(range_rows)
+        if output_path.exists() or rows:
+            _write_jsonl(output_path, rows)
+        progress = _read_progress_file(progress_path)
+        progress = _record_collected_range(progress, args.broadcaster, range_start, range_end)
+        _write_progress_file(progress_path, progress)
+        print(
+            f"Checkpoint gespeichert für {range_start.isoformat()} bis {range_end.isoformat()} "
+            f"({before_count} -> {len(rows)} Rows)"
+        )
+
+    if args.skip_covered and not missing_ranges:
+        print(
+            "Überspringe Twitch-Sammlung, Bereich bereits vollständig trainiert: "
+            f"{args.date_from} -> {args.date_to}"
+        )
+    if output_path.exists() and rows == existing_rows and not collected_any:
+        print(f"Label-Datei unverändert: {output_path}")
     print(f"Wrote {len(rows)} label rows to {output_path}")
     return 0
 
@@ -161,9 +226,17 @@ def build_label_rows(broadcaster: str, vods: list[dict], clips: list[dict]) -> l
         }
         clips_by_vod.setdefault(vod_id, []).append(clip_row)
 
+    view_thresholds = _view_count_thresholds(
+        [
+            clip_row
+            for clip_rows in clips_by_vod.values()
+            for clip_row in clip_rows
+        ]
+    )
+
     rows: list[dict] = []
     for vod_id, vod in vod_map.items():
-        merged = _merge_clip_regions(clips_by_vod.get(vod_id, []))
+        merged = _merge_clip_regions(clips_by_vod.get(vod_id, []), thresholds=view_thresholds)
         for item in merged:
             item.update(
                 {
@@ -171,6 +244,7 @@ def build_label_rows(broadcaster: str, vods: list[dict], clips: list[dict]) -> l
                     "platform_source": "twitch_clip",
                     "label_source": "twitch_clip_api",
                     "vod_url": f"https://www.twitch.tv/videos/{vod_id}",
+                    "vod_duration_seconds": int(vod.get("duration_seconds") or 0),
                     "created_at": item["cluster_created_at"],
                 }
             )
@@ -237,34 +311,23 @@ def _get_clips(client: TwitchClient, broadcaster_id: str, date_from: str, date_t
     return rows
 
 
-def _merge_clip_regions(clips: list[dict]) -> list[dict]:
+def _merge_clip_regions(clips: list[dict], thresholds: dict[str, int] | None = None) -> list[dict]:
     if not clips:
         return []
     ordered = sorted(clips, key=lambda row: (row["vod_offset"], row["duration"], row["clip_id"]))
     regions: list[dict] = []
     current: dict | None = None
     for clip in ordered:
-        start = max(float(clip["vod_offset"]) - 3.0, 0.0)
-        end = float(clip["vod_offset"]) + max(float(clip["duration"]), 8.0) + 3.0
-        bucket, label_class, label_score = _classify_clip_views(int(clip["view_count"]))
-        if current is None or start > float(current["window_end"]) + 12.0:
-            current = {
-                "vod_id": clip["vod_id"],
-                "window_start": round(start, 2),
-                "window_end": round(end, 2),
-                "label_class": label_class,
-                "label_score": label_score,
-                "quality_bucket": bucket,
-                "view_bucket": bucket,
-                "clip_ids": [clip["clip_id"]],
-                "view_count": int(clip["view_count"]),
-                "cluster_created_at": clip["created_at"],
-            }
+        start, end = _clip_window_bounds(clip)
+        bucket, label_class, label_score = _classify_clip_views(int(clip["view_count"]), thresholds=thresholds)
+        if current is None or not _should_merge_clip_into_region(current, clip):
+            current = _new_clip_region(clip, start, end, bucket, label_class, label_score)
             regions.append(current)
             continue
 
         current["window_start"] = round(min(float(current["window_start"]), start), 2)
         current["window_end"] = round(max(float(current["window_end"]), end), 2)
+        current["cluster_last_clip_end"] = max(float(current["cluster_last_clip_end"]), _clip_merge_end(clip))
         current["clip_ids"].append(clip["clip_id"])
         if int(clip["view_count"]) > int(current["view_count"]):
             current["view_count"] = int(clip["view_count"])
@@ -273,13 +336,99 @@ def _merge_clip_regions(clips: list[dict]) -> list[dict]:
             current["label_class"] = label_class
             current["label_score"] = label_score
             current["cluster_created_at"] = clip["created_at"]
+            current["anchor_clip_id"] = clip["clip_id"]
+            current["anchor_vod_offset"] = float(clip["vod_offset"])
+            current["anchor_duration"] = float(clip["duration"] or 0.0)
 
-    for region in regions:
-        if len(region["clip_ids"]) >= 5 or float(region["window_end"]) - float(region["window_start"]) > 95.0:
-            region["label_class"] = "ambiguous"
-            region["label_score"] = 0.0
-            region["quality_bucket"] = "ambiguous"
-    return regions
+    return [_finalize_clip_region(region, thresholds) for region in regions]
+
+
+def _clip_window_bounds(clip: dict) -> tuple[float, float]:
+    start = max(float(clip["vod_offset"]) - 3.0, 0.0)
+    end = float(clip["vod_offset"]) + max(float(clip["duration"]), 8.0) + 3.0
+    return start, end
+
+
+def _clip_merge_end(clip: dict) -> float:
+    return float(clip["vod_offset"]) + max(float(clip["duration"]), 8.0)
+
+
+def _new_clip_region(
+    clip: dict,
+    start: float,
+    end: float,
+    bucket: str,
+    label_class: str,
+    label_score: float,
+) -> dict:
+    return {
+        "vod_id": clip["vod_id"],
+        "window_start": round(start, 2),
+        "window_end": round(end, 2),
+        "label_class": label_class,
+        "label_score": label_score,
+        "quality_bucket": bucket,
+        "view_bucket": bucket,
+        "clip_ids": [clip["clip_id"]],
+        "view_count": int(clip["view_count"]),
+        "cluster_created_at": clip["created_at"],
+        "cluster_last_clip_end": _clip_merge_end(clip),
+        "anchor_clip_id": clip["clip_id"],
+        "anchor_vod_offset": float(clip["vod_offset"]),
+        "anchor_duration": float(clip["duration"] or 0.0),
+    }
+
+
+def _should_merge_clip_into_region(region: dict, clip: dict) -> bool:
+    clip_start = float(clip["vod_offset"])
+    return clip_start <= float(region["cluster_last_clip_end"]) + _CLIP_REGION_MERGE_GAP_SECONDS
+
+
+def _finalize_clip_region(region: dict, thresholds: dict[str, int] | None = None) -> dict:
+    finalized = dict(region)
+    region_duration = float(finalized["window_end"]) - float(finalized["window_start"])
+    if (
+        len(finalized["clip_ids"]) >= _CLIP_REGION_AMBIGUOUS_CLIP_COUNT
+        or region_duration > _CLIP_REGION_AMBIGUOUS_WINDOW_SECONDS
+    ):
+        shrunk = _shrink_strong_positive_region(finalized, thresholds=thresholds)
+        if shrunk is not None:
+            finalized = shrunk
+        else:
+            finalized["label_class"] = "ambiguous"
+            finalized["label_score"] = 0.0
+            finalized["quality_bucket"] = "ambiguous"
+    return _public_clip_region(finalized)
+
+
+def _shrink_strong_positive_region(region: dict, thresholds: dict[str, int] | None = None) -> dict | None:
+    resolved = thresholds or _default_view_thresholds()
+    if str(region.get("label_class") or "") not in {"positive", "viral_positive"}:
+        if int(region.get("view_count") or 0) < int(resolved["positive_min"]):
+            return None
+
+    anchor_clip = {
+        "vod_offset": float(region["anchor_vod_offset"]),
+        "duration": float(region["anchor_duration"]),
+    }
+    start, end = _clip_window_bounds(anchor_clip)
+    if end - start > _CLIP_REGION_STRONG_SHRINK_MAX_SECONDS:
+        end = start + _CLIP_REGION_STRONG_SHRINK_MAX_SECONDS
+
+    shrunk = dict(region)
+    shrunk["window_start"] = round(start, 2)
+    shrunk["window_end"] = round(max(end, start + 8.0), 2)
+    shrunk["clip_ids"] = [str(region["anchor_clip_id"])]
+    return shrunk
+
+
+def _public_clip_region(region: dict) -> dict:
+    public = dict(region)
+    public.pop("cluster_last_clip_end", None)
+    public.pop("anchor_clip_id", None)
+    public.pop("anchor_vod_offset", None)
+    public.pop("anchor_duration", None)
+    return public
 
 
 def _sample_negative_rows(broadcaster: str, vod: dict, positives: list[dict]) -> list[dict]:
@@ -311,6 +460,7 @@ def _sample_negative_rows(broadcaster: str, vod: dict, positives: list[dict]) ->
                     "label_source": "twitch_clip_api",
                     "vod_id": str(vod["id"]),
                     "vod_url": f"https://www.twitch.tv/videos/{vod['id']}",
+                    "vod_duration_seconds": int(vod.get("duration_seconds") or 0),
                     "window_start": round(window[0], 2),
                     "window_end": round(window[1], 2),
                     "label_class": "background_negative",
@@ -360,6 +510,7 @@ def _mine_boundary_negatives(
                         "label_source": "twitch_clip_api",
                         "vod_id": str(vod["id"]),
                         "vod_url": f"https://www.twitch.tv/videos/{vod['id']}",
+                        "vod_duration_seconds": int(vod.get("duration_seconds") or 0),
                         "window_start": round(window_start, 2),
                         "window_end": round(window_end, 2),
                         "label_class": "hard_negative",
@@ -411,9 +562,10 @@ def _mine_interstitial_negatives(
                 "platform_source": "twitch_vod_negative",
                 "label_source": "twitch_clip_api",
                 "vod_id": str(vod["id"]),
-                "vod_url": f"https://www.twitch.tv/videos/{vod['id']}",
-                "window_start": round(window_start, 2),
-                "window_end": round(window_end, 2),
+                    "vod_url": f"https://www.twitch.tv/videos/{vod['id']}",
+                    "vod_duration_seconds": int(vod.get("duration_seconds") or 0),
+                    "window_start": round(window_start, 2),
+                    "window_end": round(window_end, 2),
                 "label_class": "hard_negative",
                 "label_score": 0.0,
                 "quality_bucket": "negative",
@@ -475,14 +627,69 @@ def _dedupe_negative_rows(rows: list[dict]) -> list[dict]:
     return deduped
 
 
-def _classify_clip_views(view_count: int) -> tuple[str, str, float]:
-    if view_count >= 10_000:
+def _classify_clip_views(
+    view_count: int,
+    thresholds: dict[str, int] | None = None,
+) -> tuple[str, str, float]:
+    resolved = thresholds or _default_view_thresholds()
+    if view_count >= resolved["viral_min"]:
         return "viral", "viral_positive", 1.0
-    if view_count >= 1_000:
+    if view_count >= resolved["positive_min"]:
         return "good", "positive", 0.8
-    if view_count >= 100:
+    if view_count >= resolved["weak_positive_min"]:
         return "okay", "weak_positive", 0.55
-    return "weak", "weak_positive", 0.35
+    if view_count < resolved["hard_negative_lt"]:
+        return "weak", "hard_negative", 0.0
+    return "weak", "ambiguous", 0.0
+
+
+def _default_view_thresholds() -> dict[str, int]:
+    return {
+        "hard_negative_lt": 50,
+        "weak_positive_min": 250,
+        "positive_min": 1_000,
+        "viral_min": 10_000,
+    }
+
+
+def _view_count_thresholds(clips: list[dict]) -> dict[str, int]:
+    defaults = _default_view_thresholds()
+    counts = sorted(
+        max(int(clip.get("view_count") or 0), 0)
+        for clip in clips
+    )
+    if not counts:
+        return defaults
+
+    hard_negative_lt = int(min(max(_percentile_value(counts, 0.15), 25), 250))
+    weak_positive_min = int(max(_percentile_value(counts, 0.50), defaults["weak_positive_min"]))
+    positive_min = int(max(_percentile_value(counts, 0.75), defaults["positive_min"]))
+    viral_min = int(max(_percentile_value(counts, 0.90), defaults["viral_min"]))
+
+    weak_positive_min = max(weak_positive_min, hard_negative_lt + 25)
+    positive_min = max(positive_min, weak_positive_min + 100)
+    viral_min = max(viral_min, positive_min + 500)
+
+    return {
+        "hard_negative_lt": hard_negative_lt,
+        "weak_positive_min": weak_positive_min,
+        "positive_min": positive_min,
+        "viral_min": viral_min,
+    }
+
+
+def _percentile_value(values: list[int], percentile: float) -> int:
+    if not values:
+        return 0
+    if len(values) == 1:
+        return int(values[0])
+    position = max(0.0, min(percentile, 1.0)) * (len(values) - 1)
+    lower_index = int(position)
+    upper_index = min(lower_index + 1, len(values) - 1)
+    lower = float(values[lower_index])
+    upper = float(values[upper_index])
+    fraction = position - lower_index
+    return int(round(lower + (upper - lower) * fraction))
 
 
 def _parse_twitch_duration(raw: str) -> int:
@@ -510,9 +717,187 @@ def _overlaps_any(window: tuple[float, float], blocked: list[tuple[float, float]
     return any(window[0] < end and window[1] > start for start, end in blocked)
 
 
+def _read_jsonl(path: pathlib.Path) -> list[dict]:
+    rows: list[dict] = []
+    if not path.exists():
+        return rows
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line:
+            rows.append(json.loads(line))
+    return rows
+
+
+def _write_jsonl(path: pathlib.Path, rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text("\n".join(json.dumps(row, ensure_ascii=True) for row in rows), encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def _label_row_key(row: dict) -> tuple:
+    clip_ids = sorted(str(item) for item in (row.get("clip_ids") or []) if str(item).strip())
+    if clip_ids:
+        return (
+            "positive_cluster",
+            str(row.get("vod_id") or ""),
+            tuple(clip_ids),
+        )
+    return (
+        "window",
+        str(row.get("vod_id") or ""),
+        str(row.get("label_class") or ""),
+        str(row.get("negative_source") or ""),
+        round(float(row.get("window_start") or 0.0), 2),
+        round(float(row.get("window_end") or 0.0), 2),
+    )
+
+
+def _merge_label_rows(existing_rows: list[dict], new_rows: list[dict]) -> list[dict]:
+    merged: dict[tuple, dict] = {}
+    for row in existing_rows:
+        merged[_label_row_key(row)] = dict(row)
+    for row in new_rows:
+        merged[_label_row_key(row)] = dict(row)
+    return sorted(
+        merged.values(),
+        key=lambda row: (
+            str(row.get("vod_id") or ""),
+            float(row.get("window_start") or 0.0),
+            str(row.get("label_class") or ""),
+            str(row.get("negative_source") or ""),
+        ),
+    )
+
+
+def _parse_cli_date(raw: str) -> date:
+    return date.fromisoformat(raw)
+
+
+def _merge_date_ranges(ranges: list[tuple[date, date]]) -> list[tuple[date, date]]:
+    if not ranges:
+        return []
+    ordered = sorted(ranges, key=lambda item: item[0])
+    merged: list[tuple[date, date]] = [ordered[0]]
+    for current_start, current_end in ordered[1:]:
+        last_start, last_end = merged[-1]
+        if current_start <= last_end + timedelta(days=1):
+            merged[-1] = (last_start, max(last_end, current_end))
+            continue
+        merged.append((current_start, current_end))
+    return merged
+
+
+def _missing_date_ranges(
+    requested_start: date,
+    requested_end: date,
+    covered_ranges: list[tuple[date, date]],
+) -> list[tuple[date, date]]:
+    if requested_end < requested_start:
+        return []
+    current = requested_start
+    missing: list[tuple[date, date]] = []
+    for covered_start, covered_end in _merge_date_ranges(covered_ranges):
+        if covered_end < current:
+            continue
+        if covered_start > requested_end:
+            break
+        if covered_start > current:
+            missing.append((current, min(requested_end, covered_start - timedelta(days=1))))
+        current = max(current, covered_end + timedelta(days=1))
+        if current > requested_end:
+            break
+    if current <= requested_end:
+        missing.append((current, requested_end))
+    return missing
+
+
+def _intersecting_date_ranges(
+    requested_start: date,
+    requested_end: date,
+    covered_ranges: list[tuple[date, date]],
+) -> list[tuple[date, date]]:
+    intersections: list[tuple[date, date]] = []
+    for covered_start, covered_end in _merge_date_ranges(covered_ranges):
+        start = max(requested_start, covered_start)
+        end = min(requested_end, covered_end)
+        if start <= end:
+            intersections.append((start, end))
+    return intersections
+
+
+def _collection_chunks(
+    ranges: list[tuple[date, date]],
+    days_per_chunk: int = 1,
+) -> list[tuple[date, date]]:
+    chunk_days = max(int(days_per_chunk), 1)
+    chunks: list[tuple[date, date]] = []
+    for range_start, range_end in ranges:
+        current = range_start
+        while current <= range_end:
+            chunk_end = min(range_end, current + timedelta(days=chunk_days - 1))
+            chunks.append((current, chunk_end))
+            current = chunk_end + timedelta(days=1)
+    return chunks
+
+
+def _read_progress_file(path: pathlib.Path) -> dict:
+    if not path.exists():
+        return {"version": 1, "broadcasters": {}}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {"version": 1, "broadcasters": {}}
+    if not isinstance(payload, dict):
+        return {"version": 1, "broadcasters": {}}
+    broadcasters = payload.get("broadcasters")
+    if not isinstance(broadcasters, dict):
+        broadcasters = {}
+    return {
+        "version": int(payload.get("version") or 1),
+        "broadcasters": broadcasters,
+    }
+
+
+def _write_progress_file(path: pathlib.Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def _covered_date_ranges(payload: dict, broadcaster: str) -> list[tuple[date, date]]:
+    rows = payload.get("broadcasters", {}).get(broadcaster.strip().lower(), [])
+    covered: list[tuple[date, date]] = []
+    for row in rows:
+        try:
+            covered.append((_parse_cli_date(str(row["date_from"])), _parse_cli_date(str(row["date_to"]))))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return _merge_date_ranges(covered)
+
+
+def _record_collected_range(payload: dict, broadcaster: str, date_from: date, date_to: date) -> dict:
+    normalized = broadcaster.strip().lower()
+    ranges = _covered_date_ranges(payload, normalized)
+    ranges.append((date_from, date_to))
+    merged = _merge_date_ranges(ranges)
+    updated = {
+        "version": 1,
+        "broadcasters": dict(payload.get("broadcasters") or {}),
+    }
+    updated["broadcasters"][normalized] = [
+        {"date_from": start.isoformat(), "date_to": end.isoformat()}
+        for start, end in merged
+    ]
+    return updated
+
+
 def _write_cache(path: pathlib.Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+    tmp_path.replace(path)
 
 
 if __name__ == "__main__":

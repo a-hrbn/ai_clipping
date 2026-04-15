@@ -132,6 +132,54 @@ class TrainingExportTests(unittest.TestCase):
             self.assertEqual(row["supervision_tier"], "outcome_feedback")
             self.assertEqual(row["label_class"], "outcome_positive")
             self.assertEqual(row["ordinal_label"], 3)
+            self.assertEqual(row["dataset_source"], "feedback_outcome_export")
+
+    def test_export_training_rows_preserves_variant_and_dynamic_feature_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Path(tmp)
+            debug = storage / "job-3" / "debug"
+            debug.mkdir(parents=True, exist_ok=True)
+            (debug / "candidate_features.jsonl").write_text(
+                json.dumps({
+                    "candidate_id": "c3",
+                    "max_hype": 4.2,
+                    "source": "reaction",
+                    "dynamic_trend_score": 0.61,
+                    "projected_retention_score": 0.73,
+                    "feature_build_version": 5,
+                }) + "\n",
+                encoding="utf-8",
+            )
+            (debug / "feedback.jsonl").write_text(
+                json.dumps({
+                    "job_id": "job-3",
+                    "candidate_id": "c3",
+                    "selected": True,
+                    "exported": False,
+                    "final_start": 3.0,
+                    "final_end": 18.0,
+                    "rejected_reason": None,
+                    "rejection_source": None,
+                    "publish_platform": "tiktok",
+                    "final_variant_key": "aggressive_hook",
+                    "retention_3s": 0.81,
+                    "completion_rate": 0.54,
+                }) + "\n",
+                encoding="utf-8",
+            )
+            output = storage / "feedback" / "training_rows.jsonl"
+
+            count = export_training_rows(storage, output)
+
+            self.assertEqual(count, 1)
+            row = json.loads(output.read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(row["publish_platform"], "tiktok")
+            self.assertEqual(row["final_variant_key"], "aggressive_hook")
+            self.assertEqual(row["candidate_source"], "reaction")
+            self.assertEqual(row["content_bucket"], "reaction")
+            self.assertEqual(row["features"]["projected_retention_score"], 0.73)
+            self.assertTrue(row["feature_provenance"]["has_dynamic_trend"])
+            self.assertTrue(row["feature_provenance"]["has_variant_projection"])
 
 
 if __name__ == "__main__":

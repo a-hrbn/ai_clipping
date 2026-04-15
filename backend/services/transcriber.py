@@ -24,7 +24,12 @@ def _get_model() -> whisper.Whisper:
     global _whisper_model
     if _whisper_model is None:
         logger.info("Loading Whisper model '%s'…", settings.whisper_model)
-        _whisper_model = whisper.load_model(settings.whisper_model)
+        whisper_cache_dir = pathlib.Path(settings.storage_dir).parent / "cache" / "whisper"
+        whisper_cache_dir.mkdir(parents=True, exist_ok=True)
+        _whisper_model = whisper.load_model(
+            settings.whisper_model,
+            download_root=str(whisper_cache_dir),
+        )
         logger.info("Whisper model loaded.")
     return _whisper_model
 

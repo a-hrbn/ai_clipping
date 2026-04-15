@@ -27,10 +27,11 @@ from services.ranker import OFFLINE_ONLY_FEATURE_NAMES
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Train a simple linear ranker from candidate feedback.")
-    parser.add_argument("--storage-dir", default="/tmp/ai_clipping")
+    parser.add_argument("--storage-dir", default=str(BACKEND_ROOT / "tmp" / "storage"))
     parser.add_argument("--profile", default="gaming")
     parser.add_argument("--dataset", default="")
     parser.add_argument("--artifact-dir", default=str(BACKEND_ROOT / "ml" / "artifacts"))
+    parser.add_argument("--report-out", default="")
     args = parser.parse_args()
 
     storage_dir = pathlib.Path(args.storage_dir)
@@ -39,15 +40,27 @@ def main() -> int:
         export_training_rows(storage_dir, dataset_path)
 
     rows = _read_jsonl(dataset_path)
-    return train_from_rows(rows, args.profile, pathlib.Path(args.artifact_dir))
+    report_path = pathlib.Path(args.report_out) if args.report_out else None
+    return train_from_rows(rows, args.profile, pathlib.Path(args.artifact_dir), report_path=report_path)
 
 
-def train_from_dataset(dataset_path: pathlib.Path, profile: str, artifact_dir: pathlib.Path) -> int:
+def train_from_dataset(
+    dataset_path: pathlib.Path,
+    profile: str,
+    artifact_dir: pathlib.Path,
+    report_path: pathlib.Path | None = None,
+) -> int:
     rows = _read_jsonl(dataset_path)
-    return train_from_rows(rows, profile, artifact_dir)
+    return train_from_rows(rows, profile, artifact_dir, report_path=report_path)
 
 
-def train_from_rows(rows: list[dict], profile: str, artifact_dir: pathlib.Path) -> int:
+def train_from_rows(
+    rows: list[dict],
+    profile: str,
+    artifact_dir: pathlib.Path,
+    *,
+    report_path: pathlib.Path | None = None,
+) -> int:
     if not rows:
         print("No training rows found.")
         return 1
@@ -78,10 +91,11 @@ def train_from_rows(rows: list[dict], profile: str, artifact_dir: pathlib.Path) 
     train_weights = np.array([_sample_weight(row) for row in train_rows], dtype=float)
     validation_matrix = _feature_matrix(validation_rows, feature_names, scales)
     validation_labels = np.array([int(row["label"]) for row in validation_rows], dtype=int)
+    validation_groups = _ranking_group_labels(validation_rows, split.get("unit", ""))
 
     linear_weights = _mean_difference_weights(train_positive, train_negative, feature_names, scales)
     linear_raw_scores = _linear_raw_scores(validation_rows, feature_names, linear_weights, scales, 0.0)
-    linear_metrics = _evaluate_scores(validation_labels, linear_raw_scores)
+    linear_metrics = _evaluate_scores(validation_labels, linear_raw_scores, groups=validation_groups)
 
     logistic = LogisticRegression(
         class_weight="balanced",
@@ -91,14 +105,25 @@ def train_from_rows(rows: list[dict], profile: str, artifact_dir: pathlib.Path) 
     )
     logistic.fit(train_matrix, train_labels, sample_weight=train_weights)
     logistic_raw_scores = logistic.decision_function(validation_matrix)
-    logistic_metrics = _evaluate_scores(validation_labels, logistic_raw_scores)
+    logistic_metrics = _evaluate_scores(validation_labels, logistic_raw_scores, groups=validation_groups)
 
-    pairwise_candidate = _fit_pairwise_logistic(train_rows, validation_rows, feature_names, scales)
+    pairwise_candidate = _fit_pairwise_logistic(
+        train_rows,
+        validation_rows,
+        feature_names,
+        scales,
+        split.get("unit", ""),
+    )
 
     gradient_boost = GradientBoostingClassifier(random_state=0)
     gradient_boost.fit(train_matrix, train_labels, sample_weight=train_weights)
     gradient_boost_scores = gradient_boost.predict_proba(validation_matrix)[:, 1]
-    gradient_metrics = _evaluate_scores(validation_labels, gradient_boost_scores, score_kind="probability")
+    gradient_metrics = _evaluate_scores(
+        validation_labels,
+        gradient_boost_scores,
+        score_kind="probability",
+        groups=validation_groups,
+    )
 
     lightgbm_ranker_candidate = _fit_lightgbm_ranker(
         train_rows,
@@ -145,22 +170,26 @@ def train_from_rows(rows: list[dict], profile: str, artifact_dir: pathlib.Path) 
     if selected_model["artifact_model_type"] in {"gradient_boosting", "lightgbm_ranker"}:
         model_path = artifact_dir / f"{profile}_ranker_model.joblib"
         artifact_dir.mkdir(parents=True, exist_ok=True)
-        joblib.dump(selected_model["fitted_model"], model_path)
+        tmp_model_path = model_path.with_suffix(model_path.suffix + ".tmp")
+        joblib.dump(selected_model["fitted_model"], tmp_model_path)
+        tmp_model_path.replace(model_path)
 
     artifact = {
-        "version": 2,
+        "version": 3,
+        "artifact_family": "ranker_v2",
         "profile": profile,
         "model_type": selected_model["artifact_model_type"],
         "selected_model": selected_model["name"],
         "selection_metric": "composite_validation_score",
-        "label_schema_version": 2,
-        "feature_schema_version": 2,
+        "label_schema_version": 3,
+        "feature_schema_version": 3,
         "feature_names": feature_names,
         "weights": selected_model.get("weights", {}),
         "scales": scales,
         "intercept": selected_model.get("intercept", 0.0),
         "model_path": model_path.name if model_path else "",
         "blend": 0.45,
+        "top_feature_importances": _feature_importance_map(selected_model, feature_names),
         "training_stats": {
             "rows": len(rows),
             "positive_rows": len(positive),
@@ -172,18 +201,33 @@ def train_from_rows(rows: list[dict], profile: str, artifact_dir: pathlib.Path) 
             "leakage_risk": split.get("leakage_risk", "unknown"),
             "supervision_tiers": _count_values(rows, "supervision_tier"),
             "dataset_sources": _count_values(rows, "dataset_source"),
+            "platforms": _count_values(rows, "publish_platform"),
+            "variants": _count_values(rows, "final_variant_key"),
+            "content_buckets": _count_values(rows, "content_bucket"),
         },
         "validation": selected_model["metrics"],
         "model_comparison": {
             candidate["name"]: candidate["metrics"]
             for candidate in model_candidates
         },
-        "bucketed_validation": _bucketed_validation(selected_model["artifact_model_type"], validation_rows, feature_names, scales, selected_model),
+        "bucketed_validation": _bucketed_validation(
+            selected_model["artifact_model_type"],
+            validation_rows,
+            feature_names,
+            scales,
+            selected_model,
+            split.get("unit", ""),
+        ),
     }
 
     artifact_dir.mkdir(parents=True, exist_ok=True)
     artifact_path = artifact_dir / f"{profile}_ranker.json"
-    artifact_path.write_text(json.dumps(artifact, ensure_ascii=True, indent=2), encoding="utf-8")
+    tmp_artifact_path = artifact_path.with_suffix(artifact_path.suffix + ".tmp")
+    tmp_artifact_path.write_text(json.dumps(artifact, ensure_ascii=True, indent=2), encoding="utf-8")
+    tmp_artifact_path.replace(artifact_path)
+    if report_path is not None:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(artifact, ensure_ascii=True, indent=2), encoding="utf-8")
     print(f"Wrote artifact to {artifact_path}")
     print(
         json.dumps(
@@ -225,11 +269,11 @@ def _numeric_feature_names(feature_row: dict) -> list[str]:
 def _split_rows(rows: list[dict]) -> dict[str, list[dict] | str]:
     grouped_split = _split_rows_by_group(rows)
     if grouped_split is not None:
-        return grouped_split
+        return _validated_split(rows, grouped_split)
 
     time_split = _split_rows_by_time(rows)
     if time_split is not None:
-        return time_split
+        return _validated_split(rows, time_split)
 
     ordered = sorted(rows, key=lambda row: (_group_key(row), row.get("job_id", ""), row.get("candidate_id", "")))
     if len(ordered) < 4:
@@ -254,13 +298,13 @@ def _split_rows(rows: list[dict]) -> dict[str, list[dict] | str]:
 
     if not train or not validation:
         return _stratified_fallback_split(ordered, strategy="fallback_half_split", unit="row")
-    return {
+    return _validated_split(rows, {
         "train": train,
         "validation": validation,
         "strategy": "group_holdout",
         "unit": "creator_id",
         "leakage_risk": "medium",
-    }
+    })
 
 
 def _split_rows_by_group(rows: list[dict]) -> dict[str, list[dict] | str] | None:
@@ -341,13 +385,14 @@ def _group_holdout_by_unit(
 
     if not train or not validation:
         return None
-    return {
+    split = {
         "train": train,
         "validation": validation,
         "strategy": "group_holdout",
         "unit": unit,
         "leakage_risk": leakage_risk,
     }
+    return split if _split_has_both_classes(train) and _split_has_both_classes(validation) else None
 
 
 def _stratified_fallback_split(rows: list[dict], strategy: str, unit: str) -> dict[str, list[dict] | str]:
@@ -379,6 +424,24 @@ def _stratified_fallback_split(rows: list[dict], strategy: str, unit: str) -> di
         "unit": unit,
         "leakage_risk": "high",
     }
+
+
+def _split_has_both_classes(rows: list[dict]) -> bool:
+    labels = {int(row["label"]) for row in rows if row.get("label") in {0, 1}}
+    return labels == {0, 1}
+
+
+def _validated_split(rows: list[dict], split: dict[str, list[dict] | str]) -> dict[str, list[dict] | str]:
+    train_rows = list(split.get("train") or [])
+    validation_rows = list(split.get("validation") or [])
+    if _split_has_both_classes(train_rows) and _split_has_both_classes(validation_rows):
+        return split
+
+    fallback_strategy = f"{split.get('strategy', 'split')}_fallback_stratified"
+    fallback = _stratified_fallback_split(rows, strategy=fallback_strategy, unit="row")
+    if _split_has_both_classes(list(fallback["train"])) and _split_has_both_classes(list(fallback["validation"])):
+        return fallback
+    return fallback
 
 
 def _group_key(row: dict) -> str:
@@ -425,6 +488,7 @@ def _fit_pairwise_logistic(
     validation_rows: list[dict],
     feature_names: list[str],
     scales: dict[str, dict[str, float]],
+    split_unit: str,
 ) -> dict | None:
     pair_matrix, pair_labels, pair_weights = _pairwise_training_matrix(train_rows, feature_names, scales)
     if len(pair_labels) < 8 or len(set(pair_labels.tolist())) < 2:
@@ -446,6 +510,7 @@ def _fit_pairwise_logistic(
     metrics = _evaluate_scores(
         np.array([int(row["label"]) for row in validation_rows], dtype=int),
         validation_scores,
+        groups=_ranking_group_labels(validation_rows, split_unit),
     )
     return {
         "name": "pairwise_logistic_regression",
@@ -503,7 +568,11 @@ def _fit_lightgbm_ranker(
         return None
 
     validation_scores = np.array(model.predict(validation_matrix), dtype=float)
-    metrics = _evaluate_scores(validation_binary, validation_scores)
+    metrics = _evaluate_scores(
+        validation_binary,
+        validation_scores,
+        groups=_ranking_group_labels(validation_rows, split_unit),
+    )
     return {
         "name": "lightgbm_ranker",
         "artifact_model_type": "lightgbm_ranker",
@@ -587,6 +656,10 @@ def _ranking_group_sizes(rows: list[dict], split_unit: str) -> list[int]:
     return [grouped[key] for key in order if grouped[key] > 0]
 
 
+def _ranking_group_labels(rows: list[dict], split_unit: str) -> list[str]:
+    return [_ranking_group_key(row, split_unit) for row in rows]
+
+
 def _ranking_group_key(row: dict, split_unit: str) -> str:
     if split_unit:
         value = str(row.get(split_unit, "")).strip()
@@ -632,7 +705,12 @@ def _normalized_feature_value(features: dict, name: str, scales: dict[str, dict[
     return (value - float(scale.get("mean", 0.0))) / std
 
 
-def _evaluate_scores(labels: np.ndarray, scores: np.ndarray, score_kind: str = "margin") -> dict[str, float]:
+def _evaluate_scores(
+    labels: np.ndarray,
+    scores: np.ndarray,
+    score_kind: str = "margin",
+    groups: list[str] | None = None,
+) -> dict[str, float]:
     total = int(len(labels)) or 1
     if score_kind == "probability":
         predicted = (scores >= 0.5).astype(int)
@@ -661,10 +739,17 @@ def _evaluate_scores(labels: np.ndarray, scores: np.ndarray, score_kind: str = "
         "positive_rate": round(float(np.mean(labels == 1)), 3),
     }
     for k in (3, 5):
-        precision_k, recall_k = _precision_recall_at_k(labels, ranking_scores, k)
+        precision_k, recall_k = _grouped_precision_recall_at_k(labels, ranking_scores, k, groups)
         metrics[f"precision_at_{k}"] = round(precision_k, 3)
         metrics[f"recall_at_{k}"] = round(recall_k, 3)
-    metrics["ndcg_at_5"] = round(_ndcg_at_k(labels, ranking_scores, 5), 3)
+    metrics["ndcg_at_5"] = round(_grouped_ndcg_at_k(labels, ranking_scores, 5, groups), 3)
+    if groups:
+        metrics["ranking_groups"] = len({group for group in groups if str(group).strip()})
+        for k in (3, 5):
+            precision_k, recall_k = _precision_recall_at_k(labels, ranking_scores, k)
+            metrics[f"global_precision_at_{k}"] = round(precision_k, 3)
+            metrics[f"global_recall_at_{k}"] = round(recall_k, 3)
+        metrics["global_ndcg_at_5"] = round(_ndcg_at_k(labels, ranking_scores, 5), 3)
     metrics["rows"] = total
     return metrics
 
@@ -686,6 +771,57 @@ def _ndcg_at_k(labels: np.ndarray, scores: np.ndarray, k: int) -> float:
     ideal = sorted(labels.tolist(), reverse=True)[: min(k, len(labels))]
     idcg = sum((2 ** int(label) - 1) / math.log2(index + 2) for index, label in enumerate(ideal))
     return dcg / idcg if idcg else 0.0
+
+
+def _grouped_precision_recall_at_k(
+    labels: np.ndarray,
+    scores: np.ndarray,
+    k: int,
+    groups: list[str] | None,
+) -> tuple[float, float]:
+    if not groups:
+        return _precision_recall_at_k(labels, scores, k)
+    if len(groups) != len(labels):
+        return _precision_recall_at_k(labels, scores, k)
+
+    grouped_indices: dict[str, list[int]] = {}
+    for index, group in enumerate(groups):
+        grouped_indices.setdefault(str(group), []).append(index)
+
+    precisions: list[float] = []
+    recalls: list[float] = []
+    for indices in grouped_indices.values():
+        if not indices:
+            continue
+        precision_k, recall_k = _precision_recall_at_k(labels[indices], scores[indices], k)
+        precisions.append(float(precision_k))
+        recalls.append(float(recall_k))
+    if not precisions:
+        return _precision_recall_at_k(labels, scores, k)
+    return sum(precisions) / len(precisions), sum(recalls) / len(recalls)
+
+
+def _grouped_ndcg_at_k(
+    labels: np.ndarray,
+    scores: np.ndarray,
+    k: int,
+    groups: list[str] | None,
+) -> float:
+    if not groups:
+        return _ndcg_at_k(labels, scores, k)
+    if len(groups) != len(labels):
+        return _ndcg_at_k(labels, scores, k)
+
+    grouped_indices: dict[str, list[int]] = {}
+    for index, group in enumerate(groups):
+        grouped_indices.setdefault(str(group), []).append(index)
+
+    values: list[float] = []
+    for indices in grouped_indices.values():
+        if not indices:
+            continue
+        values.append(float(_ndcg_at_k(labels[indices], scores[indices], k)))
+    return sum(values) / len(values) if values else _ndcg_at_k(labels, scores, k)
 
 
 def _select_model(candidates: list[dict]) -> dict:
@@ -753,7 +889,40 @@ def _sample_weight(row: dict) -> float:
         "pipeline_positive": 1.0,
         "pipeline_negative": 0.8,
     }.get(label_class, 1.0)
-    return base_weight * supervision_multiplier
+    return base_weight * supervision_multiplier * _outcome_weight_multiplier(row)
+
+
+def _outcome_weight_multiplier(row: dict) -> float:
+    multiplier = 1.0
+    if str(row.get("supervision_tier", "")).strip().lower() == "outcome_feedback":
+        retention_3s = _safe_float(row.get("retention_3s"))
+        completion_rate = _safe_float(row.get("completion_rate"))
+        baseline = _safe_float(row.get("baseline_view_rate"))
+        observed = _safe_float(row.get("observed_view_rate"))
+        if retention_3s >= 0.8:
+            multiplier += 0.15
+        elif 0.0 < retention_3s <= 0.35:
+            multiplier -= 0.1
+        if completion_rate >= 0.55:
+            multiplier += 0.1
+        elif 0.0 < completion_rate <= 0.2:
+            multiplier -= 0.08
+        if baseline > 0 and observed > 0:
+            ratio = observed / baseline
+            if ratio >= 1.25:
+                multiplier += 0.12
+            elif ratio <= 0.8:
+                multiplier -= 0.08
+    if str(row.get("publish_platform") or "").strip().lower() in {"tiktok", "youtube_shorts", "instagram_reels"}:
+        multiplier += 0.03
+    return max(0.5, min(1.5, multiplier))
+
+
+def _safe_float(value) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _bucketed_validation(
@@ -762,20 +931,22 @@ def _bucketed_validation(
     feature_names: list[str],
     scales: dict[str, dict[str, float]],
     selected_model: dict,
+    split_unit: str,
 ) -> dict[str, dict[str, float]]:
     buckets: dict[str, dict[str, float]] = {}
     for bucket in sorted({str(row.get("label_class", "")) for row in rows if row.get("label_class")}):
         subset = [row for row in rows if str(row.get("label_class", "")) == bucket]
         if not subset:
             continue
+        subset_groups = _ranking_group_labels(subset, split_unit)
         if model_type == "linear":
             scores = _linear_raw_scores(subset, feature_names, selected_model["weights"], scales, float(selected_model.get("intercept", 0.0)))
             labels = np.array([int(row["label"]) for row in subset], dtype=int)
-            buckets[bucket] = _evaluate_scores(labels, scores)
+            buckets[bucket] = _evaluate_scores(labels, scores, groups=subset_groups)
         elif model_type == "logistic":
             scores = _linear_raw_scores(subset, feature_names, selected_model["weights"], scales, float(selected_model.get("intercept", 0.0)))
             labels = np.array([int(row["label"]) for row in subset], dtype=int)
-            buckets[bucket] = _evaluate_scores(labels, scores)
+            buckets[bucket] = _evaluate_scores(labels, scores, groups=subset_groups)
         elif model_type in {"gradient_boosting", "lightgbm_ranker"}:
             fitted_model = selected_model.get("fitted_model")
             if fitted_model is None:
@@ -783,12 +954,34 @@ def _bucketed_validation(
             if model_type == "gradient_boosting":
                 scores = fitted_model.predict_proba(_feature_matrix(subset, feature_names, scales))[:, 1]
                 labels = np.array([int(row["label"]) for row in subset], dtype=int)
-                buckets[bucket] = _evaluate_scores(labels, scores, score_kind="probability")
+                buckets[bucket] = _evaluate_scores(
+                    labels,
+                    scores,
+                    score_kind="probability",
+                    groups=subset_groups,
+                )
                 continue
             scores = np.array(fitted_model.predict(_feature_matrix(subset, feature_names, scales)), dtype=float)
             labels = np.array([int(row["label"]) for row in subset], dtype=int)
-            buckets[bucket] = _evaluate_scores(labels, scores)
+            buckets[bucket] = _evaluate_scores(labels, scores, groups=subset_groups)
     return buckets
+
+
+def _feature_importance_map(selected_model: dict, feature_names: list[str]) -> dict[str, float]:
+    if selected_model.get("feature_importances"):
+        values = {
+            str(name): abs(float(value))
+            for name, value in dict(selected_model["feature_importances"]).items()
+        }
+    elif selected_model.get("weights"):
+        values = {
+            str(name): abs(float(value))
+            for name, value in dict(selected_model["weights"]).items()
+        }
+    else:
+        values = {name: 0.0 for name in feature_names}
+    ordered = sorted(values.items(), key=lambda item: (item[1], item[0]), reverse=True)
+    return {name: round(value, 6) for name, value in ordered[:25]}
 
 
 def _row_timestamp(row: dict) -> int:

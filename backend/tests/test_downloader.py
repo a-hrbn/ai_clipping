@@ -26,6 +26,11 @@ class _FakeYoutubeDL:
 
 
 class DownloaderTests(unittest.TestCase):
+    def test_coerces_float_eta_to_integer_seconds(self) -> None:
+        self.assertEqual(downloader._coerce_eta_seconds(715.6143084933422), 716)
+        self.assertEqual(downloader._coerce_eta_seconds(0.2), 0)
+        self.assertIsNone(downloader._coerce_eta_seconds(None))
+
     def test_reuses_recent_twitch_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             storage_dir = Path(tmp)
@@ -36,6 +41,7 @@ class DownloaderTests(unittest.TestCase):
             cached_file.write_bytes(b"cached-video")
 
             with patch.object(downloader.settings, "storage_dir", str(storage_dir)), \
+                 patch.object(downloader.settings, "twitch_download_cache_ttl_sec", 3600), \
                  patch.object(downloader, "update_job", create=True) as update_job_mock, \
                  patch.object(downloader.yt_dlp, "YoutubeDL", side_effect=AssertionError("network should not run")):
                 output_path = downloader.download(url, "job-cache-hit")
@@ -56,6 +62,7 @@ class DownloaderTests(unittest.TestCase):
             expected_cache_file = storage_dir / "_download_cache" / "twitch" / f"{downloader.sha256(url.encode('utf-8')).hexdigest()}.mp4"
 
             with patch.object(downloader.settings, "storage_dir", str(storage_dir)), \
+                 patch.object(downloader.settings, "twitch_download_cache_ttl_sec", 3600), \
                  patch.object(downloader, "update_job", create=True), \
                  patch.object(downloader.yt_dlp, "YoutubeDL", _FakeYoutubeDL):
                 output_path = downloader.download(url, "job-cache-miss")
@@ -63,6 +70,21 @@ class DownloaderTests(unittest.TestCase):
             self.assertTrue(output_path.exists())
             self.assertTrue(expected_cache_file.exists())
             self.assertEqual(expected_cache_file.read_bytes(), output_path.read_bytes())
+
+    def test_skips_twitch_cache_when_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage_dir = Path(tmp)
+            url = "https://www.twitch.tv/videos/555"
+            expected_cache_dir = storage_dir / "_download_cache" / "twitch"
+
+            with patch.object(downloader.settings, "storage_dir", str(storage_dir)), \
+                 patch.object(downloader.settings, "twitch_download_cache_ttl_sec", 0), \
+                 patch.object(downloader, "update_job", create=True), \
+                 patch.object(downloader.yt_dlp, "YoutubeDL", _FakeYoutubeDL):
+                output_path = downloader.download(url, "job-no-cache")
+
+            self.assertTrue(output_path.exists())
+            self.assertFalse(expected_cache_dir.exists())
 
     def test_resolves_downloaded_file_with_nonstandard_extension(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

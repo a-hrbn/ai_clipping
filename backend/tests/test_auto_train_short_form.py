@@ -28,6 +28,16 @@ class AutoTrainShortFormTests(unittest.TestCase):
             self.assertEqual(rows[1]["platform"], "tiktok")
             self.assertEqual(rows[1]["max_clips"], "8")
 
+    def test_filter_seeds_by_streamers_keeps_requested_streamer(self) -> None:
+        seeds = [
+            {"streamer": "jynxzi", "platform": "youtube", "source_url": "a"},
+            {"streamer": "tarik", "platform": "tiktok", "source_url": "b"},
+        ]
+
+        filtered = auto_train_short_form._filter_seeds_by_streamers(seeds, {"jynxzi"})
+
+        self.assertEqual(filtered, [{"streamer": "jynxzi", "platform": "youtube", "source_url": "a"}])
+
     def test_label_candidates_uses_top_and_bottom_buckets(self) -> None:
         candidates = [
             {"url": f"https://example.com/{i}", "view_count": views, "like_count": 0, "comment_count": 0, "duration": 20, "title": str(i)}
@@ -269,6 +279,75 @@ class AutoTrainShortFormTests(unittest.TestCase):
 
         self.assertEqual(rc, 0)
         train_mock.assert_called_once_with(short_form_dataset, "jynxzi", Path(tmp))
+
+    def test_train_preferred_path_filters_vod_labels_for_streamer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = type("Args", (), {
+                "profile": "gaming",
+                "artifact_dir": tmp,
+                "twitch_labels": str(Path(tmp) / "twitch_labels.jsonl"),
+                "training_mode": "vod",
+                "work_dir": tmp,
+                "short_form_weight": 0.35,
+            })()
+            short_form_dataset = Path(tmp) / "short_form.jsonl"
+            short_form_dataset.write_text(json.dumps({"candidate_id": "sf-1", "label": 1, "features": {}}) + "\n", encoding="utf-8")
+            Path(args.twitch_labels).write_text(
+                "\n".join([
+                    json.dumps({"broadcaster": "jynxzi", "vod_id": "vod-a"}),
+                    json.dumps({"broadcaster": "tarik", "vod_id": "vod-b"}),
+                ]),
+                encoding="utf-8",
+            )
+
+            with patch("ml.auto_train_short_form.train_vod_ranker.build_composite_dataset", return_value=[{"candidate_id": "vod-1", "label": 1, "features": {}}]) as build_mock, \
+                 patch("ml.auto_train_short_form.train_vod_ranker._read_jsonl", side_effect=[
+                     [
+                         {"broadcaster": "jynxzi", "vod_id": "vod-a"},
+                         {"broadcaster": "tarik", "vod_id": "vod-b"},
+                     ],
+                     [{"candidate_id": "sf-1", "label": 1, "features": {}}],
+                 ]), \
+                 patch("ml.auto_train_short_form.train_vod_ranker._write_jsonl"), \
+                 patch("ml.auto_train_short_form.train_ranker.train_from_dataset", return_value=0):
+                rc = auto_train_short_form._train_preferred_path(
+                    args,
+                    short_form_dataset,
+                    profile="tarik",
+                    broadcaster_filter="tarik",
+                )
+
+        self.assertEqual(rc, 0)
+        filtered_rows = build_mock.call_args.args[0]
+        self.assertEqual(filtered_rows, [{"broadcaster": "tarik", "vod_id": "vod-b"}])
+
+    def test_train_preferred_path_falls_back_when_streamer_has_no_vod_labels(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = type("Args", (), {
+                "profile": "gaming",
+                "artifact_dir": tmp,
+                "twitch_labels": str(Path(tmp) / "twitch_labels.jsonl"),
+                "training_mode": "vod",
+                "work_dir": tmp,
+                "short_form_weight": 0.35,
+            })()
+            short_form_dataset = Path(tmp) / "short_form.jsonl"
+            short_form_dataset.write_text(json.dumps({"candidate_id": "sf-1", "label": 1, "features": {}}) + "\n", encoding="utf-8")
+            Path(args.twitch_labels).write_text(json.dumps({"broadcaster": "jynxzi", "vod_id": "vod-a"}) + "\n", encoding="utf-8")
+
+            with patch("ml.auto_train_short_form.train_vod_ranker.build_composite_dataset") as build_mock, \
+                 patch("ml.auto_train_short_form.train_vod_ranker._read_jsonl", return_value=[{"broadcaster": "jynxzi", "vod_id": "vod-a"}]), \
+                 patch("ml.auto_train_short_form.train_ranker.train_from_dataset", return_value=0) as train_mock:
+                rc = auto_train_short_form._train_preferred_path(
+                    args,
+                    short_form_dataset,
+                    profile="tarik",
+                    broadcaster_filter="tarik",
+                )
+
+        self.assertEqual(rc, 0)
+        build_mock.assert_not_called()
+        train_mock.assert_called_once_with(short_form_dataset, "tarik", Path(tmp))
 
 
 if __name__ == "__main__":

@@ -1,5 +1,62 @@
+import os
+from pathlib import Path
+
 from pydantic_settings import BaseSettings
-from pydantic import ConfigDict
+from pydantic import ConfigDict, field_validator
+
+
+BACKEND_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = BACKEND_ROOT.parent
+DEFAULT_TMP_DIR = BACKEND_ROOT / "tmp"
+DEFAULT_STORAGE_DIR = DEFAULT_TMP_DIR / "storage"
+DEFAULT_CACHE_DIR = DEFAULT_TMP_DIR / "cache"
+DEFAULT_MPLCONFIGDIR = DEFAULT_TMP_DIR / "matplotlib"
+
+
+def _resolve_local_project_path(
+    value: str | None,
+    *,
+    field_name: str,
+    default: Path | None = None,
+) -> str | None:
+    raw = (value or "").strip()
+    if not raw:
+        if default is None:
+            return None
+        candidate = default
+    else:
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            candidate = BACKEND_ROOT / candidate
+
+    candidate = candidate.resolve()
+    try:
+        candidate.relative_to(PROJECT_ROOT)
+    except ValueError as exc:
+        raise ValueError(
+            f"{field_name} must stay inside the project directory: {PROJECT_ROOT}"
+        ) from exc
+    return str(candidate)
+
+
+def _configure_local_cache_env() -> None:
+    cache_root = DEFAULT_CACHE_DIR.resolve()
+    mpl_dir = DEFAULT_MPLCONFIGDIR.resolve()
+    env_paths = {
+        "XDG_CACHE_HOME": cache_root,
+        "HF_HOME": cache_root / "huggingface",
+        "HUGGINGFACE_HUB_CACHE": cache_root / "huggingface" / "hub",
+        "TRANSFORMERS_CACHE": cache_root / "huggingface" / "transformers",
+        "TORCH_HOME": cache_root / "torch",
+        "MPLCONFIGDIR": mpl_dir,
+    }
+    for path in env_paths.values():
+        path.mkdir(parents=True, exist_ok=True)
+    for key, path in env_paths.items():
+        os.environ[key] = str(path)
+
+
+_configure_local_cache_env()
 
 
 class Settings(BaseSettings):
@@ -8,7 +65,7 @@ class Settings(BaseSettings):
     whisper_model: str = "base"
     ollama_host: str = "http://localhost:11434"
     ollama_model: str = "llama3.2"
-    storage_dir: str = "/tmp/ai_clipping"
+    storage_dir: str = str(DEFAULT_STORAGE_DIR)
     max_clip_duration: int = 90
     max_upload_size_bytes: int | None = None
     clip_profile: str = "general"
@@ -24,7 +81,8 @@ class Settings(BaseSettings):
     chat_download_timeout_sec: int = 30
     chat_join_timeout_sec: float = 1.0
     twitch_download_cache_ttl_sec: int = 1800
-    training_vod_cache_ttl_sec: int = 2_592_000
+    training_vod_cache_ttl_sec: int = 0
+    training_vod_cache_dir: str | None = None
     video_expression_sample_sec: int = 3
     shortlist_face_reaction_top_k: int = 12
     shortlist_face_reaction_sample_sec: int = 1
@@ -37,7 +95,31 @@ class Settings(BaseSettings):
     judge_keyframes_per_candidate: int = 4
     judge_keyframe_width: int = 640
     enable_trend_prior: bool = True
+    enable_trained_ranker_v2: bool = False
     trend_prior_data_path: str | None = None
+    enable_boundary_refinement_v2: bool = True
+    enable_boundary_llm_pair_rerank: bool = True
+    enable_word_level_boundaries: bool = False
+    enable_boundary_ranker: bool = False
+    enable_legacy_boundary_refinement_llm: bool = False
+
+    @field_validator("storage_dir", mode="before")
+    @classmethod
+    def _validate_storage_dir(cls, value: str | None) -> str:
+        return _resolve_local_project_path(
+            value,
+            field_name="storage_dir",
+            default=DEFAULT_STORAGE_DIR,
+        ) or str(DEFAULT_STORAGE_DIR.resolve())
+
+    @field_validator("training_vod_cache_dir", mode="before")
+    @classmethod
+    def _validate_training_vod_cache_dir(cls, value: str | None) -> str | None:
+        return _resolve_local_project_path(
+            value,
+            field_name="training_vod_cache_dir",
+            default=None,
+        )
 
 
 settings = Settings()

@@ -4,7 +4,7 @@ import logging
 import pathlib
 import shutil
 from config import settings
-from job_manager import update_job
+from job_manager import is_job_cancelled, update_job
 from services import (
     downloader,
     audio_extractor,
@@ -25,9 +25,19 @@ from services import (
     clip_judge,
     keyframe_sampler,
     chapter_segmenter,
+    clip_strategy,
 )
 
 logger = logging.getLogger(__name__)
+
+
+class PipelineCancelledError(RuntimeError):
+    pass
+
+
+def _raise_if_cancelled(job_id: str) -> None:
+    if is_job_cancelled(job_id):
+        raise PipelineCancelledError(f"Job {job_id} cancelled by client")
 
 
 async def run_pipeline(
@@ -35,16 +45,20 @@ async def run_pipeline(
     url: str | None = None,
     video_path: pathlib.Path | None = None,
     profile: str | None = None,
+    strategy: dict | None = None,
 ) -> None:
     effective_profile = profile or settings.clip_profile
+    normalized_strategy = clip_strategy.normalize_strategy(strategy)
     loop = asyncio.get_running_loop()
     try:
+        _raise_if_cancelled(job_id)
         if video_path is None:
             update_job(job_id, status="downloading", progress_pct=5)
             video_path = await loop.run_in_executor(None, downloader.download, url, job_id)
         else:
             update_job(job_id, status="downloading", progress_pct=19)
 
+        _raise_if_cancelled(job_id)
         update_job(job_id, status="extracting_audio", progress_pct=20)
         audio_path = await loop.run_in_executor(None, audio_extractor.extract, video_path, job_id)
 
@@ -72,6 +86,7 @@ async def run_pipeline(
             _transcription_progress,
         )
 
+        _raise_if_cancelled(job_id)
         update_job(job_id, status="extracting_features", progress_pct=56)
         audio_frames, visual_frames = await asyncio.gather(
             audio_features_task,
@@ -113,6 +128,7 @@ async def run_pipeline(
         transcript = chat_analyzer.enrich_segments(transcript, chat_path)
 
         # Attach composite hype scores before saving or analyzing
+        _raise_if_cancelled(job_id)
         transcript = scorer.score_segments(transcript)
         chapters = await loop.run_in_executor(
             None,
@@ -134,6 +150,7 @@ async def run_pipeline(
             candidate_generators.generate_semantic_candidates,
             transcript,
             chapters,
+            normalized_strategy,
         )
         fallback_candidates = []
         if not peak_candidates:
@@ -142,12 +159,15 @@ async def run_pipeline(
                 candidate_generators.generate_fallback_candidates,
                 transcript,
                 chapters,
+                normalized_strategy,
             )
         candidates = await loop.run_in_executor(
             None,
-            candidate_generators.merge_prioritized_candidates,
-            peak_candidates or fallback_candidates,
-            semantic_candidates,
+            lambda: candidate_generators.merge_prioritized_candidates(
+                peak_candidates or fallback_candidates,
+                semantic_candidates,
+                strategy=normalized_strategy,
+            ),
         )
         normalized_candidates = await loop.run_in_executor(
             None,
@@ -166,6 +186,7 @@ async def run_pipeline(
             None,
             None,
             chapters,
+            normalized_strategy,
         )
         ranked_candidates = await loop.run_in_executor(
             None,
@@ -173,6 +194,7 @@ async def run_pipeline(
             normalized_candidates,
             candidate_features,
             effective_profile,
+            normalized_strategy,
         )
         shortlist_top_k = min(max(settings.shortlist_face_reaction_top_k, 0), len(ranked_candidates))
         if shortlist_top_k > 0:
@@ -198,6 +220,7 @@ async def run_pipeline(
                 llm_candidate_ids,
                 None,
                 chapters,
+                normalized_strategy,
             )
             ranked_candidates = await loop.run_in_executor(
                 None,
@@ -205,6 +228,7 @@ async def run_pipeline(
                 normalized_candidates,
                 candidate_features,
                 effective_profile,
+                normalized_strategy,
             )
         ranked_candidates_pre_judge = list(ranked_candidates)
         judged_ranked_candidates = list(ranked_candidates)
@@ -240,9 +264,11 @@ async def run_pipeline(
             )
         ranked_candidates = await loop.run_in_executor(
             None,
-            selector.select_diverse_ranked_candidates,
-            judged_ranked_candidates,
-            12,
+            lambda: selector.select_diverse_ranked_candidates(
+                judged_ranked_candidates,
+                12,
+                strategy=normalized_strategy,
+            ),
         )
         moments = await loop.run_in_executor(
             None,
@@ -251,6 +277,7 @@ async def run_pipeline(
             transcript,
             5,
             effective_profile,
+            normalized_strategy,
         )
 
         transcripts_dir = pathlib.Path(__file__).parents[1] / "transcripts"
@@ -302,9 +329,25 @@ async def run_pipeline(
             debug_dir / "ranked_candidates.jsonl",
             [ranked.to_dict() for ranked in ranked_candidates],
         )
+        _write_jsonl(
+            debug_dir / "ranked_candidates_v2.jsonl",
+            _ranked_score_records(
+                ranked_candidates_pre_judge,
+                judged_ranked_candidates,
+                ranked_candidates,
+            ),
+        )
         # Post-process: align to sentence boundaries, then enforce clip diversity
         moments = post_processor.snap_boundaries(moments, transcript)
         moments = post_processor.enforce_diversity(moments)
+        moments = await loop.run_in_executor(
+            None,
+            analyzer.expand_variants,
+            moments,
+            ranked_candidates,
+            transcript,
+            normalized_strategy,
+        )
         feedback_events = feedback_store.build_pipeline_feedback(job_id, ranked_candidates, moments)
         feedback_store.write_job_feedback(debug_dir, feedback_events)
         feedback_store.append_feedback_events(pathlib.Path(settings.storage_dir), feedback_events)
@@ -314,6 +357,7 @@ async def run_pipeline(
         )
 
         update_job(job_id, status="clipping", progress_pct=88)
+        _raise_if_cancelled(job_id)
         clips = await loop.run_in_executor(None, clipper.cut_clips, video_path, moments, job_id)
 
         # Clean up intermediate files to save disk space
@@ -327,6 +371,8 @@ async def run_pipeline(
         # Schedule cleanup of entire job directory after 1 hour
         asyncio.create_task(_cleanup_later(job_id))
 
+    except (PipelineCancelledError, downloader.DownloadCancelledError):
+        logger.info("Pipeline cancelled for job %s", job_id)
     except Exception as e:
         update_job(job_id, status="failed", error=str(e))
 
@@ -353,3 +399,32 @@ def _segment_records(transcript) -> list[dict]:
 
 def _score_records(score_timeline) -> list[dict]:
     return [item.to_dict() for item in score_timeline]
+
+
+def _ranked_score_records(
+    pre_judge: list,
+    judged: list,
+    final_ranked: list,
+) -> list[dict]:
+    judged_map = {item.candidate.id: item for item in judged}
+    final_ids = {item.candidate.id for item in final_ranked}
+    rows: list[dict] = []
+    for item in pre_judge:
+        judged_item = judged_map.get(item.candidate.id, item)
+        rows.append(
+            {
+                "candidate_id": item.candidate.id,
+                "source": item.candidate.source,
+                "heuristic_rank_score": item.heuristic_rank_score,
+                "trained_rank_score": item.trained_rank_score,
+                "model_blend": item.model_blend,
+                "pre_judge_rank_score": item.rank_score,
+                "judged_rank_score": judged_item.rank_score,
+                "trained_model_used": item.trained_model_used,
+                "judge_used": judged_item.judge_result is not None,
+                "selected_after_diversity": item.candidate.id in final_ids,
+                "rationale": list(judged_item.rationale),
+            }
+        )
+    rows.sort(key=lambda row: (float(row.get("judged_rank_score") or 0.0), row["candidate_id"]), reverse=True)
+    return rows

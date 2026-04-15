@@ -30,7 +30,7 @@ def main() -> int:
     )
     parser.add_argument("--profile", default="gaming")
     parser.add_argument("--artifact-dir", default=str(BACKEND_ROOT / "ml" / "artifacts"))
-    parser.add_argument("--work-dir", default="/tmp/ai_clipping_twitch_training")
+    parser.add_argument("--work-dir", default=str(BACKEND_ROOT / "tmp" / "training_runs"))
     parser.add_argument(
         "--include-short-form",
         default=str(BACKEND_ROOT / "ml" / "artifacts" / "real_short_form_training_rows.jsonl"),
@@ -77,7 +77,7 @@ def main() -> int:
     dataset_out = pathlib.Path(args.dataset_out)
     _write_jsonl(dataset_out, rows)
     print(json.dumps(dataset_summary(rows), ensure_ascii=True))
-    return train_ranker.train_from_dataset(
+    return _train_models_for_dataset(
         dataset_out,
         args.profile,
         pathlib.Path(args.artifact_dir),
@@ -165,10 +165,60 @@ def _train_per_streamer(
                 ensure_ascii=True,
             )
         )
-        code = train_ranker.train_from_dataset(dataset_out, broadcaster, artifact_dir)
+        code = _train_models_for_dataset(dataset_out, broadcaster, artifact_dir)
         if code != 0:
             failures += 1
     return 0 if failures == 0 else 1
+
+
+def _train_models_for_dataset(
+    dataset_path: pathlib.Path,
+    profile: str,
+    artifact_dir: pathlib.Path,
+) -> int:
+    evaluate_boundary_refinement, train_boundary_ranker = _boundary_training_modules()
+
+    code = train_ranker.train_from_dataset(dataset_path, profile, artifact_dir)
+    if code != 0:
+        return code
+
+    rows = _read_jsonl(dataset_path)
+    boundary_rows = [row for row in rows if evaluate_boundary_refinement._has_boundary_reference(row)]
+    if not boundary_rows:
+        print(
+            json.dumps(
+                {
+                    "profile": profile,
+                    "boundary_ranker": {
+                        "trained": False,
+                        "reason": "no_boundary_reference_rows",
+                    },
+                },
+                ensure_ascii=True,
+            )
+        )
+        return 0
+
+    print(
+        json.dumps(
+            {
+                "profile": profile,
+                "boundary_dataset": {
+                    "rows": len(rows),
+                    "boundary_rows": len(boundary_rows),
+                    "metrics": evaluate_boundary_refinement._boundary_metrics(boundary_rows),
+                },
+            },
+            ensure_ascii=True,
+        )
+    )
+    return train_boundary_ranker.train_from_rows(rows, profile, artifact_dir)
+
+
+def _boundary_training_modules():
+    from ml import evaluate_boundary_refinement, train_boundary_ranker
+
+    return evaluate_boundary_refinement, train_boundary_ranker
 
 
 def _prepare_short_form_rows(
@@ -222,7 +272,9 @@ def _read_jsonl(path: pathlib.Path | None) -> list[dict]:
 
 def _write_jsonl(path: pathlib.Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(json.dumps(row, ensure_ascii=True) for row in rows), encoding="utf-8")
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text("\n".join(json.dumps(row, ensure_ascii=True) for row in rows), encoding="utf-8")
+    tmp_path.replace(path)
 
 
 def _as_float(value) -> float:

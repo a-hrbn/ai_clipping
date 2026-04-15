@@ -26,6 +26,7 @@ const STAGE_META: Record<string, { label: string; detail: string }> = {
   analyzing:       { label: "KI analysiert",        detail: "Llama sucht nach viralen Momenten" },
   clipping:        { label: "Clips schneiden",      detail: "FFmpeg schneidet die Szenen" },
   done:            { label: "Fertig",               detail: "Alle Clips wurden erstellt" },
+  cancelled:       { label: "Abgebrochen",          detail: "Verarbeitung wurde beendet" },
   failed:          { label: "Fehler",               detail: "Verarbeitung fehlgeschlagen" },
 };
 
@@ -66,6 +67,9 @@ export default function JobStatus({ jobId, onDone, onError }: Props) {
         if (job.status === "done") {
           clearInterval(interval);
           onDone(job.clips);
+        } else if (job.status === "cancelled") {
+          clearInterval(interval);
+          onError(job.error ?? "Verarbeitung abgebrochen");
         } else if (job.status === "failed") {
           clearInterval(interval);
           onError(job.error ?? "Unbekannter Fehler");

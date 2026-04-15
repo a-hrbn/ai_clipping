@@ -40,13 +40,14 @@ def main() -> int:
     parser.add_argument("--dataset-out", default=str(BACKEND_ROOT / "ml" / "artifacts" / "real_short_form_training_rows.jsonl"))
     parser.add_argument("--profile", default="gaming")
     parser.add_argument("--artifact-dir", default=str(BACKEND_ROOT / "ml" / "artifacts"))
-    parser.add_argument("--work-dir", default="/tmp/ai_clipping_training")
+    parser.add_argument("--work-dir", default=str(BACKEND_ROOT / "tmp" / "short_form_training"))
     parser.add_argument("--max-duration", type=int, default=180)
     parser.add_argument("--min-duration", type=int, default=8)
     parser.add_argument("--top-fraction", type=float, default=0.3)
     parser.add_argument("--bottom-fraction", type=float, default=0.3)
     parser.add_argument("--proxy", default="", help="Optional proxy URL forwarded to yt-dlp and Bing RSS fetches.")
     parser.add_argument("--skip-platforms", default="", help="Comma-separated platforms to skip (for example: tiktok).")
+    parser.add_argument("--only-streamers", default="", help="Comma-separated streamer names to keep from the sources manifest.")
     parser.add_argument("--dry-run", action="store_true", help="Only discover and write the manifest, do not download clips or train.")
     parser.add_argument("--per-streamer", action="store_true", help="Train a separate artifact for each unique streamer in the sources CSV.")
     parser.add_argument(
@@ -72,8 +73,14 @@ def main() -> int:
         for item in str(args.skip_platforms or "").split(",")
         if item.strip()
     }
+    args.only_streamers = {
+        item.strip().lower()
+        for item in str(args.only_streamers or "").split(",")
+        if item.strip()
+    }
 
     seeds = _read_source_manifest(pathlib.Path(args.sources))
+    seeds = _filter_seeds_by_streamers(seeds, args.only_streamers)
     if not seeds:
         logger.error("No streamer sources found in %s", args.sources)
         return 1
@@ -240,7 +247,12 @@ def _run_per_streamer(seeds: list[dict[str, str]], args) -> int:
         )
         logger.info("Wrote dataset for %s to %s", streamer, dataset_out)
 
-        code = _train_preferred_path(args, dataset_out, profile=streamer)
+        code = _train_preferred_path(
+            args,
+            dataset_out,
+            profile=streamer,
+            broadcaster_filter=streamer,
+        )
         exit_codes.append(code)
         logger.info("Streamer %s: training exit code %d", streamer, code)
 
@@ -287,7 +299,24 @@ def _read_source_manifest(path: pathlib.Path) -> list[dict[str, str]]:
     return seeds
 
 
-def _train_preferred_path(args, short_form_dataset: pathlib.Path, profile: str | None = None) -> int:
+def _filter_seeds_by_streamers(
+    seeds: list[dict[str, str]],
+    only_streamers: set[str],
+) -> list[dict[str, str]]:
+    if not only_streamers:
+        return seeds
+    return [
+        seed for seed in seeds
+        if str(seed.get("streamer") or "").strip().lower() in only_streamers
+    ]
+
+
+def _train_preferred_path(
+    args,
+    short_form_dataset: pathlib.Path,
+    profile: str | None = None,
+    broadcaster_filter: str | None = None,
+) -> int:
     effective_profile = profile or args.profile
     artifact_dir = pathlib.Path(args.artifact_dir)
     labels_path = pathlib.Path(args.twitch_labels)
@@ -302,8 +331,17 @@ def _train_preferred_path(args, short_form_dataset: pathlib.Path, profile: str |
             short_form_dataset,
         )
         rows = train_vod_ranker._read_jsonl(labels_path)
+        if broadcaster_filter:
+            rows = _filter_twitch_labels_for_broadcaster(rows, broadcaster_filter)
         if not rows:
-            logger.warning("VOD-first training requested but no Twitch labels were found in %s", labels_path)
+            if broadcaster_filter:
+                logger.warning(
+                    "VOD-first training requested but no Twitch labels for broadcaster=%s were found in %s",
+                    broadcaster_filter,
+                    labels_path,
+                )
+            else:
+                logger.warning("VOD-first training requested but no Twitch labels were found in %s", labels_path)
         else:
             composite = train_vod_ranker.build_composite_dataset(
                 rows,
@@ -320,6 +358,16 @@ def _train_preferred_path(args, short_form_dataset: pathlib.Path, profile: str |
 
     logger.info("Training route: short-form primary (%s)", short_form_dataset)
     return train_ranker.train_from_dataset(short_form_dataset, effective_profile, artifact_dir)
+
+
+def _filter_twitch_labels_for_broadcaster(rows: list[dict], broadcaster: str) -> list[dict]:
+    normalized = str(broadcaster or "").strip().lower()
+    if not normalized:
+        return rows
+    return [
+        row for row in rows
+        if str(row.get("broadcaster") or "").strip().lower() == normalized
+    ]
 
 
 def _discover_seed(

@@ -127,6 +127,22 @@ export default function ClipCard({ clip, rank, jobId }: Props) {
         {/* Reason */}
         <p className="text-sm text-dim leading-relaxed flex-1">{clip.reason}</p>
 
+        {clip.selection_reasons.length > 0 && (
+          <div className="border border-border bg-bg/50 p-3 flex flex-col gap-2">
+            <p className="text-[10px] font-medium uppercase tracking-widest text-muted">
+              Warum ausgewählt
+            </p>
+            <ul className="space-y-1.5">
+              {clip.selection_reasons.map((reason, index) => (
+                <li key={`${clip.candidate_id}-reason-${index}`} className="text-xs leading-relaxed text-tx flex gap-2">
+                  <span className="mt-[6px] h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />
+                  <span>{reason}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         {/* Timecode */}
         <div className="flex items-center gap-3 font-mono text-xs text-muted">
           <span>{fmtTime(clip.start_time)} → {fmtTime(clip.end_time)}</span>

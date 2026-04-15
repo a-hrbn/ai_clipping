@@ -5,10 +5,14 @@ from hashlib import sha256
 
 import yt_dlp
 from config import settings
-from job_manager import update_job
+from job_manager import is_job_cancelled, update_job
 
 
 class DownloadUnavailableError(RuntimeError):
+    pass
+
+
+class DownloadCancelledError(RuntimeError):
     pass
 
 
@@ -40,6 +44,10 @@ def _evict_expired_cache(cache_dir: pathlib.Path) -> None:
             continue
 
 
+def _twitch_cache_enabled(url: str) -> bool:
+    return _is_twitch_url(url) and max(settings.twitch_download_cache_ttl_sec, 0) > 0
+
+
 def _copy_into_job(source: pathlib.Path, target: pathlib.Path) -> pathlib.Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, target)
@@ -67,11 +75,20 @@ def _resolve_downloaded_video(job_dir: pathlib.Path, preferred_path: pathlib.Pat
     return preferred_path
 
 
+def _coerce_eta_seconds(value: float | int | None) -> int | None:
+    if value is None:
+        return None
+    return max(int(round(float(value))), 0)
+
+
 def download(url: str, job_id: str, proxy: str | None = None) -> pathlib.Path:
     job_dir = pathlib.Path(settings.storage_dir) / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
     output_path = job_dir / "video.mp4"
-    use_twitch_cache = _is_twitch_url(url)
+    use_twitch_cache = _twitch_cache_enabled(url)
+
+    if is_job_cancelled(job_id):
+        raise DownloadCancelledError(f"Download cancelled for job {job_id}")
 
     if use_twitch_cache:
         cache_dir = _cache_dir()
@@ -79,6 +96,8 @@ def download(url: str, job_id: str, proxy: str | None = None) -> pathlib.Path:
         _evict_expired_cache(cache_dir)
         cache_path = _cache_path_for_url(url)
         if cache_path.exists():
+            if is_job_cancelled(job_id):
+                raise DownloadCancelledError(f"Download cancelled for job {job_id}")
             _copy_into_job(cache_path, output_path)
             try:
                 update_job(
@@ -93,6 +112,8 @@ def download(url: str, job_id: str, proxy: str | None = None) -> pathlib.Path:
             return output_path
 
     def progress_hook(d: dict) -> None:
+        if is_job_cancelled(job_id):
+            raise DownloadCancelledError(f"Download cancelled for job {job_id}")
         if d["status"] != "downloading":
             return
         total = d.get("total_bytes") or d.get("total_bytes_estimate")
@@ -112,7 +133,7 @@ def download(url: str, job_id: str, proxy: str | None = None) -> pathlib.Path:
                 job_id,
                 progress_pct=pct,
                 download_speed=speed,
-                download_eta=eta,
+                download_eta=_coerce_eta_seconds(eta),
                 download_cached=False,
             )
         except KeyError:
@@ -134,6 +155,8 @@ def download(url: str, job_id: str, proxy: str | None = None) -> pathlib.Path:
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
+    except DownloadCancelledError:
+        raise
     except Exception as exc:
         message = str(exc).lower()
         if "tiktok.com" in url.lower() and any(

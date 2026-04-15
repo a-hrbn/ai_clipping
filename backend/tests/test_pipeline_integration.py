@@ -95,8 +95,9 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 llm_candidate_ids=None,
                 llm_provider=None,
                 chapters=None,
+                strategy=None,
             ):
-                del llm_provider
+                del llm_provider, strategy
                 build_feature_calls.append((use_llm_semantics, llm_candidate_ids, chapters))
                 return [
                     CandidateFeatures(
@@ -110,7 +111,8 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     for candidate in candidates
                 ]
 
-            def fake_rank_candidates(candidates, features, profile="general"):
+            def fake_rank_candidates(candidates, features, profile="general", strategy=None):
+                del strategy
                 feature_map = {feature.candidate_id: feature for feature in features}
                 ranked = [
                     RankedCandidate(
@@ -158,11 +160,12 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 updated.sort(key=lambda item: item.rank_score, reverse=True)
                 return updated
 
-            def fake_select_diverse_ranked_candidates(ranked_candidates, top_k, min_gap_sec=20.0):
-                del min_gap_sec
+            def fake_select_diverse_ranked_candidates(ranked_candidates, top_k, min_gap_sec=20.0, strategy=None):
+                del min_gap_sec, strategy
                 return ranked_candidates[:top_k]
 
-            def fake_refine_candidates(ranked_candidates, _segments, limit=5, profile="general"):
+            def fake_refine_candidates(ranked_candidates, _segments, limit=5, profile="general", strategy=None):
+                del strategy
                 moments = []
                 for index, ranked in enumerate(ranked_candidates[:limit], start=1):
                     moments.append(
@@ -241,6 +244,7 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 )
                 stack.enter_context(patch.object(pipeline.clip_judge, "rerank_candidates", side_effect=fake_judge_rerank))
                 stack.enter_context(patch.object(pipeline.analyzer, "refine_candidates", side_effect=fake_refine_candidates))
+                stack.enter_context(patch.object(pipeline.analyzer, "expand_variants", side_effect=lambda moments, *_args, **_kwargs: moments))
                 stack.enter_context(patch.object(pipeline.post_processor, "snap_boundaries", side_effect=lambda moments, _segments: moments))
                 stack.enter_context(patch.object(pipeline.post_processor, "enforce_diversity", side_effect=lambda moments: moments))
                 stack.enter_context(patch.object(pipeline.clipper, "cut_clips", side_effect=fake_cut_clips))
@@ -315,8 +319,9 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 llm_candidate_ids=None,
                 llm_provider=None,
                 chapters=None,
+                strategy=None,
             ):
-                del use_llm_semantics, llm_candidate_ids, llm_provider, chapters
+                del use_llm_semantics, llm_candidate_ids, llm_provider, chapters, strategy
                 return [
                     CandidateFeatures(
                         candidate_id=candidate.id,
@@ -329,7 +334,8 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     for candidate in candidates
                 ]
 
-            def fake_rank_candidates(candidates, features, profile="general"):
+            def fake_rank_candidates(candidates, features, profile="general", strategy=None):
+                del strategy
                 feature_map = {feature.candidate_id: feature for feature in features}
                 return [
                     RankedCandidate(
@@ -364,11 +370,12 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     for ranked in ranked_candidates
                 ]
 
-            def fake_select_diverse_ranked_candidates(ranked_candidates, top_k, min_gap_sec=20.0):
-                del min_gap_sec
+            def fake_select_diverse_ranked_candidates(ranked_candidates, top_k, min_gap_sec=20.0, strategy=None):
+                del min_gap_sec, strategy
                 return ranked_candidates[:top_k]
 
-            def fake_refine_candidates(ranked_candidates, _segments, limit=5, profile="general"):
+            def fake_refine_candidates(ranked_candidates, _segments, limit=5, profile="general", strategy=None):
+                del strategy
                 return [
                     {
                         "start_time": ranked_candidates[0].candidate.start,
@@ -420,6 +427,7 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 )
                 stack.enter_context(patch.object(pipeline.clip_judge, "rerank_candidates", side_effect=fake_judge_rerank))
                 stack.enter_context(patch.object(pipeline.analyzer, "refine_candidates", side_effect=fake_refine_candidates))
+                stack.enter_context(patch.object(pipeline.analyzer, "expand_variants", side_effect=lambda moments, *_args, **_kwargs: moments))
                 stack.enter_context(patch.object(pipeline.post_processor, "snap_boundaries", side_effect=lambda moments, _segments: moments))
                 stack.enter_context(patch.object(pipeline.post_processor, "enforce_diversity", side_effect=lambda moments: moments))
                 stack.enter_context(
@@ -497,8 +505,9 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 llm_candidate_ids=None,
                 llm_provider=None,
                 chapters=None,
+                strategy=None,
             ):
-                del use_llm_semantics, llm_candidate_ids, llm_provider, chapters
+                del use_llm_semantics, llm_candidate_ids, llm_provider, chapters, strategy
                 return [
                     CandidateFeatures(
                         candidate_id=candidate.id,
@@ -511,7 +520,8 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     for candidate in candidates
                 ]
 
-            def fake_rank_candidates(candidates, features, profile="general"):
+            def fake_rank_candidates(candidates, features, profile="general", strategy=None):
+                del strategy
                 feature_map = {feature.candidate_id: feature for feature in features}
                 return [
                     RankedCandidate(
@@ -523,11 +533,12 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     for candidate in candidates
                 ]
 
-            def fake_select_diverse_ranked_candidates(ranked_candidates, top_k, min_gap_sec=20.0):
-                del min_gap_sec
+            def fake_select_diverse_ranked_candidates(ranked_candidates, top_k, min_gap_sec=20.0, strategy=None):
+                del min_gap_sec, strategy
                 return ranked_candidates[:top_k]
 
-            def fake_refine_candidates(ranked_candidates, _segments, limit=5, profile="general"):
+            def fake_refine_candidates(ranked_candidates, _segments, limit=5, profile="general", strategy=None):
+                del strategy
                 return [
                     {
                         "start_time": ranked_candidates[0].candidate.start,
@@ -589,6 +600,7 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 )
                 stack.enter_context(patch.object(pipeline.clip_judge, "rerank_candidates", side_effect=lambda ranked, *_args, **_kwargs: ranked))
                 stack.enter_context(patch.object(pipeline.analyzer, "refine_candidates", side_effect=fake_refine_candidates))
+                stack.enter_context(patch.object(pipeline.analyzer, "expand_variants", side_effect=lambda moments, *_args, **_kwargs: moments))
                 stack.enter_context(patch.object(pipeline.post_processor, "snap_boundaries", side_effect=lambda moments, _segments: moments))
                 stack.enter_context(patch.object(pipeline.post_processor, "enforce_diversity", side_effect=lambda moments: moments))
                 stack.enter_context(
@@ -660,7 +672,11 @@ def _import_pipeline_with_stubs():
         enrich_segments=lambda segments, *_args, **_kwargs: segments,
     )
     _stub_module("services.chapter_segmenter", segment_chapters=lambda *_args, **_kwargs: [], segments_for_chapter=lambda segments, *_args, **_kwargs: segments)
-    _stub_module("services.analyzer", refine_candidates=lambda *_args, **_kwargs: [])
+    _stub_module(
+        "services.analyzer",
+        refine_candidates=lambda *_args, **_kwargs: [],
+        expand_variants=lambda moments, *_args, **_kwargs: moments,
+    )
     _stub_module("services.clipper", cut_clips=lambda *_args, **_kwargs: [])
     _stub_module("services.feature_builder", build_features=lambda *_args, **_kwargs: [])
     _stub_module("services.clip_judge", rerank_candidates=lambda ranked, *_args, **_kwargs: ranked)

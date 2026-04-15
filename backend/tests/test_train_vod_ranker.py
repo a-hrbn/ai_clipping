@@ -52,6 +52,40 @@ class TrainVodRankerTests(unittest.TestCase):
             ]
             self.assertEqual(written_rows, dataset_rows)
 
+    def test_train_models_for_dataset_trains_boundary_ranker_when_dataset_has_references(self) -> None:
+        rows = [
+            {
+                "candidate_id": "vod-1",
+                "label": 1,
+                "label_class": "positive",
+                "boundary_reference_start": 10.0,
+                "boundary_reference_end": 22.0,
+                "boundary_abs_start_error_sec": 0.0,
+                "boundary_abs_end_error_sec": 0.0,
+                "boundary_abs_total_error_sec": 0.0,
+                "features": {},
+            }
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_path = Path(tmp) / "dataset.jsonl"
+            dataset_path.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+            fake_boundary_eval = type("BoundaryEval", (), {
+                "_has_boundary_reference": staticmethod(lambda row: True),
+                "_boundary_metrics": staticmethod(lambda rows: {"mean_abs_total_error_sec": 0.0}),
+            })
+            fake_boundary_train = type("BoundaryTrain", (), {
+                "train_from_rows": staticmethod(lambda rows, profile, artifact_dir: 0),
+            })
+
+            with patch("ml.train_vod_ranker.train_ranker.train_from_dataset", return_value=0) as ranker_mock, \
+                 patch("ml.train_vod_ranker._boundary_training_modules", return_value=(fake_boundary_eval, fake_boundary_train)), \
+                 patch.object(fake_boundary_train, "train_from_rows", return_value=0) as boundary_mock:
+                rc = train_vod_ranker._train_models_for_dataset(dataset_path, "jynxzi", Path(tmp) / "artifacts")
+
+        self.assertEqual(rc, 0)
+        ranker_mock.assert_called_once()
+        boundary_mock.assert_called_once()
+
     def test_build_composite_dataset_marks_short_form_as_supplemental(self) -> None:
         vod_rows = [
             {

@@ -1,6 +1,6 @@
 import re
 from typing import Literal
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 JobState = Literal[
@@ -13,6 +13,7 @@ JobState = Literal[
     "analyzing",
     "clipping",
     "done",
+    "cancelled",
     "failed",
 ]
 
@@ -26,10 +27,35 @@ _SUPPORTED_URL_PATTERNS = [
     re.compile(r"https?://kick\.com/"),                               # Kick
 ]
 
+ClipPlatform = Literal["general", "tiktok", "youtube_shorts", "instagram_reels", "linkedin"]
+ClipStyle = Literal["balanced", "aggressive_hook", "context_balanced", "reaction_first", "quote_first"]
+
+
+class TimeRange(BaseModel):
+    start_sec: float | None = None
+    end_sec: float | None = None
+
+    @model_validator(mode="after")
+    def _validate_order(self):
+        if self.start_sec is not None and self.end_sec is not None and self.end_sec <= self.start_sec:
+            raise ValueError("time_range.end_sec must be greater than time_range.start_sec")
+        return self
+
 
 class JobRequest(BaseModel):
     url: str
     profile: str | None = None   # None → falls back to settings.clip_profile
+    session_id: str | None = None
+    platform: ClipPlatform | None = None
+    goal: str | None = None
+    tone: str | None = None
+    topic: str | None = None
+    must_include: list[str] = Field(default_factory=list)
+    exclude: list[str] = Field(default_factory=list)
+    speaker: str | None = None
+    time_range: TimeRange | None = None
+    clip_style: ClipStyle | None = None
+    variant_count: int | None = Field(default=None, ge=1, le=4)
 
     @field_validator("url")
     @classmethod
@@ -49,7 +75,13 @@ class ClipResult(BaseModel):
     end_time: float
     viral_score: float
     reason: str
+    selection_reasons: list[str] = Field(default_factory=list)
     ranking_mode: Literal["heuristic", "ml_blended"] = "heuristic"
+    platform: ClipPlatform = "general"
+    variant_key: str = "balanced"
+    variant_label: str | None = None
+    projected_hook_score: float | None = None
+    projected_retention_score: float | None = None
 
 
 class JobStatus(BaseModel):
@@ -62,6 +94,15 @@ class JobStatus(BaseModel):
     download_speed: float | None = None   # bytes/s
     download_eta: int | None = None       # seconds remaining
     download_cached: bool = False
+
+    @field_validator("download_eta", mode="before")
+    @classmethod
+    def coerce_download_eta(cls, value):
+        if value in (None, ""):
+            return None
+        if isinstance(value, (int, float)):
+            return max(int(round(float(value))), 0)
+        return value
 
 
 ClipFeedbackTag = Literal[
@@ -76,11 +117,17 @@ class ClipFeedbackPayload(BaseModel):
     candidate_id: str
     tags: list[ClipFeedbackTag] = Field(default_factory=list)
     notes: str | None = None
+    publish_platform: ClipPlatform | None = None
     view_count: int | None = Field(default=None, ge=0)
     like_count: int | None = Field(default=None, ge=0)
     comment_count: int | None = Field(default=None, ge=0)
     share_count: int | None = Field(default=None, ge=0)
     save_count: int | None = Field(default=None, ge=0)
+    impressions: int | None = Field(default=None, ge=0)
+    avg_watch_time: float | None = Field(default=None, ge=0.0)
+    retention_3s: float | None = Field(default=None, ge=0.0, le=1.0)
+    retention_50pct: float | None = Field(default=None, ge=0.0, le=1.0)
+    completion_rate: float | None = Field(default=None, ge=0.0, le=1.0)
     views_1h: int | None = Field(default=None, ge=0)
     views_24h: int | None = Field(default=None, ge=0)
     baseline_view_rate: float | None = Field(default=None, ge=0.0)
@@ -92,11 +139,17 @@ class ClipFeedbackResponse(BaseModel):
     candidate_id: str
     tags: list[ClipFeedbackTag] = Field(default_factory=list)
     notes: str | None = None
+    publish_platform: ClipPlatform | None = None
     view_count: int | None = None
     like_count: int | None = None
     comment_count: int | None = None
     share_count: int | None = None
     save_count: int | None = None
+    impressions: int | None = None
+    avg_watch_time: float | None = None
+    retention_3s: float | None = None
+    retention_50pct: float | None = None
+    completion_rate: float | None = None
     views_1h: int | None = None
     views_24h: int | None = None
     baseline_view_rate: float | None = None

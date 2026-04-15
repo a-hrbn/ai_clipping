@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 import job_manager
+from models import JobStatus
 
 
 class JobManagerTests(unittest.TestCase):
@@ -46,8 +47,9 @@ class JobManagerTests(unittest.TestCase):
         final_payload = json.loads(job_manager._jobs_file.read_text(encoding="utf-8"))
         self.assertEqual(final_payload[0]["status"], "done")
 
-    def test_get_job_evicts_expired_jobs_and_persists_cleanup(self) -> None:
+    def test_get_job_evicts_expired_terminal_jobs_and_persists_cleanup(self) -> None:
         job_manager.create_job("job-expired", profile="general")
+        job_manager.update_job("job-expired", status="done", progress_pct=100)
         job_manager._job_created_at["job-expired"] = time.monotonic() - job_manager._JOB_TTL_SECONDS - 1
 
         self.assertIsNone(job_manager.get_job("job-expired"))
@@ -55,6 +57,53 @@ class JobManagerTests(unittest.TestCase):
             json.loads(job_manager._jobs_file.read_text(encoding="utf-8")),
             [],
         )
+
+    def test_active_jobs_are_not_evicted_after_original_ttl(self) -> None:
+        job_manager.create_job("job-running", profile="general")
+        job_manager._job_created_at["job-running"] = time.monotonic() - job_manager._JOB_TTL_SECONDS - 1
+
+        job_manager.update_job("job-running", status="transcribing", progress_pct=40)
+
+        job = job_manager.get_job("job-running")
+        self.assertIsNotNone(job)
+        assert isinstance(job, JobStatus)
+        self.assertEqual(job.status, "transcribing")
+
+    def test_terminal_transition_refreshes_retention_window_for_long_running_job(self) -> None:
+        job_manager.create_job("job-finished", profile="general")
+        job_manager._job_created_at["job-finished"] = time.monotonic() - job_manager._JOB_TTL_SECONDS - 1
+
+        job_manager.update_job("job-finished", status="done", progress_pct=100)
+
+        job = job_manager.get_job("job-finished")
+        self.assertIsNotNone(job)
+        assert isinstance(job, JobStatus)
+        self.assertEqual(job.status, "done")
+
+    def test_load_jobs_accepts_legacy_float_download_eta(self) -> None:
+        payload = [
+            {
+                "job_id": "job-eta",
+                "status": "downloading",
+                "progress_pct": 12,
+                "profile": "general",
+                "clips": [],
+                "error": None,
+                "download_speed": 1024.5,
+                "download_eta": 715.6143084933422,
+                "download_cached": False,
+            }
+        ]
+        job_manager._jobs_file.write_text(json.dumps(payload), encoding="utf-8")
+
+        job_manager._jobs.clear()
+        job_manager._job_created_at.clear()
+        job_manager._load_jobs()
+
+        job = job_manager.get_job("job-eta")
+        self.assertIsNotNone(job)
+        assert isinstance(job, JobStatus)
+        self.assertEqual(job.download_eta, 716)
 
 
 if __name__ == "__main__":

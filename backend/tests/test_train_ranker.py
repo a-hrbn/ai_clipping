@@ -88,6 +88,22 @@ class TrainRankerTests(unittest.TestCase):
         validation_vods = {row["vod_id"] for row in split["validation"]}
         self.assertTrue(train_vods.isdisjoint(validation_vods))
 
+    def test_split_rows_falls_back_when_group_holdout_drops_a_class(self) -> None:
+        rows = [
+            {"vod_id": "vod_a", "candidate_id": "a1", "label": 1, "features": {"x": 1.0}},
+            {"vod_id": "vod_a", "candidate_id": "a2", "label": 1, "features": {"x": 1.5}},
+            {"vod_id": "vod_a", "candidate_id": "a3", "label": 1, "features": {"x": 1.7}},
+            {"vod_id": "vod_a", "candidate_id": "a4", "label": 1, "features": {"x": 1.9}},
+            {"vod_id": "vod_b", "candidate_id": "b1", "label": 0, "features": {"x": -1.0}},
+            {"vod_id": "vod_c", "candidate_id": "c1", "label": 0, "features": {"x": -2.0}},
+        ]
+
+        split = train_ranker._split_rows(rows)
+
+        self.assertIn("fallback", str(split["strategy"]))
+        self.assertEqual({row["label"] for row in split["train"]}, {0, 1})
+        self.assertEqual({row["label"] for row in split["validation"]}, {0, 1})
+
     def test_evaluate_returns_metrics(self) -> None:
         rows = [
             {"label": 1, "features": {"score": 2.0}},
@@ -104,6 +120,19 @@ class TrainRankerTests(unittest.TestCase):
         self.assertIn("recall", metrics)
         self.assertIn("f1", metrics)
         self.assertIn("ndcg_at_5", metrics)
+
+    def test_evaluate_scores_averages_ranking_metrics_per_group(self) -> None:
+        labels = train_ranker.np.array([1, 0, 1, 0], dtype=int)
+        scores = train_ranker.np.array([0.8, 0.9, 0.7, 0.6], dtype=float)
+        groups = ["vod-a", "vod-a", "vod-b", "vod-b"]
+
+        metrics = train_ranker._evaluate_scores(labels, scores, groups=groups)
+
+        self.assertEqual(metrics["ranking_groups"], 2)
+        self.assertEqual(metrics["precision_at_3"], 0.5)
+        self.assertEqual(metrics["recall_at_3"], 1.0)
+        self.assertEqual(metrics["ndcg_at_5"], 0.815)
+        self.assertLess(metrics["global_ndcg_at_5"], metrics["ndcg_at_5"])
 
     def test_numeric_feature_names_excludes_offline_only_features(self) -> None:
         names = train_ranker._numeric_feature_names({
@@ -158,9 +187,32 @@ class TrainRankerTests(unittest.TestCase):
             rc = train_ranker.train_from_rows(rows, "gaming", artifact_dir)
             self.assertEqual(rc, 0)
             artifact = json.loads((artifact_dir / "gaming_ranker.json").read_text(encoding="utf-8"))
+            self.assertEqual(artifact["version"], 3)
+            self.assertIn("top_feature_importances", artifact)
             if artifact["model_type"] == "gradient_boosting":
                 self.assertTrue(artifact["model_path"])
                 self.assertTrue((artifact_dir / artifact["model_path"]).exists())
+
+    def test_sample_weight_rewards_stronger_outcome_feedback(self) -> None:
+        weak = {
+            "supervision_tier": "outcome_feedback",
+            "label_class": "outcome_positive",
+            "retention_3s": 0.4,
+            "completion_rate": 0.2,
+            "baseline_view_rate": 100.0,
+            "observed_view_rate": 95.0,
+        }
+        strong = {
+            "supervision_tier": "outcome_feedback",
+            "label_class": "outcome_positive",
+            "retention_3s": 0.88,
+            "completion_rate": 0.62,
+            "baseline_view_rate": 100.0,
+            "observed_view_rate": 145.0,
+            "publish_platform": "tiktok",
+        }
+
+        self.assertGreater(train_ranker._sample_weight(strong), train_ranker._sample_weight(weak))
 
     def test_fit_lightgbm_ranker_returns_candidate_when_available(self) -> None:
         rows = [

@@ -15,7 +15,13 @@ export interface ClipResult {
   end_time: number;
   viral_score: number;
   reason: string;
+  selection_reasons: string[];
   ranking_mode: "heuristic" | "ml_blended";
+  platform?: "general" | "tiktok" | "youtube_shorts" | "instagram_reels" | "linkedin";
+  variant_key?: string;
+  variant_label?: string | null;
+  projected_hook_score?: number | null;
+  projected_retention_score?: number | null;
 }
 
 export type ClipFeedbackTag =
@@ -28,15 +34,34 @@ export interface ClipFeedbackPayload {
   candidate_id: string;
   tags: ClipFeedbackTag[];
   notes?: string;
+  publish_platform?: "general" | "tiktok" | "youtube_shorts" | "instagram_reels" | "linkedin";
   view_count?: number;
   like_count?: number;
   comment_count?: number;
   share_count?: number;
   save_count?: number;
+  impressions?: number;
+  avg_watch_time?: number;
+  retention_3s?: number;
+  retention_50pct?: number;
+  completion_rate?: number;
   views_1h?: number;
   views_24h?: number;
   baseline_view_rate?: number;
   observed_view_rate?: number;
+}
+
+export interface ClipRequestOptions {
+  platform?: "general" | "tiktok" | "youtube_shorts" | "instagram_reels" | "linkedin";
+  goal?: string;
+  tone?: string;
+  topic?: string;
+  must_include?: string[];
+  exclude?: string[];
+  speaker?: string;
+  time_range?: { start_sec?: number; end_sec?: number };
+  clip_style?: "balanced" | "aggressive_hook" | "context_balanced" | "reaction_first" | "quote_first";
+  variant_count?: number;
 }
 
 export interface StatusInfo {
@@ -67,6 +92,7 @@ export interface JobStatus {
     | "analyzing"
     | "clipping"
     | "done"
+    | "cancelled"
     | "failed";
   progress_pct: number;
   profile: string;
