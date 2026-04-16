@@ -46,12 +46,7 @@ class TrendPriorTests(unittest.TestCase):
                         "candidate_id": "clip-1",
                         "selected": True,
                         "publish_platform": "tiktok",
-                        "user_feedback_tags": ["strong_hook"],
-                        "retention_3s": 0.86,
-                        "completion_rate": 0.58,
-                        "view_count": 1000,
-                        "share_count": 40,
-                        "save_count": 35,
+                        "feedback_rating": "good",
                         "final_start": 0.0,
                         "final_end": 8.0,
                     }
@@ -86,7 +81,7 @@ class TrendPriorTests(unittest.TestCase):
 
         self.assertGreater(scores["dynamic_trend_score"], 0.0)
         self.assertGreater(scores["outcome_prior_score"], 0.0)
-        self.assertIn("strong_hook", scores["matched_feedback_labels"])
+        self.assertIn("good", scores["matched_feedback_labels"])
 
 
 if __name__ == "__main__":

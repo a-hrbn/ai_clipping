@@ -1,4 +1,5 @@
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -15,6 +16,22 @@ from services.transcriber import RichSegment
 
 
 class BuildTwitchTrainingDatasetTests(unittest.TestCase):
+    def test_semantic_provider_summary_reports_auto_fallback_chain(self) -> None:
+        with patch.object(settings, "groq_api_key", "secret"), \
+             patch.object(settings, "groq_model", "llama-groq"), \
+             patch.object(settings, "ollama_model", "llama-local"):
+            summary = build_twitch_training_dataset._semantic_provider_summary("auto")
+
+        self.assertEqual(summary, "auto->groq:llama-groq|fallback=ollama:llama-local")
+
+    def test_semantic_provider_summary_reports_groq_fallback_when_unconfigured(self) -> None:
+        with patch.object(settings, "groq_api_key", None), \
+             patch.object(settings, "groq_model", "llama-groq"), \
+             patch.object(settings, "ollama_model", "llama-local"):
+            summary = build_twitch_training_dataset._semantic_provider_summary("groq")
+
+        self.assertEqual(summary, "groq_unavailable->ollama:llama-local")
+
     def test_dataset_summary_counts_classes(self) -> None:
         summary = build_twitch_training_dataset.dataset_summary([
             {"vod_id": "1", "label_class": "positive"},
@@ -174,6 +191,24 @@ class BuildTwitchTrainingDatasetTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         download_mock.assert_not_called()
         self.assertEqual(build_rows_mock.call_args.kwargs["vod_path"], cache_path)
+
+    def test_extract_clip_modalities_collects_transcript_audio_and_video(self) -> None:
+        transcript = [RichSegment(start=0.0, end=1.0, text="test")]
+        audio_frames = [SimpleNamespace(second=0)]
+        visual_frames = [SimpleNamespace(second=0)]
+
+        with patch("services.transcriber.transcribe", return_value=transcript) as transcribe_mock, \
+             patch("services.audio_features.extract", return_value=audio_frames) as audio_mock, \
+             patch("services.video_features.extract", return_value=visual_frames) as video_mock:
+            result = build_twitch_training_dataset._extract_clip_modalities(
+                Path("clip.mp4"),
+                Path("audio.wav"),
+            )
+
+        self.assertEqual(result, (transcript, audio_frames, visual_frames))
+        transcribe_mock.assert_called_once_with(Path("audio.wav"))
+        audio_mock.assert_called_once_with(Path("audio.wav"))
+        video_mock.assert_called_once_with(Path("clip.mp4"))
 
     def test_build_dataset_uses_vod_checkpoint_when_present(self) -> None:
         labels = [
@@ -386,12 +421,53 @@ class BuildTwitchTrainingDatasetTests(unittest.TestCase):
             return Path("/tmp") / f"{job_id}.mp4"
 
         with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(settings, "training_vod_workers", 1), \
              patch("ml.build_twitch_training_dataset._materialize_vod", side_effect=_fake_materialize), \
-             patch("ml.build_twitch_training_dataset._build_rows_for_label", return_value=[fake_row]):
+             patch("ml.build_twitch_training_dataset._build_rows_for_label", side_effect=lambda *args, **kwargs: [dict(fake_row)]):
             rows = build_twitch_training_dataset.build_dataset(labels, "jynxzi", Path(tmp))
 
         self.assertEqual(len(rows), 2)
         self.assertIn("twitch_vod_prefetch_456", materialize_calls)
+
+    def test_build_dataset_parallel_workers_preserve_vod_order(self) -> None:
+        labels = [
+            {
+                "broadcaster": "jynxzi",
+                "vod_id": "123",
+                "vod_url": "https://www.twitch.tv/videos/123",
+                "window_start": 10.0,
+                "window_end": 20.0,
+                "label_class": "positive",
+                "label_score": 0.8,
+                "clip_ids": ["c1"],
+                "label_source": "twitch_clip_api",
+                "platform_source": "twitch_clip",
+            },
+            {
+                "broadcaster": "jynxzi",
+                "vod_id": "456",
+                "vod_url": "https://www.twitch.tv/videos/456",
+                "window_start": 30.0,
+                "window_end": 42.0,
+                "label_class": "positive",
+                "label_score": 0.7,
+                "clip_ids": ["c2"],
+                "label_source": "twitch_clip_api",
+                "platform_source": "twitch_clip",
+            },
+        ]
+
+        def _fake_build_rows_for_vod(vod_id: str, *_args, **_kwargs):
+            if vod_id == "123":
+                time.sleep(0.05)
+            return [{"vod_id": vod_id, "label": 1, "features": {"candidate_id": vod_id}}]
+
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(settings, "training_vod_workers", 2), \
+             patch("ml.build_twitch_training_dataset._build_rows_for_vod", side_effect=_fake_build_rows_for_vod):
+            rows = build_twitch_training_dataset.build_dataset(labels, "jynxzi", Path(tmp))
+
+        self.assertEqual([row["vod_id"] for row in rows], ["123", "456"])
 
     def test_refined_candidates_prefer_overlapping_generator_windows(self) -> None:
         proxy = build_twitch_training_dataset._proxy_candidate(
@@ -473,6 +549,52 @@ class BuildTwitchTrainingDatasetTests(unittest.TestCase):
         self.assertEqual(row["window_start"], 121.5)
         self.assertEqual(row["proxy_window_start"], 120.0)
         self.assertEqual(row["candidate_source"], "story_payoff")
+
+    def test_dedupe_ranker_rows_prefers_primary_proxy_window_per_clip_cluster(self) -> None:
+        primary = {
+            "candidate_id": "cand-primary",
+            "label": 1,
+            "label_class": "positive",
+            "vod_id": "vod-1",
+            "clip_ids": ["clip-a"],
+            "dataset_source": "twitch_vod_primary",
+            "window_origin": "proxy_label_refined",
+            "sample_weight": 1.5,
+        }
+        supplemental = {
+            "candidate_id": "cand-supplemental",
+            "label": 1,
+            "label_class": "positive",
+            "vod_id": "vod-1",
+            "clip_ids": ["clip-a"],
+            "dataset_source": "twitch_vod_candidate_supplemental",
+            "window_origin": "candidate_generator_overlap",
+            "sample_weight": 0.975,
+        }
+        other_positive = {
+            "candidate_id": "cand-other",
+            "label": 1,
+            "label_class": "positive",
+            "vod_id": "vod-2",
+            "clip_ids": ["clip-b"],
+            "dataset_source": "twitch_vod_primary",
+            "window_origin": "proxy_label_refined",
+            "sample_weight": 1.5,
+        }
+        negative = {
+            "candidate_id": "cand-negative",
+            "label": 0,
+            "label_class": "hard_negative",
+            "vod_id": "vod-1",
+            "clip_ids": [],
+            "dataset_source": "twitch_vod_primary",
+            "window_origin": "proxy_label_refined",
+            "sample_weight": 1.8,
+        }
+
+        rows = build_twitch_training_dataset._dedupe_ranker_rows([primary, supplemental, other_positive, negative])
+
+        self.assertEqual([row["candidate_id"] for row in rows], ["cand-primary", "cand-other", "cand-negative"])
 
     def test_boundary_perturbation_candidates_generate_valid_near_misses(self) -> None:
         transcript = [

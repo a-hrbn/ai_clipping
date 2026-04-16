@@ -58,7 +58,7 @@ class FeatureBuilderTests(unittest.TestCase):
         self.assertGreater(features.audio_pop_score, 0.0)
         self.assertGreater(features.projected_hook_score, 0.0)
         self.assertGreater(features.projected_retention_score, 0.0)
-        self.assertEqual(features.feature_build_version, 5)
+        self.assertEqual(features.feature_build_version, 6)
         self.assertGreaterEqual(features.payoff_clarity_score, 0.0)
         self.assertGreaterEqual(features.slow_open_penalty, 0.0)
         self.assertGreaterEqual(features.context_dependency_score, 0.0)
@@ -218,6 +218,23 @@ class FeatureBuilderTests(unittest.TestCase):
         self.assertGreater(features.slow_open_penalty, 0.4)
         self.assertGreater(features.context_dependency_score, 0.5)
         self.assertGreater(features.weak_resolution_penalty, 0.4)
+
+    def test_build_features_adds_memory_context_scores(self) -> None:
+        candidate = Candidate(id="memory", start=16.0, end=24.0, source="story_payoff", anchor_time=20.0)
+        segments = [
+            RichSegment(start=0.0, end=3.0, text="Remember the challenge if he loses this duel?", speaker="STREAMER", hype_score=2.1),
+            RichSegment(start=3.0, end=6.0, text="Chat keeps talking about that challenge.", speaker="STREAMER", hype_score=1.8, chat_spike_score=0.25),
+            RichSegment(start=16.0, end=20.0, text="No way he actually lost the duel.", speaker="STREAMER", emotions=["exclamation"], hype_score=5.8, chat_spike_score=0.65),
+            RichSegment(start=20.0, end=24.0, text="That challenge just paid off and everyone is laughing.", speaker="STREAMER", emotions=["laughter"], hype_score=5.2),
+        ]
+
+        features = feature_builder.build_features([candidate], segments)[0]
+
+        self.assertGreater(features.setup_depth_score, 0.0)
+        self.assertGreater(features.arc_payoff_match, 0.0)
+        self.assertGreater(features.memory_dependency_score, 0.0)
+        self.assertGreater(features.retrieved_memory_span_count, 0.0)
+        self.assertGreater(features.required_setup_lead_sec, 0.0)
 
 
 if __name__ == "__main__":

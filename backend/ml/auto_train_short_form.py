@@ -354,7 +354,11 @@ def _train_preferred_path(
             train_vod_ranker._write_jsonl(dataset_out, composite)
             logger.info("Wrote VOD-first composite dataset to %s", dataset_out)
             logger.info("VOD-first dataset summary: %s", json.dumps(train_vod_ranker.dataset_summary(composite), ensure_ascii=True))
-            return train_ranker.train_from_dataset(dataset_out, effective_profile, artifact_dir)
+            return train_vod_ranker._train_models_for_dataset(
+                dataset_out,
+                effective_profile,
+                artifact_dir,
+            )
 
     logger.info("Training route: short-form primary (%s)", short_form_dataset)
     return train_ranker.train_from_dataset(short_form_dataset, effective_profile, artifact_dir)

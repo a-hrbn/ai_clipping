@@ -5,6 +5,7 @@ import concurrent.futures
 import hashlib
 import json
 import logging
+import os
 import pathlib
 import shutil
 import time
@@ -26,8 +27,8 @@ _SUPPLEMENTAL_CANDIDATE_LIMIT = 2
 _SUPPLEMENTAL_CANDIDATE_WEIGHT = 0.65
 _BOUNDARY_NEAR_MISS_SAMPLE_WEIGHT = 0.45
 _BOUNDARY_NEAR_MISS_LIMIT = 6
-_DATASET_BUILD_LLM_PROVIDER = "ollama"
-_VOD_CHECKPOINT_VERSION = 2
+_DATASET_BUILD_LLM_PROVIDER = (os.environ.get("TRAINING_DATASET_LLM_PROVIDER") or "ollama").strip() or "ollama"
+_VOD_CHECKPOINT_VERSION = 3
 _BOUNDARY_PERTURBATION_SPECS = (
     ("start_late_small", 0.8, 0.0),
     ("start_late_large", 1.8, 0.0),
@@ -50,6 +51,7 @@ def _dataset_build_fingerprint(profile: str) -> str:
         "llm_provider": _DATASET_BUILD_LLM_PROVIDER,
         "supplemental_candidate_limit": _SUPPLEMENTAL_CANDIDATE_LIMIT,
         "supplemental_candidate_weight": _SUPPLEMENTAL_CANDIDATE_WEIGHT,
+        "ranker_positive_dedupe": 1,
         "boundary_near_miss_limit": _BOUNDARY_NEAR_MISS_LIMIT,
         "boundary_near_miss_sample_weight": _BOUNDARY_NEAR_MISS_SAMPLE_WEIGHT,
         "boundary_perturbation_specs": list(_BOUNDARY_PERTURBATION_SPECS),
@@ -83,8 +85,24 @@ def main() -> int:
 
 
 def build_dataset(labels: list[dict], profile: str, work_dir: pathlib.Path) -> list[dict]:
+    from services import semantic_candidates, transcriber, video_features
+
     rows: list[dict] = []
     work_dir.mkdir(parents=True, exist_ok=True)
+    cache_mode = "enabled" if _training_cache_enabled() else "disabled"
+    vod_workers = _resolved_training_vod_workers()
+    semantic_provider = _semantic_provider_summary(_DATASET_BUILD_LLM_PROVIDER)
+    logger.info(
+        "training_dataset_runtime profile=%s whisper_model=%s llm_provider=%s semantic_model=%s face_detector=%s deepface=%s cache=%s vod_workers=%s",
+        profile,
+        transcriber.runtime_summary()["whisper_model"],
+        semantic_provider,
+        semantic_candidates._MODEL_NAME,
+        video_features.runtime_summary()["face_detector"],
+        "enabled" if video_features.runtime_summary()["deepface_enabled"] else "disabled",
+        cache_mode,
+        vod_workers,
+    )
     labels_by_vod: dict[str, list[dict]] = {}
     for row in labels:
         if row.get("label_class") == "ambiguous":
@@ -92,6 +110,9 @@ def build_dataset(labels: list[dict], profile: str, work_dir: pathlib.Path) -> l
         labels_by_vod.setdefault(str(row["vod_id"]), []).append(row)
 
     vod_items = list(labels_by_vod.items())
+    if vod_workers > 1 and len(vod_items) > 1:
+        return _build_dataset_parallel(vod_items, profile, work_dir, max_workers=vod_workers)
+
     prefetch_future: concurrent.futures.Future[pathlib.Path] | None = None
     prefetched_vod_id: str | None = None
     prefetched_job_id: str | None = None
@@ -189,7 +210,107 @@ def build_dataset(labels: list[dict], profile: str, work_dir: pathlib.Path) -> l
                 shutil.rmtree(download_dir, ignore_errors=True)
                 if prefetched_download_dir is not None and prefetched_download_dir != download_dir:
                     shutil.rmtree(prefetched_download_dir, ignore_errors=True)
-    return rows
+    return _dedupe_ranker_rows(rows)
+
+
+def _build_dataset_parallel(
+    vod_items: list[tuple[str, list[dict]]],
+    profile: str,
+    work_dir: pathlib.Path,
+    *,
+    max_workers: int,
+) -> list[dict]:
+    futures: list[concurrent.futures.Future[list[dict]]] = []
+    resolved_workers = max(1, min(int(max_workers), len(vod_items)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=resolved_workers) as executor:
+        for vod_id, vod_rows in vod_items:
+            futures.append(
+                executor.submit(
+                    _build_rows_for_vod,
+                    vod_id,
+                    vod_rows,
+                    profile,
+                    work_dir,
+                )
+            )
+
+        rows: list[dict] = []
+        for future in futures:
+            rows.extend(future.result())
+    return _dedupe_ranker_rows(rows)
+
+
+def _build_rows_for_vod(
+    vod_id: str,
+    vod_rows: list[dict],
+    profile: str,
+    work_dir: pathlib.Path,
+) -> list[dict]:
+    job_id = f"twitch_vod_{vod_id}"
+    vod_dir = work_dir / job_id
+    download_dir = pathlib.Path(settings.storage_dir) / job_id
+    context_index = _build_vod_context_index(vod_rows)
+    vod_checkpoint_rows: list[dict] = []
+    vod_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        checkpoint_rows = _load_vod_checkpoint(work_dir, profile, vod_id, vod_rows)
+        if checkpoint_rows is not None:
+            logger.info("training_vod_checkpoint_hit %s", vod_rows[0]["vod_url"])
+            return checkpoint_rows
+
+        vod_path = _materialize_vod(vod_rows[0]["vod_url"], job_id)
+        for index, label in enumerate(sorted(vod_rows, key=lambda item: float(item["window_start"])), start=1):
+            clip_dir = vod_dir / f"window_{index:04d}"
+            clip_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                try:
+                    label_rows = _build_rows_for_label(
+                        label,
+                        vod_path=vod_path,
+                        clip_dir=clip_dir,
+                        job_prefix=f"{job_id}_{index}",
+                        profile=profile,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Skipping VOD window %s[%s] %.2f-%.2f: %s",
+                        vod_id,
+                        index,
+                        float(label["window_start"]),
+                        float(label["window_end"]),
+                        exc,
+                    )
+                    continue
+                for row in label_rows:
+                    row.setdefault("label_class", str(label.get("label_class", "")))
+                    row.setdefault("label_score", float(label.get("label_score", 0.0)))
+                    row.setdefault("platform_source", label.get("platform_source", "twitch_clip"))
+                    row.setdefault("label_source", label.get("label_source", "twitch_clip_api"))
+                    row.setdefault("window_start", float(label.get("window_start", 0.0)))
+                    row.setdefault("window_end", float(label.get("window_end", 0.0)))
+                    row.setdefault("vod_id", str(label.get("vod_id", "")))
+                    row.setdefault("vod_duration_seconds", float(label.get("vod_duration_seconds", 0.0)))
+                    row.setdefault("clip_ids", list(label.get("clip_ids") or []))
+                    row.setdefault("sample_weight", sample_weight_for_label(str(row.get("label_class", ""))))
+                    row.setdefault("dataset_source", "twitch_vod_primary")
+                    row.setdefault("supervision_tier", "twitch_clip_proxy")
+                    row.setdefault("supervision_reason", str(row.get("label_source", "twitch_clip_api")))
+                    row.setdefault("ordinal_label", collect_viral_clips._ordinal_label(str(row.get("label_class", "")), int(row.get("label", 0))))
+                    _apply_vod_context_features(row, label, context_index)
+                    row["feature_provenance"] = collect_viral_clips._feature_provenance(
+                        row["features"],
+                        has_vod_context=True,
+                    )
+                    vod_checkpoint_rows.append(row)
+            finally:
+                shutil.rmtree(clip_dir, ignore_errors=True)
+
+        if vod_checkpoint_rows:
+            _write_vod_checkpoint(work_dir, profile, vod_id, vod_rows, vod_checkpoint_rows)
+        return vod_checkpoint_rows
+    finally:
+        shutil.rmtree(vod_dir, ignore_errors=True)
+        shutil.rmtree(download_dir, ignore_errors=True)
 
 
 def _schedule_prefetch(
@@ -227,7 +348,7 @@ def _build_rows_for_label(
     profile: str,
 ) -> list[dict]:
     from services import (
-        audio_extractor, audio_features, feature_builder, scorer, transcriber, video_features,
+        audio_extractor, audio_features, feature_builder, scorer, video_features,
     )
     from services.timeline_types import Candidate
 
@@ -239,12 +360,10 @@ def _build_rows_for_label(
         expanded_end,
     )
     audio_path = audio_extractor.extract(clip_path, job_prefix)
-    transcript = transcriber.transcribe(audio_path)
+    transcript, audio_frames, visual_frames = _extract_clip_modalities(clip_path, audio_path)
     if not transcript:
         return []
 
-    audio_frames = audio_features.extract(audio_path)
-    visual_frames = video_features.extract(clip_path)
     transcript = audio_features.enrich_segments(transcript, audio_frames)
     transcript = video_features.enrich_segments(transcript, visual_frames)
     transcript = scorer.score_segments(transcript)
@@ -320,6 +439,31 @@ def _build_rows_for_label(
     return rows
 
 
+def _extract_clip_modalities(
+    clip_path: pathlib.Path,
+    audio_path: pathlib.Path,
+) -> tuple[list, list, list]:
+    from services import audio_features, transcriber, video_features
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        transcript_future = executor.submit(transcriber.transcribe, audio_path)
+        audio_future = executor.submit(audio_features.extract, audio_path)
+        visual_future = executor.submit(video_features.extract, clip_path)
+
+        transcript = transcript_future.result()
+        audio_frames = audio_future.result()
+        visual_frames = visual_future.result()
+
+    return transcript, audio_frames, visual_frames
+
+
+def _resolved_training_vod_workers() -> int:
+    try:
+        return max(int(settings.training_vod_workers), 1)
+    except (TypeError, ValueError):
+        return 1
+
+
 def _materialize_vod(vod_url: str, job_id: str) -> pathlib.Path:
     if not _training_cache_enabled():
         logger.info("training_vod_cache_disabled %s", vod_url)
@@ -341,6 +485,20 @@ def _materialize_vod(vod_url: str, job_id: str) -> pathlib.Path:
     except OSError:
         pass
     return cache_path if cache_path.exists() else downloaded
+
+
+def _semantic_provider_summary(preferred: str) -> str:
+    provider = (preferred or "auto").strip().lower() or "auto"
+    has_groq = bool(settings.groq_api_key)
+    if provider == "groq":
+        if has_groq:
+            return f"groq:{settings.groq_model}"
+        return f"groq_unavailable->ollama:{settings.ollama_model}"
+    if provider == "ollama":
+        return f"ollama:{settings.ollama_model}"
+    if has_groq:
+        return f"auto->groq:{settings.groq_model}|fallback=ollama:{settings.ollama_model}"
+    return f"auto->ollama:{settings.ollama_model}"
 
 
 def _checkpoint_dir(work_dir: pathlib.Path) -> pathlib.Path:
@@ -816,6 +974,65 @@ def _training_row_from_label(
     if perturbation_kind:
         row["boundary_perturbation_kind"] = perturbation_kind
     return row
+
+
+def _dedupe_ranker_rows(rows: list[dict]) -> list[dict]:
+    canonical_positive_rows: dict[tuple[str, tuple[str, ...]], dict] = {}
+    deduped: list[dict] = []
+    for row in rows:
+        positive_key = _positive_cluster_key(row)
+        if positive_key is None:
+            deduped.append(row)
+            continue
+        existing = canonical_positive_rows.get(positive_key)
+        if existing is None or _prefer_positive_row(row, existing):
+            canonical_positive_rows[positive_key] = row
+
+    if not canonical_positive_rows:
+        return deduped
+
+    seen_positive_keys: set[tuple[str, tuple[str, ...]]] = set()
+    merged: list[dict] = []
+    for row in rows:
+        positive_key = _positive_cluster_key(row)
+        if positive_key is None:
+            merged.append(row)
+            continue
+        if positive_key in seen_positive_keys:
+            continue
+        seen_positive_keys.add(positive_key)
+        merged.append(canonical_positive_rows[positive_key])
+    return merged
+
+
+def _positive_cluster_key(row: dict) -> tuple[str, tuple[str, ...]] | None:
+    if int(row.get("label", 0)) != 1:
+        return None
+    label_class = str(row.get("label_class") or "").strip().lower()
+    if label_class not in _POSITIVE_LABEL_CLASSES:
+        return None
+    clip_ids = tuple(sorted(str(item) for item in (row.get("clip_ids") or []) if str(item).strip()))
+    if not clip_ids:
+        return None
+    vod_id = str(row.get("vod_id") or "").strip()
+    if not vod_id:
+        return None
+    return (vod_id, clip_ids)
+
+
+def _prefer_positive_row(candidate: dict, existing: dict) -> bool:
+    def score(row: dict) -> tuple[int, int, float, float]:
+        dataset_source = str(row.get("dataset_source") or "")
+        window_origin = str(row.get("window_origin") or "")
+        clip_count = len(row.get("clip_ids") or [])
+        return (
+            1 if dataset_source == "twitch_vod_primary" else 0,
+            1 if window_origin == "proxy_label_refined" else 0,
+            float(row.get("sample_weight") or 0.0),
+            float(clip_count),
+        )
+
+    return score(candidate) > score(existing)
 
 
 def _read_jsonl(path: pathlib.Path) -> list[dict]:

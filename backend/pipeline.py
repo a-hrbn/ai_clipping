@@ -197,6 +197,7 @@ async def run_pipeline(
             normalized_strategy,
         )
         shortlist_top_k = min(max(settings.shortlist_face_reaction_top_k, 0), len(ranked_candidates))
+        llm_top_k = min(max(settings.shortlist_llm_top_k, 0), len(ranked_candidates))
         if shortlist_top_k > 0:
             transcript = await loop.run_in_executor(
                 None,
@@ -206,7 +207,7 @@ async def run_pipeline(
                 [ranked.candidate for ranked in ranked_candidates[:shortlist_top_k]],
                 settings.shortlist_face_reaction_sample_sec,
             )
-            llm_top_k = min(max(settings.shortlist_llm_top_k, 0), len(ranked_candidates))
+        if shortlist_top_k > 0 or llm_top_k > 0:
             llm_candidate_ids = {
                 ranked.candidate.id for ranked in ranked_candidates[:llm_top_k]
             } if llm_top_k > 0 else set()
@@ -296,7 +297,6 @@ async def run_pipeline(
         _write_jsonl(debug_dir / "candidates_semantic.jsonl", [candidate.to_dict() for candidate in semantic_candidates])
         _write_jsonl(debug_dir / "candidates_fallback.jsonl", [candidate.to_dict() for candidate in fallback_candidates])
         _write_jsonl(debug_dir / "candidates_merged.jsonl", [candidate.to_dict() for candidate in candidates])
-        _write_jsonl(debug_dir / "candidates_raw.jsonl", [candidate.to_dict() for candidate in candidates])
         _write_jsonl(
             debug_dir / "candidates_normalized.jsonl",
             [candidate.to_dict() for candidate in normalized_candidates],
@@ -374,6 +374,7 @@ async def run_pipeline(
     except (PipelineCancelledError, downloader.DownloadCancelledError):
         logger.info("Pipeline cancelled for job %s", job_id)
     except Exception as e:
+        logger.exception("Pipeline failed for job %s", job_id)
         update_job(job_id, status="failed", error=str(e))
 
 

@@ -28,7 +28,7 @@ class TrainVodRankerTests(unittest.TestCase):
             artifact_dir = Path(tmp) / "artifacts"
 
             with patch("ml.train_vod_ranker.build_composite_dataset", return_value=dataset_rows) as build_mock, \
-                 patch("ml.train_vod_ranker.train_ranker.train_from_dataset", return_value=0) as train_mock, \
+                 patch("ml.train_vod_ranker._train_models_for_dataset", return_value=0) as train_mock, \
                  patch(
                      "sys.argv",
                      [
@@ -78,6 +78,7 @@ class TrainVodRankerTests(unittest.TestCase):
             })
 
             with patch("ml.train_vod_ranker.train_ranker.train_from_dataset", return_value=0) as ranker_mock, \
+                 patch("ml.train_vod_ranker.ranker_dataset_quality", return_value={"ok": True}), \
                  patch("ml.train_vod_ranker._boundary_training_modules", return_value=(fake_boundary_eval, fake_boundary_train)), \
                  patch.object(fake_boundary_train, "train_from_rows", return_value=0) as boundary_mock:
                 rc = train_vod_ranker._train_models_for_dataset(dataset_path, "jynxzi", Path(tmp) / "artifacts")
@@ -154,7 +155,7 @@ class TrainVodRankerTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp, \
              patch("ml.train_vod_ranker.build_composite_dataset", side_effect=_fake_build_composite_dataset), \
-             patch("ml.train_vod_ranker.train_ranker.train_from_dataset", return_value=0) as train_mock:
+             patch("ml.train_vod_ranker._train_models_for_dataset", return_value=0) as train_mock:
             rc = train_vod_ranker._train_per_streamer(
                 labels,
                 short_form_rows=[{"streamer": "jynxzi", "label": 1, "features": {}}],
@@ -173,6 +174,33 @@ class TrainVodRankerTests(unittest.TestCase):
                 if line.strip()
             ]
             self.assertEqual(dataset_rows[0]["streamer"], "jynxzi")
+
+    def test_ranker_dataset_quality_rejects_single_vod_single_clip_dataset(self) -> None:
+        rows = [
+            {
+                "candidate_id": "cand-1",
+                "label": 1,
+                "label_class": "positive",
+                "dataset_source": "twitch_vod_primary",
+                "vod_id": "vod-1",
+                "clip_ids": ["clip-a"],
+            },
+            {
+                "candidate_id": "cand-2",
+                "label": 0,
+                "label_class": "hard_negative",
+                "dataset_source": "twitch_vod_primary",
+                "vod_id": "vod-1",
+                "clip_ids": [],
+            },
+        ]
+
+        quality = train_vod_ranker.ranker_dataset_quality(rows)
+
+        self.assertFalse(quality["ok"])
+        self.assertIn("primary_unique_vods_below_minimum", quality["violations"])
+        self.assertIn("primary_positive_clusters_below_minimum", quality["violations"])
+        self.assertIn("primary_ranking_groups_below_minimum", quality["violations"])
 
 
 if __name__ == "__main__":

@@ -172,6 +172,41 @@ class RankerTests(unittest.TestCase):
 
         self.assertGreater(score, 1.0)
 
+    def test_inspect_artifact_reports_rejected_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_dir = Path(tmp)
+            (artifact_dir / "gaming_ranker.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "profile": "gaming",
+                        "feature_names": ["quoteability_score"],
+                        "weights": {"quoteability_score": 5.0},
+                        "scales": {"quoteability_score": {"mean": 0.0, "std": 1.0}},
+                        "training_stats": {
+                            "rows": 100,
+                            "positive_rows": 40,
+                            "negative_rows": 60,
+                            "train_rows": 80,
+                            "validation_rows": 20,
+                        },
+                        "validation": {
+                            "accuracy": 0.8,
+                            "precision_at_5": 0.8,
+                            "ndcg_at_5": 0.8,
+                            "ranking_groups": 1,
+                        },
+                        "intercept": 0.0,
+                        "blend": 1.0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            inspection = Ranker(artifact_dir=artifact_dir, enable_trained_model=True).inspect_artifact("gaming")
+
+        self.assertEqual(inspection["status"], "rejected")
+        self.assertEqual(inspection["reason"], "validation_ranking_groups_below_minimum")
+
     @unittest.skipUnless(joblib is not None, "joblib is required for artifact tests")
     def test_ranker_ignores_undertrained_artifact(self) -> None:
         feature = CandidateFeatures(

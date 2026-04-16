@@ -102,7 +102,7 @@ def _load_dynamic_memory(storage_dir: pathlib.Path, transcripts_dir: pathlib.Pat
                 "opening_tokens": _normalize_text(clip_texts["opening"]).split(),
                 "full_tokens": _normalize_text(clip_texts["full"]).split(),
                 "score": _feedback_row_score(row),
-                "labels": list(row.get("user_feedback_tags") or []),
+                "labels": _feedback_row_labels(row),
             }
         )
     rows.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
@@ -220,24 +220,19 @@ def _is_positive_feedback_row(row: dict) -> bool:
 
 
 def _feedback_row_score(row: dict) -> float:
-    score = 0.0
-    tags = set(row.get("user_feedback_tags") or [])
-    if "strong_hook" in tags:
-        score += 0.18
-    if "missing_payoff" in tags:
-        score -= 0.18
-    if "too_much_context" in tags:
-        score -= 0.12
-    baseline = _as_float(row.get("baseline_view_rate"))
-    observed = _as_float(row.get("observed_view_rate"))
-    if baseline > 0 and observed > 0:
-        score += min(max((observed / baseline) - 1.0, -0.6), 1.0) * 0.55
-    score += min(_as_float(row.get("retention_3s")), 1.0) * 0.3
-    score += min(_as_float(row.get("completion_rate")), 1.0) * 0.25
-    views = max(_as_float(row.get("view_count")), 1.0)
-    score += min(_as_float(row.get("share_count")) / views, 0.05) * 6.0
-    score += min(_as_float(row.get("save_count")) / views, 0.05) * 5.0
-    return _clamp01(score)
+    rating = str(row.get("feedback_rating") or "").strip().lower()
+    if rating == "good":
+        return 1.0
+    if rating == "medium":
+        return 0.55
+    if rating == "bad":
+        return 0.0
+    return 0.5
+
+
+def _feedback_row_labels(row: dict) -> list[str]:
+    rating = str(row.get("feedback_rating") or "").strip().lower()
+    return [rating] if rating in {"good", "medium", "bad"} else []
 
 
 def _extract_feedback_texts(row: dict, transcripts_dir: pathlib.Path) -> dict[str, str] | None:

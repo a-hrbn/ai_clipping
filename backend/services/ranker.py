@@ -233,31 +233,81 @@ class Ranker:
         return scored
 
     def _load_artifact(self, profile: str) -> dict | None:
+        inspection = self.inspect_artifact(profile)
+        artifact = inspection.get("artifact")
+        return artifact if isinstance(artifact, dict) and inspection.get("status") == "usable" else None
+
+    def inspect_artifact(self, profile: str) -> dict[str, object]:
         if not self.enable_trained_model:
-            return None
-        # Level 1: exact artifact (streamer-specific or named profile)
-        artifact = self._try_load_artifact_file(profile)
-        if artifact is not None:
-            return artifact
-        # Level 2: content-type fallback via STREAMER_CONTENT_TYPE_MAP
+            return {
+                "status": "disabled",
+                "reason": "trained_model_disabled",
+                "requested_profile": profile,
+                "resolved_profile": "",
+                "source": "",
+                "artifact": None,
+            }
+
+        exact = self._inspect_artifact_file(profile, expected_profile=profile)
+        if exact["status"] == "usable":
+            return exact
+
         from services.profile_config import get_content_type_for_streamer
         content_type = get_content_type_for_streamer(profile)
         if content_type and content_type != profile:
-            artifact = self._try_load_artifact_file(content_type)
-            if artifact is not None:
-                return artifact
-        # Level 3: heuristic only
-        return None
+            fallback = self._inspect_artifact_file(content_type, expected_profile=content_type)
+            if fallback["status"] == "usable":
+                fallback["requested_profile"] = profile
+                fallback["source"] = "content_type_fallback"
+                return fallback
+            if exact["status"] == "missing" and fallback["status"] != "missing":
+                fallback["requested_profile"] = profile
+                if fallback["status"] == "rejected":
+                    fallback["source"] = "content_type_fallback"
+                return fallback
+        return exact
 
-    def _try_load_artifact_file(self, profile: str) -> dict | None:
+    def _inspect_artifact_file(self, profile: str, *, expected_profile: str) -> dict[str, object]:
         path = self.artifact_dir / f"{profile}_ranker.json"
         if not path.exists():
-            return None
+            return {
+                "status": "missing",
+                "reason": "artifact_file_missing",
+                "requested_profile": expected_profile,
+                "resolved_profile": profile,
+                "source": "exact",
+                "artifact": None,
+            }
         try:
             artifact = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return None
-        return artifact if self._artifact_is_usable(artifact, profile) else None
+        except OSError:
+            return {
+                "status": "rejected",
+                "reason": "artifact_file_unreadable",
+                "requested_profile": expected_profile,
+                "resolved_profile": profile,
+                "source": "exact",
+                "artifact": None,
+            }
+        except json.JSONDecodeError:
+            return {
+                "status": "rejected",
+                "reason": "artifact_invalid_json",
+                "requested_profile": expected_profile,
+                "resolved_profile": profile,
+                "source": "exact",
+                "artifact": None,
+            }
+
+        usable, reason = self._artifact_is_usable(artifact, profile)
+        return {
+            "status": "usable" if usable else "rejected",
+            "reason": reason,
+            "requested_profile": expected_profile,
+            "resolved_profile": profile,
+            "source": "exact",
+            "artifact": artifact,
+        }
 
     def _trained_scores(self, features: list[CandidateFeatures], artifact: dict) -> list[float]:
         feature_names: list[str] = artifact.get("feature_names", [])
@@ -318,41 +368,50 @@ class Ranker:
         scores = model.predict(matrix)
         return [self._normalize_trained_score(float(score), "lightgbm_ranker") for score in scores]
 
-    def _artifact_is_usable(self, artifact: dict, profile: str) -> bool:
+    def _artifact_is_usable(self, artifact: dict, profile: str) -> tuple[bool, str]:
         if artifact.get("profile") != profile:
-            return False
+            return False, "profile_mismatch"
         if int(artifact.get("version", 0)) < 1:
-            return False
+            return False, "artifact_version_too_old"
         model_type = str(artifact.get("model_type") or "linear").strip().lower()
         has_linear_params = bool(artifact.get("weights"))
         has_joblib_model = model_type in {"gradient_boosting", "lightgbm_ranker"} and bool(artifact.get("model_path"))
         if not artifact.get("feature_names") or not artifact.get("scales") or not (has_linear_params or has_joblib_model):
-            return False
+            return False, "artifact_schema_incomplete"
 
         training_stats = artifact.get("training_stats", {})
         validation = artifact.get("validation", {})
         if int(training_stats.get("rows", 0)) < _MIN_TRAINING_ROWS:
-            return False
+            return False, "training_rows_below_minimum"
         if int(training_stats.get("positive_rows", 0)) < _MIN_POSITIVE_ROWS:
-            return False
+            return False, "positive_rows_below_minimum"
         if int(training_stats.get("negative_rows", 0)) < _MIN_NEGATIVE_ROWS:
-            return False
-        if not self._validation_passes(validation):
-            return False
-        return True
+            return False, "negative_rows_below_minimum"
+        validation_ok, validation_reason = self._validation_passes(validation)
+        if not validation_ok:
+            return False, validation_reason
+        return True, "usable"
 
-    def _validation_passes(self, validation: dict) -> bool:
+    def _validation_passes(self, validation: dict) -> tuple[bool, str]:
         accuracy = float(validation.get("accuracy", 0.0))
         ndcg = float(validation.get("ndcg_at_5", 0.0))
         precision_at_5 = float(validation.get("precision_at_5", 0.0))
         legacy_precision = float(validation.get("precision", 0.0))
+        ranking_groups = int(validation.get("ranking_groups", 0) or 0)
+
+        if ranking_groups and ranking_groups < 2:
+            return False, "validation_ranking_groups_below_minimum"
 
         ranking_ok = (
             ndcg >= _MIN_VALIDATION_NDCG_AT_5
             or precision_at_5 >= _MIN_VALIDATION_PRECISION_AT_5
             or legacy_precision >= 0.70
         )
-        return accuracy >= _MIN_VALIDATION_ACCURACY and ranking_ok
+        if accuracy < _MIN_VALIDATION_ACCURACY:
+            return False, "validation_accuracy_below_minimum"
+        if not ranking_ok:
+            return False, "validation_ranking_metrics_below_minimum"
+        return True, "usable"
 
     def _safe_blend(self, artifact: dict) -> float:
         requested = float(artifact.get("blend", _MAX_BLEND))

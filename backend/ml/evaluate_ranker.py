@@ -33,7 +33,9 @@ def main() -> int:
 
     baseline_ranker = Ranker(artifact_dir=pathlib.Path(args.artifact_dir), enable_trained_model=False)
     trained_ranker = Ranker(artifact_dir=pathlib.Path(args.artifact_dir), enable_trained_model=True)
-    artifact = trained_ranker._load_artifact(args.profile)
+    artifact_inspection = trained_ranker.inspect_artifact(args.profile)
+    raw_artifact = artifact_inspection.get("artifact") if isinstance(artifact_inspection.get("artifact"), dict) else None
+    artifact = raw_artifact if artifact_inspection.get("status") == "usable" else None
     features = [CandidateFeatures.from_dict(row["features"]) for row in rows]
     baseline_scores = {candidate_id: score for candidate_id, score in baseline_ranker.score(features, args.profile)}
     trained_scores = {candidate_id: score for candidate_id, score in trained_ranker.score(features, args.profile)}
@@ -50,16 +52,22 @@ def main() -> int:
             {
                 "artifact": {
                     "available": artifact is not None,
-                    "selected_model": artifact.get("selected_model") if artifact else "",
-                    "model_type": artifact.get("model_type") if artifact else "",
-                    "training_stats": artifact.get("training_stats", {}) if artifact else {},
-                    "validation": artifact.get("validation", {}) if artifact else {},
+                    "status": artifact_inspection.get("status", "missing"),
+                    "reason": artifact_inspection.get("reason", "artifact_file_missing"),
+                    "requested_profile": artifact_inspection.get("requested_profile", args.profile),
+                    "resolved_profile": artifact_inspection.get("resolved_profile", ""),
+                    "source": artifact_inspection.get("source", ""),
+                    "selected_model": raw_artifact.get("selected_model") if raw_artifact else "",
+                    "model_type": raw_artifact.get("model_type") if raw_artifact else "",
+                    "training_stats": raw_artifact.get("training_stats", {}) if raw_artifact else {},
+                    "validation": raw_artifact.get("validation", {}) if raw_artifact else {},
                 },
                 "metrics": {
                     "baseline_heuristic": baseline_metrics,
                     "trained_runtime": trained_metrics,
                     "delta": _metric_delta(trained_metrics, baseline_metrics),
                 },
+                "trained_runtime_uses_artifact": artifact is not None,
                 "rows": len(rows),
                 "positive_rows": sum(1 for row in rows if int(row["label"]) == 1),
                 "negative_rows": sum(1 for row in rows if int(row["label"]) == 0),

@@ -24,6 +24,7 @@ Performance budget for a 1-hour video on Mac CPU:
 
 from __future__ import annotations
 
+import os
 import sys
 import logging
 import pathlib
@@ -37,6 +38,16 @@ from services.timeline_types import Candidate
 from services.transcriber import RichSegment
 
 logger = logging.getLogger(__name__)
+
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+
+_VIDEO_RUNTIME_LOGGED = False
+_MEDIAPIPE_STATUS = "unavailable"
+_MEDIAPIPE_DETAIL = ""
+_MTCNN_STATUS = "unavailable"
+_MTCNN_DETAIL = ""
+_DEEPFACE_STATUS = "unavailable"
+_DEEPFACE_DETAIL = ""
 
 # ---------------------------------------------------------------------------
 # Optional dependency guards
@@ -63,6 +74,8 @@ try:
         _MP_FACE_DETECTION = mp.solutions.face_detection.FaceDetection(
             model_selection=0, min_detection_confidence=0.5
         )
+        _MEDIAPIPE_STATUS = "solutions_face_detection"
+        _MEDIAPIPE_DETAIL = "model_selection=0"
     else:
         from mediapipe.tasks.python.core.base_options import BaseOptions
         from mediapipe.tasks.python.vision import FaceDetector, FaceDetectorOptions
@@ -80,17 +93,21 @@ try:
                     min_detection_confidence=0.5,
                 )
             )
+            _MEDIAPIPE_STATUS = "tasks_face_detector"
+            _MEDIAPIPE_DETAIL = f"model_asset_path={_MODEL_PATH.name}"
         else:
             raise FileNotFoundError(f"MediaPipe face model missing: {_MODEL_PATH}")
 except Exception as e:
-    print(f"[video_features] WARNING: mediapipe unavailable — falling back to Haar cascade: {e}", file=sys.stderr)
+    _MEDIAPIPE_DETAIL = str(e)
 
 _MTCNN_DETECTOR = None
 try:
     from mtcnn import MTCNN
     _MTCNN_DETECTOR = MTCNN()
+    _MTCNN_STATUS = "available"
+    _MTCNN_DETAIL = "mtcnn"
 except Exception as e:
-    print(f"[video_features] WARNING: mtcnn unavailable — falling back to Haar cascade: {e}", file=sys.stderr)
+    _MTCNN_DETAIL = str(e)
 
 _FACE_CASCADE: "cv2.CascadeClassifier | None" = None
 if _MP_FACE_DETECTION is None and _MP_TASKS_FACE_DETECTOR is None and _MTCNN_DETECTOR is None and _CV2_AVAILABLE:
@@ -106,9 +123,35 @@ if _MP_FACE_DETECTION is None and _MP_TASKS_FACE_DETECTOR is None and _MTCNN_DET
 try:
     from deepface import DeepFace
     _DEEPFACE_AVAILABLE = True
+    _DEEPFACE_STATUS = "available"
+    _DEEPFACE_DETAIL = "detector_backend=opencv"
 except Exception:
     _DEEPFACE_AVAILABLE = False
-    print("[video_features] WARNING: deepface not installed or failed to load — expression detection disabled", file=sys.stderr)
+    _DEEPFACE_DETAIL = "not installed or failed to load"
+
+
+def runtime_summary() -> dict[str, object]:
+    if _MP_FACE_DETECTION is not None:
+        face_detector = "mediapipe"
+    elif _MP_TASKS_FACE_DETECTOR is not None:
+        face_detector = "mediapipe_tasks"
+    elif _MTCNN_DETECTOR is not None:
+        face_detector = "mtcnn"
+    elif _FACE_CASCADE is not None:
+        face_detector = "haar"
+    else:
+        face_detector = "none"
+    return {
+        "face_detector": face_detector,
+        "mediapipe_status": _MEDIAPIPE_STATUS,
+        "mediapipe_detail": _MEDIAPIPE_DETAIL,
+        "mtcnn_status": _MTCNN_STATUS,
+        "mtcnn_detail": _MTCNN_DETAIL,
+        "deepface_enabled": _DEEPFACE_AVAILABLE,
+        "deepface_status": _DEEPFACE_STATUS,
+        "deepface_detail": _DEEPFACE_DETAIL,
+        "expression_sample_sec": max(settings.video_expression_sample_sec, 1),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -137,8 +180,21 @@ def extract(video_path: pathlib.Path) -> list[VideoFeatureFrame]:
     Returns an empty list (not an exception) when CV libraries are unavailable
     or the video cannot be opened, so the pipeline degrades gracefully.
     """
+    global _VIDEO_RUNTIME_LOGGED
     if not _CV2_AVAILABLE:
         return []
+
+    if not _VIDEO_RUNTIME_LOGGED:
+        summary = runtime_summary()
+        logger.info(
+            "video_runtime face_detector=%s mediapipe=%s mtcnn=%s deepface=%s expression_sample_sec=%s",
+            summary["face_detector"],
+            summary["mediapipe_status"],
+            summary["mtcnn_status"],
+            summary["deepface_status"],
+            summary["expression_sample_sec"],
+        )
+        _VIDEO_RUNTIME_LOGGED = True
 
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():

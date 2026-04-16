@@ -86,6 +86,9 @@ _METADATA_KEYS = {
     "upload_date",
 }
 
+_NETWORK_RETRY_BASE_DELAY_SEC = 30
+_NETWORK_RETRY_MAX_DELAY_SEC = 300
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -151,36 +154,52 @@ def collect_rows(
         job_id = f"viral_{uuid.uuid4().hex[:8]}"
         clip_dir = work_dir / job_id
         started_at = time.perf_counter()
-        clip_dir.mkdir(parents=True, exist_ok=True)
         platform = _infer_platform(entry)
         if platform in skipped_platforms:
             logger.warning("  ↷ skipped_unavailable: platform %s explicitly skipped", platform)
             skipped_unavailable += 1
             continue
-        try:
-            row = _process_clip(entry, job_id, clip_dir, profile, proxy=proxy)
-            if row:
-                collected_rows.append(row)
-                elapsed = time.perf_counter() - started_at
-                logger.info(
-                    "  ✓ features extracted  (label=%s hook=%.2f  hype=%.2f  arc=%.2f  %.1fs)",
-                    row["label"],
-                    row["features"]["hook_strength"],
-                    row["features"]["max_hype"],
-                    row["features"]["arc_score"],
-                    elapsed,
+        network_attempt = 0
+        while True:
+            clip_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                row = _process_clip(entry, job_id, clip_dir, profile, proxy=proxy)
+                if row:
+                    collected_rows.append(row)
+                    elapsed = time.perf_counter() - started_at
+                    logger.info(
+                        "  ✓ features extracted  (label=%s hook=%.2f  hype=%.2f  arc=%.2f  %.1fs)",
+                        row["label"],
+                        row["features"]["hook_strength"],
+                        row["features"]["max_hype"],
+                        row["features"]["arc_score"],
+                        elapsed,
+                    )
+                else:
+                    logger.warning("  ✗ skipped (no transcript or too short)")
+                    failed += 1
+                break
+            except downloader.DownloadPausedError as exc:
+                network_attempt += 1
+                delay_sec = _network_retry_delay_sec(network_attempt)
+                logger.warning(
+                    "  ‖ paused_network_retry: %s (attempt %d, retry in %ds)",
+                    exc,
+                    network_attempt,
+                    delay_sec,
                 )
-            else:
-                logger.warning("  ✗ skipped (no transcript or too short)")
+                time.sleep(delay_sec)
+                continue
+            except downloader.DownloadUnavailableError as exc:
+                logger.warning("  ↷ skipped_unavailable: %s", exc)
+                skipped_unavailable += 1
+                break
+            except Exception as exc:
+                logger.error("  ✗ failed: %s", exc)
                 failed += 1
-        except downloader.DownloadUnavailableError as exc:
-            logger.warning("  ↷ skipped_unavailable: %s", exc)
-            skipped_unavailable += 1
-        except Exception as exc:
-            logger.error("  ✗ failed: %s", exc)
-            failed += 1
-        finally:
-            shutil.rmtree(clip_dir, ignore_errors=True)
+                break
+            finally:
+                shutil.rmtree(clip_dir, ignore_errors=True)
 
     positives = sum(1 for row in collected_rows if row["label"] == 1)
     negatives = sum(1 for row in collected_rows if row["label"] == 0)
@@ -194,6 +213,11 @@ def collect_rows(
         skipped_unavailable,
     )
     return collected_rows
+
+
+def _network_retry_delay_sec(attempt: int) -> int:
+    bounded_attempt = max(int(attempt), 1)
+    return min(_NETWORK_RETRY_BASE_DELAY_SEC * bounded_attempt, _NETWORK_RETRY_MAX_DELAY_SEC)
 
 
 # ---------------------------------------------------------------------------
@@ -559,6 +583,11 @@ def _feature_provenance(feats, *, has_vod_context: bool) -> dict[str, object]:
         "has_chat_features": bool(_read("has_chat_features", False)),
         "has_vector_similarity": bool(_read("has_vector_similarity", False)),
         "has_vod_context": bool(has_vod_context),
+        "has_vod_memory": bool(
+            _read("retrieved_memory_span_count", 0.0)
+            or _read("setup_depth_score", 0.0)
+            or _read("callback_strength", 0.0)
+        ),
         "feature_build_version": int(_read("feature_build_version", 1) or 1),
     }
 

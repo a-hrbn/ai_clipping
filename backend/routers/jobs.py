@@ -22,6 +22,11 @@ status_router = APIRouter(prefix="/api", tags=["status"])
 import time as _time
 _status_cache: dict = {}
 _STATUS_TTL = 300
+# Face-detection capability is stable for the life of the process (import-time
+# dependency check), so we compute it once and reuse. The probe shells out to a
+# subprocess that loads mediapipe/MTCNN/OpenCV, which is too expensive to rerun
+# every 5 minutes on the status endpoint.
+_face_detection_cache: dict[str, str | bool | None] | None = None
 _SENTENCE_TRANSFORMERS_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
 _PYANNOTE_MODEL = "speaker-diarization-3.1"
 
@@ -356,6 +361,10 @@ def _pipeline_component_statuses() -> dict[str, dict[str, str | bool | None]]:
         )
     )
 
+    global _face_detection_cache
+    if _face_detection_cache is None:
+        _face_detection_cache = _probe_face_detection_status()
+
     return {
         "transcription": (
             _status_payload(
@@ -377,7 +386,7 @@ def _pipeline_component_statuses() -> dict[str, dict[str, str | bool | None]]:
             )
         ),
         "semantic_embeddings": embedding_status,
-        "face_detection": _probe_face_detection_status(),
+        "face_detection": dict(_face_detection_cache),
         "expression_analysis": expression_status,
         "diarization": diarization_status,
     }

@@ -293,6 +293,38 @@ class AnalyzerValidationTests(unittest.TestCase):
         self.assertTrue(all("Tiktok" in moment["variant_label"] for moment in expanded))
         self.assertTrue(any(moment["projected_hook_score"] > 0.74 for moment in expanded))
 
+    def test_enforce_story_shape_respects_minimum_required_setup_start(self) -> None:
+        segments = [
+            RichSegment(start=0.0, end=2.0, text="Setup starts."),
+            RichSegment(start=2.0, end=4.0, text="The bet is on."),
+            RichSegment(start=4.0, end=6.0, text="Still building."),
+            RichSegment(start=6.0, end=8.0, text="No way!", emotions=["exclamation"]),
+            RichSegment(start=8.0, end=12.0, text="Everyone laughs.", emotions=["laughter"]),
+        ]
+        candidate = Candidate(
+            id="memory-shape",
+            start=0.0,
+            end=12.0,
+            source="story_payoff",
+            anchor_time=7.0,
+            score_hint=6.0,
+            tags=[],
+        )
+
+        moment = analyzer._enforce_story_shape(
+            {
+                "start_time": 6.0,
+                "end_time": 12.0,
+                "viral_score": 8.0,
+                "reason": "payoff only",
+                "minimum_required_setup_start": 2.0,
+            },
+            candidate,
+            segments,
+        )
+
+        self.assertLessEqual(moment["start_time"], 2.0)
+
 
 if __name__ == "__main__":
     unittest.main()

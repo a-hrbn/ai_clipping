@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import re
 
-from services import chapter_segmenter, clip_similarity, clip_strategy, profile_config, semantic_service, trend_prior
+from services import chapter_segmenter, clip_similarity, clip_strategy, profile_config, semantic_service, trend_prior, vod_memory
 from services.timeline_types import Candidate, CandidateFeatures, Chapter
 from services.transcriber import RichSegment
 
 _TOKEN_RE = re.compile(r"[a-zA-Z0-9']+")
-FEATURE_BUILD_VERSION = 5
+FEATURE_BUILD_VERSION = 6
 
 
 def build_features(
@@ -22,6 +22,11 @@ def build_features(
 ) -> list[CandidateFeatures]:
     resolved_chapters = chapters if chapters is not None else chapter_segmenter.segment_chapters(segments)
     chapter_contexts = _prepare_chapter_contexts(candidates, segments, resolved_chapters)
+    memory_spans = vod_memory.build_memory_spans(segments, resolved_chapters)
+    memory_contexts = {
+        candidate.id: vod_memory.candidate_memory_context(candidate, segments, memory_spans)
+        for candidate in candidates
+    }
     normalized_strategy = clip_strategy.normalize_strategy(strategy)
     return [
         _build_candidate_features(
@@ -32,6 +37,7 @@ def build_features(
             llm_candidate_ids=llm_candidate_ids,
             llm_provider=llm_provider,
             chapter_context=chapter_contexts.get(candidate.id, _empty_chapter_context()),
+            memory_context=memory_contexts.get(candidate.id, _empty_memory_context()),
             strategy=normalized_strategy,
         )
         for candidate in candidates
@@ -47,9 +53,11 @@ def _build_candidate_features(
     llm_candidate_ids: set[str] | None = None,
     llm_provider: str | None = None,
     chapter_context: dict | None = None,
+    memory_context: dict | None = None,
     strategy: dict | None = None,
 ) -> CandidateFeatures:
     chapter_context = chapter_context or _empty_chapter_context()
+    memory_context = memory_context or _empty_memory_context()
     strategy = clip_strategy.normalize_strategy(strategy)
     window = [seg for seg in segments if seg.end > candidate.start and seg.start < candidate.end]
     if not window:
@@ -100,6 +108,15 @@ def _build_candidate_features(
             chapter_local_density=chapter_context["chapter_local_density"],
             chapter_boundary_distance=chapter_context["chapter_boundary_distance"],
             chapter_coherence_score=chapter_context["chapter_coherence_score"],
+            setup_depth_score=memory_context["setup_depth_score"],
+            callback_strength=memory_context["callback_strength"],
+            arc_payoff_match=memory_context["arc_payoff_match"],
+            topic_continuity_score=memory_context["topic_continuity_score"],
+            speaker_context_clarity=memory_context["speaker_context_clarity"],
+            memory_dependency_score=memory_context["memory_dependency_score"],
+            story_stage_score=memory_context["story_stage_score"],
+            required_setup_lead_sec=memory_context["required_setup_lead_sec"],
+            retrieved_memory_span_count=memory_context["retrieved_memory_span_count"],
             trend_hook_score=0.0,
             trend_topic_score=0.0,
             trend_prior_score=0.0,
@@ -287,6 +304,15 @@ def _build_candidate_features(
         chapter_local_density=chapter_context["chapter_local_density"],
         chapter_boundary_distance=chapter_context["chapter_boundary_distance"],
         chapter_coherence_score=chapter_context["chapter_coherence_score"],
+        setup_depth_score=memory_context["setup_depth_score"],
+        callback_strength=memory_context["callback_strength"],
+        arc_payoff_match=memory_context["arc_payoff_match"],
+        topic_continuity_score=memory_context["topic_continuity_score"],
+        speaker_context_clarity=memory_context["speaker_context_clarity"],
+        memory_dependency_score=memory_context["memory_dependency_score"],
+        story_stage_score=memory_context["story_stage_score"],
+        required_setup_lead_sec=memory_context["required_setup_lead_sec"],
+        retrieved_memory_span_count=memory_context["retrieved_memory_span_count"],
         trend_hook_score=float(trend_scores["trend_hook_score"]),
         trend_topic_score=float(trend_scores["trend_topic_score"]),
         trend_prior_score=float(trend_scores["trend_prior_score"]),
@@ -583,6 +609,20 @@ def _empty_chapter_context() -> dict:
         "chapter_local_density": 0.0,
         "chapter_boundary_distance": 0.0,
         "chapter_coherence_score": 0.0,
+    }
+
+
+def _empty_memory_context() -> dict:
+    return {
+        "setup_depth_score": 0.0,
+        "callback_strength": 0.0,
+        "arc_payoff_match": 0.0,
+        "topic_continuity_score": 0.0,
+        "speaker_context_clarity": 0.0,
+        "memory_dependency_score": 0.0,
+        "story_stage_score": 0.0,
+        "required_setup_lead_sec": 0.0,
+        "retrieved_memory_span_count": 0.0,
     }
 
 

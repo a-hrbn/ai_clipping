@@ -105,52 +105,17 @@ class JobStatus(BaseModel):
         return value
 
 
-ClipFeedbackTag = Literal[
-    "strong_hook",
-    "too_much_context",
-    "missing_payoff",
-    "too_long",
-]
+ClipFeedbackRating = Literal["good", "medium", "bad"]
 
 
 class ClipFeedbackPayload(BaseModel):
     candidate_id: str
-    tags: list[ClipFeedbackTag] = Field(default_factory=list)
+    rating: ClipFeedbackRating
     notes: str | None = None
-    publish_platform: ClipPlatform | None = None
-    view_count: int | None = Field(default=None, ge=0)
-    like_count: int | None = Field(default=None, ge=0)
-    comment_count: int | None = Field(default=None, ge=0)
-    share_count: int | None = Field(default=None, ge=0)
-    save_count: int | None = Field(default=None, ge=0)
-    impressions: int | None = Field(default=None, ge=0)
-    avg_watch_time: float | None = Field(default=None, ge=0.0)
-    retention_3s: float | None = Field(default=None, ge=0.0, le=1.0)
-    retention_50pct: float | None = Field(default=None, ge=0.0, le=1.0)
-    completion_rate: float | None = Field(default=None, ge=0.0, le=1.0)
-    views_1h: int | None = Field(default=None, ge=0)
-    views_24h: int | None = Field(default=None, ge=0)
-    baseline_view_rate: float | None = Field(default=None, ge=0.0)
-    observed_view_rate: float | None = Field(default=None, ge=0.0)
 
 
 class ClipFeedbackResponse(BaseModel):
     job_id: str
     candidate_id: str
-    tags: list[ClipFeedbackTag] = Field(default_factory=list)
+    rating: ClipFeedbackRating | None = None
     notes: str | None = None
-    publish_platform: ClipPlatform | None = None
-    view_count: int | None = None
-    like_count: int | None = None
-    comment_count: int | None = None
-    share_count: int | None = None
-    save_count: int | None = None
-    impressions: int | None = None
-    avg_watch_time: float | None = None
-    retention_3s: float | None = None
-    retention_50pct: float | None = None
-    completion_rate: float | None = None
-    views_1h: int | None = None
-    views_24h: int | None = None
-    baseline_view_rate: float | None = None
-    observed_view_rate: float | None = None

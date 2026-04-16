@@ -105,6 +105,10 @@ class JobManagerTests(unittest.TestCase):
         assert isinstance(job, JobStatus)
         self.assertEqual(job.download_eta, 716)
 
+    def test_missing_job_updates_do_not_log_warning_noise(self) -> None:
+        with self.assertNoLogs(job_manager.logger, level="WARNING"):
+            job_manager.update_job("missing-job", status="downloading", progress_pct=10)
+
 
 if __name__ == "__main__":
     unittest.main()

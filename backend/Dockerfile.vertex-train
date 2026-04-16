@@ -1,0 +1,24 @@
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    git \
+    zsh \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app/backend
+
+COPY backend/ /app/backend/
+
+RUN python -m pip install --upgrade pip setuptools wheel \
+  && python -m pip install --index-url https://download.pytorch.org/whl/cpu torch \
+  && python -m pip install -e ".[ml,vision,vertex]"
+
+RUN mkdir -p /app/backend/.venv/bin /app/backend/tmp/storage /app/backend/tmp/vertex_training_runs /app/backend/ml/artifacts \
+  && ln -sf /usr/local/bin/python /app/backend/.venv/bin/python
+
+ENTRYPOINT ["python", "-m", "ml.vertex_train"]

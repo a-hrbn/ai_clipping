@@ -31,6 +31,23 @@ class Chapter:
 
 
 @dataclass
+class MemorySpan:
+    id: str
+    kind: str
+    start: float
+    end: float
+    confidence: float = 0.0
+    summary: str = ""
+    entities: list[str] = field(default_factory=list)
+    speaker_ids: list[str] = field(default_factory=list)
+    related_span_ids: list[str] = field(default_factory=list)
+    metadata: dict[str, object] = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
 class SegmentScore:
     segment_index: int
     start: float
@@ -181,6 +198,15 @@ class CandidateFeatures:
     chapter_local_density: float = 0.0
     chapter_boundary_distance: float = 0.0
     chapter_coherence_score: float = 0.0
+    setup_depth_score: float = 0.0
+    callback_strength: float = 0.0
+    arc_payoff_match: float = 0.0
+    topic_continuity_score: float = 0.0
+    speaker_context_clarity: float = 0.0
+    memory_dependency_score: float = 0.0
+    story_stage_score: float = 0.0
+    required_setup_lead_sec: float = 0.0
+    retrieved_memory_span_count: float = 0.0
     trend_hook_score: float = 0.0
     trend_topic_score: float = 0.0
     trend_prior_score: float = 0.0

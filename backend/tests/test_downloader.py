@@ -121,6 +121,30 @@ class DownloaderTests(unittest.TestCase):
             self.assertTrue(output_path.exists())
             self.assertEqual(output_path.read_bytes(), b"reported-video")
 
+    def test_transient_network_errors_pause_download_instead_of_marking_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage_dir = Path(tmp)
+            url = "https://www.tiktok.com/@jynxzi/video/123"
+
+            class _FailingYDL:
+                def __init__(self, opts: dict):
+                    self.opts = opts
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def extract_info(self, url: str, download: bool = True):
+                    raise RuntimeError("Temporary failure in name resolution")
+
+            with patch.object(downloader.settings, "storage_dir", str(storage_dir)), \
+                 patch.object(downloader, "update_job", create=True), \
+                 patch.object(downloader.yt_dlp, "YoutubeDL", _FailingYDL):
+                with self.assertRaises(downloader.DownloadPausedError):
+                    downloader.download(url, "job-network-pause")
+
 
 if __name__ == "__main__":
     unittest.main()

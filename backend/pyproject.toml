@@ -41,6 +41,11 @@ vision = [
   "mtcnn>=1.0.0,<2.0.0",
   "tf-keras>=2.21.0,<3.0.0",
 ]
+vertex = [
+  "google-cloud-aiplatform>=1.93.0,<2.0.0",
+  "google-cloud-secret-manager>=2.23.0,<3.0.0",
+  "google-cloud-storage>=2.19.0,<3.0.0",
+]
 
 [tool.setuptools]
 packages = ["ml", "routers", "services"]

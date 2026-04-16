@@ -12,6 +12,11 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from ml import build_twitch_training_dataset, train_ranker
 
+_MIN_PRIMARY_POSITIVE_ROWS = 6
+_MIN_PRIMARY_UNIQUE_VODS = 2
+_MIN_PRIMARY_POSITIVE_CLUSTERS = 3
+_MIN_PRIMARY_RANKING_GROUPS = 2
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(
@@ -125,6 +130,58 @@ def dataset_summary(rows: list[dict]) -> dict:
     }
 
 
+def ranker_dataset_quality(rows: list[dict]) -> dict[str, object]:
+    primary_rows = [row for row in rows if str(row.get("dataset_source") or "") != "short_form_supplemental"]
+    evaluated_rows = primary_rows or list(rows)
+    positive_rows = [row for row in evaluated_rows if int(row.get("label", 0)) == 1]
+    negative_rows = [row for row in evaluated_rows if int(row.get("label", 0)) == 0]
+    unique_vods = {
+        str(row.get("vod_id") or row.get("source_url") or "").strip()
+        for row in evaluated_rows
+        if str(row.get("vod_id") or row.get("source_url") or "").strip()
+    }
+    positive_clusters = {
+        _positive_cluster_key(row)
+        for row in positive_rows
+        if _positive_cluster_key(row) is not None
+    }
+    ranking_groups = {
+        train_ranker._ranking_group_key(row, "vod_id")
+        for row in evaluated_rows
+        if str(train_ranker._ranking_group_key(row, "vod_id")).strip()
+    }
+
+    violations: list[str] = []
+    if len(positive_rows) < _MIN_PRIMARY_POSITIVE_ROWS:
+        violations.append("primary_positive_rows_below_minimum")
+    if len(negative_rows) == 0:
+        violations.append("primary_negative_rows_missing")
+    if len(unique_vods) < _MIN_PRIMARY_UNIQUE_VODS:
+        violations.append("primary_unique_vods_below_minimum")
+    if len(positive_clusters) < _MIN_PRIMARY_POSITIVE_CLUSTERS:
+        violations.append("primary_positive_clusters_below_minimum")
+    if len(ranking_groups) < _MIN_PRIMARY_RANKING_GROUPS:
+        violations.append("primary_ranking_groups_below_minimum")
+
+    return {
+        "ok": not violations,
+        "evaluated_rows": len(evaluated_rows),
+        "primary_rows": len(primary_rows),
+        "positive_rows": len(positive_rows),
+        "negative_rows": len(negative_rows),
+        "unique_vods": len(unique_vods),
+        "unique_positive_clusters": len(positive_clusters),
+        "ranking_groups": len(ranking_groups),
+        "thresholds": {
+            "positive_rows": _MIN_PRIMARY_POSITIVE_ROWS,
+            "unique_vods": _MIN_PRIMARY_UNIQUE_VODS,
+            "unique_positive_clusters": _MIN_PRIMARY_POSITIVE_CLUSTERS,
+            "ranking_groups": _MIN_PRIMARY_RANKING_GROUPS,
+        },
+        "violations": violations,
+    }
+
+
 def _train_per_streamer(
     labels: list[dict],
     short_form_rows: list[dict],
@@ -177,12 +234,28 @@ def _train_models_for_dataset(
     artifact_dir: pathlib.Path,
 ) -> int:
     evaluate_boundary_refinement, train_boundary_ranker = _boundary_training_modules()
+    rows = _read_jsonl(dataset_path)
+    quality = ranker_dataset_quality(rows)
+    if not quality["ok"]:
+        print(
+            json.dumps(
+                {
+                    "profile": profile,
+                    "ranker": {
+                        "trained": False,
+                        "reason": "insufficient_dataset_quality",
+                        "quality": quality,
+                    },
+                },
+                ensure_ascii=True,
+            )
+        )
+        return 1
 
     code = train_ranker.train_from_dataset(dataset_path, profile, artifact_dir)
     if code != 0:
         return code
 
-    rows = _read_jsonl(dataset_path)
     boundary_rows = [row for row in rows if evaluate_boundary_refinement._has_boundary_reference(row)]
     if not boundary_rows:
         print(
@@ -257,6 +330,21 @@ def _filter_short_form_rows(rows: list[dict], broadcaster: str) -> list[dict]:
         if str(row.get("creator_id") or row.get("streamer") or "").strip().lower() == normalized
     ]
     return filtered
+
+
+def _positive_cluster_key(row: dict) -> tuple[str, str] | None:
+    if int(row.get("label", 0)) != 1:
+        return None
+    vod_id = str(row.get("vod_id") or row.get("source_url") or "").strip()
+    if not vod_id:
+        return None
+    clip_ids = sorted(str(item) for item in (row.get("clip_ids") or []) if str(item).strip())
+    if clip_ids:
+        return vod_id, ",".join(clip_ids)
+    candidate_id = str(row.get("candidate_id") or "").strip()
+    if not candidate_id:
+        return None
+    return vod_id, f"candidate:{candidate_id}"
 
 
 def _read_jsonl(path: pathlib.Path | None) -> list[dict]:

@@ -39,6 +39,7 @@ _MODEL_NAME = "paraphrase-multilingual-MiniLM-L12-v2"
 _MODEL_REPO_ID = f"sentence-transformers/{_MODEL_NAME}"
 _model = None
 _model_lock = threading.Lock()
+_model_runtime_logged = False
 
 # ---------------------------------------------------------------------------
 # Viral pattern templates — bilingual (DE + EN)
@@ -321,7 +322,7 @@ def _materialize_local_sentence_transformer_model(model_repo_id: str) -> Path | 
 
 
 def _get_model():
-    global _model
+    global _model, _model_runtime_logged
     if _model is not None:
         return _model
     with _model_lock:
@@ -331,9 +332,9 @@ def _get_model():
             from sentence_transformers import SentenceTransformer
             cache_folder = str(_sentence_transformer_cache_folder())
             local_model_dir = _materialize_local_sentence_transformer_model(_MODEL_REPO_ID)
-            logger.info("Loading sentence-transformers model '%s'…", _MODEL_NAME)
+            source = "local_snapshot" if local_model_dir is not None else "huggingface"
+            logger.info("semantic_candidates_init model=%s source=%s", _MODEL_NAME, source)
             if local_model_dir is not None:
-                logger.info("Using local sentence-transformers snapshot for '%s'.", _MODEL_NAME)
                 _model = SentenceTransformer(
                     str(local_model_dir),
                     local_files_only=True,
@@ -344,7 +345,9 @@ def _get_model():
                     cache_folder=cache_folder,
                     local_files_only=False,
                 )
-            logger.info("Sentence-transformers model loaded.")
+            if not _model_runtime_logged:
+                logger.info("semantic_candidates_runtime model=%s source=%s", _MODEL_NAME, source)
+                _model_runtime_logged = True
         except Exception as exc:
             logger.warning("Could not load sentence-transformers model: %s", exc)
             _model = None

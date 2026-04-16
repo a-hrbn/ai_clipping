@@ -5,6 +5,7 @@ import logging
 import pathlib
 import re
 import subprocess
+import threading
 from dataclasses import dataclass, field
 
 import whisper
@@ -18,19 +19,59 @@ CHUNK_SECONDS = 600  # 10 minutes
 
 # Module-level Whisper singleton — loaded once on first use, reused across jobs.
 _whisper_model: whisper.Whisper | None = None
+_whisper_runtime_logged = False
+_whisper_lock = threading.Lock()
+
+
+def _model_device_name(model: whisper.Whisper) -> str:
+    try:
+        parameter = next(model.parameters())
+        return str(parameter.device)
+    except Exception:
+        device = getattr(model, "device", None)
+        return str(device or "unknown")
+
+
+def runtime_summary() -> dict[str, object]:
+    if _whisper_model is None:
+        return {
+            "whisper_model": settings.whisper_model,
+            "device": "unloaded",
+            "precision": "unknown",
+        }
+    device_name = _model_device_name(_whisper_model)
+    precision = "fp16" if device_name.startswith("cuda") else "fp32"
+    return {
+        "whisper_model": settings.whisper_model,
+        "device": device_name,
+        "precision": precision,
+    }
 
 
 def _get_model() -> whisper.Whisper:
-    global _whisper_model
+    global _whisper_model, _whisper_runtime_logged
+    # Double-checked locking: the load is a multi-second disk+CUDA op; without
+    # the lock two concurrent first-transcriptions would each download and load
+    # the model into memory, then silently race to bind _whisper_model.
     if _whisper_model is None:
-        logger.info("Loading Whisper model '%s'…", settings.whisper_model)
-        whisper_cache_dir = pathlib.Path(settings.storage_dir).parent / "cache" / "whisper"
-        whisper_cache_dir.mkdir(parents=True, exist_ok=True)
-        _whisper_model = whisper.load_model(
-            settings.whisper_model,
-            download_root=str(whisper_cache_dir),
+        with _whisper_lock:
+            if _whisper_model is None:
+                logger.info("transcriber_init whisper_model=%s", settings.whisper_model)
+                whisper_cache_dir = pathlib.Path(settings.storage_dir).parent / "cache" / "whisper"
+                whisper_cache_dir.mkdir(parents=True, exist_ok=True)
+                _whisper_model = whisper.load_model(
+                    settings.whisper_model,
+                    download_root=str(whisper_cache_dir),
+                )
+    if not _whisper_runtime_logged:
+        summary = runtime_summary()
+        logger.info(
+            "transcriber_runtime whisper_model=%s device=%s precision=%s",
+            summary["whisper_model"],
+            summary["device"],
+            summary["precision"],
         )
-        logger.info("Whisper model loaded.")
+        _whisper_runtime_logged = True
     return _whisper_model
 
 # Legacy type alias for backward compatibility

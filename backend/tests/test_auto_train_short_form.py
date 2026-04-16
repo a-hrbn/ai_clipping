@@ -254,12 +254,12 @@ class AutoTrainShortFormTests(unittest.TestCase):
             with patch("ml.auto_train_short_form.train_vod_ranker.build_composite_dataset", return_value=[{"candidate_id": "vod-1", "label": 1, "features": {}}]), \
                  patch("ml.auto_train_short_form.train_vod_ranker._read_jsonl", side_effect=[[{"broadcaster": "jynxzi"}], [{"candidate_id": "sf-1", "label": 1, "features": {}}]]), \
                  patch("ml.auto_train_short_form.train_vod_ranker._write_jsonl") as write_mock, \
-                 patch("ml.auto_train_short_form.train_ranker.train_from_dataset", return_value=0) as train_mock:
+                 patch("ml.auto_train_short_form.train_vod_ranker._train_models_for_dataset", return_value=0) as train_mock:
                 rc = auto_train_short_form._train_preferred_path(args, short_form_dataset)
 
         self.assertEqual(rc, 0)
         write_mock.assert_called_once()
-        train_mock.assert_called_once()
+        train_mock.assert_called_once_with(Path(tmp) / "jynxzi_vod_training_rows.jsonl", "jynxzi", Path(tmp))
 
     def test_train_preferred_path_can_force_short_form(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -309,7 +309,7 @@ class AutoTrainShortFormTests(unittest.TestCase):
                      [{"candidate_id": "sf-1", "label": 1, "features": {}}],
                  ]), \
                  patch("ml.auto_train_short_form.train_vod_ranker._write_jsonl"), \
-                 patch("ml.auto_train_short_form.train_ranker.train_from_dataset", return_value=0):
+                 patch("ml.auto_train_short_form.train_vod_ranker._train_models_for_dataset", return_value=0) as train_mock:
                 rc = auto_train_short_form._train_preferred_path(
                     args,
                     short_form_dataset,
@@ -320,6 +320,7 @@ class AutoTrainShortFormTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         filtered_rows = build_mock.call_args.args[0]
         self.assertEqual(filtered_rows, [{"broadcaster": "tarik", "vod_id": "vod-b"}])
+        train_mock.assert_called_once_with(Path(tmp) / "tarik_vod_training_rows.jsonl", "tarik", Path(tmp))
 
     def test_train_preferred_path_falls_back_when_streamer_has_no_vod_labels(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

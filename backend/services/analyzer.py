@@ -5,7 +5,7 @@ import re
 import ollama
 
 from config import settings
-from services import boundary_refiner, clip_strategy
+from services import boundary_refiner, clip_strategy, vod_memory
 
 logger = logging.getLogger(__name__)
 from services.timeline_types import Candidate, RankedCandidate
@@ -178,25 +178,38 @@ def refine_candidates(
 ) -> list[Moment]:
     moments: list[Moment] = []
     normalized_strategy = clip_strategy.normalize_strategy(strategy)
+    rich_segments = [seg for seg in segments if isinstance(seg, RichSegment)]
+    memory_spans = vod_memory.build_memory_spans(rich_segments) if rich_segments else []
+    memory_contexts = {
+        ranked.candidate.id: vod_memory.candidate_memory_context(ranked.candidate, rich_segments, memory_spans)
+        for ranked in ranked_candidates[:limit]
+    } if rich_segments else {}
     for index, ranked in enumerate(ranked_candidates[:limit], start=1):
         candidate_segments = _segments_in_candidate_window(segments, ranked.candidate)
         if not candidate_segments:
             continue
+        context_payload = memory_contexts.get(ranked.candidate.id) or _default_context_payload()
 
         if _should_use_boundary_v2(segments):
-            moment = _refine_candidate_v2(ranked, segments, candidate_segments, profile)
+            moment = _refine_candidate_v2(ranked, segments, candidate_segments, profile, context_payload)
         elif settings.enable_legacy_boundary_refinement_llm:
-            moment = _refine_candidate_v1(ranked, segments, candidate_segments, profile)
+            moment = _refine_candidate_v1(ranked, segments, candidate_segments, profile, context_payload)
         else:
             moment = None
 
         if moment is None:
             boundaries = _allowed_boundaries(candidate_segments)
             moment = _fallback_moment(ranked, boundaries, profile)
+        moment["context_summary"] = context_payload["context_summary"]
+        moment["active_topic"] = context_payload["active_topic"]
+        moment["relevant_setup"] = context_payload["relevant_setup"]
+        moment["why_this_is_a_payoff"] = context_payload["why_this_is_a_payoff"]
+        moment["speaker_roles"] = list(context_payload["speaker_roles"])
+        moment["minimum_required_setup_start"] = context_payload["minimum_required_setup_start"]
         moment = _enforce_story_shape(moment, ranked.candidate, candidate_segments)
         moment["selection_reasons"] = _selection_reasons(ranked, moment)
         moment["rank"] = index
-        moment["ranking_mode"] = "ml_blended" if "ml_ranked" in ranked.rationale else "heuristic"
+        moment["ranking_mode"] = "ml_blended" if ranked.trained_model_used else "heuristic"
         moment["candidate_id"] = ranked.candidate.id
         moment["platform"] = normalized_strategy["platform"]
         moment["variant_key"] = normalized_strategy["clip_style"]
@@ -271,9 +284,10 @@ def _refine_candidate_v1(
     segments: list[RichSegment] | list[Segment],
     candidate_segments: list[RichSegment] | list[Segment],
     profile: str,
+    context_payload: dict[str, object],
 ) -> Moment | None:
     logger.debug("Using legacy raw-boundary LLM refinement path for candidate=%s", ranked.candidate.id)
-    context_summary = _build_context_summary(segments, ranked.candidate)
+    context_summary = str(context_payload.get("context_summary") or _build_context_summary(segments, ranked.candidate))
     transcript_text = format_transcript(candidate_segments, use_seconds=True)
     boundaries = _allowed_boundaries(candidate_segments)
     return _call_ollama(ranked, transcript_text, boundaries, candidate_segments, profile, context_summary)
@@ -284,6 +298,7 @@ def _refine_candidate_v2(
     segments: list[RichSegment] | list[Segment],
     candidate_segments: list[RichSegment] | list[Segment],
     profile: str,
+    context_payload: dict[str, object],
 ) -> Moment | None:
     rich_segments = [seg for seg in segments if isinstance(seg, RichSegment)]
     if not rich_segments:
@@ -297,7 +312,7 @@ def _refine_candidate_v2(
     if selected_pair is None:
         return None
 
-    context_summary = _build_context_summary(segments, ranked.candidate)
+    context_summary = str(context_payload.get("context_summary") or _build_context_summary(segments, ranked.candidate))
     transcript_text = format_transcript(candidate_segments, use_seconds=True)
     if settings.enable_boundary_llm_pair_rerank:
         logger.debug("Using top-pair LLM rerank path for candidate=%s", ranked.candidate.id)
@@ -758,6 +773,12 @@ def _feature_selection_reasons(ranked: RankedCandidate) -> list[str]:
         reasons.append("Zusätzliche Chat- oder Reaktionssignale bestätigen den Moment.")
     if features.topic_shift_strength >= 0.45:
         reasons.append("Ein Themenwechsel macht den Einstieg natürlich und sofort verständlich.")
+    if features.callback_strength >= 0.55:
+        reasons.append("Der Moment löst ein früheres Setup oder einen Callback sichtbar ein.")
+    if features.arc_payoff_match >= 0.65:
+        reasons.append("Setup und Payoff greifen hier sauber ineinander.")
+    if features.memory_dependency_score >= 0.45 and features.required_setup_lead_sec >= 4.0:
+        reasons.append("Die Variante behält bewusst etwas Vorlauf, damit der Moment verständlich bleibt.")
     return reasons
 
 
@@ -859,6 +880,14 @@ def _enforce_story_shape(
     if end_time < target_end:
         end_time = _boundary_at_or_after(boundaries, target_end, ceiling=latest)
 
+    required_setup_start = moment.get("minimum_required_setup_start")
+    try:
+        required_setup_start = float(required_setup_start)
+    except (TypeError, ValueError):
+        required_setup_start = None
+    if required_setup_start is not None and start_time > required_setup_start:
+        start_time = _boundary_at_or_before(boundaries, required_setup_start, floor=earliest)
+
     duration = end_time - start_time
     if duration < _MIN_STORY_DURATION:
         desired_start = candidate.anchor_time - (_MIN_STORY_DURATION * 0.4)
@@ -878,6 +907,17 @@ def _enforce_story_shape(
     adjusted["start_time"] = start_time
     adjusted["end_time"] = end_time
     return adjusted
+
+
+def _default_context_payload() -> dict[str, object]:
+    return {
+        "context_summary": "No prior context available.",
+        "active_topic": "",
+        "relevant_setup": "",
+        "why_this_is_a_payoff": "",
+        "speaker_roles": [],
+        "minimum_required_setup_start": None,
+    }
 
 
 def _dedup_moments(moments: list[Moment], overlap_threshold: float = 0.6) -> list[Moment]:

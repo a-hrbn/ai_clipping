@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import pathlib
 import threading
 import time
@@ -16,6 +17,10 @@ _cancelled_jobs: set[str] = set()
 _job_session_id: Dict[str, str] = {}
 _job_session_expires_at: Dict[str, float] = {}
 _lock = threading.RLock()
+# Dedicated write lock so disk I/O is serialized but does NOT hold the job-state
+# `_lock`. Pipeline progress ticks call update_job() frequently; blocking
+# in-memory reads on every fsync is needless back-pressure.
+_write_lock = threading.Lock()
 _jobs_file = pathlib.Path(settings.storage_dir) / "jobs.json"
 _last_persisted_at = 0.0
 
@@ -76,11 +81,21 @@ def _load_jobs() -> None:
 
 
 def _persist_jobs() -> None:
+    """Flush current job state to disk without holding the state lock during I/O.
+
+    Takes a quick snapshot under `_lock`, then writes under `_write_lock`. Atomic
+    via tempfile + os.replace so a crash mid-write can't truncate jobs.json and
+    wipe the store on next boot.
+    """
     global _last_persisted_at
     _jobs_file.parent.mkdir(parents=True, exist_ok=True)
-    payload = [job.model_dump(mode="json") for job in _jobs.values()]
-    _jobs_file.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
-    _last_persisted_at = time.monotonic()
+    with _write_lock:
+        with _lock:
+            payload = [job.model_dump(mode="json") for job in _jobs.values()]
+        tmp_path = _jobs_file.with_suffix(_jobs_file.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+        os.replace(tmp_path, _jobs_file)
+        _last_persisted_at = time.monotonic()
 
 
 def _should_persist_update(kwargs: dict, now: float) -> bool:
@@ -102,24 +117,27 @@ def create_job(job_id: str, profile: str = "general") -> JobStatus:
         _jobs[job_id] = job
         _job_created_at[job_id] = time.monotonic()
         _cancelled_jobs.discard(job_id)
-        _persist_jobs()
-        return job
+    _persist_jobs()
+    return job
 
 
 def get_job(job_id: str) -> JobStatus | None:
     with _lock:
-        if _evict_expired():
-            _persist_jobs()
-        return _jobs.get(job_id)
+        evicted = _evict_expired()
+        job = _jobs.get(job_id)
+    if evicted:
+        _persist_jobs()
+    return job
 
 
 def update_job(job_id: str, **kwargs) -> None:
+    should_persist = False
     with _lock:
         now = time.monotonic()
         evicted = _evict_expired(now)
         job = _jobs.get(job_id)
         if job is None:
-            logger.warning("Ignoring update for missing job %s", job_id)
+            logger.debug("Ignoring update for missing job %s", job_id)
             return
         previous_status = job.status
         for k, v in kwargs.items():
@@ -131,34 +149,48 @@ def update_job(job_id: str, **kwargs) -> None:
         elif job_id not in _job_created_at:
             _job_created_at[job_id] = now
         if evicted or _should_persist_update(kwargs, now):
-            _persist_jobs()
+            should_persist = True
+    if should_persist:
+        _persist_jobs()
 
 
 def cancel_job(job_id: str) -> JobStatus | None:
+    should_persist = False
     with _lock:
         if _evict_expired():
-            _persist_jobs()
+            should_persist = True
         job = _jobs.get(job_id)
         if job is None:
-            return None
-        if job.status in {"done", "failed", "cancelled"}:
-            return job
-        _cancelled_jobs.add(job_id)
-        _job_session_id.pop(job_id, None)
-        _job_session_expires_at.pop(job_id, None)
-        job.status = "cancelled"
-        job.error = "Job cancelled by client"
-        _job_created_at[job_id] = time.monotonic()
+            if should_persist:
+                pass  # fall through to flush the eviction
+            else:
+                return None
+        elif job.status in {"done", "failed", "cancelled"}:
+            if should_persist:
+                pass
+            else:
+                return job
+        else:
+            _cancelled_jobs.add(job_id)
+            _job_session_id.pop(job_id, None)
+            _job_session_expires_at.pop(job_id, None)
+            job.status = "cancelled"
+            job.error = "Job cancelled by client"
+            _job_created_at[job_id] = time.monotonic()
+            should_persist = True
+    if should_persist:
         _persist_jobs()
-        return job
+    return job
 
 
 def is_job_cancelled(job_id: str) -> bool:
+    should_persist = False
     with _lock:
         _evict_expired()
         if job_id in _cancelled_jobs:
             return True
 
+        cancelled_here = False
         session_id = _job_session_id.get(job_id)
         expires_at = _job_session_expires_at.get(job_id)
         if session_id and expires_at is not None and time.monotonic() > expires_at:
@@ -170,9 +202,11 @@ def is_job_cancelled(job_id: str) -> bool:
                 job.status = "cancelled"
                 job.error = "Job cancelled because the client session ended"
                 _job_created_at[job_id] = time.monotonic()
-                _persist_jobs()
-            return True
-        return False
+                should_persist = True
+            cancelled_here = True
+    if should_persist:
+        _persist_jobs()
+    return cancelled_here
 
 
 def bind_job_session(job_id: str, session_id: str | None) -> None:
@@ -187,14 +221,20 @@ def bind_job_session(job_id: str, session_id: str | None) -> None:
 
 
 def touch_job_session(job_id: str, session_id: str | None) -> JobStatus | None:
+    should_persist = False
     with _lock:
         if _evict_expired():
-            _persist_jobs()
+            should_persist = True
         job = _jobs.get(job_id)
         if job is None:
-            return None
-        if job.status in {"done", "failed", "cancelled"}:
-            return job
-        if session_id and _job_session_id.get(job_id) == session_id:
+            if should_persist:
+                pass
+            else:
+                return None
+        elif job.status in {"done", "failed", "cancelled"}:
+            pass
+        elif session_id and _job_session_id.get(job_id) == session_id:
             _job_session_expires_at[job_id] = time.monotonic() + _SESSION_TTL_SECONDS
-        return job
+    if should_persist:
+        _persist_jobs()
+    return job

@@ -63,6 +63,13 @@ class Settings(BaseSettings):
     model_config = ConfigDict(env_file=".env", extra="ignore")
 
     whisper_model: str = "base"
+    # Comma-separated list in env (ALLOWED_ORIGINS="https://app.example.com,https://staging.example.com").
+    # Defaults cover the common local dev frontend ports.
+    allowed_origins: list[str] = [
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://localhost:3002",
+    ]
     ollama_host: str = "http://localhost:11434"
     ollama_model: str = "llama3.2"
     storage_dir: str = str(DEFAULT_STORAGE_DIR)
@@ -83,6 +90,7 @@ class Settings(BaseSettings):
     twitch_download_cache_ttl_sec: int = 1800
     training_vod_cache_ttl_sec: int = 0
     training_vod_cache_dir: str | None = None
+    training_vod_workers: int = 2
     video_expression_sample_sec: int = 3
     shortlist_face_reaction_top_k: int = 12
     shortlist_face_reaction_sample_sec: int = 1
@@ -95,13 +103,26 @@ class Settings(BaseSettings):
     judge_keyframes_per_candidate: int = 4
     judge_keyframe_width: int = 640
     enable_trend_prior: bool = True
-    enable_trained_ranker_v2: bool = False
+    # Trained ranker is gated behind quality checks in ranker.py (training rows,
+    # positive/negative balance, validation accuracy/NDCG). Enabling by default
+    # lets the feedback/training loop actually reach the scoring path — a bad
+    # artifact still falls back to the heuristic via those gates.
+    enable_trained_ranker_v2: bool = True
     trend_prior_data_path: str | None = None
     enable_boundary_refinement_v2: bool = True
     enable_boundary_llm_pair_rerank: bool = True
     enable_word_level_boundaries: bool = False
     enable_boundary_ranker: bool = False
     enable_legacy_boundary_refinement_llm: bool = False
+
+    @field_validator("allowed_origins", mode="before")
+    @classmethod
+    def _split_origins(cls, value):
+        if value is None or value == "":
+            return []
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
 
     @field_validator("storage_dir", mode="before")
     @classmethod

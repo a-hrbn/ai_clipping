@@ -24,31 +24,12 @@ export interface ClipResult {
   projected_retention_score?: number | null;
 }
 
-export type ClipFeedbackTag =
-  | "strong_hook"
-  | "too_much_context"
-  | "missing_payoff"
-  | "too_long";
+export type ClipFeedbackRating = "good" | "medium" | "bad";
 
 export interface ClipFeedbackPayload {
   candidate_id: string;
-  tags: ClipFeedbackTag[];
+  rating: ClipFeedbackRating;
   notes?: string;
-  publish_platform?: "general" | "tiktok" | "youtube_shorts" | "instagram_reels" | "linkedin";
-  view_count?: number;
-  like_count?: number;
-  comment_count?: number;
-  share_count?: number;
-  save_count?: number;
-  impressions?: number;
-  avg_watch_time?: number;
-  retention_3s?: number;
-  retention_50pct?: number;
-  completion_rate?: number;
-  views_1h?: number;
-  views_24h?: number;
-  baseline_view_rate?: number;
-  observed_view_rate?: number;
 }
 
 export interface ClipRequestOptions {

@@ -168,8 +168,14 @@ def _seg_at(segments: list[RichSegment], time: float) -> RichSegment | None:
 
 
 def _seg_index(segments: list[RichSegment], seg: RichSegment) -> int:
+    # Identity first: segments are stored by reference across the pipeline, so
+    # `is` works when the list hasn't been rebuilt. Fall back to an `isclose`
+    # match on start to tolerate minor float drift from upstream mutations.
     for i, s in enumerate(segments):
-        if s.start == seg.start:
+        if s is seg:
+            return i
+    for i, s in enumerate(segments):
+        if abs(s.start - seg.start) < 1e-6:
             return i
     return -1
 

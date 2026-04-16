@@ -17,8 +17,10 @@ EVAL_DATASET_PATH="$ARTIFACT_DIR/jynxzi_vod_eval_dataset.jsonl"
 EVAL_SUMMARY_PATH="$ARTIFACT_DIR/jynxzi_vod_eval_dataset_summary.json"
 RANKER_EVAL_PATH="$ARTIFACT_DIR/jynxzi_ranker_eval.json"
 PIPELINE_EVAL_PATH="$ARTIFACT_DIR/jynxzi_pipeline_eval.json"
+WORKFLOW_STATE_PATH="$ARTIFACT_DIR/jynxzi_training_workflow_state.json"
 WORK_DIR_BASE="${AI_CLIPPING_TRAIN_TMPDIR:-$BACKEND_DIR/tmp/training_runs}"
 WORK_DIR="$WORK_DIR_BASE/jynxzi_resume"
+SHORT_FORM_BACKFILL_ARTIFACT_DIR="$BACKEND_DIR/tmp/short_form_backfill_artifacts"
 
 cd "$BACKEND_DIR"
 
@@ -127,6 +129,7 @@ if [[ -z "$DATE_TO" ]]; then
   DATE_TO="$("$PYTHON_BIN" -c 'from datetime import date; print(date.today().isoformat())')"
 fi
 
+export SKIP_COVERED MERGE_OUTPUT
 export DATE_FROM DATE_TO
 "$PYTHON_BIN" - <<'PY'
 from datetime import datetime
@@ -154,6 +157,23 @@ for value, label in (
 for raw in (os.environ["DATE_FROM"], os.environ["DATE_TO"]):
     datetime.fromisoformat(raw)
 PY
+
+CURRENT_WORKFLOW_STATE_JSON="$("$PYTHON_BIN" - <<'PY'
+import json
+import os
+
+from ml.training_workflow_state import build_jynxzi_workflow_state
+
+payload = build_jynxzi_workflow_state(
+    date_from=os.environ["DATE_FROM"],
+    date_to=os.environ["DATE_TO"],
+    skip_covered=os.environ.get("SKIP_COVERED", "1") == "1",
+    merge_output=os.environ.get("MERGE_OUTPUT", "1") == "1",
+)
+print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
+PY
+)"
+export CURRENT_WORKFLOW_STATE_JSON
 
 dataset_label_state() {
   "$PYTHON_BIN" - "$1" <<'PY'
@@ -194,11 +214,14 @@ run_vod_training() {
 
 generate_short_form_backfill() {
   echo "Generating short-form backfill for jynxzi..."
+  mkdir -p "$SHORT_FORM_BACKFILL_ARTIFACT_DIR"
   "$PYTHON_BIN" ml/auto_train_short_form.py \
-    --per-streamer \
     --only-streamers jynxzi \
+    --profile jynxzi \
     --training-mode short-form \
-    --artifact-dir "$ARTIFACT_DIR" \
+    --artifact-dir "$SHORT_FORM_BACKFILL_ARTIFACT_DIR" \
+    --manifest-out "$SHORT_FORM_BACKFILL_ARTIFACT_DIR/discovered_short_form_manifest.csv" \
+    --dataset-out "$SHORT_FORM_PATH" \
     --work-dir "$BACKEND_DIR/tmp/short_form_training"
 }
 
@@ -227,44 +250,51 @@ fi
 "$PYTHON_BIN" ml/collect_twitch_clip_labels.py "${COLLECT_ARGS[@]}"
 
 SHOULD_TRAIN="$("$PYTHON_BIN" - <<'PY'
+import json
 from pathlib import Path
 
-labels = Path("ml/artifacts/jynxzi_twitch_clip_labels.jsonl")
-dataset = Path("ml/artifacts/jynxzi_vod_training_rows.jsonl")
-artifact = Path("ml/artifacts/jynxzi_ranker.json")
+import os
 
-if not labels.exists():
-    print("yes")
-elif not dataset.exists() or not artifact.exists():
-    print("yes")
-else:
-    labels_mtime = labels.stat().st_mtime
-    dataset_mtime = dataset.stat().st_mtime
-    artifact_mtime = artifact.stat().st_mtime
-    print("yes" if labels_mtime > min(dataset_mtime, artifact_mtime) else "no")
+from ml.training_workflow_state import should_retrain
+
+print(
+    "yes"
+    if should_retrain(
+        labels_path=Path("ml/artifacts/jynxzi_twitch_clip_labels.jsonl"),
+        dataset_path=Path("ml/artifacts/jynxzi_vod_training_rows.jsonl"),
+        artifact_path=Path("ml/artifacts/jynxzi_ranker.json"),
+        state_path=Path("ml/artifacts/jynxzi_training_workflow_state.json"),
+        current_state=json.loads(os.environ["CURRENT_WORKFLOW_STATE_JSON"]),
+    )
+    else "no"
+)
 PY
 )"
 
 SHOULD_EVALUATE="$("$PYTHON_BIN" - <<'PY'
+import json
 from pathlib import Path
 
-dataset = Path("ml/artifacts/jynxzi_vod_training_rows.jsonl")
-artifact = Path("ml/artifacts/jynxzi_ranker.json")
-eval_dataset = Path("ml/artifacts/jynxzi_vod_eval_dataset.jsonl")
-eval_summary = Path("ml/artifacts/jynxzi_vod_eval_dataset_summary.json")
-ranker_eval = Path("ml/artifacts/jynxzi_ranker_eval.json")
-pipeline_eval = Path("ml/artifacts/jynxzi_pipeline_eval.json")
+import os
 
-if not dataset.exists() or not artifact.exists():
-    print("no")
-else:
-    upstream_mtime = max(dataset.stat().st_mtime, artifact.stat().st_mtime)
-    outputs = [eval_dataset, eval_summary, ranker_eval, pipeline_eval]
-    if any(not path.exists() for path in outputs):
-        print("yes")
-    else:
-        oldest_output = min(path.stat().st_mtime for path in outputs)
-        print("yes" if oldest_output < upstream_mtime else "no")
+from ml.training_workflow_state import should_reevaluate
+
+print(
+    "yes"
+    if should_reevaluate(
+        dataset_path=Path("ml/artifacts/jynxzi_vod_training_rows.jsonl"),
+        artifact_path=Path("ml/artifacts/jynxzi_ranker.json"),
+        output_paths=[
+            Path("ml/artifacts/jynxzi_vod_eval_dataset.jsonl"),
+            Path("ml/artifacts/jynxzi_vod_eval_dataset_summary.json"),
+            Path("ml/artifacts/jynxzi_ranker_eval.json"),
+            Path("ml/artifacts/jynxzi_pipeline_eval.json"),
+        ],
+        state_path=Path("ml/artifacts/jynxzi_training_workflow_state.json"),
+        current_state=json.loads(os.environ["CURRENT_WORKFLOW_STATE_JSON"]),
+    )
+    else "no"
+)
 PY
 )"
 
@@ -306,6 +336,19 @@ else
   echo "Training übersprungen. Nutze vorhandenes Dataset und Artefakt für die neue Evaluation."
 fi
 
+"$PYTHON_BIN" - <<'PY'
+import json
+import os
+from pathlib import Path
+
+from ml.training_workflow_state import write_state
+
+write_state(
+    Path("ml/artifacts/jynxzi_training_workflow_state.json"),
+    json.loads(os.environ["CURRENT_WORKFLOW_STATE_JSON"]),
+)
+PY
+
 echo "Building eval dataset..."
 "$PYTHON_BIN" ml/build_eval_dataset.py \
   --dataset "$DATASET_PATH" \
@@ -339,26 +382,36 @@ if not ranker_eval.exists():
     raise SystemExit("Missing ranker eval output: ml/artifacts/jynxzi_ranker_eval.json")
 
 report = json.loads(ranker_eval.read_text(encoding="utf-8"))
+artifact = report.get("artifact", {})
 delta = report.get("metrics", {}).get("delta", {})
 trained = report.get("metrics", {}).get("trained_runtime", {})
 baseline = report.get("metrics", {}).get("baseline_heuristic", {})
+artifact_status = str(artifact.get("status") or "missing")
+artifact_reason = str(artifact.get("reason") or "artifact_file_missing")
 
 ndcg_delta = float(delta.get("ndcg_at_5", 0.0))
 precision_delta = float(delta.get("precision_at_5", 0.0))
 accuracy_delta = float(delta.get("accuracy", 0.0))
-recommend_enable = (
-    ndcg_delta >= 0.02
-    and precision_delta >= 0.0
-    and accuracy_delta >= -0.02
-)
-
-summary = {
-    "recommend_enable_trained_ranker_v2": recommend_enable,
-    "reason": (
+recommend_enable = False
+reason = "inconclusive_ranker_eval"
+if artifact_status == "usable":
+    recommend_enable = (
+        ndcg_delta >= 0.02
+        and precision_delta >= 0.0
+        and accuracy_delta >= -0.02
+    )
+    reason = (
         "trained_runtime_outperforms_or_matches_baseline"
         if recommend_enable
         else "keep_heuristic_default_until_eval_is_stronger"
-    ),
+    )
+else:
+    reason = f"inconclusive_{artifact_status}:{artifact_reason}"
+
+summary = {
+    "recommend_enable_trained_ranker_v2": recommend_enable,
+    "reason": reason,
+    "artifact": artifact,
     "trained_runtime": trained,
     "baseline_heuristic": baseline,
     "delta": delta,

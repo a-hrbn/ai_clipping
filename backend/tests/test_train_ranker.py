@@ -153,6 +153,18 @@ class TrainRankerTests(unittest.TestCase):
         ])
         self.assertEqual(selected["name"], "logistic")
 
+    def test_model_minimums_require_multiple_ranking_groups_when_reported(self) -> None:
+        self.assertFalse(
+            train_ranker._model_meets_minimums(
+                {"accuracy": 0.9, "ndcg_at_5": 0.9, "precision_at_5": 0.8, "ranking_groups": 1}
+            )
+        )
+        self.assertTrue(
+            train_ranker._model_meets_minimums(
+                {"accuracy": 0.9, "ndcg_at_5": 0.9, "precision_at_5": 0.8, "ranking_groups": 2}
+            )
+        )
+
     def test_pairwise_training_matrix_builds_comparisons_within_group(self) -> None:
         rows = [
             {"job_id": "job-1", "candidate_id": "p1", "label": 1, "features": {"signal": 3.0}},

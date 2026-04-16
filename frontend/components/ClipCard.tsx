@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 
-import { ClipFeedbackTag, ClipResult } from "@/lib/types";
+import { ClipFeedbackRating, ClipResult } from "@/lib/types";
 import { getDownloadUrl, submitClipFeedback } from "@/lib/api";
 
 function fmtTime(seconds: number): string {
@@ -32,52 +32,31 @@ interface Props {
   jobId: string;
 }
 
-const FEEDBACK_OPTIONS: Array<{ tag: ClipFeedbackTag; label: string }> = [
-  { tag: "strong_hook", label: "Hook stark" },
-  { tag: "too_much_context", label: "Zu viel Kontext" },
-  { tag: "missing_payoff", label: "Payoff fehlt" },
-  { tag: "too_long", label: "Zu lang" },
+const FEEDBACK_OPTIONS: Array<{ rating: ClipFeedbackRating; label: string }> = [
+  { rating: "good", label: "Gut" },
+  { rating: "medium", label: "Mittel" },
+  { rating: "bad", label: "Schlecht" },
 ];
 
 export default function ClipCard({ clip, rank, jobId }: Props) {
   const duration = Math.round(clip.end_time - clip.start_time);
   const color = scoreColor(clip.viral_score);
-  const [tags, setTags] = useState<ClipFeedbackTag[]>([]);
+  const [rating, setRating] = useState<ClipFeedbackRating | null>(null);
   const [notes, setNotes] = useState("");
-  const [views1h, setViews1h] = useState("");
-  const [views24h, setViews24h] = useState("");
-  const [commentCount, setCommentCount] = useState("");
-  const [shareCount, setShareCount] = useState("");
-  const [saveCount, setSaveCount] = useState("");
-  const [baselineRate, setBaselineRate] = useState("");
-  const [observedRate, setObservedRate] = useState("");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  function toggleTag(tag: ClipFeedbackTag) {
-    setTags((current) =>
-      current.includes(tag) ? current.filter((value) => value !== tag) : [...current, tag],
-    );
-  }
-
   async function handleSaveFeedback() {
-    if (!jobId) return;
+    if (!jobId || !rating) return;
     setSaving(true);
     setSaved(false);
     setError(null);
     try {
       await submitClipFeedback(jobId, {
         candidate_id: clip.candidate_id,
-        tags,
+        rating,
         notes: notes.trim() || undefined,
-        views_1h: views1h ? Number(views1h) : undefined,
-        views_24h: views24h ? Number(views24h) : undefined,
-        comment_count: commentCount ? Number(commentCount) : undefined,
-        share_count: shareCount ? Number(shareCount) : undefined,
-        save_count: saveCount ? Number(saveCount) : undefined,
-        baseline_view_rate: baselineRate ? Number(baselineRate) : undefined,
-        observed_view_rate: observedRate ? Number(observedRate) : undefined,
       });
       setSaved(true);
     } catch (err) {
@@ -163,15 +142,15 @@ export default function ClipCard({ clip, rank, jobId }: Props) {
           Clip laden
         </a>
 
-        <div className="border border-border bg-bg/50 p-3 flex flex-col gap-3">
-          <div className="flex flex-wrap gap-2">
-            {FEEDBACK_OPTIONS.map((option) => {
-              const active = tags.includes(option.tag);
+          <div className="border border-border bg-bg/50 p-3 flex flex-col gap-3">
+            <div className="flex flex-wrap gap-2">
+              {FEEDBACK_OPTIONS.map((option) => {
+              const active = rating === option.rating;
               return (
                 <button
-                  key={option.tag}
+                  key={option.rating}
                   type="button"
-                  onClick={() => toggleTag(option.tag)}
+                  onClick={() => setRating(option.rating)}
                   className={[
                     "px-2 py-1 text-[10px] uppercase tracking-widest border transition-colors",
                     active ? "border-accent/40 bg-accent-dim text-accent" : "border-border text-muted hover:text-tx",
@@ -183,27 +162,17 @@ export default function ClipCard({ clip, rank, jobId }: Props) {
             })}
           </div>
 
-          <textarea
-            value={notes}
-            onChange={(event) => setNotes(event.target.value)}
-            placeholder="Kurze Notiz zum Clip"
-            className="min-h-[64px] bg-surface border border-border px-2 py-2 text-xs text-tx placeholder:text-muted focus:outline-none focus:border-border-bright"
-          />
-
-          <div className="grid grid-cols-2 gap-2">
-            <input value={views1h} onChange={(e) => setViews1h(e.target.value)} inputMode="numeric" placeholder="Views 1h" className="bg-surface border border-border px-2 py-2 text-xs text-tx placeholder:text-muted focus:outline-none focus:border-border-bright" />
-            <input value={views24h} onChange={(e) => setViews24h(e.target.value)} inputMode="numeric" placeholder="Views 24h" className="bg-surface border border-border px-2 py-2 text-xs text-tx placeholder:text-muted focus:outline-none focus:border-border-bright" />
-            <input value={commentCount} onChange={(e) => setCommentCount(e.target.value)} inputMode="numeric" placeholder="Kommentare" className="bg-surface border border-border px-2 py-2 text-xs text-tx placeholder:text-muted focus:outline-none focus:border-border-bright" />
-            <input value={shareCount} onChange={(e) => setShareCount(e.target.value)} inputMode="numeric" placeholder="Shares" className="bg-surface border border-border px-2 py-2 text-xs text-tx placeholder:text-muted focus:outline-none focus:border-border-bright" />
-            <input value={saveCount} onChange={(e) => setSaveCount(e.target.value)} inputMode="numeric" placeholder="Saves" className="bg-surface border border-border px-2 py-2 text-xs text-tx placeholder:text-muted focus:outline-none focus:border-border-bright" />
-            <input value={baselineRate} onChange={(e) => setBaselineRate(e.target.value)} inputMode="decimal" placeholder="Baseline View-Rate" className="bg-surface border border-border px-2 py-2 text-xs text-tx placeholder:text-muted focus:outline-none focus:border-border-bright" />
-            <input value={observedRate} onChange={(e) => setObservedRate(e.target.value)} inputMode="decimal" placeholder="Observed View-Rate" className="bg-surface border border-border px-2 py-2 text-xs text-tx placeholder:text-muted focus:outline-none focus:border-border-bright col-span-2" />
-          </div>
+            <textarea
+              value={notes}
+              onChange={(event) => setNotes(event.target.value)}
+              placeholder="Optionaler Kommentar zur Bewertung"
+              className="min-h-[64px] bg-surface border border-border px-2 py-2 text-xs text-tx placeholder:text-muted focus:outline-none focus:border-border-bright"
+            />
 
           <button
             type="button"
             onClick={handleSaveFeedback}
-            disabled={saving || !jobId}
+            disabled={saving || !jobId || !rating}
             className="w-full py-2 text-[10px] uppercase tracking-widest border border-border-bright text-tx hover:border-accent/40 hover:text-accent disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
           >
             {saving ? "Speichert…" : saved ? "Feedback gespeichert" : "Feedback speichern"}

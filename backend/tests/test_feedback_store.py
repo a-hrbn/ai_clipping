@@ -85,29 +85,17 @@ class FeedbackStoreTests(unittest.TestCase):
                 "job-1",
                 ClipFeedbackPayload(
                     candidate_id="c1",
-                    tags=["strong_hook"],
+                    rating="good",
                     notes="guter opener",
-                    publish_platform="youtube_shorts",
-                    impressions=4000,
-                    avg_watch_time=17.5,
-                    retention_3s=0.82,
-                    retention_50pct=0.46,
-                    completion_rate=0.58,
-                    views_1h=1200,
-                    views_24h=7200,
-                    share_count=12,
-                    save_count=20,
                 ),
             )
 
             self.assertEqual(response.candidate_id, "c1")
-            self.assertEqual(response.tags, ["strong_hook"])
-            self.assertEqual(response.publish_platform, "youtube_shorts")
-            self.assertEqual(response.retention_3s, 0.82)
+            self.assertEqual(response.rating, "good")
+            self.assertEqual(response.notes, "guter opener")
             rows = feedback_store._read_feedback_rows(debug / "feedback.jsonl")
-            self.assertEqual(rows[0]["views_24h"], 7200)
-            self.assertEqual(rows[0]["impressions"], 4000)
-            self.assertEqual(rows[0]["completion_rate"], 0.58)
+            self.assertEqual(rows[0]["feedback_rating"], "good")
+            self.assertEqual(rows[0]["feedback_notes"], "guter opener")
 
 
 if __name__ == "__main__":

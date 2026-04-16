@@ -1,8 +1,10 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from ml import collect_viral_clips
+from services import downloader
 
 
 class CollectViralClipsTests(unittest.TestCase):
@@ -44,6 +46,37 @@ class CollectViralClipsTests(unittest.TestCase):
             ),
             "youtube",
         )
+
+    def test_collect_rows_pauses_and_retries_same_clip_after_transient_network_failure(self) -> None:
+        entry = {
+            "url": "https://www.tiktok.com/@tarik/video/123",
+            "streamer": "tarik",
+            "platform": "tiktok",
+            "language": "en",
+            "tags": "",
+            "label": "1",
+            "notes": "",
+        }
+        recovered_row = {
+            "label": 1,
+            "features": {
+                "hook_strength": 0.5,
+                "max_hype": 7.0,
+                "arc_score": 1.2,
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch("ml.collect_viral_clips._process_clip", side_effect=[
+                 downloader.DownloadPausedError("Temporary failure in name resolution"),
+                 recovered_row,
+             ]) as process_mock, \
+             patch("ml.collect_viral_clips.time.sleep") as sleep_mock:
+            rows = collect_viral_clips.collect_rows([entry], "gaming", Path(tmp))
+
+        self.assertEqual(rows, [recovered_row])
+        self.assertEqual(process_mock.call_count, 2)
+        sleep_mock.assert_called_once_with(30)
 
 
 if __name__ == "__main__":

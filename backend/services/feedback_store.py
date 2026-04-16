@@ -28,23 +28,9 @@ class CandidateFeedback:
     final_end: float | None = None
     rejected_reason: str | None = None   # kept for schema compatibility
     rejection_source: str | None = None  # richer label for training
-    user_feedback_tags: list[str] | None = None
+    feedback_rating: str | None = None
     feedback_notes: str | None = None
     publish_platform: str | None = None
-    view_count: int | None = None
-    like_count: int | None = None
-    comment_count: int | None = None
-    share_count: int | None = None
-    save_count: int | None = None
-    impressions: int | None = None
-    avg_watch_time: float | None = None
-    retention_3s: float | None = None
-    retention_50pct: float | None = None
-    completion_rate: float | None = None
-    views_1h: int | None = None
-    views_24h: int | None = None
-    baseline_view_rate: float | None = None
-    observed_view_rate: float | None = None
     final_variant_key: str | None = None
     updated_at: int | None = None
 
@@ -89,7 +75,6 @@ def build_pipeline_feedback(
                 final_end=selected_moment["end_time"] if selected_moment else None,
                 rejected_reason=rejected_reason,
                 rejection_source=rejection_source,
-                user_feedback_tags=[],
                 publish_platform=selected_moment.get("platform") if selected_moment else None,
                 final_variant_key=selected_moment.get("variant_key") if selected_moment else None,
                 updated_at=int(datetime.now(timezone.utc).timestamp()),
@@ -127,23 +112,8 @@ def update_job_feedback(
     if target is None:
         raise KeyError(payload.candidate_id)
 
-    target["user_feedback_tags"] = sorted(set(payload.tags))
+    target["feedback_rating"] = payload.rating
     target["feedback_notes"] = payload.notes
-    target["publish_platform"] = payload.publish_platform
-    target["view_count"] = payload.view_count
-    target["like_count"] = payload.like_count
-    target["comment_count"] = payload.comment_count
-    target["share_count"] = payload.share_count
-    target["save_count"] = payload.save_count
-    target["impressions"] = payload.impressions
-    target["avg_watch_time"] = payload.avg_watch_time
-    target["retention_3s"] = payload.retention_3s
-    target["retention_50pct"] = payload.retention_50pct
-    target["completion_rate"] = payload.completion_rate
-    target["views_1h"] = payload.views_1h
-    target["views_24h"] = payload.views_24h
-    target["baseline_view_rate"] = payload.baseline_view_rate
-    target["observed_view_rate"] = payload.observed_view_rate
     target["updated_at"] = int(datetime.now(timezone.utc).timestamp())
 
     path.write_text(
@@ -154,23 +124,8 @@ def update_job_feedback(
     return ClipFeedbackResponse(
         job_id=job_id,
         candidate_id=payload.candidate_id,
-        tags=list(target.get("user_feedback_tags") or []),
+        rating=target.get("feedback_rating"),
         notes=target.get("feedback_notes"),
-        publish_platform=target.get("publish_platform"),
-        view_count=target.get("view_count"),
-        like_count=target.get("like_count"),
-        comment_count=target.get("comment_count"),
-        share_count=target.get("share_count"),
-        save_count=target.get("save_count"),
-        impressions=target.get("impressions"),
-        avg_watch_time=target.get("avg_watch_time"),
-        retention_3s=target.get("retention_3s"),
-        retention_50pct=target.get("retention_50pct"),
-        completion_rate=target.get("completion_rate"),
-        views_1h=target.get("views_1h"),
-        views_24h=target.get("views_24h"),
-        baseline_view_rate=target.get("baseline_view_rate"),
-        observed_view_rate=target.get("observed_view_rate"),
     )
 
 

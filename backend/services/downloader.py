@@ -12,6 +12,10 @@ class DownloadUnavailableError(RuntimeError):
     pass
 
 
+class DownloadPausedError(RuntimeError):
+    pass
+
+
 class DownloadCancelledError(RuntimeError):
     pass
 
@@ -79,6 +83,34 @@ def _coerce_eta_seconds(value: float | int | None) -> int | None:
     if value is None:
         return None
     return max(int(round(float(value))), 0)
+
+
+def _is_transient_network_error(message: str) -> bool:
+    text = (message or "").strip().lower()
+    if not text:
+        return False
+    return any(
+        token in text
+        for token in (
+            "temporary failure in name resolution",
+            "name or service not known",
+            "nodename nor servname provided",
+            "failed to resolve",
+            "dns",
+            "network is unreachable",
+            "no route to host",
+            "connection refused",
+            "connection reset",
+            "connection reset by peer",
+            "connection aborted",
+            "remote end closed connection",
+            "timed out",
+            "timeout",
+            "temporarily unavailable",
+            "proxy error",
+            "unable to connect",
+        )
+    )
 
 
 def download(url: str, job_id: str, proxy: str | None = None) -> pathlib.Path:
@@ -159,17 +191,8 @@ def download(url: str, job_id: str, proxy: str | None = None) -> pathlib.Path:
         raise
     except Exception as exc:
         message = str(exc).lower()
-        if "tiktok.com" in url.lower() and any(
-            token in message
-            for token in (
-                "temporary failure in name resolution",
-                "name or service not known",
-                "nodename nor servname provided",
-                "failed to resolve",
-                "dns",
-            )
-        ):
-            raise DownloadUnavailableError(str(exc)) from exc
+        if _is_transient_network_error(message):
+            raise DownloadPausedError(str(exc)) from exc
         raise
 
     reported_paths: list[pathlib.Path] = []

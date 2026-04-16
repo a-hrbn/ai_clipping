@@ -36,16 +36,6 @@
 - Zero context switching required from the user
 - Go fix failing CI tests without being told how
 
-## 7. Graphify
-
-This project has a graphify knowledge graph at graphify-out/.
-
-Rules:
-- Before answering architecture or codebase questions, read graphify-out/GRAPH_REPORT.md for god nodes and community structure
-- If graphify-out/wiki/index.md exists, navigate it instead of reading raw files
-- After modifying code files in this session, run `python3 -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('.'))"` to keep the graph current
-- Prefer parallel sub-agents for future tasks in this workspace when delegation is materially useful and the subtasks are well-scoped
-
 
 ## Task Management
 
@@ -61,3 +51,12 @@ Rules:
 - **Simplicity First**: Make every change as simple as possible. Impact minimal code.
 - **No Laziness**: Find root causes. No temporary fixes. Senior developer standards.
 - **Minimal Impact**: Changes should only touch what's necessary. Avoid introducing bugs.
+
+## graphify
+
+This project has a graphify knowledge graph at backend/graphify-out/.
+
+Rules:
+- Before answering architecture or codebase questions, read backend/graphify-out/GRAPH_REPORT.md for god nodes and community structure
+- If backend/graphify-out/wiki/index.md exists, navigate it instead of reading raw files
+- After modifying backend code files in this session, run `python3 -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('backend'))"` to keep the graph current

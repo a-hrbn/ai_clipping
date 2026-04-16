@@ -110,13 +110,7 @@ class TrainingExportTests(unittest.TestCase):
                     "final_end": None,
                     "rejected_reason": "post_processing_filtered",
                     "rejection_source": "post_processing_filtered",
-                    "user_feedback_tags": ["strong_hook"],
-                    "views_1h": 1000,
-                    "views_24h": 8000,
-                    "baseline_view_rate": 100.0,
-                    "observed_view_rate": 160.0,
-                    "share_count": 25,
-                    "save_count": 30,
+                    "feedback_rating": "good",
                 }) + "\n",
                 encoding="utf-8",
             )
@@ -127,12 +121,47 @@ class TrainingExportTests(unittest.TestCase):
             self.assertEqual(count, 1)
             row = json.loads(output.read_text(encoding="utf-8").splitlines()[0])
             self.assertEqual(row["label"], 1)
-            self.assertEqual(row["label_source"], "outcome_feedback")
+            self.assertEqual(row["label_source"], "feedback_rating")
             self.assertGreater(row["sample_weight"], 1.0)
             self.assertEqual(row["supervision_tier"], "outcome_feedback")
             self.assertEqual(row["label_class"], "outcome_positive")
             self.assertEqual(row["ordinal_label"], 3)
             self.assertEqual(row["dataset_source"], "feedback_outcome_export")
+
+    def test_export_training_rows_treats_medium_feedback_as_weak_supervision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Path(tmp)
+            debug = storage / "job-4" / "debug"
+            debug.mkdir(parents=True, exist_ok=True)
+            (debug / "candidate_features.jsonl").write_text(
+                json.dumps({"candidate_id": "c4", "max_hype": 5.2, "source": "reaction"}) + "\n",
+                encoding="utf-8",
+            )
+            (debug / "feedback.jsonl").write_text(
+                json.dumps({
+                    "job_id": "job-4",
+                    "candidate_id": "c4",
+                    "selected": True,
+                    "exported": False,
+                    "final_start": 2.0,
+                    "final_end": 12.0,
+                    "rejected_reason": None,
+                    "rejection_source": None,
+                    "feedback_rating": "medium",
+                }) + "\n",
+                encoding="utf-8",
+            )
+            output = storage / "feedback" / "training_rows.jsonl"
+
+            count = export_training_rows(storage, output)
+
+            self.assertEqual(count, 1)
+            row = json.loads(output.read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(row["label"], 1)
+            self.assertEqual(row["label_source"], "feedback_rating_neutral")
+            self.assertEqual(row["supervision_tier"], "feedback_rating_neutral")
+            self.assertEqual(row["ordinal_label"], 1)
+            self.assertEqual(row["feedback_rating"], "medium")
 
     def test_export_training_rows_preserves_variant_and_dynamic_feature_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -146,7 +175,9 @@ class TrainingExportTests(unittest.TestCase):
                     "source": "reaction",
                     "dynamic_trend_score": 0.61,
                     "projected_retention_score": 0.73,
-                    "feature_build_version": 5,
+                    "feature_build_version": 6,
+                    "retrieved_memory_span_count": 2.0,
+                    "setup_depth_score": 0.44,
                 }) + "\n",
                 encoding="utf-8",
             )
@@ -162,8 +193,7 @@ class TrainingExportTests(unittest.TestCase):
                     "rejection_source": None,
                     "publish_platform": "tiktok",
                     "final_variant_key": "aggressive_hook",
-                    "retention_3s": 0.81,
-                    "completion_rate": 0.54,
+                    "feedback_rating": "good",
                 }) + "\n",
                 encoding="utf-8",
             )
@@ -180,6 +210,7 @@ class TrainingExportTests(unittest.TestCase):
             self.assertEqual(row["features"]["projected_retention_score"], 0.73)
             self.assertTrue(row["feature_provenance"]["has_dynamic_trend"])
             self.assertTrue(row["feature_provenance"]["has_variant_projection"])
+            self.assertTrue(row["feature_provenance"]["has_vod_memory"])
 
 
 if __name__ == "__main__":

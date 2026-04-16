@@ -853,10 +853,13 @@ def _selection_score(metrics: dict[str, float]) -> float:
 
 def _model_meets_minimums(metrics: dict[str, float]) -> bool:
     accuracy = float(metrics.get("accuracy", 0.0))
+    ranking_groups = int(metrics.get("ranking_groups", 0) or 0)
     ranking = max(
         float(metrics.get("ndcg_at_5", 0.0)),
         float(metrics.get("precision_at_5", 0.0)),
     )
+    if ranking_groups and ranking_groups < 2:
+        return False
     return accuracy >= 0.58 and ranking >= 0.6
 
 

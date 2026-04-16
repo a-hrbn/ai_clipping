@@ -50,26 +50,12 @@ def export_training_rows(storage_dir: pathlib.Path, output_path: pathlib.Path) -
                 "supervision_tier": supervision_tier,
                 "supervision_reason": feedback.get("rejection_source") or label_source,
                 "ordinal_label": ordinal_label,
-                "user_feedback_tags": list(feedback.get("user_feedback_tags") or []),
+                "feedback_rating": feedback.get("feedback_rating"),
                 "feedback_notes": feedback.get("feedback_notes"),
                 "publish_platform": feedback.get("publish_platform"),
                 "final_variant_key": feedback.get("final_variant_key"),
                 "candidate_source": feature.get("source"),
                 "content_bucket": _content_bucket(feature),
-                "view_count": feedback.get("view_count"),
-                "like_count": feedback.get("like_count"),
-                "comment_count": feedback.get("comment_count"),
-                "share_count": feedback.get("share_count"),
-                "save_count": feedback.get("save_count"),
-                "impressions": feedback.get("impressions"),
-                "avg_watch_time": feedback.get("avg_watch_time"),
-                "retention_3s": feedback.get("retention_3s"),
-                "retention_50pct": feedback.get("retention_50pct"),
-                "completion_rate": feedback.get("completion_rate"),
-                "views_1h": feedback.get("views_1h"),
-                "views_24h": feedback.get("views_24h"),
-                "baseline_view_rate": feedback.get("baseline_view_rate"),
-                "observed_view_rate": feedback.get("observed_view_rate"),
                 "feature_provenance": _feature_provenance(feature),
                 "features": feature,
             }
@@ -102,100 +88,24 @@ def _should_export_feedback(feedback: dict) -> bool:
 
 
 def _has_real_outcome_feedback(feedback: dict) -> bool:
-    outcome_keys = {
-        "view_count",
-        "like_count",
-        "comment_count",
-        "share_count",
-        "save_count",
-        "impressions",
-        "avg_watch_time",
-        "retention_3s",
-        "retention_50pct",
-        "completion_rate",
-        "views_1h",
-        "views_24h",
-        "baseline_view_rate",
-        "observed_view_rate",
-    }
-    if any(feedback.get(key) not in (None, "") for key in outcome_keys):
-        return True
-    return bool(feedback.get("user_feedback_tags"))
+    return str(feedback.get("feedback_rating") or "").strip().lower() in {"good", "medium", "bad"}
 
 
 def _resolved_feedback_label(feedback: dict) -> tuple[int, str, float, float, str, str, int]:
-    score = 0.0
-    tags = set(feedback.get("user_feedback_tags") or [])
-    if "strong_hook" in tags:
-        score += 0.35
-    if "too_much_context" in tags:
-        score -= 0.35
-    if "missing_payoff" in tags:
-        score -= 0.4
-    if "too_long" in tags:
-        score -= 0.25
-
-    baseline_rate = _as_float(feedback.get("baseline_view_rate"))
-    observed_rate = _as_float(feedback.get("observed_view_rate"))
-    if baseline_rate > 0 and observed_rate > 0:
-        ratio = observed_rate / baseline_rate
-        if ratio >= 1.15:
-            score += 0.9
-        elif ratio <= 0.85:
-            score -= 0.9
-
-    views_1h = _as_float(feedback.get("views_1h"))
-    views_24h = _as_float(feedback.get("views_24h"))
-    if views_1h > 0 and views_24h > 0:
-        growth = views_24h / views_1h
-        if growth >= 5.0:
-            score += 0.45
-        elif growth <= 1.5:
-            score -= 0.35
-
-    shares = _as_float(feedback.get("share_count"))
-    saves = _as_float(feedback.get("save_count"))
-    impressions = max(_as_float(feedback.get("impressions")), 1.0)
-    views = max(_as_float(feedback.get("view_count")), 1.0)
-    if shares > 0:
-        score += min(shares / views, 0.05) * 20.0
-    if saves > 0:
-        score += min(saves / views, 0.05) * 18.0
-    retention_3s = _as_float(feedback.get("retention_3s"))
-    retention_50pct = _as_float(feedback.get("retention_50pct"))
-    completion_rate = _as_float(feedback.get("completion_rate"))
-    avg_watch_time = _as_float(feedback.get("avg_watch_time"))
-    if retention_3s >= 0.75:
-        score += 0.55
-    elif 0.0 < retention_3s <= 0.45:
-        score -= 0.45
-    if retention_50pct >= 0.4:
-        score += 0.35
-    elif 0.0 < retention_50pct <= 0.18:
-        score -= 0.35
-    if completion_rate >= 0.5:
-        score += 0.4
-    elif 0.0 < completion_rate <= 0.2:
-        score -= 0.35
-    if avg_watch_time > 0 and impressions > 0 and avg_watch_time / max(impressions, 1.0) > 0.02:
-        score += 0.1
-
-    if abs(score) >= 0.6:
-        label = 1 if score > 0 else 0
-        label_class = "outcome_positive" if label == 1 else "outcome_negative"
-        return label, "outcome_feedback", round(score, 3), 2.4, label_class, "outcome_feedback", 3 if label == 1 else 0
+    rating = str(feedback.get("feedback_rating") or "").strip().lower()
+    if rating == "good":
+        return 1, "feedback_rating", 1.0, 2.2, "outcome_positive", "outcome_feedback", 3
+    if rating == "bad":
+        return 0, "feedback_rating", -1.0, 1.8, "outcome_negative", "outcome_feedback", 0
+    if rating == "medium":
+        fallback_label = 1 if bool(feedback.get("selected")) else 0
+        label_class = "pipeline_positive" if fallback_label == 1 else "pipeline_negative"
+        return fallback_label, "feedback_rating_neutral", 0.0, 0.7, label_class, "feedback_rating_neutral", 1
 
     fallback_label = 1 if bool(feedback.get("selected")) else 0
     label_class = "pipeline_positive" if fallback_label == 1 else "pipeline_negative"
     ordinal_label = 2 if fallback_label == 1 else 0
-    return fallback_label, "pipeline_feedback", round(score, 3), 1.0, label_class, "pipeline_feedback", ordinal_label
-
-
-def _as_float(value) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
+    return fallback_label, "pipeline_feedback", 0.0, 1.0, label_class, "pipeline_feedback", ordinal_label
 
 
 def _feature_provenance(feature: dict) -> dict[str, object]:
@@ -204,6 +114,11 @@ def _feature_provenance(feature: dict) -> dict[str, object]:
         "has_chat_features": bool(feature.get("has_chat_features", False)),
         "has_vector_similarity": bool(feature.get("has_vector_similarity", False)),
         "has_vod_context": bool(feature.get("vod_progress", 0.0) or feature.get("clip_overlap_count", 0.0)),
+        "has_vod_memory": bool(
+            feature.get("retrieved_memory_span_count", 0.0)
+            or feature.get("setup_depth_score", 0.0)
+            or feature.get("callback_strength", 0.0)
+        ),
         "feature_build_version": int(feature.get("feature_build_version", 1) or 1),
         "has_dynamic_trend": bool(feature.get("dynamic_trend_score", 0.0)),
         "has_variant_projection": bool(feature.get("projected_retention_score", 0.0)),
