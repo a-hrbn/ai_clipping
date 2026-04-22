@@ -48,6 +48,43 @@ class CollectViralClipsTests(unittest.TestCase):
         self.assertIn(str(outputs[0][0]), first_command)
         self.assertIn(str(outputs[-1][0]), second_command)
 
+    def test_cut_video_windows_retries_failed_batch_by_splitting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            video_path = Path(tmp) / "vod.mp4"
+            outputs = [
+                (Path(tmp) / f"window_{index:04d}" / "window.mp4", float(index * 10), float(index * 10 + 8))
+                for index in range(1, 5)
+            ]
+
+            def _fake_run(command, **_kwargs):
+                input_count = command.count("-i")
+                if input_count == 4:
+                    return SimpleNamespace(returncode=1, stderr="pthread_create failed")
+                return SimpleNamespace(returncode=0, stderr="")
+
+            with patch("ml.collect_viral_clips.subprocess.run", side_effect=_fake_run) as run_mock:
+                result = collect_viral_clips.cut_video_windows(video_path, outputs)
+
+        self.assertEqual(result, [item[0] for item in outputs])
+        self.assertEqual(run_mock.call_count, 3)
+        self.assertEqual(run_mock.call_args_list[0].args[0].count("-i"), 4)
+        self.assertEqual(run_mock.call_args_list[1].args[0].count("-i"), 2)
+        self.assertEqual(run_mock.call_args_list[2].args[0].count("-i"), 2)
+
+    def test_cut_video_windows_raises_when_single_window_still_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch(
+                 "ml.collect_viral_clips.subprocess.run",
+                 return_value=SimpleNamespace(returncode=1, stderr="decoder blew up"),
+             ):
+            video_path = Path(tmp) / "vod.mp4"
+            outputs = [
+                (Path(tmp) / "window_0001" / "window.mp4", 10.0, 20.0),
+            ]
+
+            with self.assertRaisesRegex(RuntimeError, "decoder blew up"):
+                collect_viral_clips.cut_video_windows(video_path, outputs)
+
     def test_read_entries_supports_manifest_metadata_and_labels(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "clips.csv"

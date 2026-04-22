@@ -375,7 +375,7 @@ def cut_video_windows(
         normalized_windows.append((output_path, start_sec, duration))
 
     for chunk in _window_batches(normalized_windows, _MAX_BATCH_CUT_WINDOWS):
-        _cut_video_windows_batch(video_path, chunk)
+        _cut_video_windows_chunk(video_path, chunk)
     return [output_path for output_path, _start_sec, _duration in normalized_windows]
 
 
@@ -406,6 +406,7 @@ def _cut_video_windows_batch(
         command.extend([
             "-map", f"{input_index}:v:0",
             "-map", f"{input_index}:a:0?",
+            "-threads", "1",
             "-c:v", "libx264",
             "-c:a", "aac",
             "-preset", "veryfast",
@@ -427,6 +428,31 @@ def _cut_video_windows_batch(
             f"{video_path} -> [{outputs}]"
             + (f": {stderr}" if stderr else "")
         )
+
+
+def _cut_video_windows_chunk(
+    video_path: pathlib.Path,
+    normalized_windows: list[tuple[pathlib.Path, float, float]],
+) -> None:
+    try:
+        _cut_video_windows_batch(video_path, normalized_windows)
+        return
+    except RuntimeError:
+        if len(normalized_windows) <= 1:
+            raise
+
+    midpoint = max(1, len(normalized_windows) // 2)
+    left = normalized_windows[:midpoint]
+    right = normalized_windows[midpoint:]
+    logger.warning(
+        "ffmpeg batch cut retry split video=%s windows=%s -> (%s,%s)",
+        video_path,
+        len(normalized_windows),
+        len(left),
+        len(right),
+    )
+    _cut_video_windows_chunk(video_path, left)
+    _cut_video_windows_chunk(video_path, right)
 
 
 def _build_training_row(entry: dict[str, str], candidate, feats) -> dict:

@@ -1197,3 +1197,27 @@ Phase 0-2 zuerst, danach **1 Woche reale Nutzung** bevor Phase 3 angefasst wird.
 - Ergebnis:
   - `11 passed`
   - Downloader-Pfade kompilieren sauber
+
+## 2026-04-22 Follow-up: Stabilize FFmpeg Batch Window Cutting
+
+- [x] Batch-Cut-Fehlerpfad im Trainingslauf analysieren.
+- [x] FFmpeg-Batch-Cuts bei Fehler automatisch in kleinere Teilbatches splitten.
+- [x] Encoder-Thread-Druck pro Output reduzieren.
+- [x] Regressions-Tests für Retry- und Single-Window-Fehler ergänzen.
+
+### Review Notes
+
+- Ursache:
+  - `backend/ml/collect_viral_clips.py` schneidet bis zu `24` Trainingsfenster in einem einzigen `ffmpeg`-Prozess.
+  - Dabei wird für jedes Output-Fenster `libx264` initialisiert; das ist auf WSL2/Docker deutlich anfälliger für Ressourcen- und Thread-Druck als Einzel- oder Kleinbatch-Cuts.
+  - Der Screenshot passt genau zu diesem Pfad: erster Fehlbatch mit `24` Windows entspricht `_MAX_BATCH_CUT_WINDOWS = 24`.
+- Fix:
+  - `cut_video_windows()` ruft jetzt `_cut_video_windows_chunk()` auf, das fehlgeschlagene Batches rekursiv halbiert statt komplett aufzugeben.
+  - Jeder Output bekommt im Batch-Cut jetzt `-threads 1`, damit ein Batch nicht 24 mal mit aggressiver Encoder-Autothreading-Politik eskaliert.
+  - Einzelne wirklich kaputte Fenster schlagen weiterhin klar fehl; der Retry-Fix kaschiert keine echten Einzeldatei-Probleme.
+- Verifiziert mit:
+  - `backend/.venv/bin/python -m pytest backend/tests/test_collect_viral_clips.py backend/tests/test_build_twitch_training_dataset.py -q`
+  - `backend/.venv/bin/python -m py_compile backend/ml/collect_viral_clips.py backend/tests/test_collect_viral_clips.py`
+- Ergebnis:
+  - `37 passed`
+  - Batch-Cut-Retry und Single-Window-Fehlerpfad abgesichert
