@@ -63,6 +63,7 @@ class Settings(BaseSettings):
     model_config = ConfigDict(env_file=".env", extra="ignore")
 
     whisper_model: str = "base"
+    whisper_device: str = "auto"
     # Comma-separated list in env (ALLOWED_ORIGINS="https://app.example.com,https://staging.example.com").
     # Defaults cover the common local dev frontend ports.
     allowed_origins: list[str] = [
@@ -84,24 +85,30 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-2.0-flash"
     twitch_client_id: str | None = None
     twitch_client_secret: str | None = None
-    enable_chat_analysis: bool = True
+    enable_chat_analysis: bool = False
     chat_download_timeout_sec: int = 30
     chat_join_timeout_sec: float = 1.0
     twitch_download_cache_ttl_sec: int = 1800
-    training_vod_cache_ttl_sec: int = 0
-    training_vod_cache_dir: str | None = None
     training_vod_workers: int = 2
+    training_label_workers: int = 2
+    semantic_device: str = "auto"
+    semantic_batch_size: int = 0
     video_expression_sample_sec: int = 3
     shortlist_face_reaction_top_k: int = 12
     shortlist_face_reaction_sample_sec: int = 1
     shortlist_llm_top_k: int = 12
     enable_clip_judge: bool = True
+    clip_judge_timeout_sec: float = 90.0
+    analyzer_refine_timeout_sec: float | None = None
     shortlist_judge_top_k: int = 24
     judge_blend_weight: float = 0.65
     judge_context_lookback_sec: float = 120.0
     enable_multimodal_clip_judge: bool = True
     judge_keyframes_per_candidate: int = 4
     judge_keyframe_width: int = 640
+    enable_hook_subclassifier: bool = False
+    enable_multimodal_embeddings: bool = False
+    enable_post_publish_labels: bool = False
     enable_trend_prior: bool = True
     # Trained ranker is gated behind quality checks in ranker.py (training rows,
     # positive/negative balance, validation accuracy/NDCG). Enabling by default
@@ -114,6 +121,8 @@ class Settings(BaseSettings):
     enable_word_level_boundaries: bool = False
     enable_boundary_ranker: bool = False
     enable_legacy_boundary_refinement_llm: bool = False
+    ranker_hpo_trials: int = 60
+    ranker_hpo_seed: int = 0
 
     @field_validator("allowed_origins", mode="before")
     @classmethod
@@ -132,15 +141,5 @@ class Settings(BaseSettings):
             field_name="storage_dir",
             default=DEFAULT_STORAGE_DIR,
         ) or str(DEFAULT_STORAGE_DIR.resolve())
-
-    @field_validator("training_vod_cache_dir", mode="before")
-    @classmethod
-    def _validate_training_vod_cache_dir(cls, value: str | None) -> str | None:
-        return _resolve_local_project_path(
-            value,
-            field_name="training_vod_cache_dir",
-            default=None,
-        )
-
 
 settings = Settings()

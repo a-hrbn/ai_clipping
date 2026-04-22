@@ -55,6 +55,7 @@ def should_reevaluate(
     dataset_path: Path,
     artifact_path: Path,
     output_paths: list[Path],
+    dependency_paths: list[Path] | None = None,
     state_path: Path,
     current_state: dict[str, object],
 ) -> bool:
@@ -65,7 +66,11 @@ def should_reevaluate(
         return True
     if any(not path.exists() for path in output_paths):
         return True
-    upstream_mtime = max(dataset_path.stat().st_mtime, artifact_path.stat().st_mtime)
+    upstream_inputs = [dataset_path, artifact_path]
+    for path in dependency_paths or []:
+        if path.exists():
+            upstream_inputs.append(path)
+    upstream_mtime = max(path.stat().st_mtime for path in upstream_inputs)
     oldest_output = min(path.stat().st_mtime for path in output_paths)
     return oldest_output < upstream_mtime
 

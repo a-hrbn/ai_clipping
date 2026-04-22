@@ -16,6 +16,11 @@ BOUNDARY_ARTIFACT_JSON_PATH="$ARTIFACT_DIR/jynxzi_boundary_ranker.json"
 EVAL_DATASET_PATH="$ARTIFACT_DIR/jynxzi_vod_eval_dataset.jsonl"
 EVAL_SUMMARY_PATH="$ARTIFACT_DIR/jynxzi_vod_eval_dataset_summary.json"
 RANKER_EVAL_PATH="$ARTIFACT_DIR/jynxzi_ranker_eval.json"
+GOLD_EVAL_ROWS_PATH="$ARTIFACT_DIR/jynxzi_gold_eval_rows.jsonl"
+GOLD_EVAL_DATASET_PATH="$ARTIFACT_DIR/jynxzi_gold_eval_dataset.jsonl"
+GOLD_EVAL_SUMMARY_PATH="$ARTIFACT_DIR/jynxzi_gold_eval_summary.json"
+GOLD_RANKER_EVAL_PATH="$ARTIFACT_DIR/jynxzi_gold_eval.json"
+PROXY_RANKER_EVAL_PATH="$ARTIFACT_DIR/jynxzi_proxy_eval.json"
 PIPELINE_EVAL_PATH="$ARTIFACT_DIR/jynxzi_pipeline_eval.json"
 WORKFLOW_STATE_PATH="$ARTIFACT_DIR/jynxzi_training_workflow_state.json"
 WORK_DIR_BASE="${AI_CLIPPING_TRAIN_TMPDIR:-$BACKEND_DIR/tmp/training_runs}"
@@ -36,6 +41,7 @@ DATE_FROM=""
 DATE_TO=""
 SKIP_COVERED=1
 MERGE_OUTPUT=1
+ARTIFACT_ONLY=0
 
 usage() {
   cat <<'EOF'
@@ -48,6 +54,8 @@ Options:
   --no-skip-covered
   --merge-output
   --no-merge-output
+  --artifact-only
+  --no-artifact-only
   --help
 EOF
 }
@@ -89,6 +97,14 @@ while [[ $# -gt 0 ]]; do
       MERGE_OUTPUT=0
       shift
       ;;
+    --artifact-only)
+      ARTIFACT_ONLY=1
+      shift
+      ;;
+    --no-artifact-only)
+      ARTIFACT_ONLY=0
+      shift
+      ;;
     --help)
       usage
       exit 0
@@ -122,7 +138,7 @@ if [[ -z "$DATE_TO" && -n "$POSITIONAL_DATE_TO" ]]; then
 fi
 
 if [[ -z "$DATE_FROM" ]]; then
-  DATE_FROM="$("$PYTHON_BIN" -c 'from datetime import date, timedelta; print((date.today() - timedelta(days=30)).isoformat())')"
+  DATE_FROM="$("$PYTHON_BIN" -c 'from datetime import date, timedelta; print((date.today() - timedelta(days=90)).isoformat())')"
 fi
 
 if [[ -z "$DATE_TO" ]]; then
@@ -130,6 +146,7 @@ if [[ -z "$DATE_TO" ]]; then
 fi
 
 export SKIP_COVERED MERGE_OUTPUT
+export ARTIFACT_ONLY
 export DATE_FROM DATE_TO
 "$PYTHON_BIN" - <<'PY'
 from datetime import datetime
@@ -209,7 +226,9 @@ run_vod_training() {
     --dataset-out "$DATASET_PATH" \
     --artifact-dir "$ARTIFACT_DIR" \
     --work-dir "$WORK_DIR" \
-    --include-short-form "$SHORT_FORM_PATH"
+    --include-short-form "$SHORT_FORM_PATH" \
+    --workflow-state-path "$WORKFLOW_STATE_PATH" \
+    --workflow-state-json "$CURRENT_WORKFLOW_STATE_JSON"
 }
 
 generate_short_form_backfill() {
@@ -287,8 +306,12 @@ print(
         output_paths=[
             Path("ml/artifacts/jynxzi_vod_eval_dataset.jsonl"),
             Path("ml/artifacts/jynxzi_vod_eval_dataset_summary.json"),
-            Path("ml/artifacts/jynxzi_ranker_eval.json"),
+            Path("ml/artifacts/jynxzi_gold_eval.json"),
+            Path("ml/artifacts/jynxzi_proxy_eval.json"),
             Path("ml/artifacts/jynxzi_pipeline_eval.json"),
+        ],
+        dependency_paths=[
+            Path("tmp/storage/feedback/gold_eval_updates.jsonl"),
         ],
         state_path=Path("ml/artifacts/jynxzi_training_workflow_state.json"),
         current_state=json.loads(os.environ["CURRENT_WORKFLOW_STATE_JSON"]),
@@ -349,24 +372,63 @@ write_state(
 )
 PY
 
+if [[ "$ARTIFACT_ONLY" -eq 1 ]]; then
+  echo "Artifact-only mode enabled. Skipping eval, gold eval, and rollout recommendation."
+  echo
+  echo "Done."
+  echo "Labels:         $LABELS_PATH"
+  echo "Dataset:        $DATASET_PATH"
+  echo "Artifact:       $ARTIFACT_JSON_PATH"
+  echo "Boundary:       $BOUNDARY_ARTIFACT_JSON_PATH"
+  exit 0
+fi
+
 echo "Building eval dataset..."
 "$PYTHON_BIN" ml/build_eval_dataset.py \
   --dataset "$DATASET_PATH" \
   --output "$EVAL_DATASET_PATH" \
   --summary-out "$EVAL_SUMMARY_PATH"
 
-echo "Evaluating trained ranker against heuristic baseline..."
+echo "Exporting frontend gold eval rows..."
+"$PYTHON_BIN" ml/export_frontend_gold_eval.py \
+  --storage-dir "tmp/storage" \
+  --creator-id jynxzi \
+  --rows-out "$GOLD_EVAL_ROWS_PATH" \
+  --output "$GOLD_EVAL_DATASET_PATH" \
+  --summary-out "$GOLD_EVAL_SUMMARY_PATH"
+
+echo "Evaluating trained ranker against heuristic baseline on proxy eval rows..."
 "$PYTHON_BIN" ml/evaluate_ranker.py \
   --dataset "$EVAL_DATASET_PATH" \
   --profile jynxzi \
   --artifact-dir "$ARTIFACT_DIR" \
-  > "$RANKER_EVAL_PATH"
+  --report-out "$PROXY_RANKER_EVAL_PATH" \
+  > /dev/null
+
+echo "Evaluating trained ranker against heuristic baseline on gold eval rows..."
+"$PYTHON_BIN" ml/evaluate_ranker.py \
+  --dataset "$GOLD_EVAL_ROWS_PATH" \
+  --profile jynxzi \
+  --artifact-dir "$ARTIFACT_DIR" \
+  --report-out "$GOLD_RANKER_EVAL_PATH" \
+  > /dev/null
+
+cp "$GOLD_RANKER_EVAL_PATH" "$RANKER_EVAL_PATH"
 
 echo "Evaluating heuristic pipeline ranking..."
 "$PYTHON_BIN" ml/evaluate_pipeline.py \
   --dataset "$EVAL_DATASET_PATH" \
   --profile jynxzi \
   > "$PIPELINE_EVAL_PATH"
+
+echo "Finalizing MLflow tracking artifacts..."
+"$PYTHON_BIN" -m ml.mlflow_tracking finalize-run \
+  --artifact-path "$ARTIFACT_JSON_PATH" \
+  --artifact-health-path "$ARTIFACT_DIR/jynxzi_artifact_health.json" \
+  --proxy-eval-path "$PROXY_RANKER_EVAL_PATH" \
+  --gold-eval-path "$GOLD_RANKER_EVAL_PATH" \
+  --pipeline-eval-path "$PIPELINE_EVAL_PATH" \
+  > /dev/null || true
 
 echo "Evaluating boundary supervision coverage..."
 "$PYTHON_BIN" ml/evaluate_boundary_refinement.py \
@@ -377,9 +439,9 @@ echo "Evaluating rollout recommendation for ENABLE_TRAINED_RANKER_V2..."
 import json
 from pathlib import Path
 
-ranker_eval = Path("ml/artifacts/jynxzi_ranker_eval.json")
+ranker_eval = Path("ml/artifacts/jynxzi_gold_eval.json")
 if not ranker_eval.exists():
-    raise SystemExit("Missing ranker eval output: ml/artifacts/jynxzi_ranker_eval.json")
+    raise SystemExit("Missing ranker eval output: ml/artifacts/jynxzi_gold_eval.json")
 
 report = json.loads(ranker_eval.read_text(encoding="utf-8"))
 artifact = report.get("artifact", {})
@@ -427,5 +489,8 @@ echo "Artifact:       $ARTIFACT_JSON_PATH"
 echo "Boundary:       $BOUNDARY_ARTIFACT_JSON_PATH"
 echo "Eval dataset:   $EVAL_DATASET_PATH"
 echo "Eval summary:   $EVAL_SUMMARY_PATH"
+echo "Gold rows:      $GOLD_EVAL_ROWS_PATH"
+echo "Gold eval:      $GOLD_RANKER_EVAL_PATH"
+echo "Proxy eval:     $PROXY_RANKER_EVAL_PATH"
 echo "Ranker eval:    $RANKER_EVAL_PATH"
 echo "Pipeline eval:  $PIPELINE_EVAL_PATH"

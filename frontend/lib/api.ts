@@ -2,6 +2,40 @@ import { AIProviderStatus, ClipFeedbackPayload, ClipRequestOptions, JobStatus, U
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
+function formatApiErrorDetail(value: unknown): string | null {
+  if (typeof value === "string" && value.trim()) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    const parts = value
+      .map((item) => {
+        if (typeof item === "string") {
+          return item.trim();
+        }
+        if (item && typeof item === "object") {
+          const record = item as { msg?: unknown; loc?: unknown };
+          const msg = typeof record.msg === "string" ? record.msg.trim() : "";
+          const loc = Array.isArray(record.loc)
+            ? record.loc.map((segment) => String(segment)).join(".")
+            : "";
+          if (msg && loc) return `${loc}: ${msg}`;
+          return msg;
+        }
+        return "";
+      })
+      .filter(Boolean);
+    return parts.length ? parts.join(" | ") : null;
+  }
+  if (value && typeof value === "object") {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+  return null;
+}
+
 export async function submitJob(
   url: string,
   profile?: string | null,
@@ -203,7 +237,7 @@ export async function submitClipFeedback(jobId: string, payload: ClipFeedbackPay
     let msg = `HTTP ${res.status}`;
     try {
       const json = await res.json();
-      msg = json.detail ?? json.message ?? msg;
+      msg = formatApiErrorDetail(json.detail) ?? formatApiErrorDetail(json.message) ?? msg;
     } catch {
       const text = await res.text().catch(() => "");
       if (text) msg = text;

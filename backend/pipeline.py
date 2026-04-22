@@ -40,6 +40,15 @@ def _raise_if_cancelled(job_id: str) -> None:
         raise PipelineCancelledError(f"Job {job_id} cancelled by client")
 
 
+async def _await_with_optional_timeout(awaitable, timeout_sec: float | None):
+    if timeout_sec is None or timeout_sec <= 0:
+        return await asyncio.shield(awaitable)
+    return await asyncio.wait_for(
+        asyncio.shield(awaitable),
+        timeout=timeout_sec,
+    )
+
+
 async def run_pipeline(
     job_id: str,
     url: str | None = None,
@@ -65,11 +74,9 @@ async def run_pipeline(
         # Start non-transcription tasks in the background, but keep transcription
         # as its own visible phase so long uploads do not appear stuck.
         update_job(job_id, status="transcribing", progress_pct=30)
-        chat_out_dir = pathlib.Path(settings.storage_dir) / job_id / "chat"
-
-        chat_task = None
-        if url and settings.enable_chat_analysis:
-            chat_task = loop.run_in_executor(None, chat_analyzer.download_chat, url, job_id, chat_out_dir)
+        # Chat download is currently disabled. Keep the enrichment call below as
+        # a stable no-op path so downstream feature extraction remains unchanged.
+        chat_path = None
 
         audio_features_task = loop.run_in_executor(None, audio_features.extract, audio_path)
         video_features_task = loop.run_in_executor(None, video_features.extract, video_path)
@@ -104,25 +111,6 @@ async def run_pipeline(
             transcript = await loop.run_in_executor(
                 None, audio_features.diarize_speakers, transcript, audio_path
             )
-
-        chat_path = None
-        if chat_task is not None:
-            try:
-                if chat_task.done():
-                    chat_path = chat_task.result()
-                else:
-                    chat_path = await asyncio.wait_for(
-                        asyncio.shield(chat_task),
-                        timeout=settings.chat_join_timeout_sec,
-                    )
-            except asyncio.TimeoutError:
-                logger.info(
-                    "Skipping chat enrichment for job %s after %.1fs join timeout",
-                    job_id,
-                    settings.chat_join_timeout_sec,
-                )
-            except Exception:
-                logger.exception("Chat download failed for job %s", job_id)
 
         # Chat-replay enrichment (best-effort — no-op when chat_path is None)
         transcript = chat_analyzer.enrich_segments(transcript, chat_path)
@@ -253,7 +241,7 @@ async def run_pipeline(
                 settings.judge_keyframes_per_candidate,
             )
         if settings.enable_clip_judge and judge_top_k > 0:
-            judged_ranked_candidates = await loop.run_in_executor(
+            judge_future = loop.run_in_executor(
                 None,
                 clip_judge.rerank_candidates,
                 ranked_candidates,
@@ -263,6 +251,17 @@ async def run_pipeline(
                 None,
                 sampled_keyframes,
             )
+            try:
+                judged_ranked_candidates = await asyncio.wait_for(
+                    asyncio.shield(judge_future),
+                    timeout=settings.clip_judge_timeout_sec,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "clip_judge.rerank_candidates timed out after %.1fs; skipping judge stage",
+                    settings.clip_judge_timeout_sec,
+                )
+                judged_ranked_candidates = list(ranked_candidates)
         ranked_candidates = await loop.run_in_executor(
             None,
             lambda: selector.select_diverse_ranked_candidates(
@@ -271,7 +270,7 @@ async def run_pipeline(
                 strategy=normalized_strategy,
             ),
         )
-        moments = await loop.run_in_executor(
+        refine_future = loop.run_in_executor(
             None,
             analyzer.refine_candidates,
             ranked_candidates,
@@ -280,6 +279,17 @@ async def run_pipeline(
             effective_profile,
             normalized_strategy,
         )
+        try:
+            moments = await _await_with_optional_timeout(
+                refine_future,
+                settings.analyzer_refine_timeout_sec,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "analyzer.refine_candidates timed out after %.1fs; no moments will be produced for this job",
+                settings.analyzer_refine_timeout_sec,
+            )
+            moments = []
 
         transcripts_dir = pathlib.Path(__file__).parents[1] / "transcripts"
         transcripts_dir.mkdir(exist_ok=True)

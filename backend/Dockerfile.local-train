@@ -1,0 +1,38 @@
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    XDG_CACHE_HOME=/app/backend/tmp/cache \
+    HF_HOME=/app/backend/tmp/cache/huggingface \
+    HUGGINGFACE_HUB_CACHE=/app/backend/tmp/cache/huggingface/hub \
+    TRANSFORMERS_CACHE=/app/backend/tmp/cache/huggingface/transformers \
+    TORCH_HOME=/app/backend/tmp/cache/torch \
+    MPLCONFIGDIR=/app/backend/tmp/matplotlib \
+    OLLAMA_HOST=http://host.docker.internal:11434 \
+    WHISPER_DEVICE=cuda \
+    SEMANTIC_DEVICE=cuda \
+    TRAINING_DATASET_LLM_PROVIDER=none
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    git \
+    zsh \
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app/backend
+
+COPY backend/ /app/backend/
+RUN python -m pip install --upgrade pip setuptools wheel \
+  && python -m pip install -e ".[ml,vision]"
+
+RUN mkdir -p /app/backend/.venv/bin /app/backend/tmp/storage /app/backend/tmp/training_runs /app/backend/ml/artifacts \
+  /app/backend/tmp/cache/huggingface /app/backend/tmp/cache/torch /app/backend/tmp/matplotlib \
+  && ln -sf /opt/conda/bin/python /app/backend/.venv/bin/python
+
+ENTRYPOINT ["python", "-m", "ml.local_train"]

@@ -1,0 +1,47 @@
+serviceAccount: vertex-train@project-22586fae-58b4-4890-aeb.iam.gserviceaccount.com
+scheduling:
+  timeout: 604800s
+workerPoolSpecs:
+  - machineSpec:
+      machineType: n2-highcpu-64
+    replicaCount: 1
+    diskSpec:
+      bootDiskType: pd-ssd
+      bootDiskSizeGb: 500
+    containerSpec:
+      imageUri: europe-west3-docker.pkg.dev/project-22586fae-58b4-4890-aeb/ml/ai-clipping-train:20260421-transcriberlock-newproject
+      args:
+        - --streamer
+        - jynxzi
+        - --date-from
+        - "2026-03-14"
+        - --date-to
+        - "2026-03-20"
+        - --artifacts-gcs-uri
+        - gs://project-22586fae-58b4-4890-aeb-ml-artifacts-ew3/jynxzi/train-artifacts-20260421-7day-artifactonly-2x2-transcriberlock-n2highcpu64
+        - --storage-dir
+        - tmp/storage
+        - --train-tmpdir
+        - tmp/vertex_training_runs
+        - --whisper-model
+        - base
+        - --dataset-llm-provider
+        - auto
+        - --artifact-only
+        - --training-vod-gcs-cache-uri
+        - gs://project-22586fae-58b4-4890-aeb-ml-artifacts-ew3/cache/vod-downloads
+        - --training-vod-checkpoint-gcs-uri
+        - gs://project-22586fae-58b4-4890-aeb-ml-artifacts-ew3/cache/vod-checkpoints
+        - --twitch-client-id-secret
+        - projects/303245987408/secrets/twitch-client-id/versions/latest
+        - --twitch-client-secret-secret
+        - projects/303245987408/secrets/twitch-client-secret/versions/latest
+        - --groq-api-key-secret
+        - projects/303245987408/secrets/groq-api-key/versions/latest
+        - --gemini-api-key-secret
+        - projects/303245987408/secrets/gemini-api-key/versions/latest
+      env:
+        - name: TRAINING_VOD_WORKERS
+          value: "2"
+        - name: TRAINING_LABEL_WORKERS
+          value: "2"

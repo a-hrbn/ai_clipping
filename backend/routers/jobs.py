@@ -31,6 +31,15 @@ _SENTENCE_TRANSFORMERS_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
 _PYANNOTE_MODEL = "speaker-diarization-3.1"
 
 
+def _write_job_request_metadata(job_id: str, payload: dict) -> None:
+    job_dir = pathlib.Path(settings.storage_dir) / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    (job_dir / "request.json").write_text(
+        json.dumps(payload, ensure_ascii=True, indent=2),
+        encoding="utf-8",
+    )
+
+
 def _quota_exhausted(message: str) -> bool:
     normalized = message.lower()
     return any(
@@ -404,23 +413,17 @@ async def get_status():
         return result
 
     loop = asyncio.get_running_loop()
-    groq_configured = bool(settings.groq_api_key)
     gemini_configured = bool(settings.gemini_api_key)
 
-    groq_ok, groq_err = (False, None)
     gemini_ok, gemini_err = (False, None)
 
     checks = []
-    if groq_configured:
-        checks.append(loop.run_in_executor(None, _check_groq, settings.groq_api_key, settings.groq_model))
     if gemini_configured:
         checks.append(loop.run_in_executor(None, _check_gemini, settings.gemini_api_key, settings.gemini_model))
     checks.append(loop.run_in_executor(None, _pipeline_component_statuses))
 
     results = await asyncio.gather(*checks)
     idx = 0
-    if groq_configured:
-        groq_ok, groq_err = results[idx]; idx += 1
     if gemini_configured:
         gemini_ok, gemini_err = results[idx]
         idx += 1
@@ -428,15 +431,15 @@ async def get_status():
 
     result = {
         "providers": {
-            "semantic": _provider_payload(
+            "semantic": _status_payload(
                 label="Scoring",
-                configured=groq_configured,
-                provider_name="Groq",
-                provider_model=settings.groq_model,
-                fallback_name="Ollama",
-                fallback_model=settings.ollama_model,
-                ok=groq_ok,
-                error=groq_err,
+                name="Ollama",
+                model=settings.ollama_model,
+                active=True,
+                error=None,
+                mode="active",
+                fallback_name="Groq" if settings.groq_api_key else None,
+                fallback_model=settings.groq_model if settings.groq_api_key else None,
             ),
             "refinement": _provider_payload(
                 label="Refinement",
@@ -516,6 +519,24 @@ async def submit_job(request: JobRequest):
         time_range=request.time_range.model_dump(exclude_none=True) if request.time_range else None,
         clip_style=request.clip_style,
         variant_count=request.variant_count,
+    )
+    _write_job_request_metadata(
+        job_id,
+        {
+            "url": request.url,
+            "profile": effective_profile,
+            "session_id": request.session_id,
+            "platform": request.platform,
+            "goal": request.goal,
+            "tone": request.tone,
+            "topic": request.topic,
+            "must_include": request.must_include,
+            "exclude": request.exclude,
+            "speaker": request.speaker,
+            "time_range": request.time_range.model_dump(exclude_none=True) if request.time_range else None,
+            "clip_style": request.clip_style,
+            "variant_count": request.variant_count,
+        },
     )
 
     from pipeline import run_pipeline
@@ -597,6 +618,32 @@ async def upload_job(
     job_dir = pathlib.Path(settings.storage_dir) / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
     video_path = job_dir / "video.mp4"
+    _write_job_request_metadata(
+        job_id,
+        {
+            "url": "",
+            "profile": effective_profile,
+            "session_id": session_id,
+            "platform": platform,
+            "goal": goal,
+            "tone": tone,
+            "topic": topic,
+            "must_include": _coerce_csv_list(must_include),
+            "exclude": _coerce_csv_list(exclude),
+            "speaker": speaker,
+            "time_range": {
+                key: value
+                for key, value in {
+                    "start_sec": time_range_start,
+                    "end_sec": time_range_end,
+                }.items()
+                if value is not None
+            } or None,
+            "clip_style": clip_style,
+            "variant_count": variant_count,
+            "original_filename": file.filename,
+        },
+    )
 
     # Detach the SpooledTemporaryFile from FastAPI's lifecycle so we can copy
     # it in the background without blocking the HTTP response.
@@ -653,3 +700,5 @@ async def submit_clip_feedback(job_id: str, payload: ClipFeedbackPayload):
         return feedback_store.update_job_feedback(pathlib.Path(settings.storage_dir), job_id, payload)
     except KeyError:
         raise HTTPException(status_code=404, detail="Candidate not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))

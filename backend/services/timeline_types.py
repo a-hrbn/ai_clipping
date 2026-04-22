@@ -225,6 +225,10 @@ class CandidateFeatures:
     has_vector_similarity: bool = False
     feature_build_version: int = 1
     source: str = ""
+    # Rule-based heuristic score used as an input feature for trained rankers.
+    # Populated at scoring time (services/ranker.py) from _heuristic_scores so the
+    # trained model can learn how to adjust it rather than being blended post-hoc.
+    heuristic_score: float = 0.0
 
     @classmethod
     def create(cls, **kwargs) -> "CandidateFeatures":

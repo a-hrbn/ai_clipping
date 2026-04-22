@@ -106,16 +106,37 @@ class JobStatus(BaseModel):
 
 
 ClipFeedbackRating = Literal["good", "medium", "bad"]
+ClipFeedbackMode = Literal["training_feedback", "gold_eval"]
 
 
 class ClipFeedbackPayload(BaseModel):
     candidate_id: str
-    rating: ClipFeedbackRating
+    mode: ClipFeedbackMode = "training_feedback"
+    rating: ClipFeedbackRating | None = None
+    gold_grade: int | None = None
     notes: str | None = None
+
+    @model_validator(mode="after")
+    def validate_feedback_fields(self):
+        if self.mode == "training_feedback":
+            if self.rating is None:
+                raise ValueError("rating is required for training_feedback")
+            if self.gold_grade is not None:
+                raise ValueError("gold_grade is only allowed for gold_eval")
+            return self
+        if self.gold_grade is None:
+            raise ValueError("gold_grade is required for gold_eval")
+        if self.gold_grade < 0 or self.gold_grade > 3:
+            raise ValueError("gold_grade must stay in 0..3")
+        if self.rating is not None:
+            raise ValueError("rating is only allowed for training_feedback")
+        return self
 
 
 class ClipFeedbackResponse(BaseModel):
     job_id: str
     candidate_id: str
+    mode: ClipFeedbackMode = "training_feedback"
     rating: ClipFeedbackRating | None = None
+    gold_grade: int | None = None
     notes: str | None = None

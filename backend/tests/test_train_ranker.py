@@ -2,15 +2,21 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from ml import train_ranker
 
 
 class _FakeLGBMRanker:
+    last_init_kwargs = None
+    last_fit_kwargs = None
+
     def __init__(self, *args, **kwargs) -> None:
+        type(self).last_init_kwargs = dict(kwargs)
         self.feature_importances_ = [1.0]
 
     def fit(self, train_matrix, train_targets, **kwargs) -> None:
+        type(self).last_fit_kwargs = dict(kwargs)
         self._positive_mean = max(
             float(train_matrix[idx][0])
             for idx, target in enumerate(train_targets.tolist())
@@ -19,6 +25,45 @@ class _FakeLGBMRanker:
 
     def predict(self, matrix):
         return [float(row[0]) - self._positive_mean for row in matrix]
+
+
+class _FakeMlflowSession:
+    def __init__(self) -> None:
+        self.enabled = True
+        self.run_id = "run-123"
+        self.logged_metrics: list[tuple[dict, str]] = []
+        self.logged_tags: list[dict] = []
+        self.logged_artifacts: list[str] = []
+        self.register_calls = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+    def log_params(self, params: dict) -> None:
+        return None
+
+    def log_metrics(self, metrics: dict, *, prefix: str = "") -> None:
+        self.logged_metrics.append((dict(metrics), prefix))
+
+    def set_tags(self, tags: dict) -> None:
+        self.logged_tags.append(dict(tags))
+
+    def log_artifact(self, path: Path, *, artifact_path: str | None = None) -> None:
+        del artifact_path
+        self.logged_artifacts.append(path.name)
+
+    def register_ranker_bundle(self, **kwargs):
+        self.register_calls += 1
+        return {
+            "enabled": True,
+            "model_name": "gaming_ranker",
+            "version": "7",
+            "stage": "Staging",
+            "promotion_gates": {"source_mix_ok": True},
+        }
 
 
 class TrainRankerTests(unittest.TestCase):
@@ -101,8 +146,31 @@ class TrainRankerTests(unittest.TestCase):
         split = train_ranker._split_rows(rows)
 
         self.assertIn("fallback", str(split["strategy"]))
+        self.assertIn("warning", split)
+        self.assertEqual(split["seed"], train_ranker._SPLIT_RANDOM_SEED)
         self.assertEqual({row["label"] for row in split["train"]}, {0, 1})
         self.assertEqual({row["label"] for row in split["validation"]}, {0, 1})
+
+    def test_stratified_fallback_split_is_seeded_and_deterministic(self) -> None:
+        rows = [
+            {"job_id": "job", "candidate_id": f"p{i}", "label": 1, "features": {"x": float(i)}}
+            for i in range(5)
+        ] + [
+            {"job_id": "job", "candidate_id": f"n{i}", "label": 0, "features": {"x": float(-i)}}
+            for i in range(5)
+        ]
+
+        left = train_ranker._stratified_fallback_split(rows, "stratified_fallback", "row")
+        right = train_ranker._stratified_fallback_split(rows, "stratified_fallback", "row")
+
+        self.assertEqual(
+            [row["candidate_id"] for row in left["train"]],
+            [row["candidate_id"] for row in right["train"]],
+        )
+        self.assertEqual(
+            [row["candidate_id"] for row in left["validation"]],
+            [row["candidate_id"] for row in right["validation"]],
+        )
 
     def test_evaluate_returns_metrics(self) -> None:
         rows = [
@@ -132,6 +200,8 @@ class TrainRankerTests(unittest.TestCase):
         self.assertEqual(metrics["precision_at_3"], 0.5)
         self.assertEqual(metrics["recall_at_3"], 1.0)
         self.assertEqual(metrics["ndcg_at_5"], 0.815)
+        self.assertEqual(metrics["ndcg_at_5_min"], 0.631)
+        self.assertEqual(metrics["ndcg_at_5_p25"], 0.631)
         self.assertLess(metrics["global_ndcg_at_5"], metrics["ndcg_at_5"])
 
     def test_numeric_feature_names_excludes_offline_only_features(self) -> None:
@@ -150,7 +220,7 @@ class TrainRankerTests(unittest.TestCase):
             {"name": "linear", "artifact_model_type": "linear", "metrics": {"ndcg_at_5": 0.5, "f1": 0.8, "accuracy": 0.8}},
             {"name": "logistic", "artifact_model_type": "logistic", "metrics": {"ndcg_at_5": 0.7, "precision_at_5": 0.8, "f1": 0.6, "accuracy": 0.6}},
             {"name": "gradient_boosting", "artifact_model_type": "gradient_boosting", "metrics": {"ndcg_at_5": 0.9, "precision_at_5": 0.8, "f1": 0.4, "accuracy": 0.55}},
-        ])
+        ], training_row_count=120)
         self.assertEqual(selected["name"], "logistic")
 
     def test_model_minimums_require_multiple_ranking_groups_when_reported(self) -> None:
@@ -161,9 +231,117 @@ class TrainRankerTests(unittest.TestCase):
         )
         self.assertTrue(
             train_ranker._model_meets_minimums(
-                {"accuracy": 0.9, "ndcg_at_5": 0.9, "precision_at_5": 0.8, "ranking_groups": 2}
+                {
+                    "accuracy": 0.9,
+                    "ndcg_at_5": 0.9,
+                    "precision_at_5": 0.8,
+                    "ranking_groups": 2,
+                    "ndcg_at_5_min": 0.5,
+                    "ndcg_at_5_p25": 0.6,
+                }
             )
         )
+
+    def test_model_minimums_reject_low_group_ndcg_floor(self) -> None:
+        self.assertFalse(
+            train_ranker._model_meets_minimums(
+                {
+                    "accuracy": 0.9,
+                    "ndcg_at_5": 0.9,
+                    "precision_at_5": 0.8,
+                    "ranking_groups": 2,
+                    "ndcg_at_5_min": 0.1,
+                    "ndcg_at_5_p25": 0.55,
+                }
+            )
+        )
+
+    def test_evaluate_scores_switches_to_ndcg_at_10_when_group_positives_are_below_five(self) -> None:
+        labels = train_ranker.np.array([1, 1, 1, 1, 0, 0, 0, 0], dtype=int)
+        scores = train_ranker.np.array([0.9, 0.8, 0.7, 0.6, 0.2, 0.1, 0.05, 0.0], dtype=float)
+        groups = ["vod-a"] * 4 + ["vod-b"] * 4
+
+        metrics = train_ranker._evaluate_scores(labels, scores, groups=groups)
+
+        self.assertEqual(metrics["min_group_positive_rows"], 0)
+        self.assertEqual(metrics["ranking_metric"], "mrr")
+
+    def test_evaluate_scores_switches_to_ndcg_at_10_when_group_positives_are_between_five_and_nine(self) -> None:
+        labels = train_ranker.np.array(
+            [1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0],
+            dtype=int,
+        )
+        scores = train_ranker.np.array(
+            [0.99, 0.95, 0.9, 0.85, 0.8, 0.2, 0.1, 0.05, 0.01, 0.0, 0.98, 0.94, 0.89, 0.84, 0.79, 0.19, 0.09, 0.04, 0.02, 0.01],
+            dtype=float,
+        )
+        groups = ["vod-a"] * 10 + ["vod-b"] * 10
+
+        metrics = train_ranker._evaluate_scores(labels, scores, groups=groups)
+
+        self.assertEqual(metrics["min_group_positive_rows"], 5)
+        self.assertEqual(metrics["ranking_metric"], "ndcg_at_10")
+
+    def test_train_from_rows_rejects_gold_eval_holdout_rows(self) -> None:
+        rows = [
+            {
+                "job_id": "job-1",
+                "candidate_id": "c1",
+                "label": 1,
+                "supervision_tier": "gold_eval",
+                "gold_holdout_split": "holdout",
+                "features": {"signal": 1.0},
+            },
+            {
+                "job_id": "job-1",
+                "candidate_id": "c2",
+                "label": 0,
+                "supervision_tier": "gold_eval",
+                "gold_holdout_split": "train",
+                "features": {"signal": -1.0},
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            rc = train_ranker.train_from_rows(rows, "gaming", Path(tmp))
+
+        self.assertEqual(rc, 1)
+
+    def test_train_from_rows_rejects_gold_eval_rows_without_frozen_split(self) -> None:
+        rows = [
+            {
+                "job_id": "job-1",
+                "candidate_id": "c1",
+                "label": 1,
+                "supervision_tier": "gold_eval",
+                "features": {"signal": 1.0},
+            },
+            {
+                "job_id": "job-1",
+                "candidate_id": "c2",
+                "label": 0,
+                "supervision_tier": "gold_eval",
+                "features": {"signal": -1.0},
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            rc = train_ranker.train_from_rows(rows, "gaming", Path(tmp))
+
+        self.assertEqual(rc, 1)
+
+    def test_mean_difference_weights_respect_sample_weights(self) -> None:
+        rows = [
+            {"label": 1, "sample_weight": 5.0, "features": {"signal": 5.0}},
+            {"label": 1, "sample_weight": 1.0, "features": {"signal": 1.0}},
+            {"label": 0, "sample_weight": 1.0, "features": {"signal": 0.0}},
+            {"label": 0, "sample_weight": 1.0, "features": {"signal": -1.0}},
+        ]
+        scales = {"signal": {"mean": 0.0, "std": 1.0}}
+
+        weights = train_ranker._mean_difference_weights(rows, ["signal"], scales)
+
+        self.assertAlmostEqual(weights["signal"], 4.833, places=3)
 
     def test_pairwise_training_matrix_builds_comparisons_within_group(self) -> None:
         rows = [
@@ -180,6 +358,60 @@ class TrainRankerTests(unittest.TestCase):
         self.assertGreaterEqual(len(labels), 4)
         self.assertEqual(set(labels.tolist()), {0, 1})
         self.assertEqual(len(weights), len(labels))
+
+    def test_select_model_keeps_lightgbm_disabled_below_phase_a_gate(self) -> None:
+        selected = train_ranker._select_model(
+            [
+                {
+                    "name": "logistic_regression",
+                    "artifact_model_type": "logistic",
+                    "metrics": {"ndcg_at_5": 0.81, "precision_at_5": 0.8, "f1": 0.72, "accuracy": 0.71},
+                },
+                {
+                    "name": "lightgbm_ranker",
+                    "artifact_model_type": "lightgbm_ranker",
+                    "metrics": {"ndcg_at_5": 0.97, "precision_at_5": 0.95, "f1": 0.9, "accuracy": 0.88},
+                },
+            ],
+            training_row_count=train_ranker._LIGHTGBM_PROMOTION_MIN_ROWS - 1,
+        )
+        self.assertEqual(selected["name"], "logistic_regression")
+
+    def test_select_model_keeps_gradient_boosting_disabled_below_gate(self) -> None:
+        selected = train_ranker._select_model(
+            [
+                {
+                    "name": "logistic_regression",
+                    "artifact_model_type": "logistic",
+                    "metrics": {"ndcg_at_5": 0.81, "precision_at_5": 0.8, "f1": 0.72, "accuracy": 0.71},
+                },
+                {
+                    "name": "gradient_boosting",
+                    "artifact_model_type": "gradient_boosting",
+                    "metrics": {"ndcg_at_5": 0.97, "precision_at_5": 0.95, "f1": 0.9, "accuracy": 0.88},
+                },
+            ],
+            training_row_count=train_ranker._GRADIENT_BOOSTING_PROMOTION_MIN_ROWS - 1,
+        )
+        self.assertEqual(selected["name"], "logistic_regression")
+
+    def test_select_model_allows_lightgbm_after_phase_a_gate(self) -> None:
+        selected = train_ranker._select_model(
+            [
+                {
+                    "name": "logistic_regression",
+                    "artifact_model_type": "logistic",
+                    "metrics": {"ndcg_at_5": 0.81, "precision_at_5": 0.8, "f1": 0.72, "accuracy": 0.71},
+                },
+                {
+                    "name": "lightgbm_ranker",
+                    "artifact_model_type": "lightgbm_ranker",
+                    "metrics": {"ndcg_at_5": 0.97, "precision_at_5": 0.95, "f1": 0.9, "accuracy": 0.88},
+                },
+            ],
+            training_row_count=train_ranker._LIGHTGBM_PROMOTION_MIN_ROWS,
+        )
+        self.assertEqual(selected["name"], "lightgbm_ranker")
 
     def test_train_from_rows_writes_model_path_for_gradient_boosting_artifact(self) -> None:
         rows = [
@@ -199,11 +431,47 @@ class TrainRankerTests(unittest.TestCase):
             rc = train_ranker.train_from_rows(rows, "gaming", artifact_dir)
             self.assertEqual(rc, 0)
             artifact = json.loads((artifact_dir / "gaming_ranker.json").read_text(encoding="utf-8"))
-            self.assertEqual(artifact["version"], 3)
+            artifact_health = json.loads((artifact_dir / "gaming_artifact_health.json").read_text(encoding="utf-8"))
+            self.assertEqual(artifact["version"], 4)
+            self.assertIn("semantic_score_config", artifact)
             self.assertIn("top_feature_importances", artifact)
+            self.assertEqual(artifact_health["selected_model"], artifact["selected_model"])
+            self.assertEqual(artifact_health["semantic_score_config"], artifact["semantic_score_config"])
+            self.assertIn("gates", artifact_health)
             if artifact["model_type"] == "gradient_boosting":
                 self.assertTrue(artifact["model_path"])
                 self.assertTrue((artifact_dir / artifact["model_path"]).exists())
+
+    def test_train_from_rows_records_mlflow_run_metadata_when_tracking_is_enabled(self) -> None:
+        rows = [
+            {
+                "job_id": f"j{i}",
+                "creator_id": "jynxzi",
+                "candidate_id": f"c{i}",
+                "label": 1 if i % 2 == 0 else 0,
+                "publish_timestamp": 1_700_000_000 + i * 60,
+                "candidate_source": "reaction" if i % 3 else "quote",
+                "features": {"signal": 5.0 if i % 2 == 0 else -5.0},
+            }
+            for i in range(60)
+        ]
+
+        fake_session = _FakeMlflowSession()
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(train_ranker.mlflow_tracking, "start_training_session", return_value=fake_session), \
+             patch.dict(train_ranker.os.environ, {"MLFLOW_REGISTER_ON_TRAIN": "1"}, clear=False):
+            artifact_dir = Path(tmp)
+            rc = train_ranker.train_from_rows(rows, "gaming", artifact_dir)
+            self.assertEqual(rc, 0)
+            artifact = json.loads((artifact_dir / "gaming_ranker.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(artifact["mlflow"]["run_id"], "run-123")
+        self.assertEqual(artifact["mlflow_run_id"], "run-123")
+        self.assertEqual(artifact["mlflow"]["registered_version"], "7")
+        self.assertEqual(fake_session.register_calls, 1)
+        metric_keys = {key for payload, _prefix in fake_session.logged_metrics for key in payload}
+        self.assertIn("ndcg_at_5", metric_keys)
+        self.assertIn("precision_at_5", metric_keys)
 
     def test_sample_weight_rewards_stronger_outcome_feedback(self) -> None:
         weak = {
@@ -251,6 +519,87 @@ class TrainRankerTests(unittest.TestCase):
         assert candidate is not None
         self.assertEqual(candidate["artifact_model_type"], "lightgbm_ranker")
         self.assertIn("ndcg_at_5", candidate["metrics"])
+
+    def test_fit_lightgbm_ranker_uses_early_stopping_and_eval_windows(self) -> None:
+        rows = [
+            {"vod_id": "vod-1", "candidate_id": "a1", "label": 1, "ordinal_label": 4, "features": {"signal": 4.0}},
+            {"vod_id": "vod-1", "candidate_id": "a2", "label": 0, "ordinal_label": 0, "features": {"signal": -2.0}},
+            {"vod_id": "vod-2", "candidate_id": "b1", "label": 1, "ordinal_label": 3, "features": {"signal": 3.0}},
+            {"vod_id": "vod-2", "candidate_id": "b2", "label": 0, "ordinal_label": 0, "features": {"signal": -3.0}},
+        ]
+        scales = train_ranker._compute_scales(rows, ["signal"])
+        original = train_ranker.LGBMRanker
+        original_early_stopping = train_ranker.early_stopping
+        train_ranker.LGBMRanker = _FakeLGBMRanker
+        train_ranker.early_stopping = lambda rounds, verbose=False: ("early_stopping", rounds, verbose)
+        _FakeLGBMRanker.last_fit_kwargs = None
+        try:
+            candidate = train_ranker._fit_lightgbm_ranker(
+                rows,
+                rows,
+                ["signal"],
+                scales,
+                "vod_id",
+            )
+        finally:
+            train_ranker.LGBMRanker = original
+            train_ranker.early_stopping = original_early_stopping
+
+        self.assertIsNotNone(candidate)
+        assert _FakeLGBMRanker.last_fit_kwargs is not None
+        self.assertEqual(_FakeLGBMRanker.last_fit_kwargs["eval_at"], [3, 5, 10])
+        self.assertEqual(_FakeLGBMRanker.last_fit_kwargs["callbacks"], [("early_stopping", 10, False)])
+
+    def test_train_from_rows_loads_hpo_artifact_for_lightgbm_candidate(self) -> None:
+        rows = [
+            {
+                "vod_id": f"vod-{i // 2}",
+                "candidate_id": f"c{i}",
+                "label": 1 if i % 2 == 0 else 0,
+                "features": {"signal": 6.0 if i % 2 == 0 else -6.0},
+            }
+            for i in range(60)
+        ]
+        original = train_ranker.LGBMRanker
+        train_ranker.LGBMRanker = _FakeLGBMRanker
+        _FakeLGBMRanker.last_init_kwargs = None
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                artifact_dir = Path(tmp)
+                (artifact_dir / "gaming_ranker_hpo.json").write_text(
+                    json.dumps(
+                        {
+                            "version": 1,
+                            "profile": "gaming",
+                            "best_value": 0.812,
+                            "best_params": {
+                                "num_leaves": 31,
+                                "learning_rate": 0.05,
+                                "min_child_samples": 7,
+                                "feature_fraction": 0.8,
+                                "bagging_fraction": 0.75,
+                                "n_estimators": 120,
+                            },
+                            "seed": 11,
+                            "trials": 8,
+                        },
+                        ensure_ascii=True,
+                    ),
+                    encoding="utf-8",
+                )
+                rc = train_ranker.train_from_rows(rows, "gaming", artifact_dir)
+                self.assertEqual(rc, 0)
+                artifact = json.loads((artifact_dir / "gaming_ranker.json").read_text(encoding="utf-8"))
+        finally:
+            train_ranker.LGBMRanker = original
+
+        self.assertIsNotNone(_FakeLGBMRanker.last_init_kwargs)
+        assert _FakeLGBMRanker.last_init_kwargs is not None
+        self.assertEqual(_FakeLGBMRanker.last_init_kwargs["num_leaves"], 31)
+        self.assertEqual(_FakeLGBMRanker.last_init_kwargs["n_estimators"], 120)
+        self.assertTrue(artifact["hpo"]["loaded"])
+        self.assertEqual(artifact["hpo"]["seed"], 11)
+        self.assertIn("blend_calibration", artifact)
 
 
 if __name__ == "__main__":

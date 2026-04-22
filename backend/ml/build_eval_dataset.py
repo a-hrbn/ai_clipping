@@ -10,6 +10,10 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from ml import train_ranker
+from services.gold_eval_policy import (
+    GOLD_HOLDOUT_SPLIT_FIELD,
+    annotate_gold_row,
+)
 
 
 def main() -> int:
@@ -52,8 +56,8 @@ def main() -> int:
 def build_eval_dataset(rows: list[dict]) -> list[dict]:
     eval_rows: list[dict] = []
     for row in rows:
+        eval_row = _annotated_eval_row(row)
         features = dict(row.get("features") or {})
-        eval_row = dict(row)
         eval_row["eval_group"] = _eval_group(row)
         eval_row["platform_bucket"] = _platform_bucket(row)
         eval_row["variant_bucket"] = _variant_bucket(row)
@@ -79,6 +83,7 @@ def eval_dataset_summary(rows: list[dict]) -> dict[str, object]:
         "by_variant": _count_values(rows, "variant_bucket"),
         "by_source": _count_values(rows, "source_bucket"),
         "by_content_bucket": _count_values(rows, "content_bucket"),
+        "gold_holdout_splits": _count_values(rows, GOLD_HOLDOUT_SPLIT_FIELD),
     }
 
 
@@ -145,11 +150,29 @@ def _has_outcome_feedback(row: dict) -> bool:
 
 
 def _dataset_role(row: dict) -> str:
+    if str(row.get("supervision_tier") or "").strip().lower() == "gold_eval":
+        return "gold_eval"
+    if str(row.get("label_source") or "").strip().lower() == "gold_eval":
+        return "gold_eval"
     if _has_outcome_feedback(row):
         return "outcome_eval"
     if bool(row.get("selected")):
         return "pipeline_positive_eval"
     return "pipeline_negative_eval"
+
+
+def _annotated_eval_row(row: dict) -> dict:
+    if _is_gold_eval_row(row):
+        return annotate_gold_row(row)
+    return dict(row)
+
+
+def _is_gold_eval_row(row: dict) -> bool:
+    if str(row.get("supervision_tier") or "").strip().lower() == "gold_eval":
+        return True
+    if str(row.get("label_source") or "").strip().lower() == "gold_eval":
+        return True
+    return False
 
 
 def _count_values(rows: list[dict], key: str) -> dict[str, int]:

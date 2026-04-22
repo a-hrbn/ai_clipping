@@ -28,7 +28,9 @@ import threading
 from typing import TYPE_CHECKING
 
 import numpy as np
+import torch
 from config import DEFAULT_CACHE_DIR
+from config import settings
 
 if TYPE_CHECKING:
     from services.transcriber import RichSegment
@@ -309,11 +311,21 @@ def _materialize_local_sentence_transformer_model(model_repo_id: str) -> Path | 
     transformer_snapshot = _snapshot_dir("transformers", model_repo_id)
     if not _has_sentence_transformer_metadata(hub_snapshot):
         return None
-    if not _has_transformer_weights(transformer_snapshot):
-        return None
 
     model_dir = _local_sentence_transformer_model_dir(model_repo_id)
     model_dir.mkdir(parents=True, exist_ok=True)
+
+    # Newer sentence-transformers / huggingface-hub releases may place the full
+    # model payload directly under the hub snapshot instead of splitting metadata
+    # and transformer weights across separate hub/transformers caches.
+    if _has_transformer_weights(hub_snapshot):
+        _link_snapshot_contents(hub_snapshot, model_dir)
+        if _materialized_model_complete(model_dir):
+            return model_dir
+
+    if not _has_transformer_weights(transformer_snapshot):
+        return None
+
     _link_snapshot_contents(hub_snapshot, model_dir)
     _link_snapshot_contents(transformer_snapshot, model_dir)
     if not _materialized_model_complete(model_dir):
@@ -333,25 +345,51 @@ def _get_model():
             cache_folder = str(_sentence_transformer_cache_folder())
             local_model_dir = _materialize_local_sentence_transformer_model(_MODEL_REPO_ID)
             source = "local_snapshot" if local_model_dir is not None else "huggingface"
-            logger.info("semantic_candidates_init model=%s source=%s", _MODEL_NAME, source)
+            device = _resolved_semantic_device()
+            logger.info("semantic_candidates_init model=%s source=%s device=%s", _MODEL_NAME, source, device)
             if local_model_dir is not None:
                 _model = SentenceTransformer(
                     str(local_model_dir),
                     local_files_only=True,
+                    device=device,
                 )
             else:
                 _model = SentenceTransformer(
                     _MODEL_NAME,
                     cache_folder=cache_folder,
                     local_files_only=False,
+                    device=device,
                 )
             if not _model_runtime_logged:
-                logger.info("semantic_candidates_runtime model=%s source=%s", _MODEL_NAME, source)
+                logger.info(
+                    "semantic_candidates_runtime model=%s source=%s device=%s batch_size=%s",
+                    _MODEL_NAME,
+                    source,
+                    device,
+                    _semantic_batch_size(),
+                )
                 _model_runtime_logged = True
         except Exception as exc:
             logger.warning("Could not load sentence-transformers model: %s", exc)
             _model = None
     return _model
+
+
+def _resolved_semantic_device() -> str:
+    requested = str(settings.semantic_device or "auto").strip().lower() or "auto"
+    if requested == "auto":
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    if requested == "cuda" and not torch.cuda.is_available():
+        logger.warning("semantic_candidates_cuda_unavailable_fallback requested=cuda resolved=cpu")
+        return "cpu"
+    return requested
+
+
+def _semantic_batch_size() -> int:
+    configured = int(settings.semantic_batch_size or 0)
+    if configured > 0:
+        return configured
+    return 256 if _resolved_semantic_device() == "cuda" else 64
 
 
 def _get_pattern_embeddings(model) -> dict[str, np.ndarray]:
@@ -360,7 +398,12 @@ def _get_pattern_embeddings(model) -> dict[str, np.ndarray]:
         return _pattern_embeddings
     result = {}
     for category, texts in _PATTERNS.items():
-        emb = model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
+        emb = model.encode(
+            texts,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+            batch_size=_semantic_batch_size(),
+        )
         result[category] = emb  # shape: (n_patterns, dim)
     _pattern_embeddings = result
     return result
@@ -390,7 +433,7 @@ def find_semantic_candidates(
             texts,
             normalize_embeddings=True,
             show_progress_bar=False,
-            batch_size=64,
+            batch_size=_semantic_batch_size(),
         )  # shape: (n_segments, dim)
     except Exception as exc:
         logger.warning("Semantic embedding failed: %s", exc)

@@ -5,7 +5,7 @@ Runs in parallel with audio_features.extract() and transcriber.transcribe().
 Produces one VideoFeatureFrame per second of video, then merges into RichSegment
 via enrich_segments() — identical pattern to audio_features.
 
-Features extracted (CPU-only, no GPU required):
+Features extracted:
   scene_change      — HSV histogram diff detects hard cuts / overlay events
   motion_score      — Farneback optical flow at 25%-scale → physical reactions
   face_count        — MediaPipe face detection → number of visible faces
@@ -28,7 +28,7 @@ import os
 import sys
 import logging
 import pathlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from statistics import mean
 
 import numpy as np
@@ -128,6 +128,32 @@ try:
 except Exception:
     _DEEPFACE_AVAILABLE = False
     _DEEPFACE_DETAIL = "not installed or failed to load"
+
+
+def _deepface_reaction_prob(result: object) -> float | None:
+    """Return combined surprise/fear/disgust probability or None for unusable payloads."""
+    if isinstance(result, list):
+        result = next(
+            (
+                item
+                for item in result
+                if isinstance(item, dict) and isinstance(item.get("emotion"), dict)
+            ),
+            None,
+        )
+    if not isinstance(result, dict):
+        return None
+    emotions = result.get("emotion")
+    if not isinstance(emotions, dict):
+        return None
+    return min(
+        float(
+            emotions.get("surprise", 0) / 100
+            + emotions.get("fear", 0) / 100
+            + emotions.get("disgust", 0) / 100
+        ),
+        1.0,
+    )
 
 
 def runtime_summary() -> dict[str, object]:
@@ -289,20 +315,11 @@ def extract(video_path: pathlib.Path) -> list[VideoFeatureFrame]:
                         detector_backend="opencv",
                         silent=True,
                     )
-                    if isinstance(result, list):
-                        result = result[0]
-                    emotions = result.get("emotion", {})
-                    # Sum the three "reaction" emotions, cap at 1.0.
-                    # Not averaged — a single strong surprise at 80% should score
-                    # close to 1.0, not 0.27.
-                    last_reaction = min(
-                        float(
-                            emotions.get("surprise", 0) / 100
-                            + emotions.get("fear",     0) / 100
-                            + emotions.get("disgust",  0) / 100
-                        ),
-                        1.0,
-                    )
+                    reaction = _deepface_reaction_prob(result)
+                    if reaction is not None:
+                        # Not averaged — a single strong surprise at 80% should score
+                        # close to 1.0, not 0.27.
+                        last_reaction = reaction
                 except Exception:
                     logger.debug("DeepFace analysis failed at second %s", sec, exc_info=True)
             vf.face_reaction_prob = last_reaction
@@ -427,17 +444,9 @@ def refine_face_reactions(
                     detector_backend="opencv",
                     silent=True,
                 )
-                if isinstance(result, list):
-                    result = result[0]
-                emotions = result.get("emotion", {})
-                last_reaction = min(
-                    float(
-                        emotions.get("surprise", 0) / 100
-                        + emotions.get("fear", 0) / 100
-                        + emotions.get("disgust", 0) / 100
-                    ),
-                    1.0,
-                )
+                reaction = _deepface_reaction_prob(result)
+                if reaction is not None:
+                    last_reaction = reaction
             except Exception:
                 logger.debug("Shortlist DeepFace analysis failed at second %s", sec, exc_info=True)
             reaction_by_second[sec] = last_reaction

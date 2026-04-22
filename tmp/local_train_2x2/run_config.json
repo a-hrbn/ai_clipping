@@ -1,0 +1,9 @@
+{
+  "date_from": "2026-03-14",
+  "date_to": "2026-03-20",
+  "labels": "tmp/local_train_2x2/jynxzi_labels_2026-03-14_2026-03-20.jsonl",
+  "dataset_out": "tmp/local_train_2x2/artifacts/jynxzi_vod_training_rows.jsonl",
+  "artifact_dir": "tmp/local_train_2x2/artifacts",
+  "work_dir": "tmp/local_train_2x2/work",
+  "include_short_form": "backend/ml/artifacts/jynxzi_training_rows.jsonl"
+}

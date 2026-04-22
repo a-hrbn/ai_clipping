@@ -10,6 +10,8 @@ from config import settings
 from services.transcriber import RichSegment, format_transcript
 
 logger = logging.getLogger(__name__)
+SEMANTIC_REGEX_BLEND_WEIGHT = 0.4
+SEMANTIC_LLM_BLEND_WEIGHT = 0.6
 
 _SURPRISE_PATTERNS = [
     re.compile(pattern, re.IGNORECASE)
@@ -47,6 +49,13 @@ _PAYOFF_PATTERNS = [
         r"\b(no way|holy|bro|look at that|was zum|krass|insane)\b",
     ]
 ]
+
+
+def semantic_score_config() -> dict[str, float]:
+    return {
+        "regex_weight": SEMANTIC_REGEX_BLEND_WEIGHT,
+        "llm_weight": SEMANTIC_LLM_BLEND_WEIGHT,
+    }
 
 # ---------------------------------------------------------------------------
 # Regex baseline (fast, language-limited)
@@ -238,15 +247,24 @@ _LLM_KEY_MAP = {
 def _call_llm(text: str, provider: str | None = None) -> dict[str, float] | None:
     """Score the five viral dimensions with an optional provider preference."""
     preferred = (provider or "auto").strip().lower()
+    if preferred in {"none", "off", "disabled"}:
+        return None
     if preferred == "ollama":
         return _call_ollama_semantic(text)
     if preferred == "groq":
         if settings.groq_api_key:
             return _call_groq(text)
         return _call_ollama_semantic(text)
+
+    # Default to the local Ollama model for the online analysis step. If the
+    # local model is unavailable and Groq is configured, use Groq as a remote
+    # fallback rather than the primary path.
+    ollama_result = _call_ollama_semantic(text)
+    if ollama_result is not None:
+        return ollama_result
     if settings.groq_api_key:
         return _call_groq(text)
-    return _call_ollama_semantic(text)
+    return None
 
 
 def _call_groq(text: str) -> dict[str, float] | None:
@@ -308,7 +326,7 @@ def score_window(
 
     Strategy:
     - Compute regex baseline first (fast, always available).
-    - If Groq/Ollama reachable, call LLM and blend: final = 0.4 * regex + 0.6 * llm.
+    - If Groq/Ollama reachable, call LLM and blend using the configured regex/LLM weights.
     - "hook_strength" comes exclusively from the LLM (regex has no equivalent);
       falls back to a heuristic based on hook_delay_sec when LLM unavailable.
     - "density" stays regex-only — the LLM "hook" dimension is a stronger signal
@@ -346,7 +364,10 @@ def score_window(
     for internal_key, regex_val in regex_scores.items():
         llm_key = next((k for k, v in _LLM_KEY_MAP.items() if v == internal_key), None)
         llm_val = llm_raw.get(llm_key, regex_val) if llm_key else regex_val
-        blended[internal_key] = round(0.4 * regex_val + 0.6 * llm_val, 3)
+        blended[internal_key] = round(
+            SEMANTIC_REGEX_BLEND_WEIGHT * regex_val + SEMANTIC_LLM_BLEND_WEIGHT * llm_val,
+            3,
+        )
 
     # hook_strength: LLM-only (no regex equivalent)
     blended["hook_strength"] = round(float(llm_raw.get("hook", 0.5)), 3)

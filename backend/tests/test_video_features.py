@@ -65,6 +65,19 @@ class _FakeDeepFace:
         return {"emotion": {"surprise": 80, "fear": 0, "disgust": 0}}
 
 
+class _FakeDeepFaceWithEmptyResults:
+    calls = 0
+
+    @classmethod
+    def analyze(cls, *_args, **_kwargs):
+        cls.calls += 1
+        if cls.calls == 1:
+            return None
+        if cls.calls == 2:
+            return []
+        return {"emotion": {"surprise": 60, "fear": 0, "disgust": 0}}
+
+
 class _FakeMTCNN:
     def detect_faces(self, _frame):
         return [{"box": [1, 1, 4, 4]}]
@@ -92,6 +105,28 @@ class VideoFeaturesTests(unittest.TestCase):
         self.assertEqual(frames[1].face_reaction_prob, 0.8)
         self.assertEqual(frames[3].face_reaction_prob, 0.8)
 
+    def test_extract_ignores_none_and_empty_deepface_payloads(self) -> None:
+        frame = np.zeros((8, 8, 3), dtype=np.uint8)
+        _FakeDeepFaceWithEmptyResults.calls = 0
+
+        with patch.object(video_features, "_CV2_AVAILABLE", True), \
+             patch.object(video_features, "cv2", _FakeCV2), \
+             patch.object(video_features, "_DEEPFACE_AVAILABLE", True), \
+             patch.object(video_features, "DeepFace", _FakeDeepFaceWithEmptyResults, create=True), \
+             patch.object(video_features, "_MP_FACE_DETECTION", None), \
+             patch.object(video_features, "_FACE_CASCADE", None), \
+             patch.object(video_features, "_seek_frame", return_value=frame), \
+             patch.object(video_features, "_hsv_hist", return_value=np.array([0.0], dtype=np.float32)), \
+             patch.object(video_features.settings, "video_expression_sample_sec", 2):
+            frames = video_features.extract(Path("fake.mp4"))
+
+        self.assertEqual(len(frames), 5)
+        self.assertEqual(_FakeDeepFaceWithEmptyResults.calls, 3)
+        self.assertEqual(frames[0].face_reaction_prob, 0.0)
+        self.assertEqual(frames[1].face_reaction_prob, 0.0)
+        self.assertEqual(frames[2].face_reaction_prob, 0.0)
+        self.assertEqual(frames[4].face_reaction_prob, 0.6)
+
     def test_refine_face_reactions_only_updates_shortlist_windows(self) -> None:
         frame = np.zeros((8, 8, 3), dtype=np.uint8)
         _FakeDeepFace.calls = 0
@@ -117,6 +152,28 @@ class VideoFeaturesTests(unittest.TestCase):
         self.assertEqual(updated[0].max_face_reaction, 0.0)
         self.assertEqual(updated[1].max_face_reaction, 0.8)
         self.assertIn("face_reaction", updated[1].emotions)
+
+    def test_refine_face_reactions_ignores_none_and_empty_deepface_payloads(self) -> None:
+        frame = np.zeros((8, 8, 3), dtype=np.uint8)
+        _FakeDeepFaceWithEmptyResults.calls = 0
+        segments = [RichSegment(start=10.0, end=14.0, text="inside")]
+        candidates = [Candidate(id="c1", start=10.0, end=14.0, source="reaction", anchor_time=11.0)]
+
+        with patch.object(video_features, "_CV2_AVAILABLE", True), \
+             patch.object(video_features, "cv2", _FakeCV2), \
+             patch.object(video_features, "_DEEPFACE_AVAILABLE", True), \
+             patch.object(video_features, "DeepFace", _FakeDeepFaceWithEmptyResults, create=True), \
+             patch.object(video_features, "_seek_frame", return_value=frame):
+            updated = video_features.refine_face_reactions(
+                segments,
+                Path("fake.mp4"),
+                candidates,
+                sample_every_sec=2,
+            )
+
+        self.assertEqual(_FakeDeepFaceWithEmptyResults.calls, 3)
+        self.assertEqual(updated[0].max_face_reaction, 0.6)
+        self.assertIn("face_reaction", updated[0].emotions)
 
     def test_extract_uses_mtcnn_when_mediapipe_unavailable(self) -> None:
         frame = np.zeros((8, 8, 3), dtype=np.uint8)

@@ -690,7 +690,7 @@ def _viral_score(entry: dict, baselines: dict[str, float] | None = None) -> floa
         + 0.9 * math.log1p(views * age_boost)
         + 18.0 * like_rate
         + 32.0 * comment_rate
-        - 0.10 * math.log(duration)
+        - 0.10 * math.log1p(duration)
         - duration_penalty
     )
     return round(score, 6)

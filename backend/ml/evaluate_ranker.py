@@ -23,13 +23,20 @@ def main() -> int:
     parser.add_argument("--profile", default="gaming")
     parser.add_argument("--artifact-dir", default=str(BACKEND_ROOT / "ml" / "artifacts"))
     parser.add_argument("--top-groups", type=int, default=5)
+    parser.add_argument("--report-out", default="")
     args = parser.parse_args()
 
     dataset_path = pathlib.Path(args.dataset)
     rows = _read_jsonl(dataset_path)
     if not rows:
-        print("No dataset rows found.")
-        return 1
+        report = _empty_report(args.profile)
+        payload = json.dumps(report, ensure_ascii=True)
+        if args.report_out:
+            report_path = pathlib.Path(args.report_out)
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            report_path.write_text(payload, encoding="utf-8")
+        print(payload)
+        return 0
 
     baseline_ranker = Ranker(artifact_dir=pathlib.Path(args.artifact_dir), enable_trained_model=False)
     trained_ranker = Ranker(artifact_dir=pathlib.Path(args.artifact_dir), enable_trained_model=True)
@@ -47,44 +54,45 @@ def main() -> int:
     trained_score_array = train_ranker.np.array([float(trained_scores.get(row["candidate_id"], 0.0)) for row in rows], dtype=float)
     baseline_metrics = train_ranker._evaluate_scores(labels, baseline_score_array, score_kind="margin", groups=groups)
     trained_metrics = train_ranker._evaluate_scores(labels, trained_score_array, score_kind="margin", groups=groups)
-    print(
-        json.dumps(
-            {
-                "artifact": {
-                    "available": artifact is not None,
-                    "status": artifact_inspection.get("status", "missing"),
-                    "reason": artifact_inspection.get("reason", "artifact_file_missing"),
-                    "requested_profile": artifact_inspection.get("requested_profile", args.profile),
-                    "resolved_profile": artifact_inspection.get("resolved_profile", ""),
-                    "source": artifact_inspection.get("source", ""),
-                    "selected_model": raw_artifact.get("selected_model") if raw_artifact else "",
-                    "model_type": raw_artifact.get("model_type") if raw_artifact else "",
-                    "training_stats": raw_artifact.get("training_stats", {}) if raw_artifact else {},
-                    "validation": raw_artifact.get("validation", {}) if raw_artifact else {},
-                },
-                "metrics": {
-                    "baseline_heuristic": baseline_metrics,
-                    "trained_runtime": trained_metrics,
-                    "delta": _metric_delta(trained_metrics, baseline_metrics),
-                },
-                "trained_runtime_uses_artifact": artifact is not None,
-                "rows": len(rows),
-                "positive_rows": sum(1 for row in rows if int(row["label"]) == 1),
-                "negative_rows": sum(1 for row in rows if int(row["label"]) == 0),
-                "split_strategy": split["strategy"],
-                "split_unit": split.get("unit", ""),
-                "leakage_risk": split.get("leakage_risk", "unknown"),
-                "by_label_class": _bucket_metrics(rows, baseline_scores, trained_scores, "label_class"),
-                "by_supervision_tier": _bucket_metrics(rows, baseline_scores, trained_scores, "supervision_tier"),
-                "by_platform": _bucket_metrics(rows, baseline_scores, trained_scores, _bucket_key(rows, "platform_bucket", "publish_platform")),
-                "by_content_bucket": _bucket_metrics(rows, baseline_scores, trained_scores, "content_bucket"),
-                "by_source_bucket": _bucket_metrics(rows, baseline_scores, trained_scores, _bucket_key(rows, "source_bucket", "candidate_source")),
-                "by_variant": _bucket_metrics(rows, baseline_scores, trained_scores, _bucket_key(rows, "variant_bucket", "final_variant_key")),
-                "top_groups": _group_metrics(rows, baseline_scores, trained_scores, split.get("unit", ""), args.top_groups),
-            },
-            ensure_ascii=True,
-        )
-    )
+    report = {
+        "artifact": {
+            "available": artifact is not None,
+            "status": artifact_inspection.get("status", "missing"),
+            "reason": artifact_inspection.get("reason", "artifact_file_missing"),
+            "requested_profile": artifact_inspection.get("requested_profile", args.profile),
+            "resolved_profile": artifact_inspection.get("resolved_profile", ""),
+            "source": artifact_inspection.get("source", ""),
+            "selected_model": raw_artifact.get("selected_model") if raw_artifact else "",
+            "model_type": raw_artifact.get("model_type") if raw_artifact else "",
+            "training_stats": raw_artifact.get("training_stats", {}) if raw_artifact else {},
+            "validation": raw_artifact.get("validation", {}) if raw_artifact else {},
+        },
+        "metrics": {
+            "baseline_heuristic": baseline_metrics,
+            "trained_runtime": trained_metrics,
+            "delta": _metric_delta(trained_metrics, baseline_metrics),
+        },
+        "trained_runtime_uses_artifact": artifact is not None,
+        "rows": len(rows),
+        "positive_rows": sum(1 for row in rows if int(row["label"]) == 1),
+        "negative_rows": sum(1 for row in rows if int(row["label"]) == 0),
+        "split_strategy": split["strategy"],
+        "split_unit": split.get("unit", ""),
+        "leakage_risk": split.get("leakage_risk", "unknown"),
+        "by_label_class": _bucket_metrics(rows, baseline_scores, trained_scores, "label_class"),
+        "by_supervision_tier": _bucket_metrics(rows, baseline_scores, trained_scores, "supervision_tier"),
+        "by_platform": _bucket_metrics(rows, baseline_scores, trained_scores, _bucket_key(rows, "platform_bucket", "publish_platform")),
+        "by_content_bucket": _bucket_metrics(rows, baseline_scores, trained_scores, "content_bucket"),
+        "by_source_bucket": _bucket_metrics(rows, baseline_scores, trained_scores, _bucket_key(rows, "source_bucket", "candidate_source")),
+        "by_variant": _bucket_metrics(rows, baseline_scores, trained_scores, _bucket_key(rows, "variant_bucket", "final_variant_key")),
+        "top_groups": _group_metrics(rows, baseline_scores, trained_scores, split.get("unit", ""), args.top_groups),
+    }
+    payload = json.dumps(report, ensure_ascii=True)
+    if args.report_out:
+        report_path = pathlib.Path(args.report_out)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(payload, encoding="utf-8")
+    print(payload)
     return 0
 
 
@@ -99,6 +107,38 @@ def _read_jsonl(path: pathlib.Path) -> list[dict]:
             if row.get("label") in {0, 1}:
                 rows.append(row)
     return rows
+
+
+def _empty_report(profile: str) -> dict[str, object]:
+    return {
+        "artifact": {
+            "available": False,
+            "status": "skipped",
+            "reason": "no_dataset_rows",
+            "requested_profile": profile,
+            "resolved_profile": "",
+            "source": "",
+            "selected_model": "",
+            "model_type": "",
+            "training_stats": {},
+            "validation": {},
+        },
+        "metrics": {},
+        "trained_runtime_uses_artifact": False,
+        "rows": 0,
+        "positive_rows": 0,
+        "negative_rows": 0,
+        "split_strategy": "",
+        "split_unit": "",
+        "leakage_risk": "unknown",
+        "by_label_class": {},
+        "by_supervision_tier": {},
+        "by_platform": {},
+        "by_content_bucket": {},
+        "by_source_bucket": {},
+        "by_variant": {},
+        "top_groups": [],
+    }
 
 
 def _bucket_key(rows: list[dict], preferred: str, fallback: str) -> str:
@@ -170,6 +210,9 @@ def _metric_delta(current: dict, baseline: dict) -> dict[str, float]:
         "precision_at_5",
         "recall_at_5",
         "ndcg_at_5",
+        "ndcg_at_10",
+        "mrr",
+        "ranking_metric_value",
     )
     delta: dict[str, float] = {}
     for key in tracked:

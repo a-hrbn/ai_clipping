@@ -52,8 +52,10 @@ import logging
 import pathlib
 import re
 import shutil
+import subprocess
 import sys
 import time
+import urllib.parse
 import uuid
 
 BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -88,6 +90,7 @@ _METADATA_KEYS = {
 
 _NETWORK_RETRY_BASE_DELAY_SEC = 30
 _NETWORK_RETRY_MAX_DELAY_SEC = 300
+_MAX_BATCH_CUT_WINDOWS = 24
 
 
 def main() -> int:
@@ -354,34 +357,76 @@ def cut_video_window(
     start: float,
     end: float,
 ) -> pathlib.Path:
-    import ffmpeg
+    return cut_video_windows(video_path, [(output_path, start, end)])[0]
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    duration = max(end - start, 1.0)
-    try:
-        (
-            ffmpeg
-            .input(str(video_path), ss=max(start, 0.0), t=duration)
-            .output(
-                str(output_path),
-                vcodec="libx264",
-                acodec="aac",
-                preset="veryfast",
-                movflags="+faststart",
-            )
-            .overwrite_output()
-            .run(quiet=True, capture_stdout=True, capture_stderr=True)
-        )
-    except ffmpeg.Error as exc:
-        stderr = ""
-        if exc.stderr:
-            stderr = exc.stderr.decode("utf-8", "ignore").strip()
+
+def cut_video_windows(
+    video_path: pathlib.Path,
+    windows: list[tuple[pathlib.Path, float, float]],
+) -> list[pathlib.Path]:
+    if not windows:
+        return []
+
+    normalized_windows: list[tuple[pathlib.Path, float, float]] = []
+    for output_path, start, end in windows:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        start_sec = max(float(start), 0.0)
+        duration = max(float(end) - float(start), 1.0)
+        normalized_windows.append((output_path, start_sec, duration))
+
+    for chunk in _window_batches(normalized_windows, _MAX_BATCH_CUT_WINDOWS):
+        _cut_video_windows_batch(video_path, chunk)
+    return [output_path for output_path, _start_sec, _duration in normalized_windows]
+
+
+def _window_batches(
+    windows: list[tuple[pathlib.Path, float, float]],
+    batch_size: int,
+) -> list[list[tuple[pathlib.Path, float, float]]]:
+    resolved_batch_size = max(1, int(batch_size))
+    return [
+        windows[index:index + resolved_batch_size]
+        for index in range(0, len(windows), resolved_batch_size)
+    ]
+
+
+def _cut_video_windows_batch(
+    video_path: pathlib.Path,
+    normalized_windows: list[tuple[pathlib.Path, float, float]],
+) -> None:
+    command = ["ffmpeg", "-y", "-nostdin", "-loglevel", "error"]
+    for _output_path, start_sec, duration in normalized_windows:
+        command.extend([
+            "-ss", f"{start_sec:.3f}",
+            "-t", f"{duration:.3f}",
+            "-i", str(video_path),
+        ])
+
+    for input_index, (output_path, _start_sec, _duration) in enumerate(normalized_windows):
+        command.extend([
+            "-map", f"{input_index}:v:0",
+            "-map", f"{input_index}:a:0?",
+            "-c:v", "libx264",
+            "-c:a", "aac",
+            "-preset", "veryfast",
+            "-movflags", "+faststart",
+            str(output_path),
+        ])
+
+    completed = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        stderr = (completed.stderr or "").strip()
+        outputs = ", ".join(str(output_path) for output_path, _start_sec, _duration in normalized_windows)
         raise RuntimeError(
-            "ffmpeg failed while cutting training window "
-            f"{video_path} [{max(start, 0.0):.2f}, {max(start, 0.0) + duration:.2f}] -> {output_path}"
+            "ffmpeg failed while cutting training windows "
+            f"{video_path} -> [{outputs}]"
             + (f": {stderr}" if stderr else "")
-        ) from exc
-    return output_path
+        )
 
 
 def _build_training_row(entry: dict[str, str], candidate, feats) -> dict:
@@ -473,9 +518,9 @@ def _read_entries(path: pathlib.Path) -> list[dict[str, str]]:
             }
             if normalized["url"]:
                 entries.append(normalized)
-        return entries
+        return _dedupe_entries(entries)
 
-    return [
+    return _dedupe_entries([
         {
             "url": line.strip(),
             "streamer": "",
@@ -496,7 +541,38 @@ def _read_entries(path: pathlib.Path) -> list[dict[str, str]]:
         }
         for line in lines
         if line.strip() and not line.lstrip().startswith("#")
-    ]
+    ])
+
+
+def _dedupe_entries(entries: list[dict[str, str]]) -> list[dict[str, str]]:
+    deduped: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for entry in entries:
+        key = _canonical_entry_url(str(entry.get("url") or ""))
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(entry)
+    return deduped
+
+
+def _canonical_entry_url(raw: str) -> str:
+    url = str(raw or "").strip()
+    if not url:
+        return ""
+    parsed = urllib.parse.urlsplit(url)
+    path = re.sub(r"/+", "/", parsed.path or "").rstrip("/")
+    if not path:
+        path = "/"
+    return urllib.parse.urlunsplit(
+        (
+            parsed.scheme.lower(),
+            parsed.netloc.lower(),
+            path,
+            "",
+            "",
+        )
+    )
 
 
 def _load_negatives(path_arg: str) -> list[dict]:

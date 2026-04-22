@@ -8,7 +8,6 @@ import logging
 import os
 import pathlib
 import shutil
-import time
 import sys
 
 BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -27,7 +26,8 @@ _SUPPLEMENTAL_CANDIDATE_LIMIT = 2
 _SUPPLEMENTAL_CANDIDATE_WEIGHT = 0.65
 _BOUNDARY_NEAR_MISS_SAMPLE_WEIGHT = 0.45
 _BOUNDARY_NEAR_MISS_LIMIT = 6
-_DATASET_BUILD_LLM_PROVIDER = (os.environ.get("TRAINING_DATASET_LLM_PROVIDER") or "ollama").strip() or "ollama"
+_MAX_CANDIDATE_SOURCE_SHARE = 0.40
+_DATASET_BUILD_LLM_PROVIDER = (os.environ.get("TRAINING_DATASET_LLM_PROVIDER") or "none").strip() or "none"
 _VOD_CHECKPOINT_VERSION = 3
 _BOUNDARY_PERTURBATION_SPECS = (
     ("start_late_small", 0.8, 0.0),
@@ -39,7 +39,6 @@ _BOUNDARY_PERTURBATION_SPECS = (
     ("both_tight", 0.8, -1.0),
     ("both_loose", -1.0, 1.2),
 )
-
 
 def _dataset_build_fingerprint(profile: str) -> str:
     # Fingerprint the code-path knobs that materially change generated rows.
@@ -89,19 +88,19 @@ def build_dataset(labels: list[dict], profile: str, work_dir: pathlib.Path) -> l
 
     rows: list[dict] = []
     work_dir.mkdir(parents=True, exist_ok=True)
-    cache_mode = "enabled" if _training_cache_enabled() else "disabled"
     vod_workers = _resolved_training_vod_workers()
+    label_workers = _resolved_training_label_workers()
     semantic_provider = _semantic_provider_summary(_DATASET_BUILD_LLM_PROVIDER)
     logger.info(
-        "training_dataset_runtime profile=%s whisper_model=%s llm_provider=%s semantic_model=%s face_detector=%s deepface=%s cache=%s vod_workers=%s",
+        "training_dataset_runtime profile=%s whisper_model=%s llm_provider=%s semantic_model=%s face_detector=%s deepface=%s vod_workers=%s label_workers=%s",
         profile,
         transcriber.runtime_summary()["whisper_model"],
         semantic_provider,
         semantic_candidates._MODEL_NAME,
         video_features.runtime_summary()["face_detector"],
         "enabled" if video_features.runtime_summary()["deepface_enabled"] else "disabled",
-        cache_mode,
         vod_workers,
+        label_workers,
     )
     labels_by_vod: dict[str, list[dict]] = {}
     for row in labels:
@@ -157,52 +156,17 @@ def build_dataset(labels: list[dict], profile: str, work_dir: pathlib.Path) -> l
                     position + 1,
                 )
 
-                for index, label in enumerate(sorted(vod_rows, key=lambda item: float(item["window_start"])), start=1):
-                    clip_dir = vod_dir / f"window_{index:04d}"
-                    clip_dir.mkdir(parents=True, exist_ok=True)
-                    try:
-                        try:
-                            label_rows = _build_rows_for_label(
-                                label,
-                                vod_path=vod_path,
-                                clip_dir=clip_dir,
-                                job_prefix=f"{job_id}_{index}",
-                                profile=profile,
-                            )
-                        except Exception as exc:
-                            logger.warning(
-                                "Skipping VOD window %s[%s] %.2f-%.2f: %s",
-                                vod_id,
-                                index,
-                                float(label["window_start"]),
-                                float(label["window_end"]),
-                                exc,
-                            )
-                            continue
-                        for row in label_rows:
-                            row.setdefault("label_class", str(label.get("label_class", "")))
-                            row.setdefault("label_score", float(label.get("label_score", 0.0)))
-                            row.setdefault("platform_source", label.get("platform_source", "twitch_clip"))
-                            row.setdefault("label_source", label.get("label_source", "twitch_clip_api"))
-                            row.setdefault("window_start", float(label.get("window_start", 0.0)))
-                            row.setdefault("window_end", float(label.get("window_end", 0.0)))
-                            row.setdefault("vod_id", str(label.get("vod_id", "")))
-                            row.setdefault("vod_duration_seconds", float(label.get("vod_duration_seconds", 0.0)))
-                            row.setdefault("clip_ids", list(label.get("clip_ids") or []))
-                            row.setdefault("sample_weight", sample_weight_for_label(str(row.get("label_class", ""))))
-                            row.setdefault("dataset_source", "twitch_vod_primary")
-                            row.setdefault("supervision_tier", "twitch_clip_proxy")
-                            row.setdefault("supervision_reason", str(row.get("label_source", "twitch_clip_api")))
-                            row.setdefault("ordinal_label", collect_viral_clips._ordinal_label(str(row.get("label_class", "")), int(row.get("label", 0))))
-                            _apply_vod_context_features(row, label, context_index)
-                            row["feature_provenance"] = collect_viral_clips._feature_provenance(
-                                row["features"],
-                                has_vod_context=True,
-                            )
-                            rows.append(row)
-                            vod_checkpoint_rows.append(row)
-                    finally:
-                        shutil.rmtree(clip_dir, ignore_errors=True)
+                label_rows = _build_rows_for_vod_labels(
+                    vod_id,
+                    vod_rows,
+                    vod_path=vod_path,
+                    vod_dir=vod_dir,
+                    job_id=job_id,
+                    profile=profile,
+                    context_index=context_index,
+                )
+                rows.extend(label_rows)
+                vod_checkpoint_rows.extend(label_rows)
                 if vod_checkpoint_rows:
                     _write_vod_checkpoint(work_dir, profile, vod_id, vod_rows, vod_checkpoint_rows)
             finally:
@@ -210,7 +174,7 @@ def build_dataset(labels: list[dict], profile: str, work_dir: pathlib.Path) -> l
                 shutil.rmtree(download_dir, ignore_errors=True)
                 if prefetched_download_dir is not None and prefetched_download_dir != download_dir:
                     shutil.rmtree(prefetched_download_dir, ignore_errors=True)
-    return _dedupe_ranker_rows(rows)
+    return _cap_candidate_source_mix(_dedupe_ranker_rows(rows))
 
 
 def _build_dataset_parallel(
@@ -220,24 +184,44 @@ def _build_dataset_parallel(
     *,
     max_workers: int,
 ) -> list[dict]:
-    futures: list[concurrent.futures.Future[list[dict]]] = []
     resolved_workers = max(1, min(int(max_workers), len(vod_items)))
-    with concurrent.futures.ThreadPoolExecutor(max_workers=resolved_workers) as executor:
+    rows: list[dict] = []
+    scheduled_results: list[tuple[str, list[dict] | concurrent.futures.Future[list[dict]]]] = []
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=resolved_workers) as executor, \
+         concurrent.futures.ThreadPoolExecutor(max_workers=resolved_workers) as download_executor:
+        download_futures: dict[str, concurrent.futures.Future[pathlib.Path]] = {}
         for vod_id, vod_rows in vod_items:
-            futures.append(
+            checkpoint_rows = _load_vod_checkpoint(work_dir, profile, vod_id, vod_rows)
+            if checkpoint_rows is not None:
+                logger.info("training_vod_checkpoint_hit %s", vod_rows[0]["vod_url"])
+                scheduled_results.append(("checkpoint", checkpoint_rows))
+                continue
+
+            job_id = f"twitch_vod_{vod_id}"
+            download_futures[vod_id] = download_executor.submit(
+                _materialize_vod,
+                str(vod_rows[0]["vod_url"]),
+                job_id,
+            )
+            scheduled_results.append((
+                "future",
                 executor.submit(
                     _build_rows_for_vod,
                     vod_id,
                     vod_rows,
                     profile,
                     work_dir,
-                )
-            )
+                    vod_path_future=download_futures[vod_id],
+                ),
+            ))
 
-        rows: list[dict] = []
-        for future in futures:
-            rows.extend(future.result())
-    return _dedupe_ranker_rows(rows)
+        for kind, result in scheduled_results:
+            if kind == "checkpoint":
+                rows.extend(result)
+            else:
+                rows.extend(result.result())
+    return _cap_candidate_source_mix(_dedupe_ranker_rows(rows))
 
 
 def _build_rows_for_vod(
@@ -245,6 +229,8 @@ def _build_rows_for_vod(
     vod_rows: list[dict],
     profile: str,
     work_dir: pathlib.Path,
+    *,
+    vod_path_future: concurrent.futures.Future[pathlib.Path] | None = None,
 ) -> list[dict]:
     job_id = f"twitch_vod_{vod_id}"
     vod_dir = work_dir / job_id
@@ -258,52 +244,27 @@ def _build_rows_for_vod(
             logger.info("training_vod_checkpoint_hit %s", vod_rows[0]["vod_url"])
             return checkpoint_rows
 
-        vod_path = _materialize_vod(vod_rows[0]["vod_url"], job_id)
-        for index, label in enumerate(sorted(vod_rows, key=lambda item: float(item["window_start"])), start=1):
-            clip_dir = vod_dir / f"window_{index:04d}"
-            clip_dir.mkdir(parents=True, exist_ok=True)
+        if vod_path_future is not None:
             try:
-                try:
-                    label_rows = _build_rows_for_label(
-                        label,
-                        vod_path=vod_path,
-                        clip_dir=clip_dir,
-                        job_prefix=f"{job_id}_{index}",
-                        profile=profile,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "Skipping VOD window %s[%s] %.2f-%.2f: %s",
-                        vod_id,
-                        index,
-                        float(label["window_start"]),
-                        float(label["window_end"]),
-                        exc,
-                    )
-                    continue
-                for row in label_rows:
-                    row.setdefault("label_class", str(label.get("label_class", "")))
-                    row.setdefault("label_score", float(label.get("label_score", 0.0)))
-                    row.setdefault("platform_source", label.get("platform_source", "twitch_clip"))
-                    row.setdefault("label_source", label.get("label_source", "twitch_clip_api"))
-                    row.setdefault("window_start", float(label.get("window_start", 0.0)))
-                    row.setdefault("window_end", float(label.get("window_end", 0.0)))
-                    row.setdefault("vod_id", str(label.get("vod_id", "")))
-                    row.setdefault("vod_duration_seconds", float(label.get("vod_duration_seconds", 0.0)))
-                    row.setdefault("clip_ids", list(label.get("clip_ids") or []))
-                    row.setdefault("sample_weight", sample_weight_for_label(str(row.get("label_class", ""))))
-                    row.setdefault("dataset_source", "twitch_vod_primary")
-                    row.setdefault("supervision_tier", "twitch_clip_proxy")
-                    row.setdefault("supervision_reason", str(row.get("label_source", "twitch_clip_api")))
-                    row.setdefault("ordinal_label", collect_viral_clips._ordinal_label(str(row.get("label_class", "")), int(row.get("label", 0))))
-                    _apply_vod_context_features(row, label, context_index)
-                    row["feature_provenance"] = collect_viral_clips._feature_provenance(
-                        row["features"],
-                        has_vod_context=True,
-                    )
-                    vod_checkpoint_rows.append(row)
-            finally:
-                shutil.rmtree(clip_dir, ignore_errors=True)
+                vod_path = vod_path_future.result()
+                logger.info("training_vod_parallel_prefetch_ready %s", vod_rows[0]["vod_url"])
+            except Exception as exc:
+                logger.warning("training_vod_parallel_prefetch_failed %s: %s", vod_rows[0]["vod_url"], exc)
+                logger.info("training_vod_parallel_prefetch_fallback %s", vod_rows[0]["vod_url"])
+                vod_path = _materialize_vod(vod_rows[0]["vod_url"], job_id)
+        else:
+            vod_path = _materialize_vod(vod_rows[0]["vod_url"], job_id)
+        vod_checkpoint_rows.extend(
+            _build_rows_for_vod_labels(
+                vod_id,
+                vod_rows,
+                vod_path=vod_path,
+                vod_dir=vod_dir,
+                job_id=job_id,
+                profile=profile,
+                context_index=context_index,
+            )
+        )
 
         if vod_checkpoint_rows:
             _write_vod_checkpoint(work_dir, profile, vod_id, vod_rows, vod_checkpoint_rows)
@@ -311,6 +272,156 @@ def _build_rows_for_vod(
     finally:
         shutil.rmtree(vod_dir, ignore_errors=True)
         shutil.rmtree(download_dir, ignore_errors=True)
+
+
+def _build_rows_for_vod_labels(
+    vod_id: str,
+    vod_rows: list[dict],
+    *,
+    vod_path: pathlib.Path,
+    vod_dir: pathlib.Path,
+    job_id: str,
+    profile: str,
+    context_index: dict,
+) -> list[dict]:
+    ordered_labels = sorted(vod_rows, key=lambda item: float(item["window_start"]))
+    if not ordered_labels:
+        return []
+    prepared_clip_paths = _prepare_vod_label_clip_paths(vod_id, ordered_labels, vod_path=vod_path, vod_dir=vod_dir)
+
+    resolved_workers = min(_resolved_training_label_workers(), len(ordered_labels))
+    if resolved_workers <= 1:
+        rows: list[dict] = []
+        for index, label in enumerate(ordered_labels, start=1):
+            rows.extend(
+                _process_vod_label(
+                    vod_id,
+                    index,
+                    label,
+                    vod_path=vod_path,
+                    vod_dir=vod_dir,
+                    job_id=job_id,
+                    profile=profile,
+                    context_index=context_index,
+                    clip_path=prepared_clip_paths.get(index),
+                )
+            )
+        return rows
+
+    futures: dict[int, concurrent.futures.Future[list[dict]]] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=resolved_workers) as executor:
+        for index, label in enumerate(ordered_labels, start=1):
+            futures[index] = executor.submit(
+                _process_vod_label,
+                vod_id,
+                index,
+                label,
+                vod_path=vod_path,
+                vod_dir=vod_dir,
+                job_id=job_id,
+                profile=profile,
+                context_index=context_index,
+                clip_path=prepared_clip_paths.get(index),
+            )
+
+        rows: list[dict] = []
+        for index in range(1, len(ordered_labels) + 1):
+            rows.extend(futures[index].result())
+        return rows
+
+
+def _process_vod_label(
+    vod_id: str,
+    index: int,
+    label: dict,
+    *,
+    vod_path: pathlib.Path,
+    vod_dir: pathlib.Path,
+    job_id: str,
+    profile: str,
+    context_index: dict,
+    clip_path: pathlib.Path | None = None,
+) -> list[dict]:
+    clip_dir = vod_dir / f"window_{index:04d}"
+    clip_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        try:
+            label_rows = _build_rows_for_label(
+                label,
+                vod_path=vod_path,
+                clip_dir=clip_dir,
+                job_prefix=f"{job_id}_{index}",
+                profile=profile,
+                clip_path=clip_path,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Skipping VOD window %s[%s] %.2f-%.2f: %s",
+                vod_id,
+                index,
+                float(label["window_start"]),
+                float(label["window_end"]),
+                exc,
+            )
+            return []
+        return _finalize_label_rows(label_rows, label, context_index)
+    finally:
+        shutil.rmtree(clip_dir, ignore_errors=True)
+
+
+def _finalize_label_rows(label_rows: list[dict], label: dict, context_index: dict) -> list[dict]:
+    rows: list[dict] = []
+    for row in label_rows:
+        row.setdefault("label_class", str(label.get("label_class", "")))
+        row.setdefault("label_score", float(label.get("label_score", 0.0)))
+        row.setdefault("platform_source", label.get("platform_source", "twitch_clip"))
+        row.setdefault("label_source", label.get("label_source", "twitch_clip_api"))
+        row.setdefault("window_start", float(label.get("window_start", 0.0)))
+        row.setdefault("window_end", float(label.get("window_end", 0.0)))
+        row.setdefault("vod_id", str(label.get("vod_id", "")))
+        row.setdefault("vod_duration_seconds", float(label.get("vod_duration_seconds", 0.0)))
+        row.setdefault("clip_ids", list(label.get("clip_ids") or []))
+        row.setdefault("sample_weight", sample_weight_for_label(str(row.get("label_class", ""))))
+        row.setdefault("dataset_source", "twitch_vod_primary")
+        row.setdefault("supervision_tier", "twitch_clip_proxy")
+        row.setdefault("supervision_reason", str(row.get("label_source", "twitch_clip_api")))
+        row.setdefault(
+            "ordinal_label",
+            collect_viral_clips._ordinal_label(str(row.get("label_class", "")), int(row.get("label", 0))),
+        )
+        _apply_vod_context_features(row, label, context_index)
+        row["feature_provenance"] = collect_viral_clips._feature_provenance(
+            row["features"],
+            has_vod_context=True,
+        )
+        rows.append(row)
+    return rows
+
+
+def _prepare_vod_label_clip_paths(
+    vod_id: str,
+    ordered_labels: list[dict],
+    *,
+    vod_path: pathlib.Path,
+    vod_dir: pathlib.Path,
+) -> dict[int, pathlib.Path]:
+    if len(ordered_labels) <= 1:
+        return {}
+
+    windows: list[tuple[pathlib.Path, float, float]] = []
+    clip_paths: dict[int, pathlib.Path] = {}
+    for index, label in enumerate(ordered_labels, start=1):
+        clip_path = vod_dir / f"window_{index:04d}" / "window.mp4"
+        expanded_start, expanded_end = _expanded_training_window(label)
+        windows.append((clip_path, expanded_start, expanded_end))
+        clip_paths[index] = clip_path
+
+    try:
+        collect_viral_clips.cut_video_windows(vod_path, windows)
+    except RuntimeError as exc:
+        logger.warning("training_vod_batch_cut_failed %s: %s", vod_id, exc)
+        return {}
+    return clip_paths
 
 
 def _schedule_prefetch(
@@ -324,12 +435,6 @@ def _schedule_prefetch(
 
     next_vod_id, next_rows = vod_items[next_index]
     next_url = str(next_rows[0]["vod_url"])
-    if _training_cache_enabled():
-        cache_path = _training_cache_path(next_url)
-        if cache_path.exists():
-            logger.info("training_vod_prefetch_skip cache_hit %s", next_url)
-            return None, None, None
-
     prefetch_job_id = f"twitch_vod_prefetch_{next_vod_id}"
     logger.info("training_vod_prefetch_start %s", next_url)
     return (
@@ -346,6 +451,7 @@ def _build_rows_for_label(
     clip_dir: pathlib.Path,
     job_prefix: str,
     profile: str,
+    clip_path: pathlib.Path | None = None,
 ) -> list[dict]:
     from services import (
         audio_extractor, audio_features, feature_builder, scorer, video_features,
@@ -353,14 +459,14 @@ def _build_rows_for_label(
     from services.timeline_types import Candidate
 
     expanded_start, expanded_end = _expanded_training_window(label)
-    clip_path = collect_viral_clips.cut_video_window(
+    resolved_clip_path = clip_path or collect_viral_clips.cut_video_window(
         vod_path,
         clip_dir / "window.mp4",
         expanded_start,
         expanded_end,
     )
-    audio_path = audio_extractor.extract(clip_path, job_prefix)
-    transcript, audio_frames, visual_frames = _extract_clip_modalities(clip_path, audio_path)
+    audio_path = audio_extractor.extract(resolved_clip_path, job_prefix)
+    transcript, audio_frames, visual_frames = _extract_clip_modalities(resolved_clip_path, audio_path)
     if not transcript:
         return []
 
@@ -464,32 +570,23 @@ def _resolved_training_vod_workers() -> int:
         return 1
 
 
-def _materialize_vod(vod_url: str, job_id: str) -> pathlib.Path:
-    if not _training_cache_enabled():
-        logger.info("training_vod_cache_disabled %s", vod_url)
-        return downloader.download(vod_url, job_id)
-
-    cache_dir = _training_cache_dir()
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    _evict_expired_training_cache(cache_dir)
-    cache_path = _training_cache_path(vod_url)
-    if cache_path.exists():
-        logger.info("training_vod_cache_hit  %s", vod_url)
-        return cache_path
-
-    logger.info("training_vod_cache_miss %s", vod_url)
-    downloaded = downloader.download(vod_url, job_id)
+def _resolved_training_label_workers() -> int:
     try:
-        shutil.copy2(downloaded, cache_path)
-        logger.info("training_vod_cache_write %s", cache_path)
-    except OSError:
-        pass
-    return cache_path if cache_path.exists() else downloaded
+        return max(int(settings.training_label_workers), 1)
+    except (TypeError, ValueError):
+        return 1
+
+
+def _materialize_vod(vod_url: str, job_id: str) -> pathlib.Path:
+    logger.info("training_vod_direct_download %s", vod_url)
+    return downloader.download(vod_url, job_id)
 
 
 def _semantic_provider_summary(preferred: str) -> str:
     provider = (preferred or "auto").strip().lower() or "auto"
     has_groq = bool(settings.groq_api_key)
+    if provider in {"none", "off", "disabled"}:
+        return "none"
     if provider == "groq":
         if has_groq:
             return f"groq:{settings.groq_model}"
@@ -497,7 +594,7 @@ def _semantic_provider_summary(preferred: str) -> str:
     if provider == "ollama":
         return f"ollama:{settings.ollama_model}"
     if has_groq:
-        return f"auto->groq:{settings.groq_model}|fallback=ollama:{settings.ollama_model}"
+        return f"auto->ollama:{settings.ollama_model}|fallback=groq:{settings.groq_model}"
     return f"auto->ollama:{settings.ollama_model}"
 
 
@@ -565,37 +662,8 @@ def _write_vod_checkpoint(
         "label_signature": _vod_checkpoint_signature(vod_rows),
         "rows": rows,
     }
-    path.write_text(json.dumps(payload, ensure_ascii=True), encoding="utf-8")
-
-
-def _training_cache_enabled() -> bool:
-    return max(int(settings.training_vod_cache_ttl_sec), 0) > 0
-
-
-def _training_cache_dir() -> pathlib.Path:
-    configured = str(settings.training_vod_cache_dir or "").strip()
-    if configured:
-        return pathlib.Path(configured)
-    return pathlib.Path(settings.storage_dir) / "_download_cache" / "training_vods"
-
-
-def _training_cache_path(vod_url: str) -> pathlib.Path:
-    digest = hashlib.sha256(vod_url.strip().encode("utf-8")).hexdigest()
-    return _training_cache_dir() / f"{digest}.mp4"
-
-
-def _evict_expired_training_cache(cache_dir: pathlib.Path) -> None:
-    ttl = max(int(settings.training_vod_cache_ttl_sec), 0)
-    if ttl <= 0 or not cache_dir.exists():
-        return
-
-    cutoff = time.time() - ttl
-    for path in cache_dir.glob("*.mp4"):
-        try:
-            if path.stat().st_mtime < cutoff:
-                path.unlink(missing_ok=True)
-        except OSError:
-            continue
+    serialized = json.dumps(payload, ensure_ascii=True)
+    path.write_text(serialized, encoding="utf-8")
 
 
 def sample_weight_for_label(label_class: str) -> float:
@@ -611,15 +679,147 @@ def sample_weight_for_label(label_class: str) -> float:
 def dataset_summary(rows: list[dict]) -> dict:
     by_class: dict[str, int] = {}
     vods: set[str] = set()
+    positive_rows = 0
+    negative_rows = 0
     for row in rows:
         by_class[row.get("label_class", "")] = by_class.get(row.get("label_class", ""), 0) + 1
         if row.get("vod_id"):
             vods.add(str(row["vod_id"]))
+        if int(row.get("label", 0)) == 1:
+            positive_rows += 1
+        elif int(row.get("label", 0)) == 0:
+            negative_rows += 1
     return {
         "rows": len(rows),
+        "positive_rows": positive_rows,
+        "negative_rows": negative_rows,
         "label_classes": by_class,
         "vod_count": len(vods),
+        "candidate_source_mix": _candidate_source_mix_summary(rows),
+        "duplicate_windows": _duplicate_window_summary(rows),
+        "platform_source_drift": _platform_source_drift_summary(rows),
+        "split_leak_check": _split_leak_summary(rows),
     }
+
+
+def _candidate_source_mix_summary(rows: list[dict]) -> dict[str, object]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        source = str(row.get("candidate_source") or "").strip().lower() or "unknown"
+        counts[source] = counts.get(source, 0) + 1
+    total = sum(counts.values()) or 1
+    shares = {
+        source: round(count / total, 3)
+        for source, count in sorted(counts.items())
+    }
+    peak_source = max(shares, key=shares.get) if shares else ""
+    peak_share = float(shares.get(peak_source, 0.0)) if peak_source else 0.0
+    return {
+        "max_share": _MAX_CANDIDATE_SOURCE_SHARE,
+        "peak_source": peak_source,
+        "peak_share": round(peak_share, 3),
+        "by_source": dict(sorted(counts.items())),
+        "share_by_source": shares,
+    }
+
+
+def _duplicate_window_summary(rows: list[dict]) -> dict[str, object]:
+    counts: dict[tuple[str, float, float], int] = {}
+    for row in rows:
+        vod_id = str(row.get("vod_id") or "").strip()
+        if not vod_id:
+            continue
+        key = (
+            vod_id,
+            round(float(row.get("window_start") or 0.0), 2),
+            round(float(row.get("window_end") or 0.0), 2),
+        )
+        counts[key] = counts.get(key, 0) + 1
+    duplicates = [
+        {
+            "vod_id": vod_id,
+            "window_start": window_start,
+            "window_end": window_end,
+            "count": count,
+        }
+        for (vod_id, window_start, window_end), count in counts.items()
+        if count > 1
+    ]
+    duplicates.sort(key=lambda item: (-int(item["count"]), str(item["vod_id"]), float(item["window_start"])))
+    return {
+        "count": len(duplicates),
+        "sample": duplicates[:10],
+    }
+
+
+def _platform_source_drift_summary(rows: list[dict]) -> dict[str, dict[str, object]]:
+    by_source: dict[str, dict[str, object]] = {}
+    for row in rows:
+        source = str(row.get("platform_source") or "unknown").strip() or "unknown"
+        bucket = by_source.setdefault(
+            source,
+            {
+                "rows": 0,
+                "positive_rows": 0,
+                "negative_rows": 0,
+                "label_classes": {},
+            },
+        )
+        bucket["rows"] = int(bucket["rows"]) + 1
+        if int(row.get("label", 0)) == 1:
+            bucket["positive_rows"] = int(bucket["positive_rows"]) + 1
+        elif int(row.get("label", 0)) == 0:
+            bucket["negative_rows"] = int(bucket["negative_rows"]) + 1
+        label_class = str(row.get("label_class") or "")
+        classes = dict(bucket["label_classes"])
+        classes[label_class] = classes.get(label_class, 0) + 1
+        bucket["label_classes"] = classes
+
+    for bucket in by_source.values():
+        rows_count = int(bucket["rows"]) or 1
+        bucket["positive_rate"] = round(int(bucket["positive_rows"]) / rows_count, 3)
+        bucket["label_classes"] = dict(sorted(dict(bucket["label_classes"]).items()))
+    return dict(sorted(by_source.items()))
+
+
+def _split_leak_summary(rows: list[dict]) -> dict[str, object]:
+    if len(rows) < 2:
+        return {
+            "strategy": "insufficient_rows",
+            "unit": "",
+            "train_rows": len(rows),
+            "validation_rows": 0,
+            "vod_overlap_count": 0,
+            "vod_overlap_sample": [],
+        }
+
+    from ml import train_ranker
+
+    split = train_ranker._split_rows(rows)
+    train_rows = list(split.get("train") or [])
+    validation_rows = list(split.get("validation") or [])
+    train_vods = _row_identity_keys(train_rows)
+    validation_vods = _row_identity_keys(validation_rows)
+    overlap = sorted(train_vods & validation_vods)
+    return {
+        "strategy": str(split.get("strategy") or ""),
+        "unit": str(split.get("unit") or ""),
+        "train_rows": len(train_rows),
+        "validation_rows": len(validation_rows),
+        "vod_overlap_count": len(overlap),
+        "vod_overlap_sample": overlap[:10],
+    }
+
+
+def _row_identity_keys(rows: list[dict]) -> set[str]:
+    identities: set[str] = set()
+    for row in rows:
+        for key in ("vod_id", "source_url", "job_id"):
+            value = str(row.get(key) or "").strip()
+            if value:
+                identities.add(value)
+                break
+    return identities
 
 
 def _entry_from_label(label: dict) -> dict[str, str]:
@@ -1003,6 +1203,71 @@ def _dedupe_ranker_rows(rows: list[dict]) -> list[dict]:
         seen_positive_keys.add(positive_key)
         merged.append(canonical_positive_rows[positive_key])
     return merged
+
+
+def _cap_candidate_source_mix(
+    rows: list[dict],
+    *,
+    max_share: float = _MAX_CANDIDATE_SOURCE_SHARE,
+) -> list[dict]:
+    if not rows:
+        return []
+
+    buckets: dict[str, list[dict]] = {}
+    for row in rows:
+        source = str(row.get("candidate_source") or "").strip().lower() or "unknown"
+        buckets.setdefault(source, []).append(row)
+
+    if len(buckets) < 3:
+        logger.warning(
+            "candidate_source_mix_unenforceable distinct_sources=%s max_share=%.2f",
+            len(buckets),
+            max_share,
+        )
+        return rows
+
+    total_rows = len(rows)
+    current_peak = max(len(bucket) for bucket in buckets.values()) / max(total_rows, 1)
+    if current_peak <= max_share + 1e-9:
+        return rows
+
+    source_counts = {source: 0 for source in buckets}
+    kept: list[dict] = []
+    ordered_sources = sorted(buckets, key=lambda source: (-len(buckets[source]), source))
+
+    for source in ordered_sources:
+        if not buckets[source]:
+            continue
+        kept.append(buckets[source].pop(0))
+        source_counts[source] += 1
+
+    while True:
+        progressed = False
+        for source in ordered_sources:
+            bucket = buckets[source]
+            if not bucket:
+                continue
+            next_source_count = source_counts[source] + 1
+            next_total = len(kept) + 1
+            if (next_source_count / next_total) > max_share + 1e-9:
+                continue
+            kept.append(bucket.pop(0))
+            source_counts[source] = next_source_count
+            progressed = True
+        if not progressed:
+            break
+
+    if len(kept) < len(rows):
+        logger.info(
+            "candidate_source_mix_capped rows_before=%s rows_after=%s max_share=%.2f peak_source=%s peak_share_before=%.3f peak_share_after=%.3f",
+            len(rows),
+            len(kept),
+            max_share,
+            max(buckets, key=lambda key: len(buckets[key]) + source_counts[key]),
+            current_peak,
+            max((count / len(kept) for count in source_counts.values()), default=0.0),
+        )
+    return kept
 
 
 def _positive_cluster_key(row: dict) -> tuple[str, tuple[str, ...]] | None:

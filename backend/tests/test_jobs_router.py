@@ -1,11 +1,14 @@
 import asyncio
 import io
+import tempfile
 import unittest
 from unittest.mock import patch
+from pathlib import Path
 
 from fastapi import HTTPException, UploadFile
 
 from routers import jobs
+from models import ClipFeedbackPayload, ClipFeedbackResponse
 
 
 class JobsRouterTests(unittest.TestCase):
@@ -39,7 +42,7 @@ class JobsRouterTests(unittest.TestCase):
         refinement = result["providers"]["refinement"]
 
         self.assertEqual(semantic["name"], "Ollama")
-        self.assertEqual(semantic["mode"], "fallback")
+        self.assertEqual(semantic["mode"], "active")
         self.assertTrue(semantic["active"])
         self.assertIsNone(semantic["error"])
         self.assertIsNone(semantic["fallback_name"])
@@ -51,23 +54,22 @@ class JobsRouterTests(unittest.TestCase):
         self.assertIsNone(refinement["fallback_name"])
         self.assertEqual(result["pipeline"]["face_detection"]["name"], "MTCNN")
 
-    def test_status_reports_ollama_fallback_when_groq_check_fails(self) -> None:
+    def test_status_reports_local_semantic_scoring_even_when_groq_is_configured(self) -> None:
         with patch.object(jobs.settings, "groq_api_key", "bad-key"), \
              patch.object(jobs.settings, "gemini_api_key", None), \
              patch.object(jobs.settings, "groq_model", "llama-3.3"), \
              patch.object(jobs.settings, "ollama_model", "llama3.2"), \
-             patch.object(jobs, "_check_groq", return_value=(False, "Ungültiger API Key")), \
              patch.object(jobs, "_pipeline_component_statuses", return_value={}):
             result = asyncio.run(jobs.get_status())
 
         semantic = result["providers"]["semantic"]
-        self.assertEqual(semantic["name"], "Groq")
-        self.assertEqual(semantic["model"], "llama-3.3")
-        self.assertEqual(semantic["mode"], "fallback")
+        self.assertEqual(semantic["name"], "Ollama")
+        self.assertEqual(semantic["model"], "llama3.2")
+        self.assertEqual(semantic["mode"], "active")
         self.assertTrue(semantic["active"])
-        self.assertEqual(semantic["error"], "Ungültiger API Key")
-        self.assertEqual(semantic["fallback_name"], "Ollama")
-        self.assertEqual(semantic["fallback_model"], "llama3.2")
+        self.assertIsNone(semantic["error"])
+        self.assertEqual(semantic["fallback_name"], "Groq")
+        self.assertEqual(semantic["fallback_model"], "llama-3.3")
 
     def test_status_reports_ollama_fallback_when_gemini_quota_is_exhausted(self) -> None:
         with patch.object(jobs.settings, "groq_api_key", None), \
@@ -164,6 +166,55 @@ class JobsRouterTests(unittest.TestCase):
 
         self.assertEqual(result, job)
         touch_mock.assert_called_once_with("job-1", "sess-1")
+
+    def test_submit_clip_feedback_accepts_gold_eval_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            response = ClipFeedbackResponse(
+                job_id="job-1",
+                candidate_id="c1",
+                mode="gold_eval",
+                gold_grade=2,
+                notes="brauchbar",
+            )
+            with patch.object(jobs.settings, "storage_dir", tmp), \
+                 patch.object(jobs, "get_job", return_value={"job_id": "job-1"}), \
+                 patch.object(jobs.feedback_store, "update_job_feedback", return_value=response) as update_mock:
+                result = asyncio.run(
+                    jobs.submit_clip_feedback(
+                        "job-1",
+                        ClipFeedbackPayload(
+                            candidate_id="c1",
+                            mode="gold_eval",
+                            gold_grade=2,
+                            notes="brauchbar",
+                        ),
+                    )
+                )
+
+        self.assertEqual(result.mode, "gold_eval")
+        self.assertEqual(result.gold_grade, 2)
+        update_mock.assert_called_once_with(Path(tmp), "job-1", unittest.mock.ANY)
+
+    def test_submit_clip_feedback_maps_validation_errors_to_http_400(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(jobs.settings, "storage_dir", tmp), \
+                 patch.object(jobs, "get_job", return_value={"job_id": "job-1"}), \
+                 patch.object(jobs.feedback_store, "update_job_feedback", side_effect=ValueError("gold_notes are required")):
+                with self.assertRaises(HTTPException) as ctx:
+                    asyncio.run(
+                        jobs.submit_clip_feedback(
+                            "job-1",
+                            ClipFeedbackPayload(
+                                candidate_id="c1",
+                                mode="gold_eval",
+                                gold_grade=3,
+                                notes="",
+                            ),
+                        )
+                    )
+
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("gold_notes are required", ctx.exception.detail)
 
 
 if __name__ == "__main__":

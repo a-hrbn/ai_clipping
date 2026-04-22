@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 
-import { ClipFeedbackRating, ClipResult } from "@/lib/types";
+import { ClipFeedbackMode, ClipFeedbackRating, ClipResult } from "@/lib/types";
 import { getDownloadUrl, submitClipFeedback } from "@/lib/api";
 
 function fmtTime(seconds: number): string {
@@ -38,26 +38,51 @@ const FEEDBACK_OPTIONS: Array<{ rating: ClipFeedbackRating; label: string }> = [
   { rating: "bad", label: "Schlecht" },
 ];
 
+const GOLD_EVAL_OPTIONS: Array<{ grade: 0 | 1 | 2 | 3; label: string }> = [
+  { grade: 0, label: "0" },
+  { grade: 1, label: "1" },
+  { grade: 2, label: "2" },
+  { grade: 3, label: "3" },
+];
+
 export default function ClipCard({ clip, rank, jobId }: Props) {
   const duration = Math.round(clip.end_time - clip.start_time);
   const color = scoreColor(clip.viral_score);
+  const clipUrl = getDownloadUrl(clip.download_url);
+  const [mode, setMode] = useState<ClipFeedbackMode>("training_feedback");
   const [rating, setRating] = useState<ClipFeedbackRating | null>(null);
+  const [goldGrade, setGoldGrade] = useState<0 | 1 | 2 | 3 | null>(null);
   const [notes, setNotes] = useState("");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function handleSaveFeedback() {
-    if (!jobId || !rating) return;
+    if (!jobId) return;
+    let payload;
+    if (mode === "training_feedback") {
+      if (!rating) return;
+      payload = {
+        candidate_id: clip.candidate_id,
+        mode,
+        rating,
+        notes: notes.trim() || undefined,
+      };
+    } else {
+      if (goldGrade === null) return;
+      payload = {
+        candidate_id: clip.candidate_id,
+        mode,
+        gold_grade: goldGrade,
+        notes: notes.trim() || undefined,
+      };
+    }
+
     setSaving(true);
     setSaved(false);
     setError(null);
     try {
-      await submitClipFeedback(jobId, {
-        candidate_id: clip.candidate_id,
-        rating,
-        notes: notes.trim() || undefined,
-      });
+      await submitClipFeedback(jobId, payload);
       setSaved(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Feedback konnte nicht gespeichert werden");
@@ -129,50 +154,106 @@ export default function ClipCard({ clip, rank, jobId }: Props) {
           <span>{duration}s</span>
         </div>
 
-        {/* Download */}
-        <a
-          href={getDownloadUrl(clip.download_url)}
-          download={clip.filename}
-          className="flex items-center justify-center gap-2 w-full py-2.5 text-xs font-bold uppercase tracking-widest transition-all bg-accent text-bg hover:brightness-110 active:brightness-95"
-        >
-          <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-            <path d="M6 1v7M3 5.5L6 8l3-2.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
-            <path d="M1 10h10" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/>
-          </svg>
-          Clip laden
-        </a>
+        <div className="border border-border bg-bg/50 overflow-hidden">
+          <video
+            key={clip.download_url}
+            src={clipUrl}
+            controls
+            preload="metadata"
+            playsInline
+            className="block w-full bg-black"
+          />
+        </div>
 
-          <div className="border border-border bg-bg/50 p-3 flex flex-col gap-3">
-            <div className="flex flex-wrap gap-2">
-              {FEEDBACK_OPTIONS.map((option) => {
-              const active = rating === option.rating;
-              return (
-                <button
-                  key={option.rating}
-                  type="button"
-                  onClick={() => setRating(option.rating)}
-                  className={[
-                    "px-2 py-1 text-[10px] uppercase tracking-widest border transition-colors",
-                    active ? "border-accent/40 bg-accent-dim text-accent" : "border-border text-muted hover:text-tx",
-                  ].join(" ")}
-                >
-                  {option.label}
-                </button>
-              );
-            })}
+        <div className="flex items-center justify-end">
+          <a
+            href={clipUrl}
+            download={clip.filename}
+            className="inline-flex items-center gap-2 px-3 py-2 text-[10px] font-bold uppercase tracking-widest border border-border-bright text-tx hover:border-accent/40 hover:text-accent transition-colors"
+          >
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+              <path d="M6 1v7M3 5.5L6 8l3-2.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
+              <path d="M1 10h10" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/>
+            </svg>
+            Download
+          </a>
+        </div>
+
+        <div className="border border-border bg-bg/50 p-3 flex flex-col gap-3">
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => setMode("training_feedback")}
+              className={[
+                "px-2 py-1 text-[10px] uppercase tracking-widest border transition-colors",
+                mode === "training_feedback"
+                  ? "border-accent/40 bg-accent-dim text-accent"
+                  : "border-border text-muted hover:text-tx",
+              ].join(" ")}
+            >
+              Training
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode("gold_eval")}
+              className={[
+                "px-2 py-1 text-[10px] uppercase tracking-widest border transition-colors",
+                mode === "gold_eval"
+                  ? "border-accent/40 bg-accent-dim text-accent"
+                  : "border-border text-muted hover:text-tx",
+              ].join(" ")}
+            >
+              Gold Eval
+            </button>
           </div>
 
-            <textarea
-              value={notes}
-              onChange={(event) => setNotes(event.target.value)}
-              placeholder="Optionaler Kommentar zur Bewertung"
-              className="min-h-[64px] bg-surface border border-border px-2 py-2 text-xs text-tx placeholder:text-muted focus:outline-none focus:border-border-bright"
-            />
+          <div className="flex flex-wrap gap-2">
+            {mode === "training_feedback"
+              ? FEEDBACK_OPTIONS.map((option) => {
+                  const active = rating === option.rating;
+                  return (
+                    <button
+                      key={option.rating}
+                      type="button"
+                      onClick={() => setRating(option.rating)}
+                      className={[
+                        "px-2 py-1 text-[10px] uppercase tracking-widest border transition-colors",
+                        active ? "border-accent/40 bg-accent-dim text-accent" : "border-border text-muted hover:text-tx",
+                      ].join(" ")}
+                    >
+                      {option.label}
+                    </button>
+                  );
+                })
+              : GOLD_EVAL_OPTIONS.map((option) => {
+                  const active = goldGrade === option.grade;
+                  return (
+                    <button
+                      key={option.grade}
+                      type="button"
+                      onClick={() => setGoldGrade(option.grade)}
+                      className={[
+                        "px-2 py-1 text-[10px] uppercase tracking-widest border transition-colors",
+                        active ? "border-accent/40 bg-accent-dim text-accent" : "border-border text-muted hover:text-tx",
+                      ].join(" ")}
+                    >
+                      {option.label}
+                    </button>
+                  );
+                })}
+          </div>
+
+          <textarea
+            value={notes}
+            onChange={(event) => setNotes(event.target.value)}
+            placeholder={mode === "gold_eval" ? "Optionaler Kommentar zur Gold-Eval-Bewertung" : "Optionaler Kommentar zur Bewertung"}
+            className="min-h-[64px] bg-surface border border-border px-2 py-2 text-xs text-tx placeholder:text-muted focus:outline-none focus:border-border-bright"
+          />
 
           <button
             type="button"
             onClick={handleSaveFeedback}
-            disabled={saving || !jobId || !rating}
+            disabled={saving || !jobId || (mode === "training_feedback" ? !rating : goldGrade === null)}
             className="w-full py-2 text-[10px] uppercase tracking-widest border border-border-bright text-tx hover:border-accent/40 hover:text-accent disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
           >
             {saving ? "Speichert…" : saved ? "Feedback gespeichert" : "Feedback speichern"}
