@@ -31,6 +31,14 @@ class DownloaderTests(unittest.TestCase):
         self.assertEqual(downloader._coerce_eta_seconds(0.2), 0)
         self.assertIsNone(downloader._coerce_eta_seconds(None))
 
+    def test_twitch_cache_path_uses_canonical_vod_id(self) -> None:
+        path = downloader._cache_path_for_url("https://www.twitch.tv/videos/123456789?t=1h2m3s")
+        self.assertEqual(path.name, "vod_123456789.mp4")
+
+    def test_negative_ttl_keeps_twitch_cache_enabled(self) -> None:
+        with patch.object(downloader.settings, "twitch_download_cache_ttl_sec", -1):
+            self.assertTrue(downloader._twitch_cache_enabled("https://www.twitch.tv/videos/123456"))
+
     def test_twitch_download_opts_enable_parallel_fragments(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             job_dir = Path(tmp)
@@ -73,11 +81,11 @@ class DownloaderTests(unittest.TestCase):
             url = "https://www.twitch.tv/videos/123456"
             cache_path = storage_dir / "_download_cache" / "twitch"
             cache_path.mkdir(parents=True, exist_ok=True)
-            cached_file = cache_path / f"{downloader.sha256(url.encode('utf-8')).hexdigest()}.mp4"
+            cached_file = cache_path / "vod_123456.mp4"
             cached_file.write_bytes(b"cached-video")
 
             with patch.object(downloader.settings, "storage_dir", str(storage_dir)), \
-                 patch.object(downloader.settings, "twitch_download_cache_ttl_sec", 3600), \
+                 patch.object(downloader.settings, "twitch_download_cache_ttl_sec", -1), \
                  patch.object(downloader, "update_job", create=True) as update_job_mock, \
                  patch.object(downloader.yt_dlp, "YoutubeDL", side_effect=AssertionError("network should not run")):
                 output_path = downloader.download(url, "job-cache-hit")
@@ -95,10 +103,10 @@ class DownloaderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             storage_dir = Path(tmp)
             url = "https://www.twitch.tv/videos/7890"
-            expected_cache_file = storage_dir / "_download_cache" / "twitch" / f"{downloader.sha256(url.encode('utf-8')).hexdigest()}.mp4"
+            expected_cache_file = storage_dir / "_download_cache" / "twitch" / "vod_7890.mp4"
 
             with patch.object(downloader.settings, "storage_dir", str(storage_dir)), \
-                 patch.object(downloader.settings, "twitch_download_cache_ttl_sec", 3600), \
+                 patch.object(downloader.settings, "twitch_download_cache_ttl_sec", -1), \
                  patch.object(downloader, "update_job", create=True), \
                  patch.object(downloader.yt_dlp, "YoutubeDL", _FakeYoutubeDL):
                 output_path = downloader.download(url, "job-cache-miss")

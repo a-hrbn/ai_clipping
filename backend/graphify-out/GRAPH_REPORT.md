@@ -1,11 +1,11 @@
 # Graph Report - backend  (2026-04-22)
 
 ## Corpus Check
-- 140 files · ~100,362 words
+- 140 files · ~100,488 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1591 nodes · 2746 edges · 106 communities detected
+- 1596 nodes · 2753 edges · 106 communities detected
 - Extraction: 94% EXTRACTED · 6% INFERRED · 0% AMBIGUOUS · INFERRED: 170 edges (avg confidence: 0.5)
 - Token cost: 0 input · 0 output
 
@@ -26,142 +26,142 @@
   backend/ml/collect_viral_clips.py → backend/services/timeline_types.py
 - `Load negative rows from a JSONL file. Defaults to synthetic data if available.` --uses--> `Candidate`  [INFERRED]
   backend/ml/collect_viral_clips.py → backend/services/timeline_types.py
-- `Post-processing of LLM-returned clip moments.  Two passes run after the LLM retu` --uses--> `RichSegment`  [INFERRED]
-  backend/services/post_processor.py → backend/services/transcriber.py
-- `Align each clip's start/end to real segment boundaries.      Start snapping:` --uses--> `RichSegment`  [INFERRED]
-  backend/services/post_processor.py → backend/services/transcriber.py
-- `Greedily keep only clips that are sufficiently spread apart in time.      Proces` --uses--> `RichSegment`  [INFERRED]
-  backend/services/post_processor.py → backend/services/transcriber.py
+- `Semantic candidate generation using sentence embeddings.  Uses sentence-transfor` --uses--> `RichSegment`  [INFERRED]
+  backend/services/semantic_candidates.py → backend/services/transcriber.py
+- `Return a dict mapping category → list of segment indices that exceed the     sim` --uses--> `RichSegment`  [INFERRED]
+  backend/services/semantic_candidates.py → backend/services/transcriber.py
+- `Score the five viral dimensions with an optional provider preference.` --uses--> `RichSegment`  [INFERRED]
+  backend/services/semantic_service.py → backend/services/transcriber.py
 
 ## Communities
 
 ### Community 0 - "Community 0"
-Cohesion: 0.02
-Nodes (84): Build a 2-3 sentence narrative summary of what happened before the clip window., Refine clip boundaries. Uses Gemini if configured, else falls back to Ollama., Ask Gemini Flash to refine clip boundaries via its OpenAI-compatible endpoint., Ask Ollama to refine clip boundaries., build_frames(), ChatFrame, ChatSpike, _classify() (+76 more)
+Cohesion: 0.03
+Nodes (75): build_frames(), ChatFrame, ChatSpike, _classify(), detect_spikes(), download_chat(), enrich_segments(), _is_missing_twitch_chat_replay() (+67 more)
 
 ### Community 1 - "Community 1"
 Cohesion: 0.04
 Nodes (39): BaseModel, append_feedback_events(), append_feedback_snapshot(), append_gold_eval_snapshot(), _as_float(), build_pipeline_feedback(), CandidateFeedback, _creator_id_from_url() (+31 more)
 
 ### Community 2 - "Community 2"
-Cohesion: 0.03
-Nodes (22): BaseSettings, _resolve_local_project_path(), Settings, _validate_storage_dir(), _build_context(), main(), _objective(), run_hpo() (+14 more)
+Cohesion: 0.04
+Nodes (23): AnalyzerApplyVariantSpecTests, AnalyzerBoundaryReasonTests, AnalyzerDedupMomentsTests, AnalyzerHelperTests, AnalyzerPairSelectionTests, AnalyzerValidationTests, _FFmpegStub, _import_pipeline_with_stubs() (+15 more)
 
 ### Community 3 - "Community 3"
 Cohesion: 0.08
 Nodes (58): _artifact_health_summary(), _artifact_hpo_summary(), _best_hpo_params(), _bucketed_validation(), _calibrate_blend(), _candidate_is_promoted(), _candidate_source_mix(), _compute_scales() (+50 more)
 
 ### Community 4 - "Community 4"
+Cohesion: 0.05
+Nodes (36): BaseSettings, _resolve_local_project_path(), Settings, _validate_storage_dir(), _build_context(), main(), _objective(), run_hpo() (+28 more)
+
+### Community 5 - "Community 5"
 Cohesion: 0.08
 Nodes (51): _blended_gap_duration(), build_label_rows(), _clamp_negative_duration(), _classify_clip_views(), _clip_merge_end(), _clip_window_bounds(), collect_clip_labels(), _collection_chunks() (+43 more)
 
-### Community 5 - "Community 5"
+### Community 6 - "Community 6"
 Cohesion: 0.09
 Nodes (47): _absolute_candidate(), _apply_vod_context_features(), _boundary_perturbation_candidates(), build_dataset(), _build_dataset_parallel(), _build_rows_for_label(), _build_rows_for_vod(), _build_rows_for_vod_labels() (+39 more)
-
-### Community 6 - "Community 6"
-Cohesion: 0.08
-Nodes (36): _adaptive_window(), _dense_coarse_score(), _dense_window_proposals(), _filter_candidates(), _generate_audio_burst_candidates(), generate_candidates(), _generate_chat_sync_candidates(), _generate_clean_reaction_candidates() (+28 more)
 
 ### Community 7 - "Community 7"
 Cohesion: 0.05
 Nodes (3): _FakeLGBMRanker, _FakeMlflowSession, TrainRankerTests
 
 ### Community 8 - "Community 8"
+Cohesion: 0.11
+Nodes (40): _allowed_boundaries(), analyze(), _append_unique_reason(), _apply_variant_spec(), _boundary_at_or_after(), _boundary_at_or_before(), _boundary_selection_reason(), _build_context_summary() (+32 more)
+
+### Community 9 - "Community 9"
 Cohesion: 0.08
 Nodes (5): Ranker, score_candidates(), _FakeLightGBMModel, RankerTests, test_ranker_scores_with_lightgbm_ranker_artifact()
 
-### Community 9 - "Community 9"
-Cohesion: 0.13
-Nodes (36): _allowed_boundaries(), analyze(), _append_unique_reason(), _apply_variant_spec(), _boundary_at_or_after(), _boundary_at_or_before(), _boundary_selection_reason(), _build_context_summary() (+28 more)
-
 ### Community 10 - "Community 10"
+Cohesion: 0.12
+Nodes (35): _adaptive_window(), _dense_coarse_score(), _dense_window_proposals(), _filter_candidates(), _generate_audio_burst_candidates(), generate_candidates(), _generate_chat_sync_candidates(), _generate_clean_reaction_candidates() (+27 more)
+
+### Community 11 - "Community 11"
 Cohesion: 0.13
 Nodes (33): _candidate_baselines(), _coerce_publish_timestamp(), _coerce_upload_date(), _dedupe_candidates(), _discover_seed(), _discover_seeds(), _extract_entry_url(), _extract_single_entry_metadata() (+25 more)
 
-### Community 11 - "Community 11"
+### Community 12 - "Community 12"
+Cohesion: 0.12
+Nodes (27): _aria2c_available(), _base_ydl_opts(), _cache_dir(), _cache_path_for_url(), download(), DownloadCancelledError, DownloadPausedError, DownloadUnavailableError (+19 more)
+
+### Community 13 - "Community 13"
 Cohesion: 0.12
 Nodes (23): _check_gemini(), _check_groq(), _coerce_csv_list(), _coerce_optional_number(), _coerce_optional_text(), get_status(), _package_available(), _pipeline_component_statuses() (+15 more)
 
-### Community 12 - "Community 12"
-Cohesion: 0.14
-Nodes (25): _aria2c_available(), _base_ydl_opts(), _cache_dir(), _cache_path_for_url(), _copy_into_job(), download(), DownloadCancelledError, DownloadPausedError (+17 more)
+### Community 14 - "Community 14"
+Cohesion: 0.07
+Nodes (1): BuildTwitchTrainingDatasetTests
 
-### Community 13 - "Community 13"
+### Community 15 - "Community 15"
 Cohesion: 0.07
 Nodes (1): TwitchClipLabelsTests
 
-### Community 14 - "Community 14"
+### Community 16 - "Community 16"
 Cohesion: 0.15
 Nodes (25): _build_training_row(), _canonical_entry_url(), collect_rows(), cut_video_window(), cut_video_windows(), _cut_video_windows_batch(), _dedupe_entries(), _feature_provenance() (+17 more)
 
-### Community 15 - "Community 15"
-Cohesion: 0.22
-Nodes (19): _clean_mapping(), _coerce_scalar(), experiment_name(), finalize_training_run(), _git_sha(), _import_mlflow(), is_configured(), load_registered_ranker_artifact() (+11 more)
-
-### Community 16 - "Community 16"
+### Community 17 - "Community 17"
 Cohesion: 0.15
 Nodes (24): _calc_tempo(), _chunk_frame_count(), _deduplicate(), _diarize(), _dominant_speaker(), _filter_transcribable_chunks(), _fmt(), format_jsonl() (+16 more)
 
-### Community 17 - "Community 17"
+### Community 18 - "Community 18"
+Cohesion: 0.22
+Nodes (19): _clean_mapping(), _coerce_scalar(), experiment_name(), finalize_training_run(), _git_sha(), _import_mlflow(), is_configured(), load_registered_ranker_artifact() (+11 more)
+
+### Community 19 - "Community 19"
 Cohesion: 0.2
 Nodes (23): _audio_pop_score(), _build_candidate_features(), build_features(), _candidate_window(), _clamp01(), _context_dependency_score(), _empty_chapter_context(), _empty_memory_context() (+15 more)
 
-### Community 18 - "Community 18"
+### Community 20 - "Community 20"
 Cohesion: 0.28
 Nodes (21): _arc_payoff_match(), build_memory_spans(), _callback_spans(), candidate_memory_context(), _clamp01(), _context_summary(), _jaccard(), _memory_relevance() (+13 more)
 
-### Community 19 - "Community 19"
+### Community 21 - "Community 21"
 Cohesion: 0.22
 Nodes (19): _blend_score_maps(), _blend_value(), _boundary_artifact_is_usable(), _boundary_feature_row(), _boundary_model_is_usable(), _boundary_model_scores(), _heuristic_end_scores(), _heuristic_start_scores() (+11 more)
 
-### Community 20 - "Community 20"
+### Community 22 - "Community 22"
 Cohesion: 0.11
 Nodes (1): AutoTrainShortFormTests
 
-### Community 21 - "Community 21"
+### Community 23 - "Community 23"
 Cohesion: 0.26
 Nodes (18): _binary_label(), _build_end_examples(), _build_pair_examples(), _build_start_examples(), _clamp01(), _count_values(), _duration(), _duration_prior() (+10 more)
 
-### Community 22 - "Community 22"
+### Community 24 - "Community 24"
 Cohesion: 0.25
 Nodes (18): _aggregate_score(), _as_float(), _clamp01(), _dynamic_scores(), _empty_result(), _extract_feedback_texts(), _feedback_row_labels(), _feedback_row_score() (+10 more)
 
-### Community 23 - "Community 23"
+### Community 25 - "Community 25"
 Cohesion: 0.16
 Nodes (17): AudioFeatureFrame, _best_k(), diarize_speakers(), enrich_segments(), extract(), LaughterDetector, Per-second audio feature extraction — runs in parallel with Whisper transcriptio, Load audio and return one AudioFeatureFrame per second.      Expects 16 kHz mono (+9 more)
 
-### Community 24 - "Community 24"
+### Community 26 - "Community 26"
 Cohesion: 0.23
 Nodes (18): build_variant_specs(), candidate_in_time_range(), _clean_text(), _coerce_float(), _coerce_list(), _coerce_variant_count(), infer_goal_family(), _normalize_platform() (+10 more)
 
-### Community 25 - "Community 25"
+### Community 27 - "Community 27"
 Cohesion: 0.15
 Nodes (2): TrainVodRankerTests, TrainVodRankerWorkflowStateTests
 
-### Community 26 - "Community 26"
+### Community 28 - "Community 28"
+Cohesion: 0.11
+Nodes (2): DownloaderTests, _FakeYoutubeDL
+
+### Community 29 - "Community 29"
 Cohesion: 0.25
 Nodes (17): _axes_to_score(), _blend_scores(), _build_context_summary(), _call_gemini(), _call_gemini_multimodal(), _call_groq(), _call_llm_judge(), _call_ollama() (+9 more)
 
-### Community 27 - "Community 27"
+### Community 30 - "Community 30"
 Cohesion: 0.19
 Nodes (16): _call_groq(), _call_llm(), _call_ollama_semantic(), context_dependency_score(), contradiction_score(), payoff_clarity_score(), quoteability_score(), Score the five viral dimensions with an optional provider preference. (+8 more)
 
-### Community 28 - "Community 28"
-Cohesion: 0.2
-Nodes (17): _apply_min_gap(), _ends_sentence(), enforce_diversity(), _extend_min_duration(), _find_clean_start(), _find_sentence_end(), _is_mid_thought(), Post-processing of LLM-returned clip moments.  Two passes run after the LLM retu (+9 more)
-
-### Community 29 - "Community 29"
+### Community 31 - "Community 31"
 Cohesion: 0.26
 Nodes (15): copy_directory(), copy_file(), ensure_parent(), is_uri(), materialize_directory(), materialize_file(), normalize_uri(), path_exists() (+7 more)
-
-### Community 30 - "Community 30"
-Cohesion: 0.26
-Nodes (15): find_semantic_candidates(), _get_model(), _get_pattern_embeddings(), _has_sentence_transformer_metadata(), _has_transformer_weights(), _link_snapshot_contents(), _local_sentence_transformer_model_dir(), _materialize_local_sentence_transformer_model() (+7 more)
-
-### Community 31 - "Community 31"
-Cohesion: 0.12
-Nodes (2): DownloaderTests, _FakeYoutubeDL
 
 ### Community 32 - "Community 32"
 Cohesion: 0.28
@@ -472,11 +472,11 @@ Nodes (0):
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `RichSegment` connect `Community 0` to `Community 2`, `Community 6`, `Community 16`, `Community 27`, `Community 28`, `Community 30`?**
+- **Why does `RichSegment` connect `Community 0` to `Community 2`, `Community 4`, `Community 8`, `Community 10`, `Community 14`, `Community 17`, `Community 30`?**
   _High betweenness centrality (0.090) - this node is a cross-community bridge._
-- **Why does `Candidate` connect `Community 0` to `Community 1`, `Community 2`, `Community 6`, `Community 8`, `Community 14`?**
+- **Why does `Candidate` connect `Community 0` to `Community 1`, `Community 2`, `Community 8`, `Community 9`, `Community 10`, `Community 14`, `Community 16`?**
   _High betweenness centrality (0.035) - this node is a cross-community bridge._
-- **Why does `_PlatformUnavailableError` connect `Community 10` to `Community 12`?**
+- **Why does `_PlatformUnavailableError` connect `Community 11` to `Community 12`?**
   _High betweenness centrality (0.023) - this node is a cross-community bridge._
 - **Are the 64 inferred relationships involving `RichSegment` (e.g. with `AnalyzerValidationTests` and `AnalyzerHelperTests`) actually correct?**
   _`RichSegment` has 64 INFERRED edges - model-reasoned connections that need verification._

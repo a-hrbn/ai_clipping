@@ -2,6 +2,8 @@ import pathlib
 import shutil
 import time
 from hashlib import sha256
+import os
+import re
 
 import yt_dlp
 from config import settings
@@ -69,13 +71,21 @@ def _cache_dir() -> pathlib.Path:
     return pathlib.Path(settings.storage_dir) / "_download_cache" / "twitch"
 
 
+def _twitch_vod_id(url: str) -> str | None:
+    match = re.search(r"twitch\.tv/videos/(\d+)", url.strip().lower())
+    return match.group(1) if match else None
+
+
 def _cache_path_for_url(url: str) -> pathlib.Path:
+    vod_id = _twitch_vod_id(url)
+    if vod_id:
+        return _cache_dir() / f"vod_{vod_id}.mp4"
     digest = sha256(url.strip().encode("utf-8")).hexdigest()
     return _cache_dir() / f"{digest}.mp4"
 
 
 def _evict_expired_cache(cache_dir: pathlib.Path) -> None:
-    ttl = max(settings.twitch_download_cache_ttl_sec, 0)
+    ttl = int(settings.twitch_download_cache_ttl_sec or 0)
     if ttl <= 0 or not cache_dir.exists():
         return
 
@@ -89,13 +99,38 @@ def _evict_expired_cache(cache_dir: pathlib.Path) -> None:
 
 
 def _twitch_cache_enabled(url: str) -> bool:
-    return _is_twitch_url(url) and max(settings.twitch_download_cache_ttl_sec, 0) > 0
+    return _is_twitch_url(url) and int(settings.twitch_download_cache_ttl_sec or 0) != 0
 
 
 def _copy_into_job(source: pathlib.Path, target: pathlib.Path) -> pathlib.Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, target)
     return target
+
+
+def _link_or_copy_into_job(source: pathlib.Path, target: pathlib.Path) -> pathlib.Path:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.unlink(missing_ok=True)
+    try:
+        os.link(source, target)
+    except OSError:
+        shutil.copy2(source, target)
+    return target
+
+
+def _store_in_cache(source: pathlib.Path, cache_path: pathlib.Path) -> pathlib.Path:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    needs_refresh = not cache_path.exists()
+    if not needs_refresh:
+        try:
+            needs_refresh = cache_path.stat().st_size != source.stat().st_size
+        except OSError:
+            needs_refresh = True
+    if needs_refresh:
+        tmp_path = cache_path.with_suffix(f"{cache_path.suffix}.tmp")
+        shutil.copy2(source, tmp_path)
+        tmp_path.replace(cache_path)
+    return cache_path
 
 
 def _resolve_downloaded_video(job_dir: pathlib.Path, preferred_path: pathlib.Path) -> pathlib.Path:
@@ -170,7 +205,8 @@ def download(url: str, job_id: str, proxy: str | None = None) -> pathlib.Path:
         if cache_path.exists():
             if is_job_cancelled(job_id):
                 raise DownloadCancelledError(f"Download cancelled for job {job_id}")
-            _copy_into_job(cache_path, output_path)
+            cache_path.touch()
+            _link_or_copy_into_job(cache_path, output_path)
             try:
                 update_job(
                     job_id,
@@ -251,7 +287,7 @@ def download(url: str, job_id: str, proxy: str | None = None) -> pathlib.Path:
 
     if use_twitch_cache:
         try:
-            _copy_into_job(resolved_output, cache_path)
+            _store_in_cache(resolved_output, cache_path)
         except OSError:
             pass
 

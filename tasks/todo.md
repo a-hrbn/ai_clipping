@@ -1174,3 +1174,26 @@ Phase 0-2 zuerst, danach **1 Woche reale Nutzung** bevor Phase 3 angefasst wird.
 - Ergebnis:
   - `36 passed`
   - Downloader- und Config-Pfade kompilieren sauber
+
+## 2026-04-22 Follow-up: Add Long-Term VOD Cache
+
+- [x] Bestehenden Twitch-Download-Cache auf einen dauerhaften lokalen Langzeit-Cache umstellen.
+- [x] Cache-Reuse fuer wiederholte VOD-Downloads schneller machen.
+- [x] Neue Cache-Semantik mit gezielten Downloader-Tests absichern.
+
+### Review Notes
+
+- `backend/config.py` nutzt fuer `TWITCH_DOWNLOAD_CACHE_TTL_SEC` jetzt per Default `-1`, also dauerhaften Cache statt kurzer TTL.
+- `backend/services/downloader.py` verwendet fuer Twitch-VODs jetzt kanonische Cache-Dateinamen wie `vod_<id>.mp4` statt URL-Hash-only.
+- Cache-Hits werden schneller in den Job materialisiert, weil zuerst ein Hardlink versucht wird und nur bei Bedarf auf Copy zurueckgefallen wird.
+- Cache-Eintrage werden nur bei erfolgreichem vollstaendigem Download gespeichert; abgebrochene Teil-Downloads wandern nicht in den Langzeit-Cache.
+- Semantik:
+  - `TWITCH_DOWNLOAD_CACHE_TTL_SEC=-1` -> dauerhaft behalten
+  - `TWITCH_DOWNLOAD_CACHE_TTL_SEC>0` -> nach TTL evicten
+  - `TWITCH_DOWNLOAD_CACHE_TTL_SEC=0` -> Cache komplett aus
+- Verifiziert mit:
+  - `backend/.venv/bin/python -m pytest backend/tests/test_downloader.py -q`
+  - `backend/.venv/bin/python -m py_compile backend/services/downloader.py backend/config.py backend/tests/test_downloader.py`
+- Ergebnis:
+  - `11 passed`
+  - Downloader-Pfade kompilieren sauber
