@@ -89,6 +89,9 @@ class Settings(BaseSettings):
     chat_download_timeout_sec: int = 30
     chat_join_timeout_sec: float = 1.0
     twitch_download_cache_ttl_sec: int = 1800
+    twitch_download_concurrent_fragments: int = 8
+    twitch_download_use_aria2c: bool = True
+    twitch_download_aria2_connections: int = 16
     training_vod_workers: int = 2
     training_label_workers: int = 2
     semantic_device: str = "auto"

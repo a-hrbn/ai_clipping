@@ -31,6 +31,42 @@ class DownloaderTests(unittest.TestCase):
         self.assertEqual(downloader._coerce_eta_seconds(0.2), 0)
         self.assertIsNone(downloader._coerce_eta_seconds(None))
 
+    def test_twitch_download_opts_enable_parallel_fragments(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = Path(tmp)
+            with patch.object(downloader.settings, "twitch_download_concurrent_fragments", 9), \
+                 patch.object(downloader.settings, "twitch_download_use_aria2c", False):
+                opts = downloader._twitch_download_ydl_opts(job_dir)
+
+        self.assertEqual(opts["concurrent_fragment_downloads"], 9)
+        self.assertEqual(opts["fragment_retries"], 10)
+        self.assertTrue(opts["skip_unavailable_fragments"])
+        self.assertFalse(opts["keep_fragments"])
+        self.assertNotIn("external_downloader", opts)
+
+    def test_twitch_download_opts_use_aria2c_when_available(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = Path(tmp)
+            with patch.object(downloader.settings, "twitch_download_use_aria2c", True), \
+                 patch.object(downloader.settings, "twitch_download_aria2_connections", 12), \
+                 patch.object(downloader, "_aria2c_available", return_value=True):
+                opts = downloader._twitch_download_ydl_opts(job_dir)
+
+        self.assertEqual(opts["external_downloader"], "aria2c")
+        self.assertEqual(
+            opts["external_downloader_args"],
+            [
+                "--split",
+                "12",
+                "--max-connection-per-server",
+                "12",
+                "--min-split-size",
+                "1M",
+                "--file-allocation=none",
+                "--summary-interval=0",
+            ],
+        )
+
     def test_reuses_recent_twitch_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             storage_dir = Path(tmp)

@@ -15,6 +15,7 @@ ENV PYTHONUNBUFFERED=1 \
     TRAINING_DATASET_LLM_PROVIDER=none
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    aria2 \
     ffmpeg \
     git \
     zsh \

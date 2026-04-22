@@ -1154,3 +1154,23 @@ Phase 0-2 zuerst, danach **1 Woche reale Nutzung** bevor Phase 3 angefasst wird.
   - repo-weite Python-Import-Analyse nach dem zweiten Sweep ohne neue klare Dead-Import-Treffer
 - Restgrenze:
   - Ich habe keine großen private-helper-Löschungen repo-weit blind gemacht, weil die schnelle Referenzanalyse zu viele falsch-negative Ergebnisse geliefert hat. Für tieferes Dead-Code-Pruning bräuchte es einen robusteren Call-Graph- oder per-file-manual pass.
+
+## 2026-04-22 Follow-up: Speed Up Twitch VOD Downloads
+
+- [x] Aktuelle `yt-dlp`-Doku fuer Beschleunigungsoptionen pruefen.
+- [x] Twitch-spezifische `yt-dlp`-Optionen fuer parallele Fragment-Downloads und optionales `aria2c` verdrahten.
+- [x] Das lokale Docker-Trainingsimage um `aria2` erweitern.
+- [x] Die neuen Downloader-Optionen mit gezielten Tests absichern.
+
+### Review Notes
+
+- `backend/services/downloader.py` nutzt fuer Twitch-VODs jetzt `concurrent_fragment_downloads`, Fragment-Retries und optional `aria2c` als externen Downloader.
+- `backend/config.py` und `backend/.env.example` expose-en dazu die Schalter `TWITCH_DOWNLOAD_CONCURRENT_FRAGMENTS`, `TWITCH_DOWNLOAD_USE_ARIA2C` und `TWITCH_DOWNLOAD_ARIA2_CONNECTIONS`.
+- `backend/Dockerfile.local-train` installiert jetzt `aria2`, damit der beschleunigte Pfad im lokalen Docker-Run tatsaechlich verfuegbar ist.
+- Verifiziert mit:
+  - `backend/.venv/bin/python -m pytest backend/tests/test_downloader.py backend/tests/test_build_twitch_training_dataset.py -q`
+  - `backend/.venv/bin/python -m py_compile backend/services/downloader.py backend/config.py backend/tests/test_downloader.py`
+  - `zsh -n scripts/train_local_docker.sh`
+- Ergebnis:
+  - `36 passed`
+  - Downloader- und Config-Pfade kompilieren sauber

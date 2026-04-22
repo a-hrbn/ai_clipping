@@ -25,6 +25,46 @@ def _is_twitch_url(url: str) -> bool:
     return "twitch.tv/" in value
 
 
+def _aria2c_available() -> bool:
+    return shutil.which("aria2c") is not None
+
+
+def _base_ydl_opts(job_dir: pathlib.Path) -> dict[str, object]:
+    return {
+        "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        "outtmpl": str(job_dir / "video.%(ext)s"),
+        "quiet": True,
+        "no_warnings": True,
+        "merge_output_format": "mp4",
+    }
+
+
+def _twitch_download_ydl_opts(job_dir: pathlib.Path) -> dict[str, object]:
+    opts = _base_ydl_opts(job_dir)
+    opts.update(
+        {
+            "concurrent_fragment_downloads": max(int(settings.twitch_download_concurrent_fragments or 0), 1),
+            "fragment_retries": 10,
+            "skip_unavailable_fragments": True,
+            "keep_fragments": False,
+        }
+    )
+    if settings.twitch_download_use_aria2c and _aria2c_available():
+        split = max(int(settings.twitch_download_aria2_connections or 0), 1)
+        opts["external_downloader"] = "aria2c"
+        opts["external_downloader_args"] = [
+            "--split",
+            str(split),
+            "--max-connection-per-server",
+            str(split),
+            "--min-split-size",
+            "1M",
+            "--file-allocation=none",
+            "--summary-interval=0",
+        ]
+    return opts
+
+
 def _cache_dir() -> pathlib.Path:
     return pathlib.Path(settings.storage_dir) / "_download_cache" / "twitch"
 
@@ -173,14 +213,8 @@ def download(url: str, job_id: str, proxy: str | None = None) -> pathlib.Path:
             # a JobStatus entry first. In that case progress updates are best-effort.
             pass
 
-    ydl_opts = {
-        "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-        "outtmpl": str(job_dir / "video.%(ext)s"),
-        "quiet": True,
-        "no_warnings": True,
-        "merge_output_format": "mp4",
-        "progress_hooks": [progress_hook],
-    }
+    ydl_opts = _twitch_download_ydl_opts(job_dir) if _is_twitch_url(url) else _base_ydl_opts(job_dir)
+    ydl_opts["progress_hooks"] = [progress_hook]
     if proxy:
         ydl_opts["proxy"] = proxy
 
