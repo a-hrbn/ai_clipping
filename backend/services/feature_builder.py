@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 import re
 
 from services import chapter_segmenter, clip_similarity, clip_strategy, profile_config, semantic_service, trend_prior, vod_memory
@@ -8,6 +9,7 @@ from services.transcriber import RichSegment
 
 _TOKEN_RE = re.compile(r"[a-zA-Z0-9']+")
 FEATURE_BUILD_VERSION = 6
+_LLM_SEMANTIC_MAX_WORKERS = 4
 
 
 def build_features(
@@ -23,10 +25,21 @@ def build_features(
     resolved_chapters = chapters if chapters is not None else chapter_segmenter.segment_chapters(segments)
     chapter_contexts = _prepare_chapter_contexts(candidates, segments, resolved_chapters)
     memory_spans = vod_memory.build_memory_spans(segments, resolved_chapters)
+    candidate_windows = {
+        candidate.id: _candidate_window(candidate, segments)
+        for candidate in candidates
+    }
     memory_contexts = {
         candidate.id: vod_memory.candidate_memory_context(candidate, segments, memory_spans)
         for candidate in candidates
     }
+    semantic_scores = _semantic_scores_for_candidates(
+        candidates,
+        candidate_windows,
+        use_llm_semantics=use_llm_semantics,
+        llm_candidate_ids=llm_candidate_ids,
+        llm_provider=llm_provider,
+    )
     normalized_strategy = clip_strategy.normalize_strategy(strategy)
     return [
         _build_candidate_features(
@@ -39,9 +52,71 @@ def build_features(
             chapter_context=chapter_contexts.get(candidate.id, _empty_chapter_context()),
             memory_context=memory_contexts.get(candidate.id, _empty_memory_context()),
             strategy=normalized_strategy,
+            window=candidate_windows.get(candidate.id),
+            semantic_scores=semantic_scores.get(candidate.id),
         )
         for candidate in candidates
     ]
+
+
+def _candidate_window(candidate: Candidate, segments: list[RichSegment]) -> list[RichSegment]:
+    return [seg for seg in segments if seg.end > candidate.start and seg.start < candidate.end]
+
+
+def _semantic_scores_for_candidates(
+    candidates: list[Candidate],
+    candidate_windows: dict[str, list[RichSegment]],
+    *,
+    use_llm_semantics: bool,
+    llm_candidate_ids: set[str] | None,
+    llm_provider: str | None,
+) -> dict[str, dict[str, float]]:
+    llm_requests: list[tuple[str, list[RichSegment], float]] = []
+    for candidate in candidates:
+        should_use_llm = use_llm_semantics and (
+            llm_candidate_ids is None or candidate.id in llm_candidate_ids
+        )
+        window = candidate_windows.get(candidate.id, [])
+        if not should_use_llm or not window:
+            continue
+        llm_requests.append((
+            candidate.id,
+            window,
+            max(0.0, candidate.anchor_time - candidate.start),
+        ))
+
+    if not llm_requests:
+        return {}
+
+    if len(llm_requests) == 1:
+        candidate_id, window, hook_delay = llm_requests[0]
+        return {
+            candidate_id: semantic_service.score_window(
+                window,
+                hook_delay,
+                use_llm=True,
+                llm_provider=llm_provider,
+            ),
+        }
+
+    resolved_workers = min(len(llm_requests), _LLM_SEMANTIC_MAX_WORKERS)
+    semantic_scores: dict[str, dict[str, float]] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=resolved_workers) as executor:
+        futures = {
+            candidate_id: executor.submit(
+                semantic_service.score_window,
+                window,
+                hook_delay,
+                use_llm=True,
+                llm_provider=llm_provider,
+            )
+            for candidate_id, window, hook_delay in llm_requests
+        }
+        for candidate in candidates:
+            future = futures.get(candidate.id)
+            if future is not None:
+                semantic_scores[candidate.id] = future.result()
+    return semantic_scores
 
 
 def _build_candidate_features(
@@ -55,11 +130,13 @@ def _build_candidate_features(
     chapter_context: dict | None = None,
     memory_context: dict | None = None,
     strategy: dict | None = None,
+    window: list[RichSegment] | None = None,
+    semantic_scores: dict[str, float] | None = None,
 ) -> CandidateFeatures:
     chapter_context = chapter_context or _empty_chapter_context()
     memory_context = memory_context or _empty_memory_context()
     strategy = clip_strategy.normalize_strategy(strategy)
-    window = [seg for seg in segments if seg.end > candidate.start and seg.start < candidate.end]
+    window = list(window) if window is not None else _candidate_window(candidate, segments)
     if not window:
         return CandidateFeatures.create(
             candidate_id=candidate.id,
@@ -101,6 +178,7 @@ def _build_candidate_features(
             vod_progress=chapter_context["vod_progress"],
             boundary_left_context_sec=chapter_context["boundary_left_context_sec"],
             boundary_right_context_sec=chapter_context["boundary_right_context_sec"],
+            # Offline-only dataset context; serving does not try to approximate it.
             neighbor_positive_density=0.0,
             clip_overlap_count=chapter_context["clip_overlap_count"],
             chapter_position=chapter_context["chapter_position"],
@@ -161,7 +239,7 @@ def _build_candidate_features(
     should_use_llm = use_llm_semantics and (
         llm_candidate_ids is None or candidate.id in llm_candidate_ids
     )
-    sem = semantic_service.score_window(
+    sem = semantic_scores or semantic_service.score_window(
         window,
         hook_delay,
         use_llm=should_use_llm,
@@ -297,6 +375,7 @@ def _build_candidate_features(
         vod_progress=chapter_context["vod_progress"],
         boundary_left_context_sec=chapter_context["boundary_left_context_sec"],
         boundary_right_context_sec=chapter_context["boundary_right_context_sec"],
+        # Offline-only dataset context; serving does not try to approximate it.
         neighbor_positive_density=0.0,
         clip_overlap_count=chapter_context["clip_overlap_count"],
         chapter_position=chapter_context["chapter_position"],

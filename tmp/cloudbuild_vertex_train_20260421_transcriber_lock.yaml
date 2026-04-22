@@ -1,0 +1,11 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - backend/Dockerfile.vertex-train
+      - -t
+      - europe-west3-docker.pkg.dev/clipping-493513/ml/ai-clipping-train:20260421-transcriberlock-rerun
+      - .
+images:
+  - europe-west3-docker.pkg.dev/clipping-493513/ml/ai-clipping-train:20260421-transcriberlock-rerun

@@ -1,4 +1,5 @@
 import sys
+import threading
 import types
 import unittest
 from unittest.mock import patch
@@ -155,6 +156,50 @@ class FeatureBuilderTests(unittest.TestCase):
             feature_builder.build_features([candidate], segments, "gaming", llm_provider="ollama")
 
         self.assertEqual(score_window_mock.call_args.kwargs["llm_provider"], "ollama")
+
+    def test_build_features_parallelizes_multiple_llm_candidates(self) -> None:
+        candidates = [
+            Candidate(id="a", start=0.0, end=5.0, source="reaction", anchor_time=1.5),
+            Candidate(id="b", start=5.0, end=10.0, source="story_payoff", anchor_time=6.5),
+        ]
+        segments = [
+            RichSegment(start=0.0, end=2.5, text="hook text one", speaker="STREAMER", hype_score=2.0),
+            RichSegment(start=2.5, end=5.0, text="payoff text one", speaker="STREAMER", hype_score=6.0),
+            RichSegment(start=5.0, end=7.5, text="hook text two", speaker="STREAMER", hype_score=2.5),
+            RichSegment(start=7.5, end=10.0, text="payoff text two", speaker="STREAMER", hype_score=5.5),
+        ]
+        barrier = threading.Barrier(2, timeout=1.0)
+        calls: list[tuple[bool, str | None]] = []
+
+        def _fake_score_window(window, hook_delay_sec, *, use_llm=True, llm_provider=None):
+            del window, hook_delay_sec
+            calls.append((use_llm, llm_provider))
+            if use_llm:
+                barrier.wait()
+            return {
+                "quoteability": 0.1,
+                "surprise": 0.2,
+                "contradiction": 0.3,
+                "standalone": 0.4,
+                "density": 0.5,
+                "hook_strength": 0.6,
+                "context_dependency": 0.1,
+                "payoff_clarity": 0.7,
+                "llm_used": use_llm,
+            }
+
+        with patch.object(feature_builder.semantic_service, "score_window", side_effect=_fake_score_window):
+            features = feature_builder.build_features(
+                candidates,
+                segments,
+                "gaming",
+                True,
+                {"a", "b"},
+                "ollama",
+            )
+
+        self.assertEqual([feature.candidate_id for feature in features], ["a", "b"])
+        self.assertCountEqual(calls, [(True, "ollama"), (True, "ollama")])
 
     def test_build_features_populates_chapter_features(self) -> None:
         candidates = [

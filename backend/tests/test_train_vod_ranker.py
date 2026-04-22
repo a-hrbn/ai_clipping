@@ -202,6 +202,150 @@ class TrainVodRankerTests(unittest.TestCase):
         self.assertIn("primary_positive_clusters_below_minimum", quality["violations"])
         self.assertIn("primary_ranking_groups_below_minimum", quality["violations"])
 
+    def test_ranker_dataset_quality_rejects_candidate_source_dominance(self) -> None:
+        rows = [
+            {
+                "candidate_id": f"cand-r{i}",
+                "label": 1 if i % 3 == 0 else 0,
+                "label_class": "positive" if i % 3 == 0 else "hard_negative",
+                "dataset_source": "twitch_vod_primary",
+                "vod_id": f"vod-{i}",
+                "clip_ids": [f"clip-{i}"] if i % 3 == 0 else [],
+                "candidate_source": "reaction",
+            }
+            for i in range(9)
+        ] + [
+            {
+                "candidate_id": "cand-q1",
+                "label": 1,
+                "label_class": "positive",
+                "dataset_source": "twitch_vod_primary",
+                "vod_id": "vod-q1",
+                "clip_ids": ["clip-q1"],
+                "candidate_source": "quote",
+            },
+            {
+                "candidate_id": "cand-m1",
+                "label": 1,
+                "label_class": "positive",
+                "dataset_source": "twitch_vod_primary",
+                "vod_id": "vod-m1",
+                "clip_ids": ["clip-m1"],
+                "candidate_source": "moment",
+            },
+        ]
+
+        quality = train_vod_ranker.ranker_dataset_quality(rows)
+
+        self.assertFalse(quality["ok"])
+        self.assertIn("candidate_source_peak_share_above_maximum", quality["violations"])
+
+
+class TrainVodRankerWorkflowStateTests(unittest.TestCase):
+    def _setup_common(self, tmp: str, *, write_artifact: bool, write_dataset: bool) -> dict:
+        root = Path(tmp)
+        labels_path = root / "labels.jsonl"
+        labels_path.write_text(json.dumps({"broadcaster": "jynxzi"}) + "\n", encoding="utf-8")
+        dataset_out = root / "dataset.jsonl"
+        if write_dataset:
+            dataset_out.write_text("{}\n", encoding="utf-8")
+        artifact_dir = root / "artifacts"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        if write_artifact:
+            (artifact_dir / "jynxzi_ranker.json").write_text("{}", encoding="utf-8")
+        state_path = artifact_dir / "workflow_state.json"
+        return {
+            "labels": labels_path,
+            "dataset_out": dataset_out,
+            "artifact_dir": artifact_dir,
+            "state_path": state_path,
+            "work_dir": root / "work",
+        }
+
+    def _argv(self, paths: dict, state_json: str | None) -> list[str]:
+        argv = [
+            "train_vod_ranker.py",
+            "--labels", str(paths["labels"]),
+            "--dataset-out", str(paths["dataset_out"]),
+            "--profile", "jynxzi",
+            "--artifact-dir", str(paths["artifact_dir"]),
+            "--work-dir", str(paths["work_dir"]),
+            "--workflow-state-path", str(paths["state_path"]),
+        ]
+        if state_json is not None:
+            argv.extend(["--workflow-state-json", state_json])
+        return argv
+
+    def test_skips_when_state_matches_and_artifacts_exist(self) -> None:
+        current_state = {"workflow": "jynxzi_vod_training", "code_hash": "same"}
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self._setup_common(tmp, write_artifact=True, write_dataset=True)
+            # Stored state already matches current, artifacts are newer than labels.
+            paths["state_path"].write_text(json.dumps(current_state), encoding="utf-8")
+            import os as _os
+            _os.utime(paths["labels"], (100, 100))
+            _os.utime(paths["dataset_out"], (300, 300))
+            _os.utime(paths["artifact_dir"] / "jynxzi_ranker.json", (300, 300))
+
+            with patch("ml.train_vod_ranker.build_composite_dataset") as build_mock, \
+                 patch("ml.train_vod_ranker._train_models_for_dataset") as train_mock, \
+                 patch("sys.argv", self._argv(paths, json.dumps(current_state))):
+                rc = train_vod_ranker.main()
+
+        self.assertEqual(rc, 0)
+        build_mock.assert_not_called()
+        train_mock.assert_not_called()
+
+    def test_retrains_and_writes_state_when_training_succeeds(self) -> None:
+        current_state = {"workflow": "jynxzi_vod_training", "code_hash": "new"}
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self._setup_common(tmp, write_artifact=False, write_dataset=False)
+
+            with patch(
+                "ml.train_vod_ranker.build_composite_dataset",
+                return_value=[{"candidate_id": "c1", "label": 1, "features": {}}],
+            ), \
+                 patch("ml.train_vod_ranker._train_models_for_dataset", return_value=0) as train_mock, \
+                 patch("sys.argv", self._argv(paths, json.dumps(current_state))):
+                rc = train_vod_ranker.main()
+
+            self.assertEqual(rc, 0)
+            train_mock.assert_called_once()
+            self.assertTrue(paths["state_path"].exists())
+            self.assertEqual(
+                json.loads(paths["state_path"].read_text(encoding="utf-8")),
+                current_state,
+            )
+
+    def test_state_not_written_when_training_fails(self) -> None:
+        current_state = {"workflow": "jynxzi_vod_training", "code_hash": "new"}
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self._setup_common(tmp, write_artifact=False, write_dataset=False)
+
+            with patch(
+                "ml.train_vod_ranker.build_composite_dataset",
+                return_value=[{"candidate_id": "c1", "label": 1, "features": {}}],
+            ), \
+                 patch("ml.train_vod_ranker._train_models_for_dataset", return_value=2), \
+                 patch("sys.argv", self._argv(paths, json.dumps(current_state))):
+                rc = train_vod_ranker.main()
+
+            self.assertEqual(rc, 2)
+            self.assertFalse(paths["state_path"].exists())
+
+    def test_rejects_invalid_workflow_state_json(self) -> None:
+        with self.assertRaises(SystemExit):
+            train_vod_ranker._load_workflow_state("not-json")
+
+    def test_rejects_non_object_workflow_state_json(self) -> None:
+        with self.assertRaises(SystemExit):
+            train_vod_ranker._load_workflow_state("[1, 2, 3]")
+
+    def test_empty_workflow_state_returns_none(self) -> None:
+        self.assertIsNone(train_vod_ranker._load_workflow_state(None))
+        self.assertIsNone(train_vod_ranker._load_workflow_state(""))
+        self.assertIsNone(train_vod_ranker._load_workflow_state("   "))
+
 
 if __name__ == "__main__":
     unittest.main()

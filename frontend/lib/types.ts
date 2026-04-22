@@ -25,10 +25,13 @@ export interface ClipResult {
 }
 
 export type ClipFeedbackRating = "good" | "medium" | "bad";
+export type ClipFeedbackMode = "training_feedback" | "gold_eval";
 
 export interface ClipFeedbackPayload {
   candidate_id: string;
-  rating: ClipFeedbackRating;
+  mode?: ClipFeedbackMode;
+  rating?: ClipFeedbackRating;
+  gold_grade?: 0 | 1 | 2 | 3;
   notes?: string;
 }
 

@@ -10,12 +10,28 @@ BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from ml import build_twitch_training_dataset, train_ranker
+from ml import build_twitch_training_dataset, train_ranker, training_workflow_state
 
 _MIN_PRIMARY_POSITIVE_ROWS = 6
 _MIN_PRIMARY_UNIQUE_VODS = 2
 _MIN_PRIMARY_POSITIVE_CLUSTERS = 3
 _MIN_PRIMARY_RANKING_GROUPS = 2
+_MAX_CANDIDATE_SOURCE_SHARE = 0.40
+
+
+def _load_workflow_state(raw: str | None) -> dict[str, object] | None:
+    if not raw:
+        return None
+    payload = raw.strip()
+    if not payload:
+        return None
+    try:
+        parsed = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Invalid --workflow-state-json payload: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise SystemExit("--workflow-state-json must decode to a JSON object")
+    return parsed
 
 
 def main() -> int:
@@ -52,6 +68,24 @@ def main() -> int:
         action="store_true",
         help="Train one artifact per broadcaster using that broadcaster's VOD windows as the primary data.",
     )
+    parser.add_argument(
+        "--workflow-state-path",
+        default=None,
+        help=(
+            "Path to the workflow-state fingerprint JSON. When combined with --workflow-state-json, "
+            "training is skipped if the stored fingerprint matches the current state and all artifacts "
+            "already exist. After a successful training run the fingerprint is rewritten to this path."
+        ),
+    )
+    parser.add_argument(
+        "--workflow-state-json",
+        default=None,
+        help=(
+            "JSON-encoded current workflow state. When omitted, fingerprint gating is disabled. "
+            "When provided alongside --workflow-state-path, training uses "
+            "training_workflow_state.should_retrain to decide whether to skip."
+        ),
+    )
     args = parser.parse_args()
 
     labels_path = pathlib.Path(args.labels)
@@ -72,6 +106,33 @@ def main() -> int:
             short_form_weight=args.short_form_weight,
         )
 
+    artifact_dir = pathlib.Path(args.artifact_dir)
+    dataset_out = pathlib.Path(args.dataset_out)
+    artifact_path = artifact_dir / f"{args.profile}_ranker.json"
+
+    workflow_state = _load_workflow_state(args.workflow_state_json)
+    state_path = pathlib.Path(args.workflow_state_path) if args.workflow_state_path else None
+    if workflow_state is not None and state_path is not None:
+        if not training_workflow_state.should_retrain(
+            labels_path=labels_path,
+            dataset_path=dataset_out,
+            artifact_path=artifact_path,
+            state_path=state_path,
+            current_state=workflow_state,
+        ):
+            print(
+                json.dumps(
+                    {
+                        "event": "train_vod_ranker_skipped",
+                        "reason": "workflow_state_unchanged",
+                        "profile": args.profile,
+                        "state_path": str(state_path),
+                    },
+                    ensure_ascii=True,
+                )
+            )
+            return 0
+
     rows = build_composite_dataset(
         labels,
         profile=args.profile,
@@ -79,14 +140,16 @@ def main() -> int:
         supplemental_rows=short_form_rows,
         supplemental_weight=args.short_form_weight,
     )
-    dataset_out = pathlib.Path(args.dataset_out)
     _write_jsonl(dataset_out, rows)
     print(json.dumps(dataset_summary(rows), ensure_ascii=True))
-    return _train_models_for_dataset(
+    code = _train_models_for_dataset(
         dataset_out,
         args.profile,
-        pathlib.Path(args.artifact_dir),
+        artifact_dir,
     )
+    if code == 0 and workflow_state is not None and state_path is not None:
+        training_workflow_state.write_state(state_path, workflow_state)
+    return code
 
 
 def build_composite_dataset(
@@ -105,6 +168,7 @@ def build_composite_dataset(
 
 
 def dataset_summary(rows: list[dict]) -> dict:
+    summary = build_twitch_training_dataset.dataset_summary(rows)
     by_source: dict[str, int] = defaultdict(int)
     by_label_class: dict[str, int] = defaultdict(int)
     by_supervision_tier: dict[str, int] = defaultdict(int)
@@ -121,13 +185,15 @@ def dataset_summary(rows: list[dict]) -> dict:
         for key in ("has_llm_semantics", "has_chat_features", "has_vector_similarity", "has_vod_context"):
             if provenance.get(key):
                 provenance_coverage[key] += 1
-    return {
-        "rows": len(rows),
-        "dataset_sources": dict(sorted(by_source.items())),
-        "label_classes": dict(sorted(by_label_class.items())),
-        "supervision_tiers": dict(sorted(by_supervision_tier.items())),
-        "feature_provenance_coverage": dict(sorted(provenance_coverage.items())),
-    }
+    summary.update(
+        {
+            "dataset_sources": dict(sorted(by_source.items())),
+            "label_classes": dict(sorted(by_label_class.items())),
+            "supervision_tiers": dict(sorted(by_supervision_tier.items())),
+            "feature_provenance_coverage": dict(sorted(provenance_coverage.items())),
+        }
+    )
+    return summary
 
 
 def ranker_dataset_quality(rows: list[dict]) -> dict[str, object]:
@@ -150,6 +216,7 @@ def ranker_dataset_quality(rows: list[dict]) -> dict[str, object]:
         for row in evaluated_rows
         if str(train_ranker._ranking_group_key(row, "vod_id")).strip()
     }
+    source_mix = _candidate_source_mix(evaluated_rows)
 
     violations: list[str] = []
     if len(positive_rows) < _MIN_PRIMARY_POSITIVE_ROWS:
@@ -162,6 +229,8 @@ def ranker_dataset_quality(rows: list[dict]) -> dict[str, object]:
         violations.append("primary_positive_clusters_below_minimum")
     if len(ranking_groups) < _MIN_PRIMARY_RANKING_GROUPS:
         violations.append("primary_ranking_groups_below_minimum")
+    if source_mix["peak_share"] > _MAX_CANDIDATE_SOURCE_SHARE:
+        violations.append("candidate_source_peak_share_above_maximum")
 
     return {
         "ok": not violations,
@@ -177,8 +246,31 @@ def ranker_dataset_quality(rows: list[dict]) -> dict[str, object]:
             "unique_vods": _MIN_PRIMARY_UNIQUE_VODS,
             "unique_positive_clusters": _MIN_PRIMARY_POSITIVE_CLUSTERS,
             "ranking_groups": _MIN_PRIMARY_RANKING_GROUPS,
+            "candidate_source_peak_share": _MAX_CANDIDATE_SOURCE_SHARE,
         },
+        "candidate_source_mix": source_mix,
         "violations": violations,
+    }
+
+
+def _candidate_source_mix(rows: list[dict]) -> dict[str, object]:
+    counts: dict[str, int] = defaultdict(int)
+    for row in rows:
+        source = str(row.get("candidate_source") or "").strip().lower() or "unknown"
+        counts[source] += 1
+    total = sum(counts.values()) or 1
+    share_by_source = {
+        source: round(count / total, 3)
+        for source, count in sorted(counts.items())
+    }
+    peak_source = max(share_by_source, key=share_by_source.get) if share_by_source else ""
+    return {
+        "rows": total if rows else 0,
+        "distinct_sources": len(counts),
+        "peak_source": peak_source,
+        "peak_share": float(share_by_source.get(peak_source, 0.0)) if peak_source else 0.0,
+        "by_source": dict(sorted(counts.items())),
+        "share_by_source": share_by_source,
     }
 
 

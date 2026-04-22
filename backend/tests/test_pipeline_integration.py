@@ -1,8 +1,8 @@
+import asyncio
 import json
 import importlib
 import sys
 import tempfile
-import time
 import unittest
 from contextlib import ExitStack
 from pathlib import Path
@@ -41,6 +41,22 @@ def _identity(*args, **kwargs):
 
 
 class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_await_with_optional_timeout_skips_wait_for_when_disabled(self) -> None:
+        pipeline = _import_pipeline_with_stubs()
+        loop = asyncio.get_running_loop()
+
+        future_none = loop.create_future()
+        future_none.set_result("none")
+        future_zero = loop.create_future()
+        future_zero.set_result("zero")
+
+        with patch.object(pipeline.asyncio, "wait_for", side_effect=AssertionError("wait_for should not run")):
+            result_none = await pipeline._await_with_optional_timeout(future_none, None)
+            result_zero = await pipeline._await_with_optional_timeout(future_zero, 0)
+
+        self.assertEqual(result_none, "none")
+        self.assertEqual(result_zero, "zero")
+
     async def test_run_pipeline_prefers_peak_path_and_writes_debug_artifacts(self) -> None:
         pipeline = _import_pipeline_with_stubs()
         with tempfile.TemporaryDirectory() as tmp:
@@ -464,7 +480,7 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(fallback_rows)
             self.assertEqual(merged_rows[0]["source"], "reaction")
 
-    async def test_run_pipeline_skips_slow_chat_download_without_blocking(self) -> None:
+    async def test_run_pipeline_disables_chat_download_and_keeps_noop_enrichment(self) -> None:
         pipeline = _import_pipeline_with_stubs()
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -492,10 +508,6 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
             ]
             enrich_chat_args: list[Path | None] = []
             job_updates: list[dict] = []
-
-            def slow_download_chat(_url: str, _job_id: str, _out_dir: Path) -> Path | None:
-                time.sleep(0.2)
-                return tmp_path / "chat.json"
 
             def fake_build_features(
                 candidates,
@@ -564,8 +576,6 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
             with ExitStack() as stack:
                 stack.enter_context(patch.object(pipeline.settings, "storage_dir", str(tmp_path)))
-                stack.enter_context(patch.object(pipeline.settings, "enable_chat_analysis", True))
-                stack.enter_context(patch.object(pipeline.settings, "chat_join_timeout_sec", 0.01))
                 stack.enter_context(patch.object(pipeline, "update_job", side_effect=fake_update_job))
                 stack.enter_context(patch.object(pipeline.audio_extractor, "extract", return_value=audio_path))
                 stack.enter_context(patch.object(pipeline.transcriber, "transcribe_with_progress", return_value=transcript))
@@ -574,7 +584,7 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 stack.enter_context(patch.object(pipeline.audio_features, "enrich_segments", side_effect=_identity))
                 stack.enter_context(patch.object(pipeline.video_features, "enrich_segments", side_effect=_identity))
                 stack.enter_context(patch.object(pipeline.audio_features, "diarize_speakers", side_effect=_identity))
-                stack.enter_context(patch.object(pipeline.chat_analyzer, "download_chat", side_effect=slow_download_chat))
+                download_chat_mock = stack.enter_context(patch.object(pipeline.chat_analyzer, "download_chat"))
                 stack.enter_context(patch.object(pipeline.chat_analyzer, "enrich_segments", side_effect=fake_enrich_chat))
                 stack.enter_context(patch.object(pipeline.chapter_segmenter, "segment_chapters", return_value=chapters))
                 stack.enter_context(
@@ -630,6 +640,7 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     profile="general",
                 )
 
+            download_chat_mock.assert_not_called()
             self.assertEqual(enrich_chat_args, [None])
             self.assertTrue(any(update.get("status") == "done" for update in job_updates))
 

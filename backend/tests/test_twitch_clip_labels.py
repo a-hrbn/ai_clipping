@@ -186,6 +186,89 @@ class TwitchClipLabelsTests(unittest.TestCase):
         self.assertTrue(background)
         self.assertGreater(len({round(float(row["window_end"]) - float(row["window_start"]), 2) for row in background}), 1)
 
+    def test_background_negative_sampling_targets_roughly_three_to_one_ratio(self) -> None:
+        vod = {"id": "1", "duration_seconds": 800, "created_at": "2025-01-01T00:00:00Z"}
+        positives = [
+            {"window_start": 100.0, "window_end": 140.0, "label_class": "positive"},
+            {"window_start": 260.0, "window_end": 300.0, "label_class": "positive"},
+        ]
+
+        rows = collect_twitch_clip_labels._sample_negative_rows("jynxzi", vod, positives)
+
+        negatives = [row for row in rows if row["label_class"] in {"hard_negative", "background_negative"}]
+        self.assertGreaterEqual(len(negatives), 6)
+
+    def test_resolved_broadcasters_merges_explicit_and_profile_pool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "streamer_sources.csv"
+            manifest.write_text(
+                "\n".join(
+                    [
+                        "streamer,platform,source_url,language,tags,max_clips,training_profiles,twitch_broadcaster",
+                        "jynxzi,youtube,https://example.com,en,gaming,5,\"jynxzi,gaming\",jynxzi",
+                        "caseoh_,twitch_pool,,en,gaming,0,\"jynxzi,gaming\",caseoh_",
+                        "shroud,twitch_pool,,en,gaming,0,gaming,shroud",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            broadcasters = collect_twitch_clip_labels._resolved_broadcasters(
+                broadcaster="jynxzi",
+                profile="jynxzi",
+                manifest_path=manifest,
+            )
+
+        self.assertEqual(broadcasters, ["jynxzi", "caseoh_"])
+
+    def test_read_source_manifest_rejects_missing_required_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "streamer_sources.csv"
+            manifest.write_text(
+                "\n".join(
+                    [
+                        "streamer,platform,language,tags,max_clips,training_profiles,twitch_broadcaster",
+                        "jynxzi,youtube,en,gaming,5,jynxzi,jynxzi",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "missing required columns"):
+                collect_twitch_clip_labels._read_source_manifest(manifest)
+
+    def test_read_source_manifest_rejects_non_pool_rows_without_source_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "streamer_sources.csv"
+            manifest.write_text(
+                "\n".join(
+                    [
+                        "streamer,platform,source_url,language,tags,max_clips,training_profiles,twitch_broadcaster",
+                        "jynxzi,youtube,,en,gaming,5,jynxzi,jynxzi",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "missing source_url"):
+                collect_twitch_clip_labels._read_source_manifest(manifest)
+
+    def test_read_source_manifest_rejects_twitch_pool_rows_without_broadcaster(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "streamer_sources.csv"
+            manifest.write_text(
+                "\n".join(
+                    [
+                        "streamer,platform,source_url,language,tags,max_clips,training_profiles,twitch_broadcaster",
+                        "caseoh_,twitch_pool,,en,gaming,0,jynxzi,",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "missing twitch_broadcaster"):
+                collect_twitch_clip_labels._read_source_manifest(manifest)
+
     def test_merge_label_rows_dedupes_positive_clusters_by_clip_ids(self) -> None:
         existing = [
             {

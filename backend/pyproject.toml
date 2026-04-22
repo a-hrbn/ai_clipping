@@ -27,9 +27,12 @@ dev = [
   "pytest>=8.3.3,<9.0.0",
 ]
 ml = [
+  "fsspec>=2024.10.0,<2027.0.0",
   "joblib>=1.4.2,<2.0.0",
   "librosa>=0.10.2.post1,<1.0.0",
   "lightgbm>=4.6.0,<5.0.0",
+  "mlflow>=3.1.4,<4.0.0",
+  "optuna>=4.4.0,<5.0.0",
   "openai-whisper>=20240930",
   "opencv-python-headless>=4.10.0.84,<5.0.0",
   "scikit-learn>=1.5.2,<2.0.0",
@@ -41,12 +44,6 @@ vision = [
   "mtcnn>=1.0.0,<2.0.0",
   "tf-keras>=2.21.0,<3.0.0",
 ]
-vertex = [
-  "google-cloud-aiplatform>=1.93.0,<2.0.0",
-  "google-cloud-secret-manager>=2.23.0,<3.0.0",
-  "google-cloud-storage>=2.19.0,<3.0.0",
-]
-
 [tool.setuptools]
 packages = ["ml", "routers", "services"]
 py-modules = ["config", "job_manager", "main", "models", "pipeline"]

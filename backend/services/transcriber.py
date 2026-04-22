@@ -6,8 +6,10 @@ import pathlib
 import re
 import subprocess
 import threading
+import wave
 from dataclasses import dataclass, field
 
+import torch
 import whisper
 from config import settings
 
@@ -21,6 +23,21 @@ CHUNK_SECONDS = 600  # 10 minutes
 _whisper_model: whisper.Whisper | None = None
 _whisper_runtime_logged = False
 _whisper_lock = threading.Lock()
+_whisper_inference_lock = threading.Lock()
+
+
+def _resolved_whisper_device() -> str:
+    requested = str(settings.whisper_device or "auto").strip().lower() or "auto"
+    if requested == "auto":
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    if requested == "cuda" and not torch.cuda.is_available():
+        logger.warning("transcriber_cuda_unavailable_fallback requested=cuda resolved=cpu")
+        return "cpu"
+    return requested
+
+
+def _resolved_precision(device: str) -> str:
+    return "fp16" if device == "cuda" else "fp32"
 
 
 def _model_device_name(model: whisper.Whisper) -> str:
@@ -34,23 +51,22 @@ def _model_device_name(model: whisper.Whisper) -> str:
 
 def runtime_summary() -> dict[str, object]:
     if _whisper_model is None:
+        device = _resolved_whisper_device()
         return {
             "whisper_model": settings.whisper_model,
-            "device": "unloaded",
-            "precision": "unknown",
+            "device": device,
+            "precision": _resolved_precision(device),
         }
-    device_name = _model_device_name(_whisper_model)
-    precision = "fp16" if device_name.startswith("cuda") else "fp32"
     return {
         "whisper_model": settings.whisper_model,
-        "device": device_name,
-        "precision": precision,
+        "device": _model_device_name(_whisper_model),
+        "precision": _resolved_precision(_model_device_name(_whisper_model)),
     }
 
 
 def _get_model() -> whisper.Whisper:
     global _whisper_model, _whisper_runtime_logged
-    # Double-checked locking: the load is a multi-second disk+CUDA op; without
+    # Double-checked locking: the load is a multi-second disk op; without
     # the lock two concurrent first-transcriptions would each download and load
     # the model into memory, then silently race to bind _whisper_model.
     if _whisper_model is None:
@@ -59,9 +75,11 @@ def _get_model() -> whisper.Whisper:
                 logger.info("transcriber_init whisper_model=%s", settings.whisper_model)
                 whisper_cache_dir = pathlib.Path(settings.storage_dir).parent / "cache" / "whisper"
                 whisper_cache_dir.mkdir(parents=True, exist_ok=True)
+                resolved_device = _resolved_whisper_device()
                 _whisper_model = whisper.load_model(
                     settings.whisper_model,
                     download_root=str(whisper_cache_dir),
+                    device=resolved_device,
                 )
     if not _whisper_runtime_logged:
         summary = runtime_summary()
@@ -81,6 +99,9 @@ Segment = tuple[float, float, str]  # (start, end, text)
 _LAUGHTER_RE = re.compile(r"\b(ha(ha)+|hehe|lol|lmao|xd|kekw|lulw)\b", re.IGNORECASE)
 _EXCLAMATION_RE = re.compile(r"[!]{1,}$|(!)\s")
 _QUESTION_RE = re.compile(r"\?")
+
+_EMPTY_TRANSCRIBE_ERROR_SNIPPET = "cannot reshape tensor of 0 elements"
+_MIN_SEGMENT_DURATION_SECONDS = 0.01
 
 
 @dataclass
@@ -146,17 +167,31 @@ def transcribe_with_progress(
         capture_output=True,
     )
 
-    chunk_files = sorted(chunks_dir.glob("chunk_*.wav"))
+    chunk_files = _filter_transcribable_chunks(sorted(chunks_dir.glob("chunk_*.wav")))
     model = _get_model()
 
     raw_segments: list[RichSegment] = []
     total_chunks = len(chunk_files)
 
-    for idx, chunk_file in enumerate(chunk_files):
-        time_offset = idx * CHUNK_SECONDS
-        result = model.transcribe(str(chunk_file), word_timestamps=True, verbose=False)
+    for progress_idx, (chunk_idx, chunk_file) in enumerate(chunk_files, start=1):
+        time_offset = chunk_idx * CHUNK_SECONDS
+        try:
+            result = _transcribe_chunk(model, chunk_file)
+        except RuntimeError as exc:
+            if _EMPTY_TRANSCRIBE_ERROR_SNIPPET not in str(exc):
+                raise
+            logger.warning(
+                "transcriber_skip_chunk chunk=%s reason=empty_tensor_runtime_error",
+                chunk_file,
+            )
+            if progress_cb is not None and total_chunks > 0:
+                progress_cb(progress_idx, total_chunks, chunk_file)
+            continue
 
-        for seg in result.get("segments", []):
+        raw_segments_payload = _validated_segments_payload(result, chunk_file=chunk_file)
+        for seg_idx, raw_seg in enumerate(raw_segments_payload):
+            seg = _normalize_segment(raw_seg, chunk_file=chunk_file, segment_index=seg_idx)
+
             start = seg["start"] + time_offset
             end = seg["end"] + time_offset
             text = seg["text"].strip()
@@ -175,7 +210,7 @@ def transcribe_with_progress(
             ))
 
         if progress_cb is not None and total_chunks > 0:
-            progress_cb(idx + 1, total_chunks, chunk_file)
+            progress_cb(progress_idx, total_chunks, chunk_file)
 
     deduped = _deduplicate(raw_segments)
 
@@ -184,6 +219,29 @@ def transcribe_with_progress(
         deduped = _diarize(audio_path, deduped)
 
     return deduped
+
+
+def _filter_transcribable_chunks(
+    chunk_files: list[pathlib.Path],
+) -> list[tuple[int, pathlib.Path]]:
+    valid_chunks: list[tuple[int, pathlib.Path]] = []
+    for chunk_idx, chunk_file in enumerate(chunk_files):
+        if _chunk_frame_count(chunk_file) > 0:
+            valid_chunks.append((chunk_idx, chunk_file))
+            continue
+        logger.warning(
+            "transcriber_skip_chunk chunk=%s reason=empty_or_invalid_wav",
+            chunk_file,
+        )
+    return valid_chunks
+
+
+def _chunk_frame_count(chunk_file: pathlib.Path) -> int:
+    try:
+        with wave.open(str(chunk_file), "rb") as wav_file:
+            return int(wav_file.getnframes())
+    except (FileNotFoundError, wave.Error, EOFError):
+        return 0
 
 
 # ---------------------------------------------------------------------------
@@ -205,6 +263,75 @@ def _calc_tempo(seg: dict, time_offset: float) -> float:
         return 0.0
 
     return round(word_count / segment_duration, 2) if segment_duration > 0 else 0.0
+
+
+def _transcribe_chunk(model: whisper.Whisper, chunk_file: pathlib.Path) -> dict:
+    with _whisper_inference_lock:
+        use_fp16 = str(_model_device_name(model)).startswith("cuda")
+        return model.transcribe(
+            str(chunk_file),
+            word_timestamps=True,
+            verbose=False,
+            fp16=use_fp16,
+        )
+
+
+def _validated_segments_payload(
+    result: dict,
+    *,
+    chunk_file: pathlib.Path,
+) -> list[object]:
+    payload = result.get("segments") or []
+    if isinstance(payload, list):
+        return payload
+    raise ValueError(
+        f"invalid Whisper segments payload for {chunk_file}: expected list, got {type(payload).__name__}"
+    )
+
+
+def _normalize_segment(
+    raw_seg: object,
+    *,
+    chunk_file: pathlib.Path,
+    segment_index: int,
+) -> dict:
+    if not isinstance(raw_seg, dict):
+        raise ValueError(
+            "invalid Whisper segment payload "
+            f"for {chunk_file} segment {segment_index}: expected mapping, got {type(raw_seg).__name__}"
+        )
+
+    try:
+        start = float(raw_seg["start"])
+        end = float(raw_seg["end"])
+    except (KeyError, TypeError, ValueError):
+        raise ValueError(
+            f"invalid Whisper timestamps for {chunk_file} segment {segment_index}"
+        )
+
+    text = str(raw_seg.get("text") or "").strip()
+    if end < start:
+        raise ValueError(
+            "non-positive Whisper segment duration "
+            f"for {chunk_file} segment {segment_index}: start={start:.3f} end={end:.3f}"
+        )
+    if end == start:
+        adjusted_end = start + _MIN_SEGMENT_DURATION_SECONDS
+        logger.warning(
+            "transcriber_clamp_zero_duration_segment chunk=%s segment=%s start=%.3f end=%.3f adjusted_end=%.3f",
+            chunk_file,
+            segment_index,
+            start,
+            end,
+            adjusted_end,
+        )
+        end = adjusted_end
+
+    normalized = dict(raw_seg)
+    normalized["start"] = start
+    normalized["end"] = end
+    normalized["text"] = text
+    return normalized
 
 
 # ---------------------------------------------------------------------------
@@ -229,7 +356,6 @@ def _tag_emotions(text: str) -> list[str]:
 def _diarize(audio_path: pathlib.Path, segments: list[RichSegment]) -> list[RichSegment]:
     try:
         from pyannote.audio import Pipeline
-        import torch
     except ImportError:
         return segments  # pyannote not installed — skip silently
 

@@ -1,0 +1,902 @@
+{
+  "components": {
+    "comp-build-eval-dataset-component": {
+      "executorLabel": "exec-build-eval-dataset-component",
+      "inputDefinitions": {
+        "artifacts": {
+          "training_rows": {
+            "artifactType": {
+              "schemaTitle": "system.Dataset",
+              "schemaVersion": "0.0.1"
+            }
+          }
+        },
+        "parameters": {
+          "storage_dir": {
+            "parameterType": "STRING"
+          },
+          "streamer": {
+            "parameterType": "STRING"
+          }
+        }
+      },
+      "outputDefinitions": {
+        "artifacts": {
+          "gold_eval_dataset": {
+            "artifactType": {
+              "schemaTitle": "system.Dataset",
+              "schemaVersion": "0.0.1"
+            }
+          },
+          "gold_eval_rows": {
+            "artifactType": {
+              "schemaTitle": "system.Dataset",
+              "schemaVersion": "0.0.1"
+            }
+          },
+          "gold_eval_summary": {
+            "artifactType": {
+              "schemaTitle": "system.Artifact",
+              "schemaVersion": "0.0.1"
+            }
+          },
+          "proxy_eval_dataset": {
+            "artifactType": {
+              "schemaTitle": "system.Dataset",
+              "schemaVersion": "0.0.1"
+            }
+          },
+          "proxy_eval_summary": {
+            "artifactType": {
+              "schemaTitle": "system.Artifact",
+              "schemaVersion": "0.0.1"
+            }
+          }
+        }
+      }
+    },
+    "comp-build-training-dataset-component": {
+      "executorLabel": "exec-build-training-dataset-component",
+      "inputDefinitions": {
+        "artifacts": {
+          "labels": {
+            "artifactType": {
+              "schemaTitle": "system.Dataset",
+              "schemaVersion": "0.0.1"
+            }
+          }
+        },
+        "parameters": {
+          "base_output_directory": {
+            "defaultValue": "",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "dataset_llm_provider": {
+            "defaultValue": "",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "display_name": {
+            "defaultValue": "build-training-dataset-component",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "enable_web_access": {
+            "defaultValue": false,
+            "isOptional": true,
+            "parameterType": "BOOLEAN"
+          },
+          "encryption_spec_key_name": {
+            "defaultValue": "",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "gemini_api_key_secret": {
+            "defaultValue": "",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "groq_api_key_secret": {
+            "defaultValue": "",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "location": {
+            "defaultValue": "{{$.pipeline_google_cloud_location}}",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "max_wait_duration": {
+            "defaultValue": "86400s",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "network": {
+            "defaultValue": "",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "ollama_host": {
+            "defaultValue": "",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "persistent_resource_id": {
+            "defaultValue": "{{$.pipeline_persistent_resource_id}}",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "profile": {
+            "parameterType": "STRING"
+          },
+          "project": {
+            "defaultValue": "{{$.pipeline_google_cloud_project_id}}",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "psc_interface_config": {
+            "isOptional": true,
+            "parameterType": "STRUCT"
+          },
+          "reserved_ip_ranges": {
+            "isOptional": true,
+            "parameterType": "LIST"
+          },
+          "restart_job_on_worker_restart": {
+            "defaultValue": false,
+            "isOptional": true,
+            "parameterType": "BOOLEAN"
+          },
+          "service_account": {
+            "defaultValue": "",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "strategy": {
+            "defaultValue": "STANDARD",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "tensorboard": {
+            "defaultValue": "",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "timeout": {
+            "defaultValue": "604800s",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "worker_pool_specs": {
+            "defaultValue": [
+              {
+                "container_spec": {
+                  "args": [
+                    "--executor_input",
+                    "{{$.json_escape[1]}}",
+                    "--function_to_execute",
+                    "build_training_dataset_component"
+                  ],
+                  "command": [
+                    "sh",
+                    "-c",
+                    "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip || python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0' '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"$0\" \"$@\"\n",
+                    "sh",
+                    "-ec",
+                    "program_path=$(mktemp -d)\n\nprintf \"%s\" \"$0\" > \"$program_path/ephemeral_component.py\"\n_KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         \"$program_path/ephemeral_component.py\"                         \"$@\"\n",
+                    "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import *\n\ndef build_training_dataset_component(\n    labels: Input[Dataset],\n    profile: str,\n    training_rows: Output[Dataset],\n    dataset_llm_provider: str = \"\",\n    groq_api_key_secret: str = \"\",\n    gemini_api_key_secret: str = \"\",\n    ollama_host: str = \"\",\n):\n    import os\n    import subprocess\n    import tempfile\n    from google.cloud import secretmanager\n\n    def resolve_secret_ref(secret_ref: str) -> str:\n        ref = secret_ref.strip()\n        if not ref:\n            return \"\"\n        if not ref.startswith(\"projects/\"):\n            return ref\n        client = secretmanager.SecretManagerServiceClient()\n        response = client.access_secret_version(request={\"name\": ref})\n        return response.payload.data.decode(\"utf-8\")\n\n    env = os.environ.copy()\n    if dataset_llm_provider.strip():\n        env[\"TRAINING_DATASET_LLM_PROVIDER\"] = dataset_llm_provider.strip()\n    if ollama_host.strip():\n        env[\"OLLAMA_HOST\"] = ollama_host.strip()\n    if groq_api_key_secret.strip():\n        env[\"GROQ_API_KEY\"] = resolve_secret_ref(groq_api_key_secret)\n    if gemini_api_key_secret.strip():\n        env[\"GEMINI_API_KEY\"] = resolve_secret_ref(gemini_api_key_secret)\n    with tempfile.TemporaryDirectory(prefix=\"build-training-dataset-\") as temp_dir:\n        subprocess.run(\n            [\n                \"python\",\n                \"-m\",\n                \"ml.build_twitch_training_dataset\",\n                \"--labels\",\n                labels.path,\n                \"--output\",\n                training_rows.path,\n                \"--profile\",\n                profile,\n                \"--work-dir\",\n                os.path.join(temp_dir, \"dataset_work\"),\n            ],\n            check=True,\n            env=env,\n        )\n\n"
+                  ],
+                  "env": [],
+                  "image_uri": "europe-west3-docker.pkg.dev/project-22586fae-58b4-4890-aeb/ml/ai-clipping-train:20260422-pipeline-gcloud-7day"
+                },
+                "disk_spec": {
+                  "boot_disk_size_gb": 500.0,
+                  "boot_disk_type": "pd-ssd"
+                },
+                "machine_spec": {
+                  "machine_type": "e2-standard-4"
+                },
+                "replica_count": 1.0
+              }
+            ],
+            "isOptional": true,
+            "parameterType": "LIST"
+          }
+        }
+      },
+      "outputDefinitions": {
+        "artifacts": {
+          "training_rows": {
+            "artifactType": {
+              "schemaTitle": "system.Dataset",
+              "schemaVersion": "0.0.1"
+            }
+          }
+        },
+        "parameters": {
+          "gcp_resources": {
+            "parameterType": "STRING"
+          }
+        }
+      }
+    },
+    "comp-collect-twitch-clips-component": {
+      "executorLabel": "exec-collect-twitch-clips-component",
+      "inputDefinitions": {
+        "parameters": {
+          "date_from": {
+            "parameterType": "STRING"
+          },
+          "date_to": {
+            "parameterType": "STRING"
+          },
+          "streamer": {
+            "parameterType": "STRING"
+          },
+          "twitch_client_id_secret": {
+            "defaultValue": "",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "twitch_client_secret_secret": {
+            "defaultValue": "",
+            "isOptional": true,
+            "parameterType": "STRING"
+          }
+        }
+      },
+      "outputDefinitions": {
+        "artifacts": {
+          "output_labels": {
+            "artifactType": {
+              "schemaTitle": "system.Dataset",
+              "schemaVersion": "0.0.1"
+            }
+          }
+        }
+      }
+    },
+    "comp-evaluate-ranker-component": {
+      "executorLabel": "exec-evaluate-ranker-component",
+      "inputDefinitions": {
+        "artifacts": {
+          "artifact_bundle": {
+            "artifactType": {
+              "schemaTitle": "system.Artifact",
+              "schemaVersion": "0.0.1"
+            }
+          },
+          "gold_eval_rows": {
+            "artifactType": {
+              "schemaTitle": "system.Dataset",
+              "schemaVersion": "0.0.1"
+            }
+          },
+          "proxy_eval_dataset": {
+            "artifactType": {
+              "schemaTitle": "system.Dataset",
+              "schemaVersion": "0.0.1"
+            }
+          }
+        },
+        "parameters": {
+          "profile": {
+            "parameterType": "STRING"
+          }
+        }
+      },
+      "outputDefinitions": {
+        "artifacts": {
+          "gold_eval_report": {
+            "artifactType": {
+              "schemaTitle": "system.Artifact",
+              "schemaVersion": "0.0.1"
+            }
+          },
+          "pipeline_eval_report": {
+            "artifactType": {
+              "schemaTitle": "system.Artifact",
+              "schemaVersion": "0.0.1"
+            }
+          },
+          "proxy_eval_report": {
+            "artifactType": {
+              "schemaTitle": "system.Artifact",
+              "schemaVersion": "0.0.1"
+            }
+          }
+        }
+      }
+    },
+    "comp-promote-component": {
+      "executorLabel": "exec-promote-component",
+      "inputDefinitions": {
+        "artifacts": {
+          "artifact_bundle": {
+            "artifactType": {
+              "schemaTitle": "system.Artifact",
+              "schemaVersion": "0.0.1"
+            }
+          },
+          "gold_eval_report": {
+            "artifactType": {
+              "schemaTitle": "system.Artifact",
+              "schemaVersion": "0.0.1"
+            }
+          },
+          "pipeline_eval_report": {
+            "artifactType": {
+              "schemaTitle": "system.Artifact",
+              "schemaVersion": "0.0.1"
+            }
+          },
+          "proxy_eval_report": {
+            "artifactType": {
+              "schemaTitle": "system.Artifact",
+              "schemaVersion": "0.0.1"
+            }
+          }
+        },
+        "parameters": {
+          "mlflow_tracking_uri_secret": {
+            "defaultValue": "",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "profile": {
+            "parameterType": "STRING"
+          }
+        }
+      },
+      "outputDefinitions": {
+        "artifacts": {
+          "registry_report": {
+            "artifactType": {
+              "schemaTitle": "system.Artifact",
+              "schemaVersion": "0.0.1"
+            }
+          }
+        }
+      }
+    },
+    "comp-train-ranker-component": {
+      "executorLabel": "exec-train-ranker-component",
+      "inputDefinitions": {
+        "artifacts": {
+          "training_rows": {
+            "artifactType": {
+              "schemaTitle": "system.Dataset",
+              "schemaVersion": "0.0.1"
+            }
+          }
+        },
+        "parameters": {
+          "date_from": {
+            "defaultValue": "",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "date_to": {
+            "defaultValue": "",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "mlflow_tracking_uri_secret": {
+            "defaultValue": "",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "profile": {
+            "parameterType": "STRING"
+          },
+          "streamer": {
+            "defaultValue": "",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "vertex_image_uri": {
+            "defaultValue": "",
+            "isOptional": true,
+            "parameterType": "STRING"
+          }
+        }
+      },
+      "outputDefinitions": {
+        "artifacts": {
+          "artifact_bundle": {
+            "artifactType": {
+              "schemaTitle": "system.Artifact",
+              "schemaVersion": "0.0.1"
+            }
+          },
+          "training_stats": {
+            "artifactType": {
+              "schemaTitle": "system.Artifact",
+              "schemaVersion": "0.0.1"
+            }
+          }
+        }
+      }
+    }
+  },
+  "deploymentSpec": {
+    "executors": {
+      "exec-build-eval-dataset-component": {
+        "container": {
+          "args": [
+            "--executor_input",
+            "{{$}}",
+            "--function_to_execute",
+            "build_eval_dataset_component"
+          ],
+          "command": [
+            "sh",
+            "-c",
+            "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip || python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0' '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"$0\" \"$@\"\n",
+            "sh",
+            "-ec",
+            "program_path=$(mktemp -d)\n\nprintf \"%s\" \"$0\" > \"$program_path/ephemeral_component.py\"\n_KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         \"$program_path/ephemeral_component.py\"                         \"$@\"\n",
+            "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import *\n\ndef build_eval_dataset_component(\n    training_rows: Input[Dataset],\n    streamer: str,\n    storage_dir: str,\n    proxy_eval_dataset: Output[Dataset],\n    proxy_eval_summary: Output[Artifact],\n    gold_eval_rows: Output[Dataset],\n    gold_eval_dataset: Output[Dataset],\n    gold_eval_summary: Output[Artifact],\n):\n    from ml.pipelines.components import build_eval_dataset_op as component_module\n\n    component_module.run(\n        training_rows_uri=training_rows.path,\n        proxy_eval_dataset_uri=proxy_eval_dataset.path,\n        proxy_eval_summary_uri=proxy_eval_summary.path,\n        gold_eval_rows_uri=gold_eval_rows.path,\n        gold_eval_dataset_uri=gold_eval_dataset.path,\n        gold_eval_summary_uri=gold_eval_summary.path,\n        streamer=streamer,\n        storage_dir=storage_dir,\n    )\n\n"
+          ],
+          "image": "europe-west3-docker.pkg.dev/project-22586fae-58b4-4890-aeb/ml/ai-clipping-train:20260422-pipeline-gcloud-7day"
+        }
+      },
+      "exec-build-training-dataset-component": {
+        "container": {
+          "args": [
+            "--type",
+            "CustomJob",
+            "--payload",
+            "{\"display_name\": \"{{$.inputs.parameters['display_name']}}\", \"job_spec\": {\"worker_pool_specs\": {{$.inputs.parameters['worker_pool_specs']}}, \"scheduling\": {\"timeout\": \"{{$.inputs.parameters['timeout']}}\", \"restart_job_on_worker_restart\": {{$.inputs.parameters['restart_job_on_worker_restart']}}, \"strategy\": \"{{$.inputs.parameters['strategy']}}\", \"max_wait_duration\": \"{{$.inputs.parameters['max_wait_duration']}}\"}, \"service_account\": \"{{$.inputs.parameters['service_account']}}\", \"tensorboard\": \"{{$.inputs.parameters['tensorboard']}}\", \"enable_web_access\": {{$.inputs.parameters['enable_web_access']}}, \"network\": \"{{$.inputs.parameters['network']}}\", \"reserved_ip_ranges\": {{$.inputs.parameters['reserved_ip_ranges']}}, \"base_output_directory\": {\"output_uri_prefix\": \"{{$.inputs.parameters['base_output_directory']}}\"}, \"persistent_resource_id\": \"{{$.inputs.parameters['persistent_resource_id']}}\", \"psc_interface_config\": {{$.inputs.parameters['psc_interface_config']}}}, \"labels\": {{$.inputs.parameters['labels']}}, \"encryption_spec\": {\"kms_key_name\": \"{{$.inputs.parameters['encryption_spec_key_name']}}\"}}",
+            "--project",
+            "{{$.inputs.parameters['project']}}",
+            "--location",
+            "{{$.inputs.parameters['location']}}",
+            "--gcp_resources",
+            "{{$.outputs.parameters['gcp_resources'].output_file}}"
+          ],
+          "command": [
+            "python3",
+            "-u",
+            "-m",
+            "google_cloud_pipeline_components.container.v1.custom_job.launcher"
+          ],
+          "image": "gcr.io/ml-pipeline/google-cloud-pipeline-components:2.22.0"
+        }
+      },
+      "exec-collect-twitch-clips-component": {
+        "container": {
+          "args": [
+            "--executor_input",
+            "{{$}}",
+            "--function_to_execute",
+            "collect_twitch_clips_component"
+          ],
+          "command": [
+            "sh",
+            "-c",
+            "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip || python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0' '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"$0\" \"$@\"\n",
+            "sh",
+            "-ec",
+            "program_path=$(mktemp -d)\n\nprintf \"%s\" \"$0\" > \"$program_path/ephemeral_component.py\"\n_KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         \"$program_path/ephemeral_component.py\"                         \"$@\"\n",
+            "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import *\n\ndef collect_twitch_clips_component(\n    streamer: str,\n    date_from: str,\n    date_to: str,\n    output_labels: Output[Dataset],\n    twitch_client_id_secret: str = \"\",\n    twitch_client_secret_secret: str = \"\",\n):\n    import os\n    import subprocess\n    from google.cloud import secretmanager\n\n    def resolve_secret_ref(secret_ref: str) -> str:\n        ref = secret_ref.strip()\n        if not ref:\n            return \"\"\n        if not ref.startswith(\"projects/\"):\n            return ref\n        client = secretmanager.SecretManagerServiceClient()\n        response = client.access_secret_version(request={\"name\": ref})\n        return response.payload.data.decode(\"utf-8\")\n\n    env = os.environ.copy()\n    env[\"TWITCH_CLIENT_ID\"] = resolve_secret_ref(twitch_client_id_secret)\n    env[\"TWITCH_CLIENT_SECRET\"] = resolve_secret_ref(twitch_client_secret_secret)\n    subprocess.run(\n        [\n            \"python\",\n            \"-m\",\n            \"ml.collect_twitch_clip_labels\",\n            \"--broadcaster\",\n            streamer,\n            \"--date-from\",\n            date_from,\n            \"--date-to\",\n            date_to,\n            \"--output\",\n            output_labels.path,\n            \"--progress-file\",\n            f\"{output_labels.path}.progress.json\",\n            \"--merge-output\",\n            \"--skip-covered\",\n        ],\n        check=True,\n        env=env,\n    )\n\n"
+          ],
+          "image": "europe-west3-docker.pkg.dev/project-22586fae-58b4-4890-aeb/ml/ai-clipping-train:20260422-pipeline-gcloud-7day",
+          "resources": {
+            "cpuLimit": 2.0,
+            "resourceCpuLimit": "2"
+          }
+        }
+      },
+      "exec-evaluate-ranker-component": {
+        "container": {
+          "args": [
+            "--executor_input",
+            "{{$}}",
+            "--function_to_execute",
+            "evaluate_ranker_component"
+          ],
+          "command": [
+            "sh",
+            "-c",
+            "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip || python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0' '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"$0\" \"$@\"\n",
+            "sh",
+            "-ec",
+            "program_path=$(mktemp -d)\n\nprintf \"%s\" \"$0\" > \"$program_path/ephemeral_component.py\"\n_KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         \"$program_path/ephemeral_component.py\"                         \"$@\"\n",
+            "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import *\n\ndef evaluate_ranker_component(\n    artifact_bundle: Input[Artifact],\n    proxy_eval_dataset: Input[Dataset],\n    gold_eval_rows: Input[Dataset],\n    profile: str,\n    proxy_eval_report: Output[Artifact],\n    gold_eval_report: Output[Artifact],\n    pipeline_eval_report: Output[Artifact],\n):\n    from ml.pipelines.components import evaluate_ranker_op as component_module\n\n    component_module.run(\n        artifact_bundle_uri=artifact_bundle.path,\n        proxy_eval_dataset_uri=proxy_eval_dataset.path,\n        gold_eval_rows_uri=gold_eval_rows.path,\n        proxy_eval_report_uri=proxy_eval_report.path,\n        gold_eval_report_uri=gold_eval_report.path,\n        pipeline_eval_report_uri=pipeline_eval_report.path,\n        profile=profile,\n    )\n\n"
+          ],
+          "image": "europe-west3-docker.pkg.dev/project-22586fae-58b4-4890-aeb/ml/ai-clipping-train:20260422-pipeline-gcloud-7day"
+        }
+      },
+      "exec-promote-component": {
+        "container": {
+          "args": [
+            "--executor_input",
+            "{{$}}",
+            "--function_to_execute",
+            "promote_component"
+          ],
+          "command": [
+            "sh",
+            "-c",
+            "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip || python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0' '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"$0\" \"$@\"\n",
+            "sh",
+            "-ec",
+            "program_path=$(mktemp -d)\n\nprintf \"%s\" \"$0\" > \"$program_path/ephemeral_component.py\"\n_KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         \"$program_path/ephemeral_component.py\"                         \"$@\"\n",
+            "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import *\n\ndef promote_component(\n    artifact_bundle: Input[Artifact],\n    proxy_eval_report: Input[Artifact],\n    gold_eval_report: Input[Artifact],\n    pipeline_eval_report: Input[Artifact],\n    profile: str,\n    registry_report: Output[Artifact],\n    mlflow_tracking_uri_secret: str = \"\",\n):\n    import contextlib\n    import json\n    import os\n    from pathlib import Path\n    from google.cloud import secretmanager\n    from ml import mlflow_tracking\n\n    def resolve_secret_ref(secret_ref: str) -> str:\n        ref = secret_ref.strip()\n        if not ref:\n            return \"\"\n        if not ref.startswith(\"projects/\"):\n            return ref\n        client = secretmanager.SecretManagerServiceClient()\n        response = client.access_secret_version(request={\"name\": ref})\n        return response.payload.data.decode(\"utf-8\")\n\n    @contextlib.contextmanager\n    def apply_env(key: str, value: str):\n        previous = os.environ.get(key)\n        if value:\n            os.environ[key] = value\n        try:\n            yield\n        finally:\n            if previous is None:\n                os.environ.pop(key, None)\n            else:\n                os.environ[key] = previous\n\n    artifact_dir = Path(artifact_bundle.path)\n    artifact_path = artifact_dir / f\"{profile}_ranker.json\"\n    artifact_health_path = artifact_dir / f\"{profile}_artifact_health.json\"\n    with apply_env(\"MLFLOW_TRACKING_URI\", resolve_secret_ref(mlflow_tracking_uri_secret)):\n        registry_payload = mlflow_tracking.register_existing_artifact_bundle(\n            artifact_path=artifact_path,\n            artifact_health_path=artifact_health_path if artifact_health_path.exists() else None,\n            proxy_eval_path=Path(proxy_eval_report.path),\n            gold_eval_path=Path(gold_eval_report.path),\n            pipeline_eval_path=Path(pipeline_eval_report.path),\n        )\n    Path(registry_report.path).write_text(\n        json.dumps(registry_payload, ensure_ascii=True),\n        encoding=\"utf-8\",\n    )\n\n"
+          ],
+          "image": "europe-west3-docker.pkg.dev/project-22586fae-58b4-4890-aeb/ml/ai-clipping-train:20260422-pipeline-gcloud-7day"
+        }
+      },
+      "exec-train-ranker-component": {
+        "container": {
+          "args": [
+            "--executor_input",
+            "{{$}}",
+            "--function_to_execute",
+            "train_ranker_component"
+          ],
+          "command": [
+            "sh",
+            "-c",
+            "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip || python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0' '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"$0\" \"$@\"\n",
+            "sh",
+            "-ec",
+            "program_path=$(mktemp -d)\n\nprintf \"%s\" \"$0\" > \"$program_path/ephemeral_component.py\"\n_KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         \"$program_path/ephemeral_component.py\"                         \"$@\"\n",
+            "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import *\n\ndef train_ranker_component(\n    training_rows: Input[Dataset],\n    profile: str,\n    artifact_bundle: Output[Artifact],\n    training_stats: Output[Artifact],\n    streamer: str = \"\",\n    date_from: str = \"\",\n    date_to: str = \"\",\n    vertex_image_uri: str = \"\",\n    mlflow_tracking_uri_secret: str = \"\",\n):\n    import json\n    import os\n    import shutil\n    import subprocess\n    import tempfile\n    from pathlib import Path\n    from google.cloud import secretmanager\n\n    def resolve_secret_ref(secret_ref: str) -> str:\n        ref = secret_ref.strip()\n        if not ref:\n            return \"\"\n        if not ref.startswith(\"projects/\"):\n            return ref\n        client = secretmanager.SecretManagerServiceClient()\n        response = client.access_secret_version(request={\"name\": ref})\n        return response.payload.data.decode(\"utf-8\")\n\n    env = os.environ.copy()\n    env[\"MLFLOW_REGISTER_ON_TRAIN\"] = \"0\"\n    if streamer.strip():\n        env[\"TRAINING_STREAMER\"] = streamer.strip()\n    if date_from.strip():\n        env[\"DATE_FROM\"] = date_from.strip()\n    if date_to.strip():\n        env[\"DATE_TO\"] = date_to.strip()\n    if vertex_image_uri.strip():\n        env[\"VERTEX_IMAGE_URI\"] = vertex_image_uri.strip()\n    if mlflow_tracking_uri_secret.strip():\n        env[\"MLFLOW_TRACKING_URI\"] = resolve_secret_ref(mlflow_tracking_uri_secret)\n\n    with tempfile.TemporaryDirectory(prefix=\"train-ranker-\") as temp_dir:\n        work_dir = Path(temp_dir)\n        artifact_dir = work_dir / \"artifacts\"\n        artifact_dir.mkdir(parents=True, exist_ok=True)\n        report_path = work_dir / \"training_report.json\"\n        subprocess.run(\n            [\n                \"python\",\n                \"-m\",\n                \"ml.train_ranker\",\n                \"--dataset\",\n                training_rows.path,\n                \"--profile\",\n                profile,\n                \"--artifact-dir\",\n                str(artifact_dir),\n                \"--report-out\",\n                str(report_path),\n            ],\n            check=True,\n            env=env,\n        )\n\n        artifact_path = artifact_dir / f\"{profile}_ranker.json\"\n        artifact = json.loads(artifact_path.read_text(encoding=\"utf-8\"))\n        metrics_payload = {\n            \"selected_model\": artifact.get(\"selected_model\", \"\"),\n            \"validation\": artifact.get(\"validation\", {}),\n            \"training_stats\": artifact.get(\"training_stats\", {}),\n            \"mlflow\": artifact.get(\"mlflow\", {}),\n        }\n\n        bundle_path = Path(artifact_bundle.path)\n        bundle_path.mkdir(parents=True, exist_ok=True)\n        for child in artifact_dir.iterdir():\n            target = bundle_path / child.name\n            if child.is_dir():\n                shutil.copytree(child, target, dirs_exist_ok=True)\n            else:\n                shutil.copy2(child, target)\n        Path(training_stats.path).write_text(\n            json.dumps(metrics_payload, ensure_ascii=True),\n            encoding=\"utf-8\",\n        )\n\n"
+          ],
+          "image": "europe-west3-docker.pkg.dev/project-22586fae-58b4-4890-aeb/ml/ai-clipping-train:20260422-pipeline-gcloud-7day",
+          "resources": {
+            "cpuLimit": 16.0,
+            "memoryLimit": 111.669149696,
+            "resourceCpuLimit": "16",
+            "resourceMemoryLimit": "104Gi"
+          }
+        }
+      }
+    }
+  },
+  "pipelineInfo": {
+    "name": "ai-clipping-train-pipeline"
+  },
+  "root": {
+    "dag": {
+      "tasks": {
+        "build-eval-dataset-component": {
+          "cachingOptions": {},
+          "componentRef": {
+            "name": "comp-build-eval-dataset-component"
+          },
+          "dependentTasks": [
+            "build-training-dataset-component"
+          ],
+          "inputs": {
+            "artifacts": {
+              "training_rows": {
+                "taskOutputArtifact": {
+                  "outputArtifactKey": "training_rows",
+                  "producerTask": "build-training-dataset-component"
+                }
+              }
+            },
+            "parameters": {
+              "storage_dir": {
+                "componentInputParameter": "storage_dir"
+              },
+              "streamer": {
+                "componentInputParameter": "streamer"
+              }
+            }
+          },
+          "taskInfo": {
+            "name": "build-eval-dataset-component"
+          }
+        },
+        "build-training-dataset-component": {
+          "cachingOptions": {
+            "enableCache": true
+          },
+          "componentRef": {
+            "name": "comp-build-training-dataset-component"
+          },
+          "dependentTasks": [
+            "collect-twitch-clips-component"
+          ],
+          "inputs": {
+            "artifacts": {
+              "labels": {
+                "taskOutputArtifact": {
+                  "outputArtifactKey": "output_labels",
+                  "producerTask": "collect-twitch-clips-component"
+                }
+              }
+            },
+            "parameters": {
+              "dataset_llm_provider": {
+                "componentInputParameter": "dataset_llm_provider"
+              },
+              "gemini_api_key_secret": {
+                "componentInputParameter": "gemini_api_key_secret"
+              },
+              "groq_api_key_secret": {
+                "componentInputParameter": "groq_api_key_secret"
+              },
+              "location": {
+                "componentInputParameter": "vertex_location"
+              },
+              "network": {
+                "componentInputParameter": "vertex_network"
+              },
+              "ollama_host": {
+                "componentInputParameter": "ollama_host"
+              },
+              "profile": {
+                "componentInputParameter": "profile"
+              },
+              "project": {
+                "componentInputParameter": "vertex_project"
+              },
+              "service_account": {
+                "componentInputParameter": "vertex_service_account"
+              }
+            }
+          },
+          "taskInfo": {
+            "name": "build-training-dataset-component"
+          }
+        },
+        "collect-twitch-clips-component": {
+          "cachingOptions": {
+            "enableCache": true
+          },
+          "componentRef": {
+            "name": "comp-collect-twitch-clips-component"
+          },
+          "inputs": {
+            "parameters": {
+              "date_from": {
+                "componentInputParameter": "date_from"
+              },
+              "date_to": {
+                "componentInputParameter": "date_to"
+              },
+              "streamer": {
+                "componentInputParameter": "streamer"
+              },
+              "twitch_client_id_secret": {
+                "componentInputParameter": "twitch_client_id_secret"
+              },
+              "twitch_client_secret_secret": {
+                "componentInputParameter": "twitch_client_secret_secret"
+              }
+            }
+          },
+          "taskInfo": {
+            "name": "collect-twitch-clips-component"
+          }
+        },
+        "evaluate-ranker-component": {
+          "cachingOptions": {
+            "enableCache": true
+          },
+          "componentRef": {
+            "name": "comp-evaluate-ranker-component"
+          },
+          "dependentTasks": [
+            "build-eval-dataset-component",
+            "train-ranker-component"
+          ],
+          "inputs": {
+            "artifacts": {
+              "artifact_bundle": {
+                "taskOutputArtifact": {
+                  "outputArtifactKey": "artifact_bundle",
+                  "producerTask": "train-ranker-component"
+                }
+              },
+              "gold_eval_rows": {
+                "taskOutputArtifact": {
+                  "outputArtifactKey": "gold_eval_rows",
+                  "producerTask": "build-eval-dataset-component"
+                }
+              },
+              "proxy_eval_dataset": {
+                "taskOutputArtifact": {
+                  "outputArtifactKey": "proxy_eval_dataset",
+                  "producerTask": "build-eval-dataset-component"
+                }
+              }
+            },
+            "parameters": {
+              "profile": {
+                "componentInputParameter": "profile"
+              }
+            }
+          },
+          "taskInfo": {
+            "name": "evaluate-ranker-component"
+          }
+        },
+        "promote-component": {
+          "cachingOptions": {
+            "enableCache": true
+          },
+          "componentRef": {
+            "name": "comp-promote-component"
+          },
+          "dependentTasks": [
+            "evaluate-ranker-component",
+            "train-ranker-component"
+          ],
+          "inputs": {
+            "artifacts": {
+              "artifact_bundle": {
+                "taskOutputArtifact": {
+                  "outputArtifactKey": "artifact_bundle",
+                  "producerTask": "train-ranker-component"
+                }
+              },
+              "gold_eval_report": {
+                "taskOutputArtifact": {
+                  "outputArtifactKey": "gold_eval_report",
+                  "producerTask": "evaluate-ranker-component"
+                }
+              },
+              "pipeline_eval_report": {
+                "taskOutputArtifact": {
+                  "outputArtifactKey": "pipeline_eval_report",
+                  "producerTask": "evaluate-ranker-component"
+                }
+              },
+              "proxy_eval_report": {
+                "taskOutputArtifact": {
+                  "outputArtifactKey": "proxy_eval_report",
+                  "producerTask": "evaluate-ranker-component"
+                }
+              }
+            },
+            "parameters": {
+              "mlflow_tracking_uri_secret": {
+                "componentInputParameter": "mlflow_tracking_uri_secret"
+              },
+              "profile": {
+                "componentInputParameter": "profile"
+              }
+            }
+          },
+          "taskInfo": {
+            "name": "promote-component"
+          }
+        },
+        "train-ranker-component": {
+          "cachingOptions": {
+            "enableCache": true
+          },
+          "componentRef": {
+            "name": "comp-train-ranker-component"
+          },
+          "dependentTasks": [
+            "build-training-dataset-component"
+          ],
+          "inputs": {
+            "artifacts": {
+              "training_rows": {
+                "taskOutputArtifact": {
+                  "outputArtifactKey": "training_rows",
+                  "producerTask": "build-training-dataset-component"
+                }
+              }
+            },
+            "parameters": {
+              "date_from": {
+                "componentInputParameter": "date_from"
+              },
+              "date_to": {
+                "componentInputParameter": "date_to"
+              },
+              "mlflow_tracking_uri_secret": {
+                "componentInputParameter": "mlflow_tracking_uri_secret"
+              },
+              "profile": {
+                "componentInputParameter": "profile"
+              },
+              "streamer": {
+                "componentInputParameter": "streamer"
+              },
+              "vertex_image_uri": {
+                "componentInputParameter": "vertex_image_uri"
+              }
+            }
+          },
+          "taskInfo": {
+            "name": "train-ranker-component"
+          }
+        }
+      }
+    },
+    "inputDefinitions": {
+      "parameters": {
+        "dataset_llm_provider": {
+          "defaultValue": "auto",
+          "isOptional": true,
+          "parameterType": "STRING"
+        },
+        "date_from": {
+          "parameterType": "STRING"
+        },
+        "date_to": {
+          "parameterType": "STRING"
+        },
+        "gemini_api_key_secret": {
+          "defaultValue": "",
+          "isOptional": true,
+          "parameterType": "STRING"
+        },
+        "groq_api_key_secret": {
+          "defaultValue": "",
+          "isOptional": true,
+          "parameterType": "STRING"
+        },
+        "mlflow_tracking_uri_secret": {
+          "defaultValue": "",
+          "isOptional": true,
+          "parameterType": "STRING"
+        },
+        "ollama_host": {
+          "defaultValue": "",
+          "isOptional": true,
+          "parameterType": "STRING"
+        },
+        "profile": {
+          "parameterType": "STRING"
+        },
+        "storage_dir": {
+          "defaultValue": "tmp/storage",
+          "isOptional": true,
+          "parameterType": "STRING"
+        },
+        "streamer": {
+          "parameterType": "STRING"
+        },
+        "twitch_client_id_secret": {
+          "defaultValue": "",
+          "isOptional": true,
+          "parameterType": "STRING"
+        },
+        "twitch_client_secret_secret": {
+          "defaultValue": "",
+          "isOptional": true,
+          "parameterType": "STRING"
+        },
+        "vertex_image_uri": {
+          "defaultValue": "",
+          "isOptional": true,
+          "parameterType": "STRING"
+        },
+        "vertex_location": {
+          "defaultValue": "",
+          "isOptional": true,
+          "parameterType": "STRING"
+        },
+        "vertex_network": {
+          "defaultValue": "",
+          "isOptional": true,
+          "parameterType": "STRING"
+        },
+        "vertex_project": {
+          "defaultValue": "",
+          "isOptional": true,
+          "parameterType": "STRING"
+        },
+        "vertex_service_account": {
+          "defaultValue": "",
+          "isOptional": true,
+          "parameterType": "STRING"
+        }
+      }
+    }
+  },
+  "schemaVersion": "2.1.0",
+  "sdkVersion": "kfp-2.16.0"
+}

@@ -1,7 +1,10 @@
 import json
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 try:
     import joblib
@@ -13,7 +16,8 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - optional ML deps in test env
     GradientBoostingClassifier = None
 
-from services import selector
+import ml as ml_package
+from services import ranker as ranker_module, selector
 from services.ranker import Ranker
 from services.timeline_types import Candidate, CandidateFeatures
 
@@ -24,6 +28,21 @@ class _FakeLightGBMModel:
 
 
 class RankerTests(unittest.TestCase):
+    def test_ranker_semantic_score_uses_full_zero_to_ten_scale(self) -> None:
+        feature = CandidateFeatures(
+            candidate_id="semantic",
+            quoteability_score=1.0,
+            surprise_score=1.0,
+            contradiction_score=1.0,
+            standalone_score=1.0,
+            semantic_density=1.0,
+            source="quote",
+        )
+
+        score = Ranker(enable_trained_model=False)._heuristic_scores([feature], profile="general")[0][0]
+
+        self.assertAlmostEqual(score, 0.8, places=3)
+
     def test_selector_prefers_stronger_candidate(self) -> None:
         candidates = [
             Candidate(id="strong", start=0.0, end=12.0, source="reaction", anchor_time=2.0),
@@ -206,6 +225,212 @@ class RankerTests(unittest.TestCase):
 
         self.assertEqual(inspection["status"], "rejected")
         self.assertEqual(inspection["reason"], "validation_ranking_groups_below_minimum")
+
+    def test_inspect_artifact_rejects_offline_only_features(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_dir = Path(tmp)
+            (artifact_dir / "gaming_ranker.json").write_text(
+                json.dumps(
+                    {
+                        "version": 3,
+                        "profile": "gaming",
+                        "model_type": "linear",
+                        "feature_names": ["quoteability_score", "neighbor_positive_density"],
+                        "weights": {"quoteability_score": 2.0, "neighbor_positive_density": 1.0},
+                        "scales": {
+                            "quoteability_score": {"mean": 0.0, "std": 1.0},
+                            "neighbor_positive_density": {"mean": 0.0, "std": 1.0},
+                        },
+                        "training_stats": {
+                            "rows": 100,
+                            "positive_rows": 40,
+                            "negative_rows": 60,
+                            "train_rows": 80,
+                            "validation_rows": 20,
+                        },
+                        "validation": {"accuracy": 0.8, "ndcg_at_5": 0.8, "precision_at_5": 0.8},
+                        "intercept": 0.0,
+                        "blend": 1.0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            inspection = Ranker(artifact_dir=artifact_dir, enable_trained_model=True).inspect_artifact("gaming")
+
+        self.assertEqual(inspection["status"], "rejected")
+        self.assertEqual(inspection["reason"], "artifact_references_offline_only_features")
+
+    def test_inspect_artifact_rejects_semantic_config_mismatch_for_v4_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_dir = Path(tmp)
+            (artifact_dir / "gaming_ranker.json").write_text(
+                json.dumps(
+                    {
+                        "version": 4,
+                        "profile": "gaming",
+                        "model_type": "linear",
+                        "feature_names": ["quoteability_score"],
+                        "semantic_score_config": {"regex_weight": 0.5, "llm_weight": 0.5},
+                        "weights": {"quoteability_score": 2.0},
+                        "scales": {"quoteability_score": {"mean": 0.0, "std": 1.0}},
+                        "training_stats": {
+                            "rows": 100,
+                            "positive_rows": 40,
+                            "negative_rows": 60,
+                            "train_rows": 80,
+                            "validation_rows": 20,
+                        },
+                        "validation": {"accuracy": 0.8, "ndcg_at_5": 0.8, "precision_at_5": 0.8},
+                        "intercept": 0.0,
+                        "blend": 1.0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            inspection = Ranker(artifact_dir=artifact_dir, enable_trained_model=True).inspect_artifact("gaming")
+
+        self.assertEqual(inspection["status"], "rejected")
+        self.assertEqual(inspection["reason"], "semantic_score_config_mismatch")
+
+    def test_inspect_artifact_falls_back_to_mlflow_registry_when_local_file_is_missing(self) -> None:
+        registry_artifact = {
+            "version": 4,
+            "profile": "gaming",
+            "model_type": "linear",
+            "feature_names": ["quoteability_score"],
+            "semantic_score_config": ranker_module.semantic_service.semantic_score_config(),
+            "weights": {"quoteability_score": 2.0},
+            "scales": {"quoteability_score": {"mean": 0.0, "std": 1.0}},
+            "training_stats": {
+                "rows": 100,
+                "positive_rows": 40,
+                "negative_rows": 60,
+                "train_rows": 80,
+                "validation_rows": 20,
+            },
+            "validation": {
+                "accuracy": 0.8,
+                "ndcg_at_5": 0.8,
+                "precision_at_5": 0.8,
+                "ranking_groups": 2,
+                "ndcg_at_5_min": 0.5,
+                "ndcg_at_5_p25": 0.6,
+            },
+            "intercept": 0.0,
+            "blend": 1.0,
+            "_artifact_base_dir": "/tmp/mlflow-registry",
+        }
+
+        fake_mlflow_tracking = types.ModuleType("ml.mlflow_tracking")
+        fake_mlflow_tracking.load_registered_ranker_artifact = lambda profile, stage="Production": dict(registry_artifact)
+
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.dict(sys.modules, {"ml.mlflow_tracking": fake_mlflow_tracking}), \
+             patch.object(ml_package, "mlflow_tracking", fake_mlflow_tracking, create=True):
+            artifact_dir = Path(tmp)
+            inspection = Ranker(artifact_dir=artifact_dir, enable_trained_model=True).inspect_artifact("gaming")
+
+        self.assertEqual(inspection["status"], "usable")
+        self.assertEqual(inspection["source"], "mlflow_registry")
+
+    def test_inspect_artifact_falls_back_to_mlflow_registry_when_local_file_is_rejected(self) -> None:
+        registry_artifact = {
+            "version": 4,
+            "profile": "gaming",
+            "model_type": "linear",
+            "feature_names": ["quoteability_score"],
+            "semantic_score_config": ranker_module.semantic_service.semantic_score_config(),
+            "weights": {"quoteability_score": 2.0},
+            "scales": {"quoteability_score": {"mean": 0.0, "std": 1.0}},
+            "training_stats": {
+                "rows": 100,
+                "positive_rows": 40,
+                "negative_rows": 60,
+                "train_rows": 80,
+                "validation_rows": 20,
+            },
+            "validation": {
+                "accuracy": 0.8,
+                "ndcg_at_5": 0.8,
+                "precision_at_5": 0.8,
+                "ranking_groups": 2,
+                "ndcg_at_5_min": 0.5,
+                "ndcg_at_5_p25": 0.6,
+            },
+            "intercept": 0.0,
+            "blend": 1.0,
+            "_artifact_base_dir": "/tmp/mlflow-registry",
+        }
+
+        fake_mlflow_tracking = types.ModuleType("ml.mlflow_tracking")
+        fake_mlflow_tracking.load_registered_ranker_artifact = lambda profile, stage="Production": dict(registry_artifact)
+
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.dict(sys.modules, {"ml.mlflow_tracking": fake_mlflow_tracking}), \
+             patch.object(ml_package, "mlflow_tracking", fake_mlflow_tracking, create=True):
+            artifact_dir = Path(tmp)
+            (artifact_dir / "gaming_ranker.json").write_text(
+                json.dumps(
+                    {
+                        "version": 4,
+                        "profile": "gaming",
+                        "model_type": "linear",
+                        "feature_names": ["quoteability_score"],
+                        "semantic_score_config": {"regex_weight": 0.5, "llm_weight": 0.5},
+                        "weights": {"quoteability_score": 2.0},
+                        "scales": {"quoteability_score": {"mean": 0.0, "std": 1.0}},
+                        "training_stats": {
+                            "rows": 100,
+                            "positive_rows": 40,
+                            "negative_rows": 60,
+                            "train_rows": 80,
+                            "validation_rows": 20,
+                        },
+                        "validation": {"accuracy": 0.8, "ndcg_at_5": 0.8, "precision_at_5": 0.8},
+                        "intercept": 0.0,
+                        "blend": 1.0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            inspection = Ranker(artifact_dir=artifact_dir, enable_trained_model=True).inspect_artifact("gaming")
+
+        self.assertEqual(inspection["status"], "usable")
+        self.assertEqual(inspection["source"], "mlflow_registry")
+
+    @unittest.skipUnless(joblib is not None, "joblib is required for artifact tests")
+    def test_inspect_artifact_rejects_unloadable_joblib_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_dir = Path(tmp)
+            (artifact_dir / "gaming_ranker.json").write_text(
+                json.dumps(
+                    {
+                        "version": 3,
+                        "profile": "gaming",
+                        "model_type": "gradient_boosting",
+                        "feature_names": ["quoteability_score"],
+                        "weights": {},
+                        "scales": {"quoteability_score": {"mean": 0.0, "std": 1.0}},
+                        "model_path": "missing_model.joblib",
+                        "training_stats": {
+                            "rows": 100,
+                            "positive_rows": 40,
+                            "negative_rows": 60,
+                            "train_rows": 80,
+                            "validation_rows": 20,
+                        },
+                        "validation": {"accuracy": 0.8, "ndcg_at_5": 0.8, "precision_at_5": 0.8},
+                        "blend": 1.0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.object(ranker_module.logger, "warning") as warning_mock:
+                inspection = Ranker(artifact_dir=artifact_dir, enable_trained_model=True).inspect_artifact("gaming")
+
+        self.assertEqual(inspection["status"], "rejected")
+        self.assertEqual(inspection["reason"], "artifact_model_unloadable")
+        warning_mock.assert_called()
 
     @unittest.skipUnless(joblib is not None, "joblib is required for artifact tests")
     def test_ranker_ignores_undertrained_artifact(self) -> None:

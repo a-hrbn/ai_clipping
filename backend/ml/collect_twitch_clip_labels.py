@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import pathlib
 import ssl
@@ -25,11 +26,24 @@ _NEGATIVE_WINDOW_SECONDS = 45
 _NEGATIVE_WINDOW_MIN_SECONDS = 18
 _NEGATIVE_WINDOW_MAX_SECONDS = 75
 _NEGATIVE_BUFFER_SECONDS = 20
-_HARD_NEGATIVE_OFFSETS = (12.0, 24.0, 40.0)
+_HARD_NEGATIVE_OFFSETS = (6.0, 12.0, 24.0, 40.0, 60.0)
+_BACKGROUND_NEGATIVE_RATIO = 3.0
+_BACKGROUND_STRIDE_MULTIPLIER = 1.2
 _CLIP_REGION_MERGE_GAP_SECONDS = 5.0
 _CLIP_REGION_AMBIGUOUS_CLIP_COUNT = 5
 _CLIP_REGION_AMBIGUOUS_WINDOW_SECONDS = 95.0
 _CLIP_REGION_STRONG_SHRINK_MAX_SECONDS = 75.0
+_DEFAULT_SOURCE_MANIFEST = BACKEND_ROOT / "ml" / "streamer_sources.csv"
+_SOURCE_MANIFEST_REQUIRED_COLUMNS = {
+    "streamer",
+    "platform",
+    "source_url",
+    "language",
+    "tags",
+    "max_clips",
+    "training_profiles",
+    "twitch_broadcaster",
+}
 
 
 class TwitchClient:
@@ -98,9 +112,11 @@ class TwitchClient:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Collect Twitch clip labels and derive canonical VOD windows.")
-    parser.add_argument("--broadcaster", required=True)
+    parser.add_argument("--broadcaster", default="")
+    parser.add_argument("--profile", default="", help="Resolve a broadcaster pool from streamer_sources.csv.")
     parser.add_argument("--date-from", required=True, help="YYYY-MM-DD")
     parser.add_argument("--date-to", required=True, help="YYYY-MM-DD")
+    parser.add_argument("--sources", default=str(_DEFAULT_SOURCE_MANIFEST))
     parser.add_argument("--cache-dir", default=str(BACKEND_ROOT / "ml" / "artifacts" / "twitch_cache"))
     parser.add_argument("--output", default=str(BACKEND_ROOT / "ml" / "artifacts" / "twitch_clip_labels.jsonl"))
     parser.add_argument(
@@ -120,6 +136,15 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    resolved_broadcasters = _resolved_broadcasters(
+        broadcaster=args.broadcaster,
+        profile=args.profile,
+        manifest_path=pathlib.Path(args.sources),
+    )
+    if not resolved_broadcasters:
+        print("Either --broadcaster or --profile must resolve to at least one Twitch broadcaster.")
+        return 1
+
     if not settings.twitch_client_id or not settings.twitch_client_secret:
         print("TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET must be configured.")
         return 1
@@ -136,54 +161,161 @@ def main() -> int:
         return 1
 
     existing_rows = _read_jsonl(output_path) if output_path.exists() else []
-    missing_ranges = [(requested_start, requested_end)]
-    skipped_ranges: list[tuple[date, date]] = []
-    if args.skip_covered and output_path.exists():
-        progress = _read_progress_file(progress_path)
-        covered_ranges = _covered_date_ranges(progress, args.broadcaster)
-        skipped_ranges = _intersecting_date_ranges(requested_start, requested_end, covered_ranges)
-        missing_ranges = _missing_date_ranges(requested_start, requested_end, covered_ranges)
-
     print(f"Trainiere VOD von {args.date_from} bis {args.date_to}")
-    for skipped_start, skipped_end in skipped_ranges:
-        print(f"Überspringe {skipped_start.isoformat()} bis {skipped_end.isoformat()} (bereits trainiert)")
     rows = list(existing_rows) if (output_path.exists() and (args.merge_output or args.skip_covered)) else []
     collected_any = False
-    chunk_ranges = _collection_chunks(missing_ranges)
-    for range_start, range_end in chunk_ranges:
-        print(
-            "Sammle Twitch-Labels für "
-            f"{args.broadcaster}: {range_start.isoformat()} bis {range_end.isoformat()}"
-        )
-        range_rows = collect_clip_labels(
-            client,
-            broadcaster=args.broadcaster,
-            date_from=range_start.isoformat(),
-            date_to=range_end.isoformat(),
-            cache_dir=cache_dir,
-        )
-        before_count = len(rows)
-        rows = _merge_label_rows(rows, range_rows)
-        collected_any = collected_any or bool(range_rows)
-        if output_path.exists() or rows:
-            _write_jsonl(output_path, rows)
-        progress = _read_progress_file(progress_path)
-        progress = _record_collected_range(progress, args.broadcaster, range_start, range_end)
-        _write_progress_file(progress_path, progress)
-        print(
-            f"Checkpoint gespeichert für {range_start.isoformat()} bis {range_end.isoformat()} "
-            f"({before_count} -> {len(rows)} Rows)"
-        )
+    failures: list[str] = []
+    for broadcaster in resolved_broadcasters:
+        missing_ranges = [(requested_start, requested_end)]
+        skipped_ranges: list[tuple[date, date]] = []
+        if args.skip_covered and output_path.exists():
+            progress = _read_progress_file(progress_path)
+            covered_ranges = _covered_date_ranges(progress, broadcaster)
+            skipped_ranges = _intersecting_date_ranges(requested_start, requested_end, covered_ranges)
+            missing_ranges = _missing_date_ranges(requested_start, requested_end, covered_ranges)
 
-    if args.skip_covered and not missing_ranges:
-        print(
-            "Überspringe Twitch-Sammlung, Bereich bereits vollständig trainiert: "
-            f"{args.date_from} -> {args.date_to}"
-        )
+        for skipped_start, skipped_end in skipped_ranges:
+            print(
+                f"Überspringe {broadcaster}: {skipped_start.isoformat()} bis {skipped_end.isoformat()} "
+                "(bereits trainiert)"
+            )
+
+        chunk_ranges = _collection_chunks(missing_ranges)
+        if args.skip_covered and not missing_ranges:
+            print(
+                "Überspringe Twitch-Sammlung, Bereich bereits vollständig trainiert: "
+                f"{broadcaster} {args.date_from} -> {args.date_to}"
+            )
+            continue
+
+        for range_start, range_end in chunk_ranges:
+            print(
+                "Sammle Twitch-Labels für "
+                f"{broadcaster}: {range_start.isoformat()} bis {range_end.isoformat()}"
+            )
+            try:
+                range_rows = collect_clip_labels(
+                    client,
+                    broadcaster=broadcaster,
+                    date_from=range_start.isoformat(),
+                    date_to=range_end.isoformat(),
+                    cache_dir=cache_dir,
+                )
+            except Exception as exc:
+                message = f"{broadcaster}: {exc}"
+                failures.append(message)
+                print(f"Warnung: Twitch-Sammlung übersprungen für {message}", file=sys.stderr)
+                continue
+            before_count = len(rows)
+            rows = _merge_label_rows(rows, range_rows)
+            collected_any = collected_any or bool(range_rows)
+            if output_path.exists() or rows:
+                _write_jsonl(output_path, rows)
+            progress = _read_progress_file(progress_path)
+            progress = _record_collected_range(progress, broadcaster, range_start, range_end)
+            _write_progress_file(progress_path, progress)
+            print(
+                f"Checkpoint gespeichert für {broadcaster} {range_start.isoformat()} bis {range_end.isoformat()} "
+                f"({before_count} -> {len(rows)} Rows)"
+            )
+
     if output_path.exists() and rows == existing_rows and not collected_any:
         print(f"Label-Datei unverändert: {output_path}")
+    if failures:
+        print(json.dumps({"event": "twitch_pool_failures", "failures": failures}, ensure_ascii=True), file=sys.stderr)
     print(f"Wrote {len(rows)} label rows to {output_path}")
+    if failures and not rows and not collected_any:
+        return 1
     return 0
+
+
+def _resolved_broadcasters(
+    *,
+    broadcaster: str,
+    profile: str,
+    manifest_path: pathlib.Path,
+) -> list[str]:
+    explicit = str(broadcaster or "").strip().lower()
+    broadcasters: list[str] = []
+    if explicit:
+        broadcasters.append(explicit)
+    profile_name = str(profile or "").strip().lower()
+    if profile_name:
+        manifest_rows = _read_source_manifest(manifest_path)
+        for row in manifest_rows:
+            profiles = {
+                item.strip().lower()
+                for item in str(row.get("training_profiles") or "").split(",")
+                if item.strip()
+            }
+            if profile_name not in profiles:
+                continue
+            candidate = str(row.get("twitch_broadcaster") or row.get("streamer") or "").strip().lower()
+            if candidate:
+                broadcasters.append(candidate)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in broadcasters:
+        if item in seen:
+            continue
+        seen.add(item)
+        deduped.append(item)
+    return deduped
+
+
+def _read_source_manifest(path: pathlib.Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    lines = [
+        line for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if not lines:
+        return []
+    delimiter = "\t" if "\t" in lines[0] else ","
+    reader = csv.DictReader(lines, delimiter=delimiter)
+    _validate_source_manifest_header(reader.fieldnames or [], path)
+    rows: list[dict[str, str]] = []
+    for row in reader:
+        normalized = {str(key or ""): str(value or "").strip() for key, value in row.items()}
+        _validate_source_manifest_row(normalized, path)
+        rows.append(normalized)
+    return rows
+
+
+def _validate_source_manifest_header(fieldnames: list[str], path: pathlib.Path) -> None:
+    normalized = {str(name or "").strip() for name in fieldnames}
+    missing = sorted(_SOURCE_MANIFEST_REQUIRED_COLUMNS - normalized)
+    if missing:
+        raise ValueError(
+            f"Invalid streamer source manifest {path}: missing required columns {missing}"
+        )
+
+
+def _validate_source_manifest_row(row: dict[str, str], path: pathlib.Path) -> None:
+    streamer = str(row.get("streamer") or "").strip()
+    platform = str(row.get("platform") or "").strip().lower()
+    source_url = str(row.get("source_url") or "").strip()
+    training_profiles = str(row.get("training_profiles") or "").strip()
+    twitch_broadcaster = str(row.get("twitch_broadcaster") or "").strip()
+    if not streamer:
+        raise ValueError(f"Invalid streamer source manifest {path}: row missing streamer")
+    if not platform:
+        raise ValueError(f"Invalid streamer source manifest {path}: row for {streamer} missing platform")
+    if not training_profiles:
+        raise ValueError(
+            f"Invalid streamer source manifest {path}: row for {streamer} missing training_profiles"
+        )
+    if platform == "twitch_pool":
+        if not twitch_broadcaster:
+            raise ValueError(
+                f"Invalid streamer source manifest {path}: twitch_pool row for {streamer} missing twitch_broadcaster"
+            )
+        return
+    if not source_url:
+        raise ValueError(
+            f"Invalid streamer source manifest {path}: row for {streamer} missing source_url"
+        )
 
 
 def collect_clip_labels(
@@ -436,6 +568,10 @@ def _sample_negative_rows(broadcaster: str, vod: dict, positives: list[dict]) ->
     if duration <= _NEGATIVE_WINDOW_SECONDS:
         return []
     target_durations = _negative_target_durations(positives)
+    positive_like = [
+        row for row in positives
+        if str(row.get("label_class") or "") in {"viral_positive", "positive", "weak_positive"}
+    ]
     blocked: list[tuple[float, float]] = []
     for row in positives:
         start = float(row["window_start"]) - _NEGATIVE_BUFFER_SECONDS
@@ -444,38 +580,24 @@ def _sample_negative_rows(broadcaster: str, vod: dict, positives: list[dict]) ->
     rows: list[dict] = []
     rows.extend(_mine_boundary_negatives(broadcaster, vod, positives, blocked))
     rows.extend(_mine_interstitial_negatives(broadcaster, vod, positives, blocked))
-    cursor = 0.0
-    negative_index = 0
-    while cursor + min(target_durations) <= duration:
-        target_duration = _cycled_duration(target_durations, negative_index)
-        window_end = min(cursor + target_duration, float(duration))
-        if window_end - cursor < target_duration * 0.8:
-            break
-        window = (cursor, window_end)
-        if not _overlaps_any(window, blocked):
-            rows.append(
-                {
-                    "broadcaster": broadcaster,
-                    "platform_source": "twitch_vod_negative",
-                    "label_source": "twitch_clip_api",
-                    "vod_id": str(vod["id"]),
-                    "vod_url": f"https://www.twitch.tv/videos/{vod['id']}",
-                    "vod_duration_seconds": int(vod.get("duration_seconds") or 0),
-                    "window_start": round(window[0], 2),
-                    "window_end": round(window[1], 2),
-                    "label_class": "background_negative",
-                    "label_score": 0.0,
-                    "quality_bucket": "negative",
-                    "view_bucket": "none",
-                    "clip_ids": [],
-                    "view_count": 0,
-                    "created_at": str(vod.get("created_at") or ""),
-                    "negative_index": negative_index,
-                    "negative_source": "background_sample",
-                }
-            )
-            negative_index += 1
-        cursor += target_duration * 2.5
+    target_negative_rows = max(
+        int(max(len(positive_like), len(positives), 1) * _BACKGROUND_NEGATIVE_RATIO),
+        len(rows),
+        4,
+    )
+    target_background_rows = max(
+        int(max(len(positive_like), len(positives), 1) * 1.5),
+        2,
+    )
+    rows.extend(
+        _mine_background_negatives(
+            broadcaster,
+            vod,
+            blocked,
+            target_durations=target_durations,
+            target_count=max(target_negative_rows - len(rows), target_background_rows),
+        )
+    )
     return _dedupe_negative_rows(rows)
 
 
@@ -548,37 +670,111 @@ def _mine_interstitial_negatives(
         gap = gap_end - gap_start
         if gap < target_duration * 1.35:
             continue
-        center = (gap_start + gap_end) / 2.0
-        window_start = max(center - (target_duration / 2.0), 0.0)
-        window_end = min(window_start + target_duration, duration)
-        if window_end - window_start < target_duration * 0.8:
-            continue
-        window = (window_start, window_end)
-        if _overlaps_any(window, blocked):
-            continue
-        rows.append(
-            {
-                "broadcaster": broadcaster,
-                "platform_source": "twitch_vod_negative",
-                "label_source": "twitch_clip_api",
-                "vod_id": str(vod["id"]),
+        for window_start in _interstitial_window_starts(gap_start, gap_end, target_duration):
+            window_end = min(window_start + target_duration, duration)
+            if window_end - window_start < target_duration * 0.8:
+                continue
+            window = (window_start, window_end)
+            if _overlaps_any(window, blocked):
+                continue
+            rows.append(
+                {
+                    "broadcaster": broadcaster,
+                    "platform_source": "twitch_vod_negative",
+                    "label_source": "twitch_clip_api",
+                    "vod_id": str(vod["id"]),
                     "vod_url": f"https://www.twitch.tv/videos/{vod['id']}",
                     "vod_duration_seconds": int(vod.get("duration_seconds") or 0),
                     "window_start": round(window_start, 2),
                     "window_end": round(window_end, 2),
-                "label_class": "hard_negative",
-                "label_score": 0.0,
-                "quality_bucket": "negative",
-                "view_bucket": "none",
-                "clip_ids": [],
-                "view_count": 0,
-                "created_at": str(vod.get("created_at") or ""),
-                "negative_index": index,
-                "negative_source": "between_positive_clusters",
-            }
-        )
-        index += 1
+                    "label_class": "hard_negative",
+                    "label_score": 0.0,
+                    "quality_bucket": "negative",
+                    "view_bucket": "none",
+                    "clip_ids": [],
+                    "view_count": 0,
+                    "created_at": str(vod.get("created_at") or ""),
+                    "negative_index": index,
+                    "negative_source": "between_positive_clusters",
+                }
+            )
+            index += 1
     return rows
+
+
+def _mine_background_negatives(
+    broadcaster: str,
+    vod: dict,
+    blocked: list[tuple[float, float]],
+    *,
+    target_durations: list[float],
+    target_count: int,
+) -> list[dict]:
+    duration = float(vod.get("duration_seconds") or 0.0)
+    if target_count <= 0 or duration <= 0.0:
+        return []
+    offsets = [0.0]
+    for item in target_durations[:3]:
+        offsets.extend([round(item * 0.45, 2), round(item * 0.9, 2)])
+
+    rows: list[dict] = []
+    negative_index = 0
+    for base_offset in offsets:
+        cursor = min(max(base_offset, 0.0), max(duration - min(target_durations), 0.0))
+        duration_index = negative_index
+        while cursor + min(target_durations) <= duration and len(rows) < target_count:
+            target_duration = _cycled_duration(target_durations, duration_index)
+            window_end = min(cursor + target_duration, duration)
+            if window_end - cursor < target_duration * 0.8:
+                break
+            window = (cursor, window_end)
+            if not _overlaps_any(window, blocked):
+                rows.append(
+                    {
+                        "broadcaster": broadcaster,
+                        "platform_source": "twitch_vod_negative",
+                        "label_source": "twitch_clip_api",
+                        "vod_id": str(vod["id"]),
+                        "vod_url": f"https://www.twitch.tv/videos/{vod['id']}",
+                        "vod_duration_seconds": int(vod.get("duration_seconds") or 0),
+                        "window_start": round(window[0], 2),
+                        "window_end": round(window[1], 2),
+                        "label_class": "background_negative",
+                        "label_score": 0.0,
+                        "quality_bucket": "negative",
+                        "view_bucket": "none",
+                        "clip_ids": [],
+                        "view_count": 0,
+                        "created_at": str(vod.get("created_at") or ""),
+                        "negative_index": negative_index,
+                        "negative_source": "background_sample",
+                    }
+                )
+                negative_index += 1
+            duration_index += 1
+            cursor += max(target_duration * _BACKGROUND_STRIDE_MULTIPLIER, float(_NEGATIVE_WINDOW_MIN_SECONDS))
+    return rows
+
+
+def _interstitial_window_starts(gap_start: float, gap_end: float, target_duration: float) -> list[float]:
+    gap = max(gap_end - gap_start, 0.0)
+    if gap <= 0.0:
+        return []
+    slack = max(gap - target_duration, 0.0)
+    starts = [gap_start + (slack / 2.0)]
+    if slack >= target_duration * 0.6:
+        starts.extend([
+            gap_start + (slack * 0.2),
+            gap_start + (slack * 0.8),
+        ])
+    deduped: list[float] = []
+    seen: set[float] = set()
+    for start in sorted(round(max(item, 0.0), 2) for item in starts):
+        if start in seen:
+            continue
+        seen.add(start)
+        deduped.append(start)
+    return deduped
 
 
 def _negative_target_durations(positives: list[dict]) -> list[float]:

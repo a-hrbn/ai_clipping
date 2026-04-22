@@ -1,3 +1,4 @@
+import json
 import tempfile
 import time
 import unittest
@@ -22,7 +23,7 @@ class BuildTwitchTrainingDatasetTests(unittest.TestCase):
              patch.object(settings, "ollama_model", "llama-local"):
             summary = build_twitch_training_dataset._semantic_provider_summary("auto")
 
-        self.assertEqual(summary, "auto->groq:llama-groq|fallback=ollama:llama-local")
+        self.assertEqual(summary, "auto->ollama:llama-local|fallback=groq:llama-groq")
 
     def test_semantic_provider_summary_reports_groq_fallback_when_unconfigured(self) -> None:
         with patch.object(settings, "groq_api_key", None), \
@@ -34,13 +35,71 @@ class BuildTwitchTrainingDatasetTests(unittest.TestCase):
 
     def test_dataset_summary_counts_classes(self) -> None:
         summary = build_twitch_training_dataset.dataset_summary([
-            {"vod_id": "1", "label_class": "positive"},
-            {"vod_id": "1", "label_class": "hard_negative"},
-            {"vod_id": "2", "label_class": "viral_positive"},
+            {"vod_id": "1", "label_class": "positive", "label": 1, "platform_source": "twitch_clip"},
+            {"vod_id": "1", "label_class": "hard_negative", "label": 0, "platform_source": "twitch_vod_negative"},
+            {"vod_id": "2", "label_class": "viral_positive", "label": 1, "platform_source": "twitch_clip"},
         ])
         self.assertEqual(summary["rows"], 3)
         self.assertEqual(summary["vod_count"], 2)
         self.assertEqual(summary["label_classes"]["positive"], 1)
+        self.assertEqual(summary["positive_rows"], 2)
+        self.assertEqual(summary["negative_rows"], 1)
+
+    def test_dataset_summary_reports_duplicate_windows_and_platform_drift(self) -> None:
+        summary = build_twitch_training_dataset.dataset_summary([
+            {
+                "vod_id": "1",
+                "window_start": 10.0,
+                "window_end": 20.0,
+                "label_class": "positive",
+                "label": 1,
+                "platform_source": "twitch_clip",
+                "candidate_id": "a",
+            },
+            {
+                "vod_id": "1",
+                "window_start": 10.0,
+                "window_end": 20.0,
+                "label_class": "hard_negative",
+                "label": 0,
+                "platform_source": "twitch_vod_negative",
+                "candidate_id": "b",
+            },
+            {
+                "vod_id": "2",
+                "window_start": 30.0,
+                "window_end": 40.0,
+                "label_class": "positive",
+                "label": 1,
+                "platform_source": "twitch_clip",
+                "candidate_id": "c",
+            },
+        ])
+
+        self.assertEqual(summary["duplicate_windows"]["count"], 1)
+        self.assertEqual(summary["platform_source_drift"]["twitch_clip"]["positive_rows"], 2)
+        self.assertEqual(summary["platform_source_drift"]["twitch_vod_negative"]["negative_rows"], 1)
+        self.assertIn("vod_overlap_count", summary["split_leak_check"])
+        self.assertIn("candidate_source_mix", summary)
+
+    def test_cap_candidate_source_mix_limits_peak_share(self) -> None:
+        rows = [
+            {"candidate_id": "r1", "candidate_source": "reaction"},
+            {"candidate_id": "r2", "candidate_source": "reaction"},
+            {"candidate_id": "r3", "candidate_source": "reaction"},
+            {"candidate_id": "r4", "candidate_source": "reaction"},
+            {"candidate_id": "r5", "candidate_source": "reaction"},
+            {"candidate_id": "q1", "candidate_source": "quote"},
+            {"candidate_id": "q2", "candidate_source": "quote"},
+            {"candidate_id": "m1", "candidate_source": "moment"},
+            {"candidate_id": "m2", "candidate_source": "moment"},
+        ]
+
+        capped = build_twitch_training_dataset._cap_candidate_source_mix(rows)
+        summary = build_twitch_training_dataset._candidate_source_mix_summary(capped)
+
+        self.assertLessEqual(summary["peak_share"], 0.4)
+        self.assertLess(len(capped), len(rows))
 
     def test_entry_from_label_maps_positive_and_negative(self) -> None:
         pos = build_twitch_training_dataset._entry_from_label({
@@ -158,40 +217,6 @@ class BuildTwitchTrainingDatasetTests(unittest.TestCase):
         self.assertGreater(row["features"]["vod_progress"], 0.0)
         self.assertEqual(row["features"]["clip_overlap_count"], 2.0)
 
-    def test_build_dataset_uses_training_cache_when_present(self) -> None:
-        labels = [
-            {
-                "broadcaster": "jynxzi",
-                "vod_id": "123",
-                "vod_url": "https://www.twitch.tv/videos/123",
-                "window_start": 10.0,
-                "window_end": 20.0,
-                "label_class": "positive",
-                "label_score": 0.8,
-                "clip_ids": ["c1"],
-                "label_source": "twitch_clip_api",
-                "platform_source": "twitch_clip",
-            },
-        ]
-        fake_row = {
-            "label": 1,
-            "label_source": "twitch_clip_api",
-            "features": {"candidate_id": "x"},
-        }
-        with tempfile.TemporaryDirectory() as tmp, \
-             patch.object(settings, "storage_dir", tmp), \
-             patch.object(settings, "training_vod_cache_ttl_sec", 3600), \
-             patch("ml.build_twitch_training_dataset._build_rows_for_label", return_value=[fake_row]) as build_rows_mock, \
-             patch("ml.build_twitch_training_dataset.downloader.download") as download_mock:
-            cache_path = build_twitch_training_dataset._training_cache_path(labels[0]["vod_url"])
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            cache_path.write_bytes(b"cached")
-            rows = build_twitch_training_dataset.build_dataset(labels, "jynxzi", Path(tmp) / "work")
-
-        self.assertEqual(len(rows), 1)
-        download_mock.assert_not_called()
-        self.assertEqual(build_rows_mock.call_args.kwargs["vod_path"], cache_path)
-
     def test_extract_clip_modalities_collects_transcript_audio_and_video(self) -> None:
         transcript = [RichSegment(start=0.0, end=1.0, text="test")]
         audio_frames = [SimpleNamespace(second=0)]
@@ -296,42 +321,17 @@ class BuildTwitchTrainingDatasetTests(unittest.TestCase):
 
         self.assertIsNone(checkpoint)
 
-    def test_materialize_vod_writes_training_cache_after_download(self) -> None:
+    def test_materialize_vod_always_downloads_directly_without_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, \
-             patch.object(settings, "storage_dir", tmp), \
-             patch.object(settings, "training_vod_cache_ttl_sec", 3600):
-            downloaded = Path(tmp) / "job" / "video.mp4"
-            downloaded.parent.mkdir(parents=True, exist_ok=True)
-            downloaded.write_bytes(b"video")
-            with patch("ml.build_twitch_training_dataset.downloader.download", return_value=downloaded):
-                path = build_twitch_training_dataset._materialize_vod("https://www.twitch.tv/videos/456", "job-1")
-
-            self.assertTrue(path.exists())
-            self.assertEqual(path.read_bytes(), b"video")
-            self.assertEqual(path, build_twitch_training_dataset._training_cache_path("https://www.twitch.tv/videos/456"))
-
-    def test_materialize_vod_skips_training_cache_when_disabled(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, \
-             patch.object(settings, "storage_dir", tmp), \
-             patch.object(settings, "training_vod_cache_ttl_sec", 0):
-            downloaded = Path(tmp) / "job" / "video.mp4"
+             patch.object(settings, "storage_dir", tmp):
+            downloaded = Path(tmp) / "job-1" / "video.mp4"
             downloaded.parent.mkdir(parents=True, exist_ok=True)
             downloaded.write_bytes(b"video")
             with patch("ml.build_twitch_training_dataset.downloader.download", return_value=downloaded) as download_mock:
                 path = build_twitch_training_dataset._materialize_vod("https://www.twitch.tv/videos/456", "job-1")
 
-            self.assertEqual(path, downloaded)
-            self.assertEqual(path.read_bytes(), b"video")
-            self.assertFalse((Path(tmp) / "_download_cache" / "training_vods").exists())
-            download_mock.assert_called_once()
-
-    def test_training_cache_dir_can_be_overridden(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            custom_cache = Path(tmp) / "external_training_cache"
-            with patch.object(settings, "storage_dir", "/tmp/ignored"), \
-                 patch.object(settings, "training_vod_cache_dir", str(custom_cache)):
-                resolved = build_twitch_training_dataset._training_cache_dir()
-            self.assertEqual(resolved, custom_cache)
+        self.assertEqual(path, downloaded)
+        download_mock.assert_called_once_with("https://www.twitch.tv/videos/456", "job-1")
 
     def test_build_dataset_skips_failed_window_and_keeps_processing(self) -> None:
         labels = [
@@ -371,6 +371,7 @@ class BuildTwitchTrainingDatasetTests(unittest.TestCase):
         }
 
         with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(settings, "training_label_workers", 1), \
              patch("ml.build_twitch_training_dataset._materialize_vod", return_value=Path(tmp) / "vod.mp4"), \
              patch(
                  "ml.build_twitch_training_dataset._build_rows_for_label",
@@ -381,6 +382,200 @@ class BuildTwitchTrainingDatasetTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["label_class"], "hard_negative")
         self.assertEqual(build_rows_mock.call_count, 2)
+
+    def test_build_dataset_parallel_label_workers_preserve_label_order(self) -> None:
+        labels = [
+            {
+                "broadcaster": "jynxzi",
+                "vod_id": "123",
+                "vod_url": "https://www.twitch.tv/videos/123",
+                "window_start": 10.0,
+                "window_end": 20.0,
+                "label_class": "positive",
+                "label_score": 0.8,
+                "clip_ids": ["c1"],
+                "label_source": "twitch_clip_api",
+                "platform_source": "twitch_clip",
+            },
+            {
+                "broadcaster": "jynxzi",
+                "vod_id": "123",
+                "vod_url": "https://www.twitch.tv/videos/123",
+                "window_start": 30.0,
+                "window_end": 40.0,
+                "label_class": "hard_negative",
+                "label_score": 0.0,
+                "clip_ids": [],
+                "label_source": "twitch_clip_api",
+                "platform_source": "twitch_clip",
+            },
+        ]
+
+        def _fake_build_rows_for_label(label: dict, **_kwargs) -> list[dict]:
+            if float(label["window_start"]) == 10.0:
+                time.sleep(0.05)
+            return [{
+                "label": 1 if label["label_class"] == "positive" else 0,
+                "label_source": "twitch_clip_api",
+                "features": {"candidate_id": f"cand-{int(label['window_start'])}"},
+            }]
+
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(settings, "training_vod_workers", 1), \
+             patch.object(settings, "training_label_workers", 2), \
+             patch("ml.build_twitch_training_dataset._materialize_vod", return_value=Path(tmp) / "vod.mp4"), \
+             patch("ml.build_twitch_training_dataset._build_rows_for_label", side_effect=_fake_build_rows_for_label):
+            rows = build_twitch_training_dataset.build_dataset(labels, "jynxzi", Path(tmp))
+
+        self.assertEqual([row["window_start"] for row in rows], [10.0, 30.0])
+        self.assertEqual([row["label_class"] for row in rows], ["positive", "hard_negative"])
+
+    def test_build_dataset_parallel_label_workers_keep_processing_after_failure(self) -> None:
+        labels = [
+            {
+                "broadcaster": "jynxzi",
+                "vod_id": "123",
+                "vod_url": "https://www.twitch.tv/videos/123",
+                "window_start": 10.0,
+                "window_end": 20.0,
+                "label_class": "positive",
+                "label_score": 0.8,
+                "clip_ids": ["c1"],
+                "label_source": "twitch_clip_api",
+                "platform_source": "twitch_clip",
+            },
+            {
+                "broadcaster": "jynxzi",
+                "vod_id": "123",
+                "vod_url": "https://www.twitch.tv/videos/123",
+                "window_start": 30.0,
+                "window_end": 40.0,
+                "label_class": "hard_negative",
+                "label_score": 0.0,
+                "clip_ids": [],
+                "label_source": "twitch_clip_api",
+                "platform_source": "twitch_clip",
+            },
+        ]
+
+        def _fake_build_rows_for_label(label: dict, **_kwargs) -> list[dict]:
+            if float(label["window_start"]) == 10.0:
+                time.sleep(0.05)
+                raise RuntimeError("ffmpeg failed")
+            return [{
+                "label": 0,
+                "label_source": "twitch_clip_api",
+                "features": {"candidate_id": "cand-30"},
+            }]
+
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(settings, "training_vod_workers", 1), \
+             patch.object(settings, "training_label_workers", 2), \
+             patch("ml.build_twitch_training_dataset._materialize_vod", return_value=Path(tmp) / "vod.mp4"), \
+             patch("ml.build_twitch_training_dataset._build_rows_for_label", side_effect=_fake_build_rows_for_label):
+            rows = build_twitch_training_dataset.build_dataset(labels, "jynxzi", Path(tmp))
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["window_start"], 30.0)
+        self.assertEqual(rows[0]["label_class"], "hard_negative")
+
+    def test_build_dataset_batches_vod_window_cuts_once_per_vod(self) -> None:
+        labels = [
+            {
+                "broadcaster": "jynxzi",
+                "vod_id": "123",
+                "vod_url": "https://www.twitch.tv/videos/123",
+                "window_start": 10.0,
+                "window_end": 20.0,
+                "label_class": "positive",
+                "label_score": 0.8,
+                "clip_ids": ["c1"],
+                "label_source": "twitch_clip_api",
+                "platform_source": "twitch_clip",
+            },
+            {
+                "broadcaster": "jynxzi",
+                "vod_id": "123",
+                "vod_url": "https://www.twitch.tv/videos/123",
+                "window_start": 30.0,
+                "window_end": 40.0,
+                "label_class": "hard_negative",
+                "label_score": 0.0,
+                "clip_ids": [],
+                "label_source": "twitch_clip_api",
+                "platform_source": "twitch_clip",
+            },
+        ]
+
+        def _fake_build_rows_for_label(label: dict, *, clip_path=None, **_kwargs) -> list[dict]:
+            self.assertIsNotNone(clip_path)
+            return [{
+                "label": 1 if label["label_class"] == "positive" else 0,
+                "label_source": "twitch_clip_api",
+                "features": {"candidate_id": f"cand-{int(label['window_start'])}"},
+            }]
+
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(settings, "training_vod_workers", 1), \
+             patch.object(settings, "training_label_workers", 1), \
+             patch("ml.build_twitch_training_dataset._materialize_vod", return_value=Path(tmp) / "vod.mp4"), \
+             patch("ml.build_twitch_training_dataset.collect_viral_clips.cut_video_windows") as batch_cut_mock, \
+             patch("ml.build_twitch_training_dataset._build_rows_for_label", side_effect=_fake_build_rows_for_label):
+            rows = build_twitch_training_dataset.build_dataset(labels, "jynxzi", Path(tmp))
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(batch_cut_mock.call_count, 1)
+        batch_windows = batch_cut_mock.call_args.args[1]
+        self.assertEqual(len(batch_windows), 2)
+
+    def test_build_dataset_falls_back_to_per_label_cut_when_batch_cut_fails(self) -> None:
+        labels = [
+            {
+                "broadcaster": "jynxzi",
+                "vod_id": "123",
+                "vod_url": "https://www.twitch.tv/videos/123",
+                "window_start": 10.0,
+                "window_end": 20.0,
+                "label_class": "positive",
+                "label_score": 0.8,
+                "clip_ids": ["c1"],
+                "label_source": "twitch_clip_api",
+                "platform_source": "twitch_clip",
+            },
+            {
+                "broadcaster": "jynxzi",
+                "vod_id": "123",
+                "vod_url": "https://www.twitch.tv/videos/123",
+                "window_start": 30.0,
+                "window_end": 40.0,
+                "label_class": "hard_negative",
+                "label_score": 0.0,
+                "clip_ids": [],
+                "label_source": "twitch_clip_api",
+                "platform_source": "twitch_clip",
+            },
+        ]
+
+        def _fake_build_rows_for_label(label: dict, *, clip_path=None, **_kwargs) -> list[dict]:
+            self.assertIsNone(clip_path)
+            return [{
+                "label": 1 if label["label_class"] == "positive" else 0,
+                "label_source": "twitch_clip_api",
+                "features": {"candidate_id": f"cand-{int(label['window_start'])}"},
+            }]
+
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(settings, "training_vod_workers", 1), \
+             patch.object(settings, "training_label_workers", 1), \
+             patch("ml.build_twitch_training_dataset._materialize_vod", return_value=Path(tmp) / "vod.mp4"), \
+             patch(
+                 "ml.build_twitch_training_dataset.collect_viral_clips.cut_video_windows",
+                 side_effect=RuntimeError("ffmpeg failed"),
+             ), \
+             patch("ml.build_twitch_training_dataset._build_rows_for_label", side_effect=_fake_build_rows_for_label):
+            rows = build_twitch_training_dataset.build_dataset(labels, "jynxzi", Path(tmp))
+
+        self.assertEqual(len(rows), 2)
 
     def test_build_dataset_starts_prefetch_for_next_vod(self) -> None:
         labels = [
@@ -468,6 +663,108 @@ class BuildTwitchTrainingDatasetTests(unittest.TestCase):
             rows = build_twitch_training_dataset.build_dataset(labels, "jynxzi", Path(tmp))
 
         self.assertEqual([row["vod_id"] for row in rows], ["123", "456"])
+
+    def test_build_dataset_parallel_workers_prefetch_download_futures(self) -> None:
+        labels = [
+            {
+                "broadcaster": "jynxzi",
+                "vod_id": "123",
+                "vod_url": "https://www.twitch.tv/videos/123",
+                "window_start": 10.0,
+                "window_end": 20.0,
+                "label_class": "positive",
+                "label_score": 0.8,
+                "clip_ids": ["c1"],
+                "label_source": "twitch_clip_api",
+                "platform_source": "twitch_clip",
+            },
+            {
+                "broadcaster": "jynxzi",
+                "vod_id": "456",
+                "vod_url": "https://www.twitch.tv/videos/456",
+                "window_start": 30.0,
+                "window_end": 42.0,
+                "label_class": "positive",
+                "label_score": 0.7,
+                "clip_ids": ["c2"],
+                "label_source": "twitch_clip_api",
+                "platform_source": "twitch_clip",
+            },
+            {
+                "broadcaster": "jynxzi",
+                "vod_id": "789",
+                "vod_url": "https://www.twitch.tv/videos/789",
+                "window_start": 50.0,
+                "window_end": 62.0,
+                "label_class": "positive",
+                "label_score": 0.6,
+                "clip_ids": ["c3"],
+                "label_source": "twitch_clip_api",
+                "platform_source": "twitch_clip",
+            },
+        ]
+        seen_prefetch_flags: list[tuple[str, bool]] = []
+
+        def _fake_build_rows_for_vod(vod_id: str, *_args, **kwargs):
+            vod_path_future = kwargs.get("vod_path_future")
+            seen_prefetch_flags.append((vod_id, vod_path_future is not None))
+            return [{"vod_id": vod_id, "label": 1, "features": {"candidate_id": vod_id}}]
+
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(settings, "training_vod_workers", 2), \
+             patch("ml.build_twitch_training_dataset._materialize_vod", return_value=Path(tmp) / "vod.mp4"), \
+             patch("ml.build_twitch_training_dataset._build_rows_for_vod", side_effect=_fake_build_rows_for_vod):
+            rows = build_twitch_training_dataset.build_dataset(labels, "jynxzi", Path(tmp))
+
+        self.assertEqual([row["vod_id"] for row in rows], ["123", "456", "789"])
+        self.assertCountEqual(seen_prefetch_flags, [("123", True), ("456", True), ("789", True)])
+
+    def test_build_dataset_parallel_path_skips_prefetch_for_checkpoint_hits(self) -> None:
+        labels = [
+            {
+                "broadcaster": "jynxzi",
+                "vod_id": "123",
+                "vod_url": "https://www.twitch.tv/videos/123",
+                "window_start": 10.0,
+                "window_end": 20.0,
+                "label_class": "positive",
+                "label_score": 0.8,
+                "clip_ids": ["c1"],
+                "label_source": "twitch_clip_api",
+                "platform_source": "twitch_clip",
+            },
+            {
+                "broadcaster": "jynxzi",
+                "vod_id": "456",
+                "vod_url": "https://www.twitch.tv/videos/456",
+                "window_start": 30.0,
+                "window_end": 42.0,
+                "label_class": "positive",
+                "label_score": 0.7,
+                "clip_ids": ["c2"],
+                "label_source": "twitch_clip_api",
+                "platform_source": "twitch_clip",
+            },
+        ]
+
+        def _fake_load_checkpoint(_work_dir, _profile, vod_id, _vod_rows):
+            if vod_id == "123":
+                return [{"vod_id": "123", "label": 1, "features": {"candidate_id": "cached-123"}}]
+            return None
+
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(settings, "training_vod_workers", 2), \
+             patch("ml.build_twitch_training_dataset._load_vod_checkpoint", side_effect=_fake_load_checkpoint), \
+             patch("ml.build_twitch_training_dataset._materialize_vod", return_value=Path(tmp) / "vod.mp4") as materialize_mock, \
+             patch(
+                 "ml.build_twitch_training_dataset._build_rows_for_vod",
+                 return_value=[{"vod_id": "456", "label": 1, "features": {"candidate_id": "456"}}],
+             ):
+            rows = build_twitch_training_dataset.build_dataset(labels, "jynxzi", Path(tmp))
+
+        self.assertEqual([row["vod_id"] for row in rows], ["123", "456"])
+        self.assertEqual(materialize_mock.call_count, 1)
+        self.assertEqual(materialize_mock.call_args.args[1], "twitch_vod_456")
 
     def test_refined_candidates_prefer_overlapping_generator_windows(self) -> None:
         proxy = build_twitch_training_dataset._proxy_candidate(

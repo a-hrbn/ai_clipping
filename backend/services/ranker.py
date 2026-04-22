@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import pathlib
 
@@ -10,7 +11,7 @@ except ModuleNotFoundError:  # pragma: no cover - optional when only heuristic/l
     joblib = None
 
 from config import settings
-from services import clip_strategy, profile_config
+from services import clip_strategy, profile_config, semantic_service
 from services.timeline_types import CandidateFeatures
 
 
@@ -21,9 +22,10 @@ _MIN_NEGATIVE_ROWS = 15
 _MIN_VALIDATION_ACCURACY = 0.60
 _MIN_VALIDATION_NDCG_AT_5 = 0.70
 _MIN_VALIDATION_PRECISION_AT_5 = 0.60
+_MIN_VALIDATION_PRIMARY_RANKING_METRIC = 0.60
 _MAX_NORMALIZED_ABS = 4.0
 _MAX_ML_ABS_SCORE = 12.0
-_MIN_BLEND = 0.15
+_MIN_BLEND = 0.0
 _MAX_BLEND = 0.65
 OFFLINE_ONLY_FEATURE_NAMES = {
     "vod_progress",
@@ -36,6 +38,7 @@ OFFLINE_ONLY_FEATURE_NAMES = {
     "has_vector_similarity",
     "feature_build_version",
 }
+logger = logging.getLogger(__name__)
 
 
 class Ranker:
@@ -83,6 +86,10 @@ class Ranker:
                 for feature, (score, rationale) in zip(features, heuristic)
             ]
 
+        # Expose the heuristic score as an input feature so trained models that
+        # were fit with heuristic_score in their feature vector can consume it.
+        for feature, (heur_score, _rationale) in zip(features, heuristic):
+            feature.heuristic_score = float(heur_score)
         trained_scores = self._trained_scores(features, artifact)
         blend = self._safe_blend(artifact)
         merged: list[dict[str, object]] = []
@@ -140,7 +147,7 @@ class Ranker:
                 + feature.contradiction_score
                 + feature.standalone_score
                 + feature.semantic_density
-            ) / 5.0 * 10.0
+            ) * 2.0
             payoff_clarity = feature.payoff_clarity_score * 10.0
             profile_fit = feature.profile_fit_score * 10.0
             context_efficiency = feature.context_efficiency * 10.0
@@ -159,6 +166,8 @@ class Ranker:
                 + hw["dialogue"]         * dialogue_dynamism * profile_weights["dialogue_weight"]
                 + hw["semantic"]         * semantic_score * profile_weights.get("semantic_weight", 1.0)
                 + hw["context_efficiency"] * context_efficiency
+                # profile_fit_score is already profile-weighted upstream in
+                # feature_builder._profile_fit_score(); do not multiply it again.
                 + hw["profile_fit"]      * profile_fit
                 + hw.get("chapter_coherence", 0.0) * chapter_coherence
                 + hw.get("topic_shift", 0.0) * topic_shift
@@ -249,7 +258,13 @@ class Ranker:
             }
 
         exact = self._inspect_artifact_file(profile, expected_profile=profile)
-        if exact["status"] == "usable":
+        if exact["status"] != "usable":
+            registry_exact = self._inspect_registry_artifact(profile, expected_profile=profile)
+            if registry_exact["status"] == "usable":
+                return registry_exact
+            if exact["status"] == "missing" and registry_exact["status"] != "missing":
+                return registry_exact
+        else:
             return exact
 
         from services.profile_config import get_content_type_for_streamer
@@ -260,6 +275,12 @@ class Ranker:
                 fallback["requested_profile"] = profile
                 fallback["source"] = "content_type_fallback"
                 return fallback
+            if fallback["status"] == "missing":
+                registry_fallback = self._inspect_registry_artifact(content_type, expected_profile=content_type)
+                if registry_fallback["status"] != "missing":
+                    registry_fallback["requested_profile"] = profile
+                    registry_fallback["source"] = "content_type_registry_fallback"
+                    return registry_fallback
             if exact["status"] == "missing" and fallback["status"] != "missing":
                 fallback["requested_profile"] = profile
                 if fallback["status"] == "rejected":
@@ -309,6 +330,32 @@ class Ranker:
             "artifact": artifact,
         }
 
+    def _inspect_registry_artifact(self, profile: str, *, expected_profile: str) -> dict[str, object]:
+        try:
+            from ml import mlflow_tracking
+            artifact = mlflow_tracking.load_registered_ranker_artifact(profile=profile, stage="Production")
+        except Exception:
+            artifact = None
+        if artifact is None:
+            return {
+                "status": "missing",
+                "reason": "registry_artifact_missing",
+                "requested_profile": expected_profile,
+                "resolved_profile": profile,
+                "source": "mlflow_registry",
+                "artifact": None,
+            }
+
+        usable, reason = self._artifact_is_usable(artifact, profile)
+        return {
+            "status": "usable" if usable else "rejected",
+            "reason": reason,
+            "requested_profile": expected_profile,
+            "resolved_profile": profile,
+            "source": "mlflow_registry",
+            "artifact": artifact,
+        }
+
     def _trained_scores(self, features: list[CandidateFeatures], artifact: dict) -> list[float]:
         feature_names: list[str] = artifact.get("feature_names", [])
         scales: dict[str, dict[str, float]] = artifact.get("scales", {})
@@ -341,12 +388,27 @@ class Ranker:
         scales: dict[str, dict[str, float]],
         model_type: str,
     ) -> list[float]:
+        artifact_base_dir = pathlib.Path(str(artifact.get("_artifact_base_dir") or self.artifact_dir))
         model_path = str(artifact.get("model_path") or "").strip()
         if not model_path or joblib is None:
+            logger.warning(
+                "artifact_model_load_failure profile=%s model_type=%s model_path=%s reason=%s",
+                artifact.get("profile", ""),
+                model_type,
+                model_path,
+                "joblib_unavailable" if joblib is None else "model_path_missing",
+            )
             return [0.0 for _ in features]
         try:
-            model = joblib.load(self.artifact_dir / model_path)
-        except Exception:
+            model = joblib.load(artifact_base_dir / model_path)
+        except Exception as exc:
+            logger.warning(
+                "artifact_model_load_failure profile=%s model_type=%s model_path=%s reason=%s",
+                artifact.get("profile", ""),
+                model_type,
+                model_path,
+                exc,
+            )
             return [0.0 for _ in features]
 
         matrix: list[list[float]] = []
@@ -369,15 +431,50 @@ class Ranker:
         return [self._normalize_trained_score(float(score), "lightgbm_ranker") for score in scores]
 
     def _artifact_is_usable(self, artifact: dict, profile: str) -> tuple[bool, str]:
+        artifact_base_dir = pathlib.Path(str(artifact.get("_artifact_base_dir") or self.artifact_dir))
         if artifact.get("profile") != profile:
             return False, "profile_mismatch"
         if int(artifact.get("version", 0)) < 1:
             return False, "artifact_version_too_old"
+        if int(artifact.get("version", 0)) >= 4:
+            if artifact.get("semantic_score_config") != semantic_service.semantic_score_config():
+                return False, "semantic_score_config_mismatch"
+        feature_names = [str(name) for name in artifact.get("feature_names") or []]
+        offline_names = sorted({name for name in feature_names if name in OFFLINE_ONLY_FEATURE_NAMES})
+        if offline_names:
+            logger.warning(
+                "artifact_rejected_offline_only_features profile=%s offline_only_features=%s",
+                profile,
+                ",".join(offline_names),
+            )
+            return False, "artifact_references_offline_only_features"
         model_type = str(artifact.get("model_type") or "linear").strip().lower()
         has_linear_params = bool(artifact.get("weights"))
         has_joblib_model = model_type in {"gradient_boosting", "lightgbm_ranker"} and bool(artifact.get("model_path"))
-        if not artifact.get("feature_names") or not artifact.get("scales") or not (has_linear_params or has_joblib_model):
+        if not feature_names or not artifact.get("scales") or not (has_linear_params or has_joblib_model):
             return False, "artifact_schema_incomplete"
+        if model_type in {"gradient_boosting", "lightgbm_ranker"}:
+            model_path = str(artifact.get("model_path") or "").strip()
+            if joblib is None:
+                logger.warning(
+                    "artifact_model_load_failure profile=%s model_type=%s model_path=%s reason=%s",
+                    profile,
+                    model_type,
+                    model_path,
+                    "joblib_unavailable",
+                )
+                return False, "artifact_model_loader_unavailable"
+            try:
+                joblib.load(artifact_base_dir / model_path)
+            except Exception as exc:
+                logger.warning(
+                    "artifact_model_load_failure profile=%s model_type=%s model_path=%s reason=%s",
+                    profile,
+                    model_type,
+                    model_path,
+                    exc,
+                )
+                return False, "artifact_model_unloadable"
 
         training_stats = artifact.get("training_stats", {})
         validation = artifact.get("validation", {})
@@ -395,15 +492,24 @@ class Ranker:
     def _validation_passes(self, validation: dict) -> tuple[bool, str]:
         accuracy = float(validation.get("accuracy", 0.0))
         ndcg = float(validation.get("ndcg_at_5", 0.0))
+        ranking_metric_value = float(validation.get("ranking_metric_value", ndcg))
         precision_at_5 = float(validation.get("precision_at_5", 0.0))
         legacy_precision = float(validation.get("precision", 0.0))
         ranking_groups = int(validation.get("ranking_groups", 0) or 0)
+        ranking_metric_min = float(validation.get("ranking_metric_min", validation.get("ndcg_at_5_min", ranking_metric_value)))
+        ranking_metric_p25 = float(validation.get("ranking_metric_p25", validation.get("ndcg_at_5_p25", ranking_metric_value)))
 
         if ranking_groups and ranking_groups < 2:
             return False, "validation_ranking_groups_below_minimum"
+        if ranking_groups >= 2:
+            if ranking_metric_min < 0.2:
+                return False, "validation_group_ranking_metric_min_below_minimum"
+            if ranking_metric_p25 < 0.45:
+                return False, "validation_group_ranking_metric_p25_below_minimum"
 
         ranking_ok = (
-            ndcg >= _MIN_VALIDATION_NDCG_AT_5
+            ranking_metric_value >= _MIN_VALIDATION_PRIMARY_RANKING_METRIC
+            or ndcg >= _MIN_VALIDATION_NDCG_AT_5
             or precision_at_5 >= _MIN_VALIDATION_PRECISION_AT_5
             or legacy_precision >= 0.70
         )

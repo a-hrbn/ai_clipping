@@ -1,4 +1,3 @@
-import json
 import os
 import tempfile
 import unittest
@@ -52,6 +51,35 @@ class TrainingWorkflowStateTests(unittest.TestCase):
                     output_paths=outputs,
                     state_path=state,
                     current_state={"code_hash": "new"},
+                )
+            )
+
+    def test_should_reevaluate_when_dependency_is_newer_than_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset = root / "dataset.jsonl"
+            artifact = root / "artifact.json"
+            dependency = root / "gold_eval_updates.jsonl"
+            outputs = [root / "eval.json", root / "ranker.json"]
+            state = root / "state.json"
+            current_state = {"code_hash": "same"}
+            for path in (dataset, artifact, dependency, *outputs):
+                path.write_text("x", encoding="utf-8")
+            os.utime(dataset, (100, 100))
+            os.utime(artifact, (100, 100))
+            os.utime(outputs[0], (200, 200))
+            os.utime(outputs[1], (200, 200))
+            os.utime(dependency, (300, 300))
+            training_workflow_state.write_state(state, current_state)
+
+            self.assertTrue(
+                training_workflow_state.should_reevaluate(
+                    dataset_path=dataset,
+                    artifact_path=artifact,
+                    output_paths=outputs,
+                    dependency_paths=[dependency],
+                    state_path=state,
+                    current_state=current_state,
                 )
             )
 

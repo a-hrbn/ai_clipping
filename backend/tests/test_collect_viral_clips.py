@@ -2,12 +2,52 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from types import SimpleNamespace
 
 from ml import collect_viral_clips
 from services import downloader
 
 
 class CollectViralClipsTests(unittest.TestCase):
+    def test_cut_video_windows_uses_single_ffmpeg_process_within_batch_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch("ml.collect_viral_clips.subprocess.run", return_value=SimpleNamespace(returncode=0, stderr="")) as run_mock:
+            video_path = Path(tmp) / "vod.mp4"
+            outputs = [
+                (Path(tmp) / "window_0001" / "window.mp4", 10.0, 20.0),
+                (Path(tmp) / "window_0002" / "window.mp4", 30.0, 45.0),
+            ]
+
+            result = collect_viral_clips.cut_video_windows(video_path, outputs)
+
+        self.assertEqual(result, [item[0] for item in outputs])
+        command = run_mock.call_args.args[0]
+        self.assertEqual(command[:4], ["ffmpeg", "-y", "-nostdin", "-loglevel"])
+        self.assertEqual(command.count("-i"), 2)
+        self.assertIn(str(outputs[0][0]), command)
+        self.assertIn(str(outputs[1][0]), command)
+        self.assertEqual(run_mock.call_count, 1)
+
+    def test_cut_video_windows_splits_large_batches_across_multiple_ffmpeg_processes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch("ml.collect_viral_clips.subprocess.run", return_value=SimpleNamespace(returncode=0, stderr="")) as run_mock:
+            video_path = Path(tmp) / "vod.mp4"
+            outputs = [
+                (Path(tmp) / f"window_{index:04d}" / "window.mp4", float(index * 10), float(index * 10 + 8))
+                for index in range(1, collect_viral_clips._MAX_BATCH_CUT_WINDOWS + 3)
+            ]
+
+            result = collect_viral_clips.cut_video_windows(video_path, outputs)
+
+        self.assertEqual(result, [item[0] for item in outputs])
+        self.assertEqual(run_mock.call_count, 2)
+        first_command = run_mock.call_args_list[0].args[0]
+        second_command = run_mock.call_args_list[1].args[0]
+        self.assertEqual(first_command.count("-i"), collect_viral_clips._MAX_BATCH_CUT_WINDOWS)
+        self.assertEqual(second_command.count("-i"), 2)
+        self.assertIn(str(outputs[0][0]), first_command)
+        self.assertIn(str(outputs[-1][0]), second_command)
+
     def test_read_entries_supports_manifest_metadata_and_labels(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "clips.csv"
@@ -26,6 +66,30 @@ class CollectViralClipsTests(unittest.TestCase):
             self.assertEqual(entries[0]["streamer"], "shroud")
             self.assertEqual(entries[1]["label"], "0")
             self.assertEqual(entries[1]["notes"], "flat")
+
+    def test_read_entries_dedupes_cross_source_urls_by_canonical_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "clips.csv"
+            path.write_text(
+                "\n".join([
+                    "url,streamer,platform,language,tags,label,notes",
+                    "https://www.youtube.com/shorts/abc?feature=share,jynxzi,youtube,en,gaming,1,first",
+                    "https://www.youtube.com/shorts/abc,jynxzi,youtube,en,gaming,0,duplicate",
+                    "https://www.tiktok.com/@jynxzi/video/123/,jynxzi,tiktok,en,gaming,1,unique",
+                ]),
+                encoding="utf-8",
+            )
+
+            entries = collect_viral_clips._read_entries(path)
+
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(entries[0]["notes"], "first")
+
+    def test_canonical_entry_url_drops_query_and_trailing_slash(self) -> None:
+        self.assertEqual(
+            collect_viral_clips._canonical_entry_url("https://www.youtube.com/shorts/abc/?feature=share"),
+            "https://www.youtube.com/shorts/abc",
+        )
 
     def test_parse_label_accepts_positive_and_negative_aliases(self) -> None:
         self.assertEqual(collect_viral_clips._parse_label("1"), 1)

@@ -108,6 +108,24 @@ class AutoTrainShortFormTests(unittest.TestCase):
         self.assertEqual(by_url["https://example.com/short"], 1)
         self.assertNotIn("https://example.com/long", {url for url, label in by_url.items() if label == 1})
 
+    def test_viral_score_uses_log1p_duration_penalty(self) -> None:
+        base = {
+            "view_count": 1_000,
+            "like_count": 150,
+            "comment_count": 30,
+            "duration": 1,
+        }
+        longer = dict(base, duration=2)
+        baselines = {"median_views": 100.0, "median_likes": 10.0, "median_comments": 5.0}
+
+        score_delta = auto_train_short_form._viral_score(base, baselines) - auto_train_short_form._viral_score(longer, baselines)
+
+        self.assertAlmostEqual(
+            score_delta,
+            0.10 * (auto_train_short_form.math.log1p(2) - auto_train_short_form.math.log1p(1)),
+            places=6,
+        )
+
     def test_short_form_filter_requires_supported_short_content(self) -> None:
         youtube_short = {"url": "https://www.youtube.com/shorts/abc", "duration": 30}
         youtube_long = {"url": "https://www.youtube.com/watch?v=abc", "duration": 400}
