@@ -9,7 +9,6 @@ BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from ml import train_ranker
 from services.gold_eval_policy import (
     GOLD_HOLDOUT_SPLIT_FIELD,
     annotate_gold_row,
@@ -32,7 +31,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    rows = train_ranker._read_jsonl(pathlib.Path(args.dataset))
+    rows = _read_jsonl(pathlib.Path(args.dataset))
     if not rows:
         print("No dataset rows found.")
         return 1
@@ -183,6 +182,17 @@ def _count_values(rows: list[dict], key: str) -> dict[str, int]:
             continue
         counts[value] = counts.get(value, 0) + 1
     return dict(sorted(counts.items()))
+
+
+def _read_jsonl(path: pathlib.Path) -> list[dict]:
+    if not path.exists():
+        return []
+    rows: list[dict] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line:
+            rows.append(json.loads(line))
+    return rows
 
 
 if __name__ == "__main__":

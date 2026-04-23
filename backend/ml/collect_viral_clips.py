@@ -46,7 +46,10 @@ Options
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import csv
+import hashlib
+import importlib
 import json
 import logging
 import pathlib
@@ -54,6 +57,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 import uuid
@@ -61,6 +65,8 @@ import uuid
 BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
+
+from config import settings
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
 logger = logging.getLogger(__name__)
@@ -91,6 +97,13 @@ _METADATA_KEYS = {
 _NETWORK_RETRY_BASE_DELAY_SEC = 30
 _NETWORK_RETRY_MAX_DELAY_SEC = 300
 _MAX_BATCH_CUT_WINDOWS = 24
+_FFMPEG_BATCH_HEARTBEAT_SEC = 15.0
+_SHORT_FORM_ROW_CACHE_VERSION = 1
+_DEFAULT_SHORT_FORM_COLLECTION_WORKERS = 3
+_DEFAULT_SHORT_FORM_CLIP_STEP_WORKERS = 3
+_DEFAULT_SHORT_FORM_PREFETCH_WORKERS = 2
+_SHORT_FORM_MEDIA_CACHE_NAMESPACE = "short_form"
+_SHORT_FORM_MEDIA_CACHE_TTL_SEC = -1
 
 
 def main() -> int:
@@ -140,82 +153,419 @@ def collect_rows(
     proxy: str | None = None,
     skip_platforms: set[str] | None = None,
 ) -> list[dict]:
-    from services import downloader
-
     logger.info("Processing %d URLs…", len(entries))
     work_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir = _short_form_row_cache_dir(work_dir)
+    total_entries = len(entries)
+    resolved_workers = _resolved_short_form_collection_workers(total_entries)
+    resolved_prefetch_workers = _resolved_short_form_prefetch_workers(total_entries)
+    cache_fingerprint = _short_form_cache_fingerprint(profile)
+    logger.info(
+        "short_form_collection_runtime urls=%s workers=%s prefetch_workers=%s cache_dir=%s",
+        total_entries,
+        resolved_workers,
+        resolved_prefetch_workers,
+        cache_dir,
+    )
 
-    collected_rows: list[dict] = []
+    collected_rows_by_index: dict[int, dict] = {}
     failed = 0
     skipped_unavailable = 0
+    cache_hits = 0
     skipped_platforms = {item.strip().lower() for item in (skip_platforms or set()) if item.strip()}
+    logger.info("%s", _render_progress_bar(0, total_entries, failed))
+    prefetcher = _ShortFormMediaPrefetcher(proxy=proxy, max_workers=resolved_prefetch_workers)
+    _schedule_short_form_prefetch(prefetcher, entries, start_index=1, width=_short_form_prefetch_window(resolved_workers))
 
-    for i, entry in enumerate(entries, 1):
-        progress = _render_progress_bar(i - 1, len(entries), failed)
-        logger.info("%s", progress)
-        logger.info("[%d/%d] %s", i, len(entries), entry["url"])
-        job_id = f"viral_{uuid.uuid4().hex[:8]}"
-        clip_dir = work_dir / job_id
-        started_at = time.perf_counter()
-        platform = _infer_platform(entry)
-        if platform in skipped_platforms:
-            logger.warning("  ↷ skipped_unavailable: platform %s explicitly skipped", platform)
-            skipped_unavailable += 1
-            continue
-        network_attempt = 0
-        while True:
-            clip_dir.mkdir(parents=True, exist_ok=True)
-            try:
-                row = _process_clip(entry, job_id, clip_dir, profile, proxy=proxy)
-                if row:
-                    collected_rows.append(row)
-                    elapsed = time.perf_counter() - started_at
-                    logger.info(
-                        "  ✓ features extracted  (label=%s hook=%.2f  hype=%.2f  arc=%.2f  %.1fs)",
-                        row["label"],
-                        row["features"]["hook_strength"],
-                        row["features"]["max_hype"],
-                        row["features"]["arc_score"],
-                        elapsed,
-                    )
-                else:
-                    logger.warning("  ✗ skipped (no transcript or too short)")
-                    failed += 1
-                break
-            except downloader.DownloadPausedError as exc:
-                network_attempt += 1
-                delay_sec = _network_retry_delay_sec(network_attempt)
-                logger.warning(
-                    "  ‖ paused_network_retry: %s (attempt %d, retry in %ds)",
-                    exc,
-                    network_attempt,
-                    delay_sec,
+    completed = 0
+    try:
+        if resolved_workers <= 1:
+            _warm_clip_worker_runtime(profile)
+            for index, entry in enumerate(entries, start=1):
+                outcome = _collect_row_for_entry(
+                    entry,
+                    entries=entries,
+                    index=index,
+                    total_entries=total_entries,
+                    profile=profile,
+                    work_dir=work_dir,
+                    cache_dir=cache_dir,
+                    cache_fingerprint=cache_fingerprint,
+                    proxy=proxy,
+                    skipped_platforms=skipped_platforms,
+                    prefetcher=prefetcher,
+                    prefetch_width=_short_form_prefetch_window(resolved_workers),
                 )
-                time.sleep(delay_sec)
-                continue
-            except downloader.DownloadUnavailableError as exc:
-                logger.warning("  ↷ skipped_unavailable: %s", exc)
-                skipped_unavailable += 1
-                break
-            except Exception as exc:
-                logger.error("  ✗ failed: %s", exc)
-                failed += 1
-                break
-            finally:
-                shutil.rmtree(clip_dir, ignore_errors=True)
+                completed, failed, skipped_unavailable, cache_hits = _record_collect_outcome(
+                    outcome,
+                    completed=completed,
+                    total_entries=total_entries,
+                    failed=failed,
+                    skipped_unavailable=skipped_unavailable,
+                    cache_hits=cache_hits,
+                    collected_rows_by_index=collected_rows_by_index,
+                )
+        else:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=resolved_workers,
+                initializer=_warm_clip_worker_runtime,
+                initargs=(profile,),
+            ) as executor:
+                futures = [
+                    executor.submit(
+                        _collect_row_for_entry,
+                        entry,
+                        entries=entries,
+                        index=index,
+                        total_entries=total_entries,
+                        profile=profile,
+                        work_dir=work_dir,
+                        cache_dir=cache_dir,
+                        cache_fingerprint=cache_fingerprint,
+                        proxy=proxy,
+                        skipped_platforms=skipped_platforms,
+                        prefetcher=prefetcher,
+                        prefetch_width=_short_form_prefetch_window(resolved_workers),
+                    )
+                    for index, entry in enumerate(entries, start=1)
+                ]
+                for future in concurrent.futures.as_completed(futures):
+                    outcome = future.result()
+                    completed, failed, skipped_unavailable, cache_hits = _record_collect_outcome(
+                        outcome,
+                        completed=completed,
+                        total_entries=total_entries,
+                        failed=failed,
+                        skipped_unavailable=skipped_unavailable,
+                        cache_hits=cache_hits,
+                        collected_rows_by_index=collected_rows_by_index,
+                    )
+    finally:
+        prefetcher.close()
 
+    collected_rows = [collected_rows_by_index[index] for index in sorted(collected_rows_by_index)]
     positives = sum(1 for row in collected_rows if row["label"] == 1)
     negatives = sum(1 for row in collected_rows if row["label"] == 0)
-    logger.info("%s", _render_progress_bar(len(entries), len(entries), failed))
+    logger.info("%s", _render_progress_bar(total_entries, total_entries, failed))
     logger.info(
-        "Collected %d labeled rows (%d positive, %d negative, %d failed, %d skipped_unavailable)",
+        "Collected %d labeled rows (%d positive, %d negative, %d failed, %d skipped_unavailable, %d cache_hits)",
         len(collected_rows),
         positives,
         negatives,
         failed,
         skipped_unavailable,
+        cache_hits,
     )
     return collected_rows
+
+
+def _collect_row_for_entry(
+    entry: dict[str, str],
+    *,
+    entries: list[dict[str, str]],
+    index: int,
+    total_entries: int,
+    profile: str,
+    work_dir: pathlib.Path,
+    cache_dir: pathlib.Path,
+    cache_fingerprint: dict[str, object],
+    proxy: str | None,
+    skipped_platforms: set[str],
+    prefetcher: "_ShortFormMediaPrefetcher",
+    prefetch_width: int,
+) -> dict[str, object]:
+    from services import downloader
+
+    logger.info("[%d/%d] %s", index, total_entries, entry["url"])
+    started_at = time.perf_counter()
+    platform = _infer_platform(entry)
+    if platform in skipped_platforms:
+        logger.warning("  ↷ skipped_unavailable: platform %s explicitly skipped", platform)
+        return {
+            "index": index,
+            "row": None,
+            "failed": 0,
+            "skipped_unavailable": 1,
+            "cache_hit": False,
+        }
+
+    cached_row = _load_cached_row(cache_dir, entry, cache_fingerprint)
+    if cached_row is not None:
+        elapsed = time.perf_counter() - started_at
+        logger.info(
+            "  ✓ cache hit  (label=%s hook=%.2f  hype=%.2f  arc=%.2f  %.1fs)",
+            cached_row["label"],
+            cached_row["features"]["hook_strength"],
+            cached_row["features"]["max_hype"],
+            cached_row["features"]["arc_score"],
+            elapsed,
+        )
+        return {
+            "index": index,
+            "row": cached_row,
+            "failed": 0,
+            "skipped_unavailable": 0,
+            "cache_hit": True,
+        }
+
+    _schedule_short_form_prefetch(prefetcher, entries, start_index=index + 1, width=prefetch_width)
+
+    job_id = f"viral_{uuid.uuid4().hex[:8]}"
+    clip_dir = work_dir / job_id
+    network_attempt = 0
+    while True:
+        clip_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            media_path = prefetcher.get(entry)
+            row = _process_clip(entry, job_id, clip_dir, profile, proxy=proxy, media_path=media_path)
+            if row:
+                _write_cached_row(cache_dir, entry, cache_fingerprint, row)
+                elapsed = time.perf_counter() - started_at
+                logger.info(
+                    "  ✓ features extracted  (label=%s hook=%.2f  hype=%.2f  arc=%.2f  %.1fs)",
+                    row["label"],
+                    row["features"]["hook_strength"],
+                    row["features"]["max_hype"],
+                    row["features"]["arc_score"],
+                    elapsed,
+                )
+                return {
+                    "index": index,
+                    "row": row,
+                    "failed": 0,
+                    "skipped_unavailable": 0,
+                    "cache_hit": False,
+                }
+            logger.warning("  ✗ skipped (no transcript or too short)")
+            return {
+                "index": index,
+                "row": None,
+                "failed": 1,
+                "skipped_unavailable": 0,
+                "cache_hit": False,
+            }
+        except downloader.DownloadPausedError as exc:
+            network_attempt += 1
+            delay_sec = _network_retry_delay_sec(network_attempt)
+            logger.warning(
+                "  ‖ paused_network_retry: %s (attempt %d, retry in %ds)",
+                exc,
+                network_attempt,
+                delay_sec,
+            )
+            time.sleep(delay_sec)
+            continue
+        except downloader.DownloadUnavailableError as exc:
+            logger.warning("  ↷ skipped_unavailable: %s", exc)
+            return {
+                "index": index,
+                "row": None,
+                "failed": 0,
+                "skipped_unavailable": 1,
+                "cache_hit": False,
+            }
+        except Exception as exc:
+            logger.error("  ✗ failed: %s", exc)
+            return {
+                "index": index,
+                "row": None,
+                "failed": 1,
+                "skipped_unavailable": 0,
+                "cache_hit": False,
+            }
+        finally:
+            shutil.rmtree(clip_dir, ignore_errors=True)
+
+
+def _record_collect_outcome(
+    outcome: dict[str, object],
+    *,
+    completed: int,
+    total_entries: int,
+    failed: int,
+    skipped_unavailable: int,
+    cache_hits: int,
+    collected_rows_by_index: dict[int, dict],
+) -> tuple[int, int, int, int]:
+    completed += 1
+    failed += int(outcome.get("failed", 0) or 0)
+    skipped_unavailable += int(outcome.get("skipped_unavailable", 0) or 0)
+    cache_hits += 1 if outcome.get("cache_hit") else 0
+    row = outcome.get("row")
+    if isinstance(row, dict):
+        collected_rows_by_index[int(outcome["index"])] = row
+    logger.info("%s", _render_progress_bar(completed, total_entries, failed))
+    return completed, failed, skipped_unavailable, cache_hits
+
+
+def _short_form_row_cache_dir(work_dir: pathlib.Path) -> pathlib.Path:
+    cache_dir = work_dir / "_row_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
+
+
+def _cacheable_entry(entry: dict[str, str]) -> dict[str, str]:
+    return {key: str(value or "") for key, value in sorted(entry.items())}
+
+
+def _import_service_module(module_name: str):
+    try:
+        return importlib.import_module(f"services.{module_name}")
+    except Exception:
+        return None
+
+
+def _short_form_cache_fingerprint(profile: str) -> dict[str, object]:
+    transcriber = _import_service_module("transcriber")
+    video_features = _import_service_module("video_features")
+    feature_builder = _import_service_module("feature_builder")
+
+    transcriber_runtime = {}
+    if transcriber is not None and hasattr(transcriber, "runtime_summary"):
+        try:
+            transcriber_runtime = transcriber.runtime_summary()
+        except Exception:
+            transcriber_runtime = {"status": "unavailable"}
+
+    video_runtime = {}
+    if video_features is not None and hasattr(video_features, "runtime_summary"):
+        try:
+            video_runtime = video_features.runtime_summary()
+        except Exception:
+            video_runtime = {"status": "unavailable"}
+
+    return {
+        "cache_version": _SHORT_FORM_ROW_CACHE_VERSION,
+        "profile": profile,
+        "feature_build_version": getattr(feature_builder, "FEATURE_BUILD_VERSION", 1),
+        "whisper_model": str(settings.whisper_model or ""),
+        "whisper_device": str(settings.whisper_device or ""),
+        "semantic_device": str(settings.semantic_device or ""),
+        "semantic_batch_size": int(settings.semantic_batch_size or 0),
+        "video_expression_sample_sec": int(settings.video_expression_sample_sec or 0),
+        "transcriber_runtime": transcriber_runtime,
+        "video_runtime": video_runtime,
+    }
+
+
+def _short_form_row_cache_key(entry: dict[str, str], cache_fingerprint: dict[str, object]) -> str:
+    payload = {
+        "entry": _cacheable_entry(entry),
+        "runtime": cache_fingerprint,
+    }
+    serialized = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _short_form_row_cache_path(
+    cache_dir: pathlib.Path,
+    entry: dict[str, str],
+    cache_fingerprint: dict[str, object],
+) -> pathlib.Path:
+    return cache_dir / f"{_short_form_row_cache_key(entry, cache_fingerprint)}.json"
+
+
+def _load_cached_row(
+    cache_dir: pathlib.Path,
+    entry: dict[str, str],
+    cache_fingerprint: dict[str, object],
+) -> dict | None:
+    cache_path = _short_form_row_cache_path(cache_dir, entry, cache_fingerprint)
+    if not cache_path.exists():
+        return None
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _write_cached_row(
+    cache_dir: pathlib.Path,
+    entry: dict[str, str],
+    cache_fingerprint: dict[str, object],
+    row: dict,
+) -> None:
+    cache_path = _short_form_row_cache_path(cache_dir, entry, cache_fingerprint)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps(row, ensure_ascii=True), encoding="utf-8")
+
+
+def _resolved_short_form_collection_workers(total_entries: int) -> int:
+    if total_entries <= 0:
+        return 1
+    configured = int(getattr(settings, "short_form_collection_workers", _DEFAULT_SHORT_FORM_COLLECTION_WORKERS) or 0)
+    if configured <= 0:
+        configured = _DEFAULT_SHORT_FORM_COLLECTION_WORKERS
+    return max(1, min(configured, total_entries))
+
+
+def _resolved_short_form_clip_step_workers() -> int:
+    configured = int(getattr(settings, "short_form_clip_step_workers", _DEFAULT_SHORT_FORM_CLIP_STEP_WORKERS) or 0)
+    if configured <= 0:
+        configured = _DEFAULT_SHORT_FORM_CLIP_STEP_WORKERS
+    return max(1, min(configured, 3))
+
+
+def _resolved_short_form_prefetch_workers(total_entries: int) -> int:
+    if total_entries <= 1:
+        return 1
+    configured = int(getattr(settings, "short_form_prefetch_workers", _DEFAULT_SHORT_FORM_PREFETCH_WORKERS) or 0)
+    if configured <= 0:
+        configured = _DEFAULT_SHORT_FORM_PREFETCH_WORKERS
+    return max(1, min(configured, total_entries))
+
+
+def _short_form_prefetch_window(collection_workers: int) -> int:
+    return max(1, int(collection_workers) + _DEFAULT_SHORT_FORM_PREFETCH_WORKERS)
+
+
+def _schedule_short_form_prefetch(
+    prefetcher: "_ShortFormMediaPrefetcher",
+    entries: list[dict[str, str]],
+    *,
+    start_index: int,
+    width: int,
+) -> None:
+    if not entries:
+        return
+    start = max(int(start_index), 1)
+    end = min(len(entries), start + max(int(width), 0) - 1)
+    if end < start:
+        return
+    prefetcher.schedule_entries(entries[start - 1:end])
+
+
+def _warm_clip_worker_runtime(profile: str) -> None:
+    logger.info("short_form_collection_worker_warmup profile=%s", profile)
+    transcriber = _import_service_module("transcriber")
+    video_features = _import_service_module("video_features")
+    semantic_candidates = _import_service_module("semantic_candidates")
+
+    try:
+        get_model = getattr(transcriber, "_get_model", None) if transcriber is not None else None
+        if callable(get_model):
+            get_model()
+    except Exception as exc:
+        logger.warning("short_form_collection_warmup_transcriber_failed profile=%s error=%s", profile, exc)
+    try:
+        ensure_deepface_ready = getattr(video_features, "_ensure_deepface_ready", None) if video_features is not None else None
+        if callable(ensure_deepface_ready):
+            ensure_deepface_ready()
+        if video_features is not None and hasattr(video_features, "runtime_summary"):
+            video_features.runtime_summary()
+    except Exception as exc:
+        logger.warning("short_form_collection_warmup_video_failed profile=%s error=%s", profile, exc)
+    try:
+        get_model = getattr(semantic_candidates, "_get_model", None) if semantic_candidates is not None else None
+        get_pattern_embeddings = getattr(semantic_candidates, "_get_pattern_embeddings", None) if semantic_candidates is not None else None
+        model = get_model() if callable(get_model) else None
+        if model is not None and callable(get_pattern_embeddings):
+            get_pattern_embeddings(model)
+    except Exception as exc:
+        logger.warning("short_form_collection_warmup_semantic_failed profile=%s error=%s", profile, exc)
 
 
 def _network_retry_delay_sec(attempt: int) -> int:
@@ -233,6 +583,7 @@ def _process_clip(
     clip_dir: pathlib.Path,
     profile: str,
     proxy: str | None = None,
+    media_path: pathlib.Path | None = None,
 ) -> dict | None:
     from services import (
         downloader, audio_extractor, transcriber,
@@ -243,20 +594,23 @@ def _process_clip(
     url = entry["url"]
 
     # 1. Download
-    video_path = downloader.download(url, job_id, proxy=proxy)
+    video_path = media_path or downloader.download(url, job_id, proxy=proxy)
 
     # 2. Extract audio
-    audio_path = audio_extractor.extract(video_path, job_id)
+    audio_path = audio_extractor.extract(video_path, job_id, output_path=clip_dir / "audio.wav")
 
-    # 3. Transcribe
-    transcript = transcriber.transcribe(audio_path)
+    # 3. Transcribe + per-modality features
+    transcript, audio_frames, visual_frames = _collect_clip_modalities(
+        audio_path,
+        video_path,
+        transcriber=transcriber,
+        audio_features=audio_features,
+        video_features=video_features,
+    )
     if not transcript:
         return None
 
-    # 4. Audio + video features (parallel via threads would be nice, but keep simple)
-    audio_frames = audio_features.extract(audio_path)
-    visual_frames = video_features.extract(video_path)
-
+    # 4. Merge feature modalities into the transcript timeline
     transcript = audio_features.enrich_segments(transcript, audio_frames)
     transcript = video_features.enrich_segments(transcript, visual_frames)
 
@@ -313,13 +667,17 @@ def process_local_video(
     )
     from services.timeline_types import Candidate
 
-    audio_path = audio_extractor.extract(video_path, job_id)
-    transcript = transcriber.transcribe(audio_path)
+    audio_path = audio_extractor.extract(video_path, job_id, output_path=clip_dir / "audio.wav")
+    transcript, audio_frames, visual_frames = _collect_clip_modalities(
+        audio_path,
+        video_path,
+        transcriber=transcriber,
+        audio_features=audio_features,
+        video_features=video_features,
+    )
     if not transcript:
         return None
 
-    audio_frames = audio_features.extract(audio_path)
-    visual_frames = video_features.extract(video_path)
     transcript = audio_features.enrich_segments(transcript, audio_frames)
     transcript = video_features.enrich_segments(transcript, visual_frames)
     transcript = scorer.score_segments(transcript)
@@ -351,6 +709,74 @@ def process_local_video(
     return _build_training_row(entry, candidate, feats)
 
 
+class _ShortFormMediaPrefetcher:
+    def __init__(self, *, proxy: str | None, max_workers: int) -> None:
+        self._proxy = proxy
+        self._max_workers = max(int(max_workers), 1)
+        self._lock = threading.Lock()
+        self._futures: dict[str, concurrent.futures.Future[pathlib.Path]] = {}
+        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=self._max_workers)
+
+    def schedule_entries(self, entries: list[dict[str, str]]) -> None:
+        for entry in entries:
+            self._schedule(entry)
+
+    def get(self, entry: dict[str, str]) -> pathlib.Path:
+        return self._schedule(entry).result()
+
+    def close(self) -> None:
+        self._executor.shutdown(wait=True)
+
+    def _schedule(self, entry: dict[str, str]) -> concurrent.futures.Future[pathlib.Path]:
+        key = _short_form_media_cache_key(entry["url"])
+        with self._lock:
+            future = self._futures.get(key)
+            if future is None:
+                future = self._executor.submit(_ensure_short_form_media_cached, entry["url"], self._proxy)
+                self._futures[key] = future
+            return future
+
+
+def _short_form_media_cache_key(url: str) -> str:
+    return hashlib.sha256(url.strip().encode("utf-8")).hexdigest()
+
+
+def _ensure_short_form_media_cached(url: str, proxy: str | None = None) -> pathlib.Path:
+    from services import downloader
+
+    return downloader.ensure_cached_download(
+        url,
+        cache_namespace=_SHORT_FORM_MEDIA_CACHE_NAMESPACE,
+        cache_ttl_sec=_SHORT_FORM_MEDIA_CACHE_TTL_SEC,
+        proxy=proxy,
+    )
+
+
+def _collect_clip_modalities(
+    audio_path: pathlib.Path,
+    video_path: pathlib.Path,
+    *,
+    transcriber,
+    audio_features,
+    video_features,
+) -> tuple[list, list, list]:
+    resolved_workers = _resolved_short_form_clip_step_workers()
+    if resolved_workers <= 1:
+        transcript = transcriber.transcribe(audio_path)
+        audio_frames = audio_features.extract(audio_path)
+        visual_frames = video_features.extract(video_path)
+        return transcript, audio_frames, visual_frames
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=resolved_workers) as executor:
+        transcript_future = executor.submit(transcriber.transcribe, audio_path)
+        audio_future = executor.submit(audio_features.extract, audio_path)
+        visual_future = executor.submit(video_features.extract, video_path)
+        transcript = transcript_future.result()
+        audio_frames = audio_future.result()
+        visual_frames = visual_future.result()
+    return transcript, audio_frames, visual_frames
+
+
 def cut_video_window(
     video_path: pathlib.Path,
     output_path: pathlib.Path,
@@ -374,8 +800,49 @@ def cut_video_windows(
         duration = max(float(end) - float(start), 1.0)
         normalized_windows.append((output_path, start_sec, duration))
 
-    for chunk in _window_batches(normalized_windows, _MAX_BATCH_CUT_WINDOWS):
-        _cut_video_windows_chunk(video_path, chunk)
+    batches = _window_batches(normalized_windows, _MAX_BATCH_CUT_WINDOWS)
+    total_windows = len(normalized_windows)
+    logger.info(
+        "training_vod_batch_cut_plan video=%s windows=%s batches=%s batch_limit=%s",
+        video_path,
+        total_windows,
+        len(batches),
+        _MAX_BATCH_CUT_WINDOWS,
+    )
+    completed_windows = 0
+    for batch_index, chunk in enumerate(batches, start=1):
+        batch_start = completed_windows + 1
+        batch_end = completed_windows + len(chunk)
+        batch_media_seconds = sum(duration for _output_path, _start_sec, duration in chunk)
+        started_at = time.perf_counter()
+        logger.info(
+            "training_vod_batch_cut_start video=%s batch=%s/%s windows=%s-%s total_windows=%s batch_media_seconds=%.1f",
+            video_path,
+            batch_index,
+            len(batches),
+            batch_start,
+            batch_end,
+            total_windows,
+            batch_media_seconds,
+        )
+        _cut_video_windows_chunk(
+            video_path,
+            chunk,
+            progress_label=(
+                f"video={video_path} batch={batch_index}/{len(batches)} "
+                f"windows={batch_start}-{batch_end}/{total_windows}"
+            ),
+        )
+        completed_windows = batch_end
+        logger.info(
+            "training_vod_batch_cut_done video=%s batch=%s/%s completed_windows=%s/%s elapsed_sec=%.1f",
+            video_path,
+            batch_index,
+            len(batches),
+            completed_windows,
+            total_windows,
+            time.perf_counter() - started_at,
+        )
     return [output_path for output_path, _start_sec, _duration in normalized_windows]
 
 
@@ -393,6 +860,8 @@ def _window_batches(
 def _cut_video_windows_batch(
     video_path: pathlib.Path,
     normalized_windows: list[tuple[pathlib.Path, float, float]],
+    *,
+    progress_label: str,
 ) -> None:
     command = ["ffmpeg", "-y", "-nostdin", "-loglevel", "error"]
     for _output_path, start_sec, duration in normalized_windows:
@@ -402,24 +871,27 @@ def _cut_video_windows_batch(
             "-i", str(video_path),
         ])
 
+    video_codec = str(settings.training_ffmpeg_video_codec).strip()
+    audio_codec = str(settings.training_ffmpeg_audio_codec).strip()
+    preset = str(settings.training_ffmpeg_preset).strip()
+    threads = int(settings.training_ffmpeg_threads)
     for input_index, (output_path, _start_sec, _duration) in enumerate(normalized_windows):
-        command.extend([
+        output_command = [
             "-map", f"{input_index}:v:0",
             "-map", f"{input_index}:a:0?",
-            "-threads", "1",
-            "-c:v", "libx264",
-            "-c:a", "aac",
-            "-preset", "veryfast",
-            "-movflags", "+faststart",
-            str(output_path),
-        ])
+        ]
+        if threads > 0:
+            output_command.extend(["-threads", str(threads)])
+        if video_codec:
+            output_command.extend(["-c:v", video_codec])
+        if audio_codec:
+            output_command.extend(["-c:a", audio_codec])
+        if preset:
+            output_command.extend(["-preset", preset])
+        output_command.append(str(output_path))
+        command.extend(output_command)
 
-    completed = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    completed = _run_ffmpeg_command(command, progress_label=progress_label)
     if completed.returncode != 0:
         stderr = (completed.stderr or "").strip()
         outputs = ", ".join(str(output_path) for output_path, _start_sec, _duration in normalized_windows)
@@ -433,9 +905,15 @@ def _cut_video_windows_batch(
 def _cut_video_windows_chunk(
     video_path: pathlib.Path,
     normalized_windows: list[tuple[pathlib.Path, float, float]],
+    *,
+    progress_label: str,
 ) -> None:
     try:
-        _cut_video_windows_batch(video_path, normalized_windows)
+        _cut_video_windows_batch(
+            video_path,
+            normalized_windows,
+            progress_label=progress_label,
+        )
         return
     except RuntimeError:
         if len(normalized_windows) <= 1:
@@ -451,8 +929,37 @@ def _cut_video_windows_chunk(
         len(left),
         len(right),
     )
-    _cut_video_windows_chunk(video_path, left)
-    _cut_video_windows_chunk(video_path, right)
+    _cut_video_windows_chunk(video_path, left, progress_label=progress_label)
+    _cut_video_windows_chunk(video_path, right, progress_label=progress_label)
+
+
+def _run_ffmpeg_command(command: list[str], *, progress_label: str) -> subprocess.CompletedProcess[str]:
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    started_at = time.perf_counter()
+    next_heartbeat = _FFMPEG_BATCH_HEARTBEAT_SEC
+    while process.poll() is None:
+        elapsed = time.perf_counter() - started_at
+        if elapsed >= next_heartbeat:
+            logger.info(
+                "training_vod_batch_cut_heartbeat %s elapsed_sec=%.1f",
+                progress_label,
+                elapsed,
+            )
+            next_heartbeat += _FFMPEG_BATCH_HEARTBEAT_SEC
+        time.sleep(1.0)
+
+    _stdout, stderr = process.communicate()
+    return subprocess.CompletedProcess(
+        args=command,
+        returncode=process.returncode,
+        stdout="",
+        stderr=stderr or "",
+    )
 
 
 def _build_training_row(entry: dict[str, str], candidate, feats) -> dict:

@@ -8,6 +8,8 @@ from types import SimpleNamespace
 import sys
 import types
 
+import numpy as np
+
 sys.modules.setdefault("whisper", types.SimpleNamespace(load_model=lambda *_args, **_kwargs: None))
 
 from config import settings
@@ -17,6 +19,16 @@ from services.transcriber import RichSegment
 
 
 class BuildTwitchTrainingDatasetTests(unittest.TestCase):
+    def _fake_vod_feature_context(self, root: Path) -> build_twitch_training_dataset.VodFeatureContext:
+        cache_dir = root / "vod_feature_cache" / "123"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        return build_twitch_training_dataset.VodFeatureContext(
+            transcript=[RichSegment(start=0.0, end=60.0, text="context")],
+            audio_signal=[],
+            audio_sample_rate=16000,
+            cache_dir=cache_dir,
+        )
+
     def test_semantic_provider_summary_reports_auto_fallback_chain(self) -> None:
         with patch.object(settings, "groq_api_key", "secret"), \
              patch.object(settings, "groq_model", "llama-groq"), \
@@ -191,6 +203,7 @@ class BuildTwitchTrainingDatasetTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as tmp, \
              patch("ml.build_twitch_training_dataset._materialize_vod", return_value=Path(tmp) / "vod.mp4"), \
+             patch("ml.build_twitch_training_dataset._load_or_build_vod_feature_context", return_value=self._fake_vod_feature_context(Path(tmp))), \
              patch("ml.build_twitch_training_dataset._build_rows_for_label", return_value=[fake_row]):
             rows = build_twitch_training_dataset.build_dataset(labels, "jynxzi", Path(tmp))
         self.assertEqual(len(rows), 1)
@@ -226,14 +239,376 @@ class BuildTwitchTrainingDatasetTests(unittest.TestCase):
              patch("services.audio_features.extract", return_value=audio_frames) as audio_mock, \
              patch("services.video_features.extract", return_value=visual_frames) as video_mock:
             result = build_twitch_training_dataset._extract_clip_modalities(
-                Path("clip.mp4"),
+                Path("vod.mp4"),
                 Path("audio.wav"),
+                window_start=10.0,
+                window_end=28.0,
             )
 
         self.assertEqual(result, (transcript, audio_frames, visual_frames))
         transcribe_mock.assert_called_once_with(Path("audio.wav"))
         audio_mock.assert_called_once_with(Path("audio.wav"))
-        video_mock.assert_called_once_with(Path("clip.mp4"))
+        video_mock.assert_called_once_with(Path("vod.mp4"), start_sec=10.0, end_sec=28.0)
+
+    def test_slice_transcript_for_window_clamps_and_rebases_times(self) -> None:
+        transcript = [
+            RichSegment(start=8.0, end=12.0, text="before"),
+            RichSegment(start=12.5, end=15.0, text="inside"),
+            RichSegment(start=19.0, end=24.0, text="after"),
+        ]
+
+        sliced = build_twitch_training_dataset._slice_transcript_for_window(
+            transcript,
+            window_start=10.0,
+            window_end=20.0,
+        )
+
+        self.assertEqual(
+            [(segment.text, segment.start, segment.end) for segment in sliced],
+            [("before", 0.0, 2.0), ("inside", 2.5, 5.0), ("after", 9.0, 10.0)],
+        )
+
+    def test_load_or_build_vod_feature_context_reuses_cached_transcript_and_audio(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage_dir = Path(tmp) / "storage"
+            storage_dir.mkdir(parents=True, exist_ok=True)
+            vod_path = storage_dir / "twitch_vod_123" / "video.mp4"
+            vod_path.parent.mkdir(parents=True, exist_ok=True)
+            vod_path.write_bytes(b"video")
+            transcript = [RichSegment(start=0.0, end=1.0, text="cached")]
+            extract_calls: list[Path] = []
+
+            def _fake_extract(_source, _job, *, output_path, **_kwargs):
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_bytes(b"audio")
+                extract_calls.append(output_path)
+                return output_path
+
+            with patch.object(settings, "storage_dir", str(storage_dir)), \
+                 patch.dict(sys.modules, {"services.audio_extractor": types.SimpleNamespace(extract=_fake_extract)}), \
+                 patch("services.transcriber.transcribe", return_value=transcript) as transcribe_mock, \
+                 patch("librosa.load", return_value=(["samples"], 16000)):
+                first = build_twitch_training_dataset._load_or_build_vod_feature_context(
+                    "123",
+                    vod_path=vod_path,
+                    job_id="job-1",
+                )
+                second = build_twitch_training_dataset._load_or_build_vod_feature_context(
+                    "123",
+                    vod_path=vod_path,
+                    job_id="job-1",
+                )
+
+        self.assertEqual([segment.text for segment in first.transcript], ["cached"])
+        self.assertEqual([segment.text for segment in second.transcript], ["cached"])
+        self.assertEqual(len(extract_calls), 1)
+        transcribe_mock.assert_called_once()
+
+    def test_load_or_build_vod_feature_context_migrates_old_source_bound_transcript_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage_dir = Path(tmp) / "storage"
+            storage_dir.mkdir(parents=True, exist_ok=True)
+            cache_dir = storage_dir.parent / "vod_feature_cache" / "123"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            audio_path = cache_dir / "audio.wav"
+            audio_path.write_bytes(b"audio")
+
+            old_vod_path = storage_dir / "old_job" / "video.mp4"
+            old_vod_path.parent.mkdir(parents=True, exist_ok=True)
+            old_vod_path.write_bytes(b"video")
+            old_payload = {
+                "version": build_twitch_training_dataset._VOD_FEATURE_CACHE_VERSION,
+                "kind": "transcript",
+                "vod_id": "123",
+                "source": build_twitch_training_dataset._source_video_signature(old_vod_path),
+                "whisper_model": str(settings.whisper_model),
+            }
+            cached_transcript = [RichSegment(start=0.0, end=1.0, text="old cached")]
+            old_transcript_path = build_twitch_training_dataset._transcript_cache_path(cache_dir, old_payload)
+            build_twitch_training_dataset._write_transcript_cache(
+                old_transcript_path,
+                old_payload,
+                cached_transcript,
+            )
+
+            new_vod_path = storage_dir / "new_job" / "video.mp4"
+            new_vod_path.parent.mkdir(parents=True, exist_ok=True)
+            new_vod_path.write_bytes(b"video")
+            stable_payload = build_twitch_training_dataset._transcript_cache_payload("123")
+            stable_transcript_path = build_twitch_training_dataset._transcript_cache_path(cache_dir, stable_payload)
+
+            with patch.object(settings, "storage_dir", str(storage_dir)), \
+                 patch.dict(sys.modules, {"services.audio_extractor": types.SimpleNamespace(extract=lambda *_args, **_kwargs: audio_path)}), \
+                 patch("services.transcriber.transcribe") as transcribe_mock, \
+                 patch.dict(sys.modules, {"librosa": types.SimpleNamespace(load=lambda *_args, **_kwargs: (["samples"], 16000))}):
+                context = build_twitch_training_dataset._load_or_build_vod_feature_context(
+                    "123",
+                    vod_path=new_vod_path,
+                    job_id="job-1",
+                )
+
+                self.assertEqual([segment.text for segment in context.transcript], ["old cached"])
+                transcribe_mock.assert_not_called()
+                self.assertTrue(stable_transcript_path.exists())
+                self.assertFalse(old_transcript_path.exists())
+
+    def test_load_or_build_vod_feature_context_prunes_old_transcripts_on_stable_cache_hit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage_dir = Path(tmp) / "storage"
+            storage_dir.mkdir(parents=True, exist_ok=True)
+            cache_dir = storage_dir.parent / "vod_feature_cache" / "123"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            audio_path = cache_dir / "audio.wav"
+            audio_path.write_bytes(b"audio")
+
+            stable_payload = build_twitch_training_dataset._transcript_cache_payload("123")
+            stable_transcript_path = build_twitch_training_dataset._transcript_cache_path(cache_dir, stable_payload)
+            build_twitch_training_dataset._write_transcript_cache(
+                stable_transcript_path,
+                stable_payload,
+                [RichSegment(start=0.0, end=1.0, text="stable")],
+            )
+            chunks_dir = cache_dir / "chunks"
+            chunks_dir.mkdir()
+            (chunks_dir / "chunk_000.wav").write_bytes(b"chunk")
+
+            old_vod_path = storage_dir / "old_job" / "video.mp4"
+            old_vod_path.parent.mkdir(parents=True, exist_ok=True)
+            old_vod_path.write_bytes(b"video")
+            old_payload = {
+                "version": build_twitch_training_dataset._VOD_FEATURE_CACHE_VERSION,
+                "kind": "transcript",
+                "vod_id": "123",
+                "source": build_twitch_training_dataset._source_video_signature(old_vod_path),
+                "whisper_model": str(settings.whisper_model),
+            }
+            old_transcript_path = build_twitch_training_dataset._transcript_cache_path(cache_dir, old_payload)
+            build_twitch_training_dataset._write_transcript_cache(
+                old_transcript_path,
+                old_payload,
+                [RichSegment(start=0.0, end=1.0, text="old cached")],
+            )
+
+            vod_path = storage_dir / "new_job" / "video.mp4"
+            vod_path.parent.mkdir(parents=True, exist_ok=True)
+            vod_path.write_bytes(b"video")
+
+            with patch.object(settings, "storage_dir", str(storage_dir)), \
+                 patch.dict(sys.modules, {"services.audio_extractor": types.SimpleNamespace(extract=lambda *_args, **_kwargs: audio_path)}), \
+                 patch("services.transcriber.transcribe") as transcribe_mock, \
+                 patch.dict(sys.modules, {"librosa": types.SimpleNamespace(load=lambda *_args, **_kwargs: (["samples"], 16000))}):
+                context = build_twitch_training_dataset._load_or_build_vod_feature_context(
+                    "123",
+                    vod_path=vod_path,
+                    job_id="job-1",
+                )
+
+                self.assertEqual([segment.text for segment in context.transcript], ["stable"])
+                transcribe_mock.assert_not_called()
+                self.assertTrue(stable_transcript_path.exists())
+                self.assertFalse(old_transcript_path.exists())
+                self.assertFalse(chunks_dir.exists())
+
+    def test_window_cache_payload_uses_stable_twitch_cache_signature(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage_dir = Path(tmp) / "storage"
+            cache_dir = storage_dir / "_download_cache" / "twitch"
+            cache_dir.mkdir(parents=True)
+            cached_vod = cache_dir / "vod_123.mp4"
+            cached_vod.write_bytes(b"same-video")
+            first_path = storage_dir / "twitch_vod_123" / "video.mp4"
+            second_path = storage_dir / "another_job" / "video.mp4"
+            first_path.parent.mkdir(parents=True)
+            second_path.parent.mkdir(parents=True)
+            first_path.write_bytes(b"same-video")
+            second_path.write_bytes(b"same-video")
+            old_time = time.time() - 100
+            first_path.touch()
+            second_path.touch()
+
+            with patch.object(settings, "storage_dir", str(storage_dir)):
+                first = build_twitch_training_dataset._window_feature_cache_payload(
+                    "123",
+                    first_path,
+                    window_start=10.0,
+                    window_end=20.0,
+                )
+                second = build_twitch_training_dataset._window_feature_cache_payload(
+                    "123",
+                    second_path,
+                    window_start=10.0,
+                    window_end=20.0,
+                )
+
+        self.assertEqual(first["source"], second["source"])
+        self.assertEqual(first["source"]["kind"], "twitch_download_cache")
+
+    def test_load_or_build_window_modalities_uses_cache_after_first_build(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "vod_feature_cache" / "123"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            context = build_twitch_training_dataset.VodFeatureContext(
+                transcript=[],
+                audio_signal=["samples"],
+                audio_sample_rate=16000,
+                cache_dir=cache_dir,
+            )
+            vod_path = Path(tmp) / "video.mp4"
+            vod_path.write_bytes(b"video")
+            audio_frames = [
+                SimpleNamespace(
+                    second=0,
+                    pitch_hz=100.0,
+                    rms_db=-10.0,
+                    is_silence=False,
+                    laughter_prob=0.2,
+                    onset_rate=1.0,
+                )
+            ]
+            visual_frames = [
+                SimpleNamespace(
+                    second=0,
+                    scene_change=False,
+                    motion_score=0.4,
+                    face_count=1,
+                    face_size_ratio=0.3,
+                    face_reaction_prob=0.1,
+                    visual_activity=0.5,
+                )
+            ]
+
+            with patch("services.audio_features.extract_window_from_signal", return_value=audio_frames) as audio_mock, \
+                 patch("services.video_features.extract", return_value=visual_frames) as video_mock:
+                first = build_twitch_training_dataset._load_or_build_window_modalities(
+                    "123",
+                    vod_path=vod_path,
+                    vod_context=context,
+                    window_start=10.0,
+                    window_end=20.0,
+                )
+                second = build_twitch_training_dataset._load_or_build_window_modalities(
+                    "123",
+                    vod_path=vod_path,
+                    vod_context=context,
+                    window_start=10.0,
+                    window_end=20.0,
+                )
+
+        self.assertEqual(first[0][0].second, 0)
+        self.assertEqual(first[1][0].second, 0)
+        self.assertEqual(second[0][0].second, 0)
+        self.assertEqual(second[1][0].second, 0)
+        audio_mock.assert_called_once()
+        video_mock.assert_called_once()
+
+    def test_load_or_build_window_modalities_serializes_numpy_scalars(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "vod_feature_cache" / "123"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            context = build_twitch_training_dataset.VodFeatureContext(
+                transcript=[],
+                audio_signal=["samples"],
+                audio_sample_rate=16000,
+                cache_dir=cache_dir,
+            )
+            vod_path = Path(tmp) / "video.mp4"
+            vod_path.write_bytes(b"video")
+            audio_frames = [
+                SimpleNamespace(
+                    second=np.int64(0),
+                    pitch_hz=np.float32(100.0),
+                    rms_db=np.float64(-10.0),
+                    is_silence=np.bool_(False),
+                    laughter_prob=np.float32(0.2),
+                    onset_rate=np.float32(1.0),
+                )
+            ]
+            visual_frames = [
+                SimpleNamespace(
+                    second=np.int64(0),
+                    scene_change=np.bool_(True),
+                    motion_score=np.float32(0.4),
+                    face_count=np.int64(1),
+                    face_size_ratio=np.float32(0.3),
+                    face_reaction_prob=np.float32(0.1),
+                    visual_activity=np.float32(0.5),
+                )
+            ]
+
+            with patch("services.audio_features.extract_window_from_signal", return_value=audio_frames), \
+                 patch("services.video_features.extract", return_value=visual_frames):
+                build_twitch_training_dataset._load_or_build_window_modalities(
+                    "123",
+                    vod_path=vod_path,
+                    vod_context=context,
+                    window_start=10.0,
+                    window_end=20.0,
+                )
+
+            cache_files = list((cache_dir / "windows").glob("*.json"))
+            self.assertEqual(len(cache_files), 1)
+            cached = json.loads(cache_files[0].read_text(encoding="utf-8"))
+
+        self.assertIs(cached["audio_frames"][0]["is_silence"], False)
+        self.assertIs(cached["visual_frames"][0]["scene_change"], True)
+        self.assertEqual(cached["visual_frames"][0]["face_count"], 1)
+
+    def test_load_or_build_window_modalities_treats_corrupt_cache_as_miss(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "vod_feature_cache" / "123"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            context = build_twitch_training_dataset.VodFeatureContext(
+                transcript=[],
+                audio_signal=["samples"],
+                audio_sample_rate=16000,
+                cache_dir=cache_dir,
+            )
+            vod_path = Path(tmp) / "video.mp4"
+            vod_path.write_bytes(b"video")
+            payload = build_twitch_training_dataset._window_feature_cache_payload(
+                "123",
+                vod_path,
+                window_start=10.0,
+                window_end=20.0,
+            )
+            cache_path = build_twitch_training_dataset._window_feature_cache_path(cache_dir, payload)
+            cache_path.parent.mkdir(parents=True)
+            cache_path.write_text("{not-json", encoding="utf-8")
+            audio_frames = [
+                SimpleNamespace(
+                    second=0,
+                    pitch_hz=100.0,
+                    rms_db=-10.0,
+                    is_silence=False,
+                    laughter_prob=0.2,
+                    onset_rate=1.0,
+                )
+            ]
+            visual_frames = [
+                SimpleNamespace(
+                    second=0,
+                    scene_change=False,
+                    motion_score=0.4,
+                    face_count=1,
+                    face_size_ratio=0.3,
+                    face_reaction_prob=0.1,
+                    visual_activity=0.5,
+                )
+            ]
+
+            with patch("services.audio_features.extract_window_from_signal", return_value=audio_frames) as audio_mock, \
+                 patch("services.video_features.extract", return_value=visual_frames) as video_mock:
+                result = build_twitch_training_dataset._load_or_build_window_modalities(
+                    "123",
+                    vod_path=vod_path,
+                    vod_context=context,
+                    window_start=10.0,
+                    window_end=20.0,
+                )
+
+        self.assertEqual(result[0][0].second, 0)
+        audio_mock.assert_called_once()
+        video_mock.assert_called_once()
 
     def test_build_dataset_uses_vod_checkpoint_when_present(self) -> None:
         labels = [
@@ -289,6 +664,7 @@ class BuildTwitchTrainingDatasetTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp, \
              patch("ml.build_twitch_training_dataset._materialize_vod", return_value=Path(tmp) / "vod.mp4"), \
+             patch("ml.build_twitch_training_dataset._load_or_build_vod_feature_context", return_value=self._fake_vod_feature_context(Path(tmp))), \
              patch("ml.build_twitch_training_dataset._build_rows_for_label", return_value=built_rows):
             work_dir = Path(tmp) / "work"
             build_twitch_training_dataset.build_dataset(labels, "jynxzi", work_dir)
@@ -373,6 +749,7 @@ class BuildTwitchTrainingDatasetTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, \
              patch.object(settings, "training_label_workers", 1), \
              patch("ml.build_twitch_training_dataset._materialize_vod", return_value=Path(tmp) / "vod.mp4"), \
+             patch("ml.build_twitch_training_dataset._load_or_build_vod_feature_context", return_value=self._fake_vod_feature_context(Path(tmp))), \
              patch(
                  "ml.build_twitch_training_dataset._build_rows_for_label",
                  side_effect=[RuntimeError("ffmpeg failed"), [fake_row]],
@@ -424,6 +801,7 @@ class BuildTwitchTrainingDatasetTests(unittest.TestCase):
              patch.object(settings, "training_vod_workers", 1), \
              patch.object(settings, "training_label_workers", 2), \
              patch("ml.build_twitch_training_dataset._materialize_vod", return_value=Path(tmp) / "vod.mp4"), \
+             patch("ml.build_twitch_training_dataset._load_or_build_vod_feature_context", return_value=self._fake_vod_feature_context(Path(tmp))), \
              patch("ml.build_twitch_training_dataset._build_rows_for_label", side_effect=_fake_build_rows_for_label):
             rows = build_twitch_training_dataset.build_dataset(labels, "jynxzi", Path(tmp))
 
@@ -472,6 +850,7 @@ class BuildTwitchTrainingDatasetTests(unittest.TestCase):
              patch.object(settings, "training_vod_workers", 1), \
              patch.object(settings, "training_label_workers", 2), \
              patch("ml.build_twitch_training_dataset._materialize_vod", return_value=Path(tmp) / "vod.mp4"), \
+             patch("ml.build_twitch_training_dataset._load_or_build_vod_feature_context", return_value=self._fake_vod_feature_context(Path(tmp))), \
              patch("ml.build_twitch_training_dataset._build_rows_for_label", side_effect=_fake_build_rows_for_label):
             rows = build_twitch_training_dataset.build_dataset(labels, "jynxzi", Path(tmp))
 
@@ -479,7 +858,7 @@ class BuildTwitchTrainingDatasetTests(unittest.TestCase):
         self.assertEqual(rows[0]["window_start"], 30.0)
         self.assertEqual(rows[0]["label_class"], "hard_negative")
 
-    def test_build_dataset_batches_vod_window_cuts_once_per_vod(self) -> None:
+    def test_build_dataset_processes_label_windows_directly_from_vod(self) -> None:
         labels = [
             {
                 "broadcaster": "jynxzi",
@@ -507,8 +886,8 @@ class BuildTwitchTrainingDatasetTests(unittest.TestCase):
             },
         ]
 
-        def _fake_build_rows_for_label(label: dict, *, clip_path=None, **_kwargs) -> list[dict]:
-            self.assertIsNotNone(clip_path)
+        def _fake_build_rows_for_label(label: dict, **_kwargs) -> list[dict]:
+            self.assertNotIn("clip_path", _kwargs)
             return [{
                 "label": 1 if label["label_class"] == "positive" else 0,
                 "label_source": "twitch_clip_api",
@@ -519,16 +898,14 @@ class BuildTwitchTrainingDatasetTests(unittest.TestCase):
              patch.object(settings, "training_vod_workers", 1), \
              patch.object(settings, "training_label_workers", 1), \
              patch("ml.build_twitch_training_dataset._materialize_vod", return_value=Path(tmp) / "vod.mp4"), \
-             patch("ml.build_twitch_training_dataset.collect_viral_clips.cut_video_windows") as batch_cut_mock, \
+             patch("ml.build_twitch_training_dataset._load_or_build_vod_feature_context", return_value=self._fake_vod_feature_context(Path(tmp))), \
              patch("ml.build_twitch_training_dataset._build_rows_for_label", side_effect=_fake_build_rows_for_label):
             rows = build_twitch_training_dataset.build_dataset(labels, "jynxzi", Path(tmp))
 
         self.assertEqual(len(rows), 2)
-        self.assertEqual(batch_cut_mock.call_count, 1)
-        batch_windows = batch_cut_mock.call_args.args[1]
-        self.assertEqual(len(batch_windows), 2)
+        self.assertEqual([row["window_start"] for row in rows], [10.0, 30.0])
 
-    def test_build_dataset_falls_back_to_per_label_cut_when_batch_cut_fails(self) -> None:
+    def test_build_dataset_no_longer_uses_batch_cut_fallback_path(self) -> None:
         labels = [
             {
                 "broadcaster": "jynxzi",
@@ -556,8 +933,8 @@ class BuildTwitchTrainingDatasetTests(unittest.TestCase):
             },
         ]
 
-        def _fake_build_rows_for_label(label: dict, *, clip_path=None, **_kwargs) -> list[dict]:
-            self.assertIsNone(clip_path)
+        def _fake_build_rows_for_label(label: dict, **_kwargs) -> list[dict]:
+            self.assertNotIn("clip_path", _kwargs)
             return [{
                 "label": 1 if label["label_class"] == "positive" else 0,
                 "label_source": "twitch_clip_api",
@@ -568,14 +945,78 @@ class BuildTwitchTrainingDatasetTests(unittest.TestCase):
              patch.object(settings, "training_vod_workers", 1), \
              patch.object(settings, "training_label_workers", 1), \
              patch("ml.build_twitch_training_dataset._materialize_vod", return_value=Path(tmp) / "vod.mp4"), \
-             patch(
-                 "ml.build_twitch_training_dataset.collect_viral_clips.cut_video_windows",
-                 side_effect=RuntimeError("ffmpeg failed"),
-             ), \
+             patch("ml.build_twitch_training_dataset._load_or_build_vod_feature_context", return_value=self._fake_vod_feature_context(Path(tmp))), \
              patch("ml.build_twitch_training_dataset._build_rows_for_label", side_effect=_fake_build_rows_for_label):
             rows = build_twitch_training_dataset.build_dataset(labels, "jynxzi", Path(tmp))
 
         self.assertEqual(len(rows), 2)
+
+    def test_build_dataset_logs_label_phase_progress(self) -> None:
+        labels = [
+            {
+                "broadcaster": "jynxzi",
+                "vod_id": "123",
+                "vod_url": "https://www.twitch.tv/videos/123",
+                "window_start": 10.0,
+                "window_end": 20.0,
+                "label_class": "positive",
+                "label_score": 0.8,
+                "clip_ids": ["c1"],
+                "label_source": "twitch_clip_api",
+                "platform_source": "twitch_clip",
+            },
+            {
+                "broadcaster": "jynxzi",
+                "vod_id": "123",
+                "vod_url": "https://www.twitch.tv/videos/123",
+                "window_start": 30.0,
+                "window_end": 40.0,
+                "label_class": "hard_negative",
+                "label_score": 0.0,
+                "clip_ids": [],
+                "label_source": "twitch_clip_api",
+                "platform_source": "twitch_clip",
+            },
+            {
+                "broadcaster": "jynxzi",
+                "vod_id": "123",
+                "vod_url": "https://www.twitch.tv/videos/123",
+                "window_start": 50.0,
+                "window_end": 60.0,
+                "label_class": "positive",
+                "label_score": 0.7,
+                "clip_ids": ["c2"],
+                "label_source": "twitch_clip_api",
+                "platform_source": "twitch_clip",
+            },
+        ]
+
+        def _fake_build_rows_for_label(label: dict, **_kwargs) -> list[dict]:
+            self.assertNotIn("clip_path", _kwargs)
+            return [{
+                "label": 1 if label["label_class"] == "positive" else 0,
+                "label_source": "twitch_clip_api",
+                "features": {"candidate_id": f"cand-{int(label['window_start'])}"},
+            }]
+
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(settings, "training_vod_workers", 1), \
+             patch.object(settings, "training_label_workers", 2), \
+             patch("ml.build_twitch_training_dataset._materialize_vod", return_value=Path(tmp) / "vod.mp4"), \
+             patch("ml.build_twitch_training_dataset._load_or_build_vod_feature_context", return_value=self._fake_vod_feature_context(Path(tmp))), \
+             patch("ml.build_twitch_training_dataset._build_rows_for_label", side_effect=_fake_build_rows_for_label), \
+             patch("ml.build_twitch_training_dataset.logger.info") as info_mock:
+            rows = build_twitch_training_dataset.build_dataset(labels, "jynxzi", Path(tmp))
+
+        self.assertEqual(len(rows), 3)
+        messages = [call.args[0] for call in info_mock.call_args_list]
+        self.assertIn("training_vod_label_phase_start vod_id=%s labels=%s label_workers=%s", messages)
+        self.assertIn("training_vod_label_window_source vod_id=%s mode=%s labels=%s", messages)
+        self.assertIn(
+            "training_vod_label_progress vod_id=%s completed=%s/%s latest_window=%s rows=%s elapsed_sec=%.1f mode=parallel",
+            messages,
+        )
+        self.assertIn("training_vod_label_phase_done vod_id=%s completed=%s rows=%s elapsed_sec=%.1f", messages)
 
     def test_build_dataset_starts_prefetch_for_next_vod(self) -> None:
         labels = [
@@ -618,6 +1059,7 @@ class BuildTwitchTrainingDatasetTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, \
              patch.object(settings, "training_vod_workers", 1), \
              patch("ml.build_twitch_training_dataset._materialize_vod", side_effect=_fake_materialize), \
+             patch("ml.build_twitch_training_dataset._load_or_build_vod_feature_context", return_value=self._fake_vod_feature_context(Path(tmp))), \
              patch("ml.build_twitch_training_dataset._build_rows_for_label", side_effect=lambda *args, **kwargs: [dict(fake_row)]):
             rows = build_twitch_training_dataset.build_dataset(labels, "jynxzi", Path(tmp))
 

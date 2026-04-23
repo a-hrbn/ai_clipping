@@ -33,6 +33,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--train-tmpdir", default=DEFAULT_TRAIN_TMPDIR)
     parser.add_argument("--whisper-model", default=os.environ.get("WHISPER_MODEL", "base"))
     parser.add_argument("--whisper-device", default=os.environ.get("WHISPER_DEVICE", "cuda"))
+    parser.add_argument("--whisper-language", default=os.environ.get("WHISPER_LANGUAGE", "en"))
     parser.add_argument(
         "--semantic-device",
         default=os.environ.get("SEMANTIC_DEVICE", "cuda"),
@@ -50,6 +51,23 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--ollama-host", default=os.environ.get("OLLAMA_HOST", "http://host.docker.internal:11434"))
     parser.add_argument("--training-vod-workers", type=int, default=0)
     parser.add_argument("--training-label-workers", type=int, default=0)
+    parser.add_argument(
+        "--training-ffmpeg-video-codec",
+        default=os.environ.get("TRAINING_FFMPEG_VIDEO_CODEC", "h264_nvenc"),
+    )
+    parser.add_argument(
+        "--training-ffmpeg-audio-codec",
+        default=os.environ.get("TRAINING_FFMPEG_AUDIO_CODEC", "aac"),
+    )
+    parser.add_argument(
+        "--training-ffmpeg-preset",
+        default=os.environ.get("TRAINING_FFMPEG_PRESET", ""),
+    )
+    parser.add_argument(
+        "--training-ffmpeg-threads",
+        type=int,
+        default=int(os.environ.get("TRAINING_FFMPEG_THREADS", "0") or "0"),
+    )
     parser.add_argument("--video-expression-sample-sec", type=int, default=6)
     parser.add_argument("--artifact-only", action="store_true")
     parser.add_argument("--skip-covered", dest="skip_covered", action="store_true", default=True)
@@ -81,6 +99,7 @@ def _configure_runtime_env(args: argparse.Namespace) -> dict[str, str]:
         {
             "WHISPER_MODEL": args.whisper_model,
             "WHISPER_DEVICE": args.whisper_device,
+            "WHISPER_LANGUAGE": args.whisper_language,
             "SEMANTIC_DEVICE": args.semantic_device,
             "SEMANTIC_BATCH_SIZE": str(semantic_batch_size),
             "STORAGE_DIR": args.storage_dir,
@@ -88,6 +107,10 @@ def _configure_runtime_env(args: argparse.Namespace) -> dict[str, str]:
             "TRAINING_DATASET_LLM_PROVIDER": args.dataset_llm_provider,
             "TRAINING_VOD_WORKERS": str(vod_workers),
             "TRAINING_LABEL_WORKERS": str(label_workers),
+            "TRAINING_FFMPEG_VIDEO_CODEC": args.training_ffmpeg_video_codec,
+            "TRAINING_FFMPEG_AUDIO_CODEC": args.training_ffmpeg_audio_codec,
+            "TRAINING_FFMPEG_PRESET": args.training_ffmpeg_preset,
+            "TRAINING_FFMPEG_THREADS": str(args.training_ffmpeg_threads),
             "VIDEO_EXPRESSION_SAMPLE_SEC": str(max(args.video_expression_sample_sec, 1)),
             "SHORTLIST_FACE_REACTION_SAMPLE_SEC": "2",
             "TOKENIZERS_PARALLELISM": "false",
@@ -131,9 +154,14 @@ def _build_summary(args: argparse.Namespace, env: dict[str, str], training_retur
         "hardware_profile": {
             "cpu_count": cpu_count,
             "whisper_device": env.get("WHISPER_DEVICE", ""),
+            "whisper_language": env.get("WHISPER_LANGUAGE", ""),
             "semantic_device": env.get("SEMANTIC_DEVICE", ""),
             "training_vod_workers": env.get("TRAINING_VOD_WORKERS", ""),
             "training_label_workers": env.get("TRAINING_LABEL_WORKERS", ""),
+            "training_ffmpeg_video_codec": env.get("TRAINING_FFMPEG_VIDEO_CODEC", ""),
+            "training_ffmpeg_audio_codec": env.get("TRAINING_FFMPEG_AUDIO_CODEC", ""),
+            "training_ffmpeg_preset": env.get("TRAINING_FFMPEG_PRESET", ""),
+            "training_ffmpeg_threads": env.get("TRAINING_FFMPEG_THREADS", ""),
             "semantic_batch_size": env.get("SEMANTIC_BATCH_SIZE", ""),
             "dataset_llm_provider": env.get("TRAINING_DATASET_LLM_PROVIDER", ""),
             "video_expression_sample_sec": env.get("VIDEO_EXPRESSION_SAMPLE_SEC", ""),

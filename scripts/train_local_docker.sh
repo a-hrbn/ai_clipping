@@ -9,6 +9,7 @@ ENV_FILE="${AI_CLIPPING_LOCAL_TRAIN_ENV_FILE:-$REPO_ROOT/backend/.env}"
 ARTIFACT_DIR="$REPO_ROOT/backend/ml/artifacts"
 TMP_DIR="$REPO_ROOT/backend/tmp"
 PREWARMED_MODEL_DIR="${AI_CLIPPING_LOCAL_PREWARMED_MODEL_DIR:-$REPO_ROOT/tmp/prewarmed_sentence_transformers_local}"
+NVIDIA_DRIVER_CAPABILITIES_VALUE="${NVIDIA_DRIVER_CAPABILITIES:-compute,utility,video}"
 
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "Missing env file: $ENV_FILE" >&2
@@ -30,6 +31,7 @@ DOCKER_ARGS=(
   --add-host=host.docker.internal:host-gateway
   --env-file "$ENV_FILE"
   -e "OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}"
+  -e "NVIDIA_DRIVER_CAPABILITIES=${NVIDIA_DRIVER_CAPABILITIES_VALUE}"
   -v "$ARTIFACT_DIR:/app/backend/ml/artifacts"
   -v "$TMP_DIR:/app/backend/tmp"
 )

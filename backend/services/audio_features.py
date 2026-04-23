@@ -107,13 +107,7 @@ class LaughterDetector:
 # Main extraction function
 # ---------------------------------------------------------------------------
 
-def extract(audio_path: pathlib.Path) -> list[AudioFeatureFrame]:
-    """
-    Load audio and return one AudioFeatureFrame per second.
-
-    Expects 16 kHz mono WAV (output of audio_extractor.extract).
-    """
-    y, sr = librosa.load(str(audio_path), sr=None, mono=True)
+def _extract_frames(y: np.ndarray, sr: int) -> list[AudioFeatureFrame]:
     duration_s = int(len(y) / sr)
     detector = LaughterDetector()
     frames: list[AudioFeatureFrame] = []
@@ -163,6 +157,28 @@ def extract(audio_path: pathlib.Path) -> list[AudioFeatureFrame]:
         ))
 
     return frames
+
+
+def extract(audio_path: pathlib.Path) -> list[AudioFeatureFrame]:
+    """
+    Load audio and return one AudioFeatureFrame per second.
+
+    Expects 16 kHz mono WAV (output of audio_extractor.extract).
+    """
+    y, sr = librosa.load(str(audio_path), sr=None, mono=True)
+    return _extract_frames(y, sr)
+
+
+def extract_window_from_signal(
+    y: np.ndarray,
+    sr: int,
+    *,
+    start_sec: float,
+    end_sec: float,
+) -> list[AudioFeatureFrame]:
+    start_sample = max(int(round(float(start_sec) * sr)), 0)
+    end_sample = max(int(round(float(end_sec) * sr)), start_sample)
+    return _extract_frames(y[start_sample:end_sample], sr)
 
 
 # ---------------------------------------------------------------------------

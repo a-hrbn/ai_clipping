@@ -1,12 +1,42 @@
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from ml import export_frontend_gold_eval
 
 
 class ExportFrontendGoldEvalTests(unittest.TestCase):
+    def test_main_writes_empty_artifacts_when_no_gold_eval_rows_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            storage = root / "storage"
+            storage.mkdir(parents=True, exist_ok=True)
+            rows_out = root / "gold_rows.jsonl"
+            output = root / "gold_dataset.jsonl"
+            summary = root / "gold_summary.json"
+
+            argv = [
+                "export_frontend_gold_eval.py",
+                "--storage-dir",
+                str(storage),
+                "--rows-out",
+                str(rows_out),
+                "--output",
+                str(output),
+                "--summary-out",
+                str(summary),
+            ]
+            with patch.object(sys, "argv", argv):
+                code = export_frontend_gold_eval.main()
+
+            self.assertEqual(code, 0)
+            self.assertEqual(rows_out.read_text(encoding="utf-8"), "")
+            self.assertEqual(output.read_text(encoding="utf-8"), "")
+            self.assertEqual(json.loads(summary.read_text(encoding="utf-8")), {"rows": 0, "eval_dataset": {}})
+
     def test_export_builds_gold_eval_dataset_from_debug_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             storage = Path(tmp) / "storage"

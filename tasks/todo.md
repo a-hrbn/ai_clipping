@@ -1,5 +1,907 @@
 # Task Plan
 
+## 2026-04-23 Plan: Fix Local Training Failure When Gold Eval Rows Are Missing
+
+- [x] Inspect `train_jynxzi_vod.sh` handling of `export_frontend_gold_eval.py`.
+- [x] Inspect exporter exit behavior for empty frontend gold-eval rows.
+- [x] Make missing gold-eval rows a non-fatal skipped evaluation path.
+- [x] Add/update regression tests for no-gold local training behavior.
+- [x] Run targeted verification and document outcome.
+
+### Review Notes
+
+- Root cause:
+  - `backend/ml/export_frontend_gold_eval.py` returned exit code `1` when no frontend gold-eval rows existed.
+  - `backend/ml/train_jynxzi_vod.sh` runs with `set -euo pipefail`, so that expected empty-state aborted the whole local training run after artifact/eval work had already started.
+- Fix:
+  - `export_frontend_gold_eval.py` now writes empty `rows`, empty `eval_rows`, and a summary `{"rows": 0, "eval_dataset": {}}`, prints a warning, and returns `0`.
+  - `backend/ml/build_eval_dataset.py` no longer imports `ml.train_ranker` just to read JSONL. It now has a local `_read_jsonl()`, avoiding the heavy `train_ranker -> semantic_service -> transcriber -> whisper` import path for eval dataset export.
+  - Added regression coverage for the no-gold CLI path in `backend/tests/test_export_frontend_gold_eval.py`.
+- Verification:
+  - `PYTHONPATH=/home/antonio/ai_clipping/backend /home/antonio/ai_clipping/backend/.venv/bin/python -m unittest backend.tests.test_export_frontend_gold_eval backend.tests.test_build_eval_dataset`
+  - `python3 -m py_compile backend/ml/export_frontend_gold_eval.py backend/ml/build_eval_dataset.py backend/tests/test_export_frontend_gold_eval.py backend/tests/test_build_eval_dataset.py`
+  - `bash -n backend/ml/train_jynxzi_vod.sh`
+  - `python3 -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('backend'))"`
+- Result:
+  - `8` targeted tests green.
+  - Syntax and shell parse checks clean.
+  - Graphify rebuild still fails in this environment with `ModuleNotFoundError: No module named 'graphify'`.
+- Expected behavior now:
+  - A run with no frontend gold-eval rows continues past export.
+  - Downstream `evaluate_ranker.py` can create an empty/no-dataset gold eval report instead of the shell aborting.
+  - Rollout recommendation should remain inconclusive when no gold eval rows exist, rather than failing the whole training command.
+
+## 2026-04-23 Plan: Compare Viral Clip Pipeline Against AI Clipping Apps
+
+- [x] Verify current positioning/features of leading AI clipping tools from primary sources.
+- [x] Map competitor capabilities against the local pipeline architecture.
+- [x] Identify quality, workflow, training, eval, and product gaps.
+- [x] Prioritize improvements by impact and implementation leverage.
+- [x] Record findings and recommendations.
+
+### Review Notes
+
+- Market baseline checked from official/current sources:
+  - OpusClip emphasizes any-genre clipping, AI reframe/object tracking, dynamic captions, B-roll, audio enhance, voice-over, brand templates, API/workflow automation, and publishing.
+  - Captions AI Shorts emphasizes auto short extraction, templates, subtitles, and AI editing.
+  - Clippper is Twitch-specific and emphasizes webcam/gameplay/chat region detection, planned 9:16 layouts, timed captions, hooks, and export-ready shorts.
+  - vidIQ emphasizes YouTube-to-shorts clipping, cut/crop/captions, safe-zone captions, and title/keyword/post-time optimization.
+  - Vizard/Descript emphasize clip counts/duration controls, layouts/aspect ratios, topic/goal guided clip generation, text editing, templates, subtitles, translation, sharing/publishing.
+  - Munch emphasizes coherent clips, multimodal analysis, trend/keyword analysis, platform-specific posts, auto-captioning, and smart cropping.
+- Local strengths:
+  - Strong architecture for candidate discovery and scoring: transcript/audio/video features, semantic candidates, peak candidates, strategy/profile knobs, boundary refinement, feedback/gold eval plumbing.
+  - Twitch/VOD training infrastructure is more specialized than generic tools: VOD labels, VOD feature cache, boundary near-miss negatives, streamer profiles, training state, artifact health.
+  - Debug outputs and feedback collection are unusually good for an early internal tool.
+- Major gaps versus leading apps:
+  - Current ranker artifact is not runtime-usable; serving likely falls back to heuristic.
+  - Training data is still short-form-heavy, not genuinely VOD-first.
+  - Export only cuts horizontal MP4 clips; no vertical 9:16 composition, no webcam/gameplay layout, no active speaker/object tracking crop.
+  - No burned-in dynamic captions, safe-zone caption placement, caption templates, emoji/keyword highlighting, translation, or brand kit.
+  - No B-roll, transitions, audio enhancement, silence/filler-word removal, hook/title generation, thumbnails, hashtags, descriptions, or posting workflow.
+  - UI is review/download/feedback, not a timeline/text editor where users can adjust cuts/captions/layouts.
+  - Trend/post-publish learning loop exists mostly as disabled flags or weak placeholders, not an operational outcome-based system.
+  - Portable pipeline and Vertex docs drift from the richer shell flow.
+- Priority:
+  - First make clip selection measurable and active: non-artifact-only eval, gold/proxy reports, ranker gate fixes, more VOD-positive data.
+  - Then build export-ready vertical output: Twitch region detector/layout planner, captions, safe zones, templates.
+  - Then close learning loop with post-publish metrics and trend-conditioned metadata.
+
+## 2026-04-23 Plan: Evaluate Current 14-Day Run Artifact
+
+- [x] Identify the run metadata and current artifact files.
+- [x] Inspect ranker artifact, artifact health, boundary artifact, and dataset composition.
+- [x] Compare artifact validation metrics against runtime usability gates.
+- [x] Assess rollout readiness, model quality, and primary risks.
+- [x] Record findings and verification commands.
+
+### Review Notes
+
+- Run metadata:
+  - `backend/ml/artifacts/local_train_summary.json` identifies the current 14-day run as `jynxzi`, `2026-03-01` to `2026-03-14`, `training_return_code=0`, `artifact_only=true`.
+  - Because `artifact_only=true`, no proxy/gold/pipeline eval reports were produced in `backend/ml/artifacts`.
+  - MLflow is disabled in the artifact (`mlflow.enabled=false`).
+- Candidate ranker artifact:
+  - `backend/ml/artifacts/jynxzi_ranker.json`: `version=4`, `artifact_family=ranker_v2`, `model_type=logistic`, `selected_model=pairwise_logistic_regression`, `blend=0.95`.
+  - Runtime clamps blend to `0.65`, so the artifact's requested `0.95` is not the actual serving blend.
+  - Training stats: `1089` rows, `521` positives, `568` negatives, `872` train rows, `217` validation rows, `group_holdout` by `source_url`, leakage risk `low`.
+  - Validation: accuracy `0.636`, precision `0.547`, recall `0.652`, F1 `0.595`, precision@5 `0.546`, ndcg@5 `0.552`, mrr `0.547`.
+  - Runtime usability gates fail on `ranking_metric_min=0.0 < 0.20`, `ranking_metric_p25=0.0 < 0.45`, and ranking composite thresholds (`mrr=0.547 < 0.60`, `ndcg@5=0.552 < 0.70`, `precision@5=0.546 < 0.60`, `precision=0.547 < 0.70`).
+  - Expected runtime result: artifact rejected, heuristic fallback.
+- Dataset composition:
+  - Parsed `1089` JSONL rows from `jynxzi_vod_training_rows.jsonl`.
+  - `1003` rows are `short_form_supplemental`; `52` are `twitch_vod_primary`; `34` are `twitch_vod_boundary_near_miss`.
+  - Weighted data: total sample weight `447.75`; short-form supplement weight `351.05`; primary Twitch VOD weight `81.4`; boundary near-miss weight `15.3`.
+  - Label classes: `503` short-form positive, `500` short-form negative, `34` boundary near-miss negative, `29` hard negative, `14` positive, `5` background negative, `4` weak positive.
+  - Grouping is mostly singleton short-form URLs: `1015` groups, `1007` singleton groups, `500` zero-positive groups, `509` zero-negative groups, only `6` mixed groups. This explains the zero min/p25 grouped ranking metrics.
+  - Primary VOD source mix barely passes the configured cap: `twitch_label_proxy=34/86` and `boundary_perturbation=34/86`, peak share about `0.395` below the `0.40` cap.
+- Boundary artifact:
+  - `backend/ml/artifacts/jynxzi_boundary_ranker.json`: `version=1`, `boundary_logistic`, `86` boundary rows.
+  - Start/end/pair validation each report accuracy `0.722`, F1 about `0.737`/`0.783`/`0.762`, ndcg@5 `1.0`.
+  - This passes static boundary model gates, but `enable_boundary_ranker` defaults to `False`; also validation has only `18` rows and stratified fallback split, so do not promote without boundary-specific eval.
+- Assessment:
+  - The ranker artifact is useful as a training checkpoint, not rollout-ready.
+  - It should not be treated as an active serving improvement because runtime gates reject it.
+  - The artifact is still dominated by short-form supervision, so it is not yet a strong VOD-first model.
+  - Run a non-artifact-only eval pass before changing serving flags or relaxing gates.
+- Verification:
+  - Inspected `local_train_summary.json`, `jynxzi_ranker.json`, `jynxzi_artifact_health.json`, `jynxzi_boundary_ranker.json`.
+  - Counted dataset rows, labels, source mix, sample weights, and grouping structure via read-only JSON parsing.
+  - Compared artifact metrics against `services.ranker.Ranker._validation_passes` thresholds statically.
+
+## 2026-04-23 Plan: Analyze Codebase ML Model And Training Workflow
+
+- [x] Read architecture map and identify core ML/training entry points.
+- [x] Trace runtime inference path from candidate generation through feature building, ranker scoring, boundary refinement, and final selection.
+- [x] Trace training workflow from data collection/labeling through dataset construction, ranker/boundary training, evaluation, artifact promotion, and deployment/loading.
+- [x] Inspect model artifacts/config contracts and tests that define expected behavior.
+- [x] Run lightweight verification commands that do not mutate backend code, and record limitations.
+- [x] Document findings, risks, and improvement opportunities.
+
+### Review Notes
+
+- Graphify/entry points:
+  - Graphify identifies `RichSegment`, `Candidate`, `train_from_rows()`, `Ranker`, `_build_candidate_features()` and `_window_candidate()` as central nodes.
+  - Main runtime path is `backend/pipeline.py`: download, audio extraction, transcription, audio/video/chat enrichment, segment scoring, candidate generation/normalization, `feature_builder.build_features()`, `selector.rank_candidates()`, optional clip judge, `analyzer.refine_candidates()`, post-processing, clipping, feedback export.
+  - Main local training path is `backend/ml/local_train.py` -> `backend/ml/train_jynxzi_vod.sh` -> `backend/ml/collect_twitch_clip_labels.py` -> `backend/ml/train_vod_ranker.py` -> `backend/ml/build_twitch_training_dataset.py` -> `backend/ml/train_ranker.py` plus `backend/ml/train_boundary_ranker.py`.
+- Model architecture:
+  - Serving ranker is hybrid: heuristic score in `backend/services/ranker.py` plus optional trained artifact blend from `backend/ml/artifacts/{profile}_ranker.json` or MLflow Production registry fallback.
+  - Current ranker artifact is `version=4`, `profile=jynxzi`, `model_type=logistic`, `selected_model=pairwise_logistic_regression`, `blend=0.95`.
+  - Runtime artifact gates likely reject the current ranker: validation has `ranking_metric=mrr`, `ranking_metric_value=0.547`, but `ranking_metric_min=0.0` and `ranking_metric_p25=0.0`, which trips `validation_group_ranking_metric_min_below_minimum`.
+  - Boundary artifact exists and its start/end/pair submodels pass static gate thresholds, but `enable_boundary_ranker` defaults to `False`, so serving uses heuristic boundary scoring unless explicitly enabled.
+- Data/training state:
+  - Current artifacts: `jynxzi_twitch_clip_labels.jsonl` has 6703 label rows; `jynxzi_vod_training_rows.jsonl` has 1089 training rows; `jynxzi_training_rows.jsonl` has 1003 short-form rows.
+  - Composite training data is dominated by short-form supplement: 1003/1089 rows are `short_form_supplemental`; only 52 rows are `twitch_vod_primary` and 34 are `twitch_vod_boundary_near_miss`.
+  - Twitch label source is very imbalanced/noisy at the label-window stage: hard/background negatives dominate; only 14 `positive` and 4 `weak_positive` label rows are present after ambiguous rows are excluded.
+  - Last local training summary says `artifact_only=true` for 2026-03-01 to 2026-03-14, so eval/gold/proxy reports were intentionally skipped; no `jynxzi_*eval*.json` reports were present in `backend/ml/artifacts`.
+- Workflow mechanics:
+  - Dataset build uses VOD download cache, full-VOD audio/transcript cache, window modality cache, VOD row checkpoints, candidate-source capping, and short-form supplemental fallback.
+  - `train_ranker.py` trains mean-difference linear, logistic, pairwise logistic, gradient boosting, and optionally LightGBM LambdaRank, then selects by composite validation score and calibrates heuristic/model blend.
+  - Evaluation path builds proxy eval rows, exports frontend gold eval rows, compares trained vs heuristic ranker, evaluates heuristic pipeline ranking, finalizes MLflow artifacts, and prints rollout recommendation.
+  - Workflow state hashes tracked ML/services/config code and skips retraining/evaluation when labels, dataset, artifact, and state are unchanged.
+  - Productive local path is more complete than portable pipeline path: shell trains VOD composite dataset, ranker, boundary ranker, eval, MLflow finalization and rollout recommendation; pipeline components train only the direct `ml.build_twitch_training_dataset` output and `ml.train_ranker`.
+  - `docs/vertex-training.md` references `backend/ml/vertex_train.py`, `backend/ml/pipelines/train_pipeline.py`, `scripts/submit_vertex_training.py`, and `scripts/submit_vertex_pipeline.py`; all four are missing in this workspace.
+  - MLflow registration is driven by training-validation gates, while proxy/gold eval is logged later by finalization and is not a hard promotion gate.
+- Verification:
+  - Parsed 80 Python files under `backend/ml` and `backend/services` with `ast.parse`; no syntax errors.
+  - Static artifact gate check showed current ranker would fail with `validation_group_ranking_metric_min_below_minimum`.
+  - Static boundary artifact gate check showed all three boundary submodels meet row/accuracy/F1 minimums.
+  - Verified missing Vertex files listed above and inspected pipeline train/build components for shell-flow drift.
+  - Import-level runtime verification could not run because the local `.venv` is missing `whisper`, causing `ModuleNotFoundError` when importing `services.transcriber`.
+- Risks / recommendations:
+  - The current trained ranker is probably not active at runtime despite `ENABLE_TRAINED_RANKER_V2=True`; verify after installing dependencies or in the Docker image with `Ranker().inspect_artifact("jynxzi")`.
+  - Treat the current `jynxzi` model as short-form-heavy, not truly VOD-first, until primary VOD positives grow materially.
+  - The validation gate is conservative but currently punishes many single-positive/zero-positive groups; consider filtering groups without positives from min/p25 ranking gates or adding a separate coverage metric.
+  - Boundary ranker should stay disabled until evaluated on gold/proxy boundary data; its internal split uses `stratified_fallback`, so leakage risk is higher than the main ranker split.
+  - Run a non-artifact-only eval pass before changing serving flags, because the current artifact lacks the proxy/gold/pipeline reports needed for a staff-level rollout decision.
+  - Treat Vertex docs/pipeline as non-authoritative until the missing submitter/entrypoint files are restored or the docs are corrected.
+
+## 2026-04-23 Plan: Prevent VOD FFmpeg Decode Stalls
+
+- [x] Live-Haenger gegen Container-Prozesse und Trainingscode einordnen.
+- [x] Harten Timeout fuer FFmpeg-Window-Decodes implementieren.
+- [x] Regressionstests fuer Timeout-/Cleanup-Verhalten ergaenzen.
+- [x] Tests, Syntaxcheck und Graphify-Rebuild ausfuehren.
+
+### Review Notes
+
+- Live-Befund:
+  - Der laufende Container war nicht durch RAM/CPU limitiert, sondern hing mit sechs `ffmpeg -hide_banner -loglevel fatal ... -f rawvideo ...` Prozessen seit ueber 3:38 Stunden an 16-36 Sekunden langen VOD-Window-Decodes.
+  - `docker stats` lag dabei bei ca. `0.06%` CPU und ca. `1GiB` RAM; die letzten Logs waren alte Download-Ausgaben. Das ist ein Decode-Hang, kein normaler Download- oder Compute-Bottleneck.
+- Umsetzung:
+  - `backend/services/video_features.py` hat jetzt fuer FFmpeg-Frame-Decodes einen harten Timeout. Batch-Decodes lesen non-blocking aus der Rawvideo-Pipe, killen den Prozess bei Timeout und geben bereits gelesene Frames beziehungsweise leere Visual-Frames zurueck.
+  - `backend/config.py` fuegt `video_feature_ffmpeg_timeout_sec` hinzu; Default ist `120.0`. Per Env kann das als `VIDEO_FEATURE_FFMPEG_TIMEOUT_SEC` angepasst werden.
+  - Einzelbild-Decodes nutzen denselben Timeout und unterdruecken weiterhin FFmpeg-Stderr ueber `stderr=DEVNULL`.
+  - Tests decken Timeout, Kill-Verhalten und die Timeout-Weitergabe an `subprocess.run` ab.
+- Verifiziert mit:
+  - `python3 -m py_compile backend/config.py backend/services/video_features.py backend/tests/test_video_features.py`
+  - `PYTHONPATH=/home/antonio/ai_clipping/backend /home/antonio/ai_clipping/backend/.venv/bin/python -m unittest backend.tests.test_video_features`
+  - `env STORAGE_DIR=tmp/storage .venv/bin/python -m unittest tests.test_build_twitch_training_dataset`
+  - `python3 -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('backend'))"`
+- Ergebnis:
+  - `test_video_features`: `17` Tests gruen.
+  - `test_build_twitch_training_dataset`: `36` Tests gruen.
+  - Syntaxcheck sauber.
+  - Graphify-Rebuild scheitert weiterhin an `ModuleNotFoundError: No module named 'graphify'`.
+- Rest-Risiken / lokale Einschraenkungen:
+  - Der aktuell laufende Container nutzt diese Aenderung nicht; er muss neu gestartet werden. `scripts/train_local_docker.sh` baut das Image beim Start neu, danach greift der Timeout.
+  - Ein Timeout bedeutet fuer das betroffene Window reduzierte visuelle Features, aber der 14-Tage-Run bleibt fortsetzbar statt endlos zu blockieren.
+
+## 2026-04-23 Plan: Implement ML Training Cache Optimization And Legacy Cleanup
+
+- [x] Cache-Key und VOD-Feature-Cache robust machen.
+- [x] Download-Cache-Metadata und sichere Cleanup-Regeln erweitern.
+- [x] Regressionstests fuer Cache-Hits, korrupte Caches und Altlasten ergaenzen.
+- [x] Relevante Tests, Syntaxcheck und Graphify-Rebuild ausfuehren.
+
+### Review Notes
+
+- Umsetzung:
+  - `backend/ml/build_twitch_training_dataset.py` nutzt fuer Window-Cache-Keys bei Twitch jetzt eine stabile Signatur aus canonical Download-Cache und `vod_id`, statt den transienten Jobpfad in den Key zu ziehen.
+  - VOD-Audio bekommt `audio.metadata.json`; inkompatible Audio-Caches werden neu extrahiert, Legacy-Audio ohne Metadata bleibt fuer Rueckwaertskompatibilitaet zunaechst nutzbar und wird beim Zugriff mit Metadata versehen.
+  - Transcript- und Window-Cache-Writes laufen atomar ueber `.tmp` + `replace`.
+  - Kompatible Transcript-Hits entfernen jetzt uebrig gebliebene `chunks/`, weil das persistierte Transcript danach die wiederverwendbare Quelle ist.
+  - Korrupte Window-Cache-JSONs werden als Cache-Miss behandelt und neu aufgebaut.
+  - `backend/services/downloader.py` schreibt fuer neue Mediencache-Eintraege `.metadata.json` mit Namespace, URL/VOD-ID, Groesse und Complete-Marker; fehlerhafte Metadata erzwingt einen Refresh.
+  - `backend/ml/cache_cleanup.py` entfernt alte `backend/tmp/storage/viral_*` nur, wenn die finalen Medien per Inhaltsvergleich im Short-Form-Downloadcache vorhanden sind oder keine finalen Medien existieren.
+- Verifiziert mit:
+  - `PYTHONPATH=/home/antonio/ai_clipping/backend /home/antonio/ai_clipping/backend/.venv/bin/python -m unittest backend.tests.test_build_twitch_training_dataset backend.tests.test_downloader backend.tests.test_cache_cleanup`
+  - `python3 -m py_compile backend/ml/build_twitch_training_dataset.py backend/services/downloader.py backend/ml/cache_cleanup.py backend/tests/test_build_twitch_training_dataset.py backend/tests/test_downloader.py backend/tests/test_cache_cleanup.py`
+  - `PYTHONPATH=/home/antonio/ai_clipping/backend /home/antonio/ai_clipping/backend/.venv/bin/python -m ml.cache_cleanup --backend-root /home/antonio/ai_clipping/backend --dry-run`
+  - `python3 -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('backend'))"`
+- Ergebnis:
+  - `53` gezielte Unit-Tests gruen.
+  - Syntaxcheck sauber.
+  - Cleanup-Dry-Run findet jetzt `312` konservativ entfernbare Pfade im aktuellen Workspace, inklusive redundant gespiegeltem Short-Form-Legacy-Material; es wurde nichts geloescht.
+  - Graphify-Rebuild scheitert weiterhin an `ModuleNotFoundError: No module named 'graphify'`.
+- Rest-Risiken / lokale Einschraenkungen:
+  - Die neuen Download-Cache-Metadata-Dateien entstehen bei neuen oder refreshenden Cache-Writes; bestehende Legacy-Mediencache-Dateien ohne Metadata bleiben als kompatible Hits gueltig.
+  - Der Short-Form-Legacy-Cleanup vergleicht Inhalte gegen den Cache und ist dadurch sicherer, aber bei sehr vielen Kandidaten etwas teurer als eine reine Groessenregel.
+
+## 2026-04-23 Plan: Analyze ML Training Cache Optimization And Legacy Cleanup
+
+- [x] Graphify-Report, bisherige Lessons und vorhandene Task-Historie lesen.
+- [x] ML-Training-Entry-Points und Dataset-Stufen einordnen.
+- [x] Cache-Schichten, Keying, Invalidierung und Cleanup-Regeln auditieren.
+- [x] Aktuelle Altlasten und redundante Artefakte konservativ bewerten.
+- [x] Konkrete Optimierungsempfehlungen mit Risiken und Verifikation dokumentieren.
+
+### Review Notes
+
+- Workflow:
+  - Lokaler Hauptpfad: `backend/ml/local_train.py` setzt Runtime-Umgebung und ruft `backend/ml/train_jynxzi_vod.sh`.
+  - Shell-Orchestrierung: Cleanup, Twitch-Label-Collect, Workflow-State-Gating, VOD-first Dataset/Training, Short-Form-Backfill-Fallback und Evaluation.
+  - Innerer Trainingspfad: `backend/ml/train_vod_ranker.py` baut ein Composite-Dataset aus VOD-Primary-Rows und optional Short-Form-Supplement, prueft Quality-Gates und trainiert Ranker plus Boundary-Ranker.
+  - Teuerster Teil: `backend/ml/build_twitch_training_dataset.py`, besonders VOD-Download, Full-VOD-Audio/Transcript, Window-Modalities und VOD-Row-Checkpoints.
+- Cache-Schichten:
+  - Modell-/Library-Cache: `backend/tmp/cache/**` fuer Whisper, HuggingFace, Torch, DeepFace, Matplotlib. Behalten.
+  - Mediencache: `backend/tmp/storage/_download_cache/twitch/vod_<id>.mp4` und `_download_cache/short_form/<sha>.mp4`. Behalten; Hauptschutz gegen Re-Downloads.
+  - Featurecache: `backend/tmp/vod_feature_cache/<vod_id>/audio.wav`, `transcript_*.json`, `windows/*.json`. Behalten, aber Keying verbessern.
+  - Row-Checkpoints: `backend/tmp/training_runs/.../_vod_checkpoints/<vod_id>.json`. Behalten; aktuell klein.
+  - Short-Form-Row-Cache: `backend/tmp/short_form_training/_row_cache`. Behalten.
+  - Artefakte/State: `backend/ml/artifacts/**`. Behalten.
+- Aktueller Workspace-Befund:
+  - `backend/tmp`: ca. `428G`.
+  - `backend/tmp/storage/_download_cache`: ca. `179G` bis `197G`, davon Twitch ca. `177G`; persistent wertvoll.
+  - `backend/tmp/storage/twitch_vod_*`: ca. `244G`, davon `9` Ordner mit finalem `video.mp4`, die groesstenteils im Twitch-Download-Cache repliziert sind, plus `2` abgebrochene Fragmentordner.
+  - `backend/tmp/vod_feature_cache`: ca. `18G`; persistent wertvoll, aber `chunks/` dupliziert große Teile von `audio.wav`.
+  - `backend/tmp/storage/viral_*`: `929` Short-Form-Jobordner, zusammen ca. `6.1G`; nicht pauschal loeschen, weil alte Rohkopien dort liegen koennen.
+  - Fragment-/Temp-Dateien unter `backend/tmp/storage`: `2033` Dateien, ca. `18.31GiB`, vor allem in `twitch_vod_2719793388` und `twitch_vod_2720629593`.
+  - `ml.cache_cleanup --dry-run` wuerde aktuell `24` Pfade loeschen, inklusive redundanter Twitch-Jobordner und transienter Short-Form-/Backfill-/Legacy-Pfade.
+- Optimierungsvorschlaege:
+  - Window-Feature-Key stabilisieren: in `_window_feature_cache_payload()` nicht transienten Jobpfad/mtime verwenden, sondern canonical Twitch-Cache-Signatur oder VOD-ID plus Cache-Metadata. Das verbessert Cross-Run-Hits.
+  - `audio.wav` mit Metadata-Sidecar validieren: VOD-ID, Source-Signatur, Extractor-/Cache-Version. Bei Mismatch neu extrahieren.
+  - `chunks/` nach erfolgreichem Transcript-Cache optional entfernen oder unter eigener TTL fuehren; die Chunks kosten aktuell fast die Haelfte von `vod_feature_cache`, waehrend das Transcript bereits persistiert ist.
+  - Window-/Transcript-Cache-Writes atomar machen und korrupte JSON-Dateien als Cache-Miss behandeln.
+  - Download-Cache mit `.complete`/Sidecar-Metadata absichern, damit Cache-Hits nicht nur auf Dateiexistenz vertrauen.
+  - Cleanup-Regeln um sichere Short-Form-`viral_*`-Migration erweitern: nur loeschen, wenn Rohmedium im `_download_cache/short_form` vorhanden ist oder kein finales Medium existiert.
+- Verifikation:
+  - Graphify-Report gelesen.
+  - Read-only Befund via `du`, `find`, `rg` und JSONL-Zaehlung.
+  - `PYTHONPATH=/home/antonio/ai_clipping/backend /home/antonio/ai_clipping/backend/.venv/bin/python -m ml.cache_cleanup --backend-root /home/antonio/ai_clipping/backend --dry-run`.
+- Keine Backend-Codeaenderung vorgenommen; Graphify-Rebuild ist deshalb nicht erforderlich.
+
+## 2026-04-23 Plan: Add Per-Run Backend Cache Cleanup
+
+- [x] Cache- und Arbeitsordner im Backend klassifizieren.
+- [x] Konservativen Run-Start-Cleanup fuer transiente Altlasten implementieren.
+- [x] Cleanup in lokalen Trainingsstart einhaengen.
+- [x] Regressionstests fuer Behalten/Loeschen ergaenzen.
+- [x] Tests, Syntaxcheck und Graphify-Rebuild ausfuehren.
+
+### Review Notes
+
+- Ursache / Ziel:
+  - `backend/tmp/cache` enthaelt Modell-/Library-Caches wie Whisper, HuggingFace, Torch und DeepFace; diese sollen nicht geloescht werden.
+  - Die eigentlichen Cleanup-Kandidaten sind transiente Laufartefakte: `_cache_fill_*`, sicher gecachte `twitch_vod_*` / `twitch_vod_prefetch_*`, Short-Form-Jobordner unter `backend/tmp/short_form_training/viral_*`, alte Backfill-Artefakte und leere Legacy-Cache-Ordner.
+  - `backend/tmp/storage/viral_*` enthaelt in alten Laeufen oft die einzige lokale Short-Form-Rohkopie (`video.mp4`) und wird deshalb nicht automatisch geloescht.
+  - Persistente Caches wie `_download_cache`, `vod_feature_cache`, `_row_cache` und Modellcaches bleiben erhalten.
+- Umsetzung:
+  - Neues Modul `backend/ml/cache_cleanup.py` klassifiziert und entfernt nur bekannte Runtime-Artefakte.
+  - `storage/viral_*` bleibt erhalten; Twitch-Jobordner werden nur geloescht, wenn kein finales `video.mp4` drinliegt oder der passende `_download_cache/twitch/vod_<id>.mp4` mit gleicher Groesse existiert.
+  - `backend/ml/train_jynxzi_vod.sh` ruft den Cleanup bei jedem lokalen Trainingsstart auf, ausser `AI_CLIPPING_CACHE_CLEANUP=0` ist gesetzt.
+  - Der Cleanup hat einen `--dry-run`-Modus fuer Inspektion.
+- Verifiziert mit:
+  - `PYTHONPATH=/home/antonio/ai_clipping/backend /home/antonio/ai_clipping/backend/.venv/bin/python -m unittest backend.tests.test_cache_cleanup backend.tests.test_downloader`
+  - `python3 -m py_compile backend/ml/cache_cleanup.py backend/tests/test_cache_cleanup.py backend/services/downloader.py backend/tests/test_downloader.py`
+  - `bash -n backend/ml/train_jynxzi_vod.sh`
+  - `python3 -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('backend'))"`
+- Ergebnis:
+  - `test_cache_cleanup` + `test_downloader`: `16` Tests gruen.
+  - `py_compile` und Shell-Syntax sauber.
+  - Der Graphify-Rebuild scheitert in dieser Umgebung weiterhin an `ModuleNotFoundError: No module named 'graphify'`.
+- Aktuelle Workspace-Pruefung:
+  - Dry-run auf dem aktuellen Workspace fand nach der konservativen Rohdaten-Schutzregel `23` entfernbare Runtime-Artefakte.
+  - Der echte Cleanup wurde nicht auf den aktuellen Workspace angewendet, weil gerade ein Trainingscontainer (`ai-clipping-train-local:latest`) laeuft.
+- Rest-Risiken / lokale Einschraenkungen:
+  - Bei parallel gestarteten Trainingslaeufen sollte nur ein Lauf die gemeinsamen `backend/tmp`-Arbeitsordner verwenden; der Cleanup ist fuer den normalen Ein-Run-Startpfad gedacht.
+  - Rohmedien-Cache und Feature-Cache werden absichtlich nicht automatisch geloescht, weil sie erneute Downloads und teure Feature-Arbeit vermeiden.
+
+## 2026-04-23 Plan: Clean Redundant Raw VOD Copies After Cache Fill
+
+- [x] Downloader-Pfad fuer Roh-VOD-Duplikate einordnen.
+- [x] Frische Twitch-Downloads nach erfolgreichem Cache-Store auf den Cache-Hardlink umlegen.
+- [x] Bekannte temporaere Job-Artefakte wie `video.temp.mp4` nach erfolgreichem Download entfernen.
+- [x] Regressionstests, Syntaxcheck und Graphify-Rebuild ausfuehren.
+
+### Review Notes
+
+- Ursache / Ziel:
+  - Die Transcript-Cache-Bereinigung hatte nur Feature-Cache-Duplikate behandelt.
+  - Im Roh-VOD-Pfad konnte nach einem frischen Twitch-Download trotzdem eine echte zweite Kopie entstehen: `job/video.mp4` plus `_download_cache/twitch/vod_<id>.mp4`.
+  - Zusaetzlich konnten alte yt-dlp/aria2-Artefakte wie `video.temp.mp4` und `video.mp4.part-*` im Jobordner liegen bleiben.
+- Umsetzung:
+  - `backend/services/downloader.py` verlinkt `job/video.mp4` nach erfolgreichem Cache-Store wieder aus der Cache-Datei, statt die vorher heruntergeladene Kopie weiter separat liegen zu lassen.
+  - Beim Twitch-Cache-Hit und nach einem frischen Cache-Fill werden redundante `video*`-Medien- und Fragment-Artefakte im Jobordner entfernt; die finale `video.mp4` bleibt erhalten.
+  - Wenn Hardlinks nicht moeglich sind, bleibt der bestehende Copy-Fallback erhalten.
+- Verifiziert mit:
+  - `PYTHONPATH=/home/antonio/ai_clipping/backend /home/antonio/ai_clipping/backend/.venv/bin/python -m unittest backend.tests.test_downloader`
+  - `python3 -m py_compile backend/services/downloader.py backend/tests/test_downloader.py`
+  - `python3 -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('backend'))"`
+- Ergebnis:
+  - `backend.tests.test_downloader`: `13` Tests gruen.
+  - `py_compile` sauber.
+  - Der Graphify-Rebuild scheitert in dieser Umgebung weiterhin an `ModuleNotFoundError: No module named 'graphify'`.
+- Rest-Risiken / lokale Einschraenkungen:
+  - Der aktuell laufende Docker-Container nutzt diese Code-Aenderung erst nach Neustart mit aktualisiertem Code/Image.
+  - Bereits existierende alte Jobordner werden nicht global geloescht; der Cleanup greift beim naechsten Downloader-Lauf fuer den betroffenen Jobordner.
+
+## 2026-04-23 Plan: Prune Superseded Transcript Cache Copies
+
+- [x] Doppelte Transcript-Dateien und den Migrationspfad vom alten source-signierten Cache einordnen.
+- [x] Stabile Transcript-Migration so anpassen, dass alte kompatible Kopien entfernt werden.
+- [x] Regressionstests fuer Migration und Cleanup ergaenzen und ausfuehren.
+- [x] Graphify-Rebuild versuchen und Ergebnis dokumentieren.
+
+### Review Notes
+
+- Ursache / Ziel:
+  - Nach der Umstellung auf stabile Transcript-Keys lagen bei `2711274372` und `2712128863` jeweils zwei Transcript-Dateien: die alte source-signierte Datei und die neue stabile Datei.
+  - Funktional war das nicht falsch, aber es macht Cache-Inspektion uneindeutig und laesst den Cache unnoetig wachsen.
+- Umsetzung:
+  - `backend/ml/build_twitch_training_dataset.py` laedt kompatible alte Transcript-Caches weiter, schreibt danach aber die stabile Datei und entfernt kompatible Altdateien im selben VOD-Cache.
+  - Auch wenn die stabile Datei bereits existiert, werden alte kompatible Transcript-Dateien bei einem Cache-Hit aufgeraeumt.
+  - Inkompatible Transcripts, etwa anderes `vod_id`, anderes Whisper-Modell oder andere Sprache, werden nicht entfernt.
+- Verifiziert mit:
+  - `env STORAGE_DIR=tmp/storage .venv/bin/python -m unittest tests.test_build_twitch_training_dataset.BuildTwitchTrainingDatasetTests.test_load_or_build_vod_feature_context_migrates_old_source_bound_transcript_cache tests.test_build_twitch_training_dataset.BuildTwitchTrainingDatasetTests.test_load_or_build_vod_feature_context_prunes_old_transcripts_on_stable_cache_hit`
+  - `env STORAGE_DIR=tmp/storage .venv/bin/python -m unittest tests.test_build_twitch_training_dataset`
+  - `python3 -m py_compile backend/ml/build_twitch_training_dataset.py backend/tests/test_build_twitch_training_dataset.py`
+  - `python3 -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('backend'))"`
+- Ergebnis:
+  - Gezielt: `2` Tests gruen.
+  - `tests.test_build_twitch_training_dataset`: `34` Tests gruen.
+  - `py_compile` sauber.
+  - Der Graphify-Rebuild scheitert in dieser Umgebung weiterhin an `ModuleNotFoundError: No module named 'graphify'`.
+- Rest-Risiken / lokale Einschraenkungen:
+  - Der aktuell laufende Docker-Container nutzt diese Code-Aenderung erst nach Neustart mit aktualisiertem Code/Image.
+  - Bereits vorhandene doppelte Transcript-Dateien im aktuellen Host-Cache werden beim naechsten Lauf mit diesem Code bereinigt; laufende alte Container bereinigen sie nicht.
+
+## 2026-04-23 Plan: Suppress H264 Decoder Noise In VOD Feature Extraction
+
+- [x] Den H.264-Warning-Pfad gegen aktuelle Logs und `video_features` einordnen.
+- [x] H.264-Frames ueber den kontrollierten FFmpeg-Decode-Pfad lesen, statt OpenCV/FFmpeg direkt in stderr loggen zu lassen.
+- [x] Regressionstests fuer die H.264-Pfadwahl und FFmpeg-Loglevel ergaenzen.
+- [x] Relevante Tests, Graphify-Rebuild und Ergebnis dokumentieren.
+
+### Review Notes
+
+- Ursache / Ziel:
+  - `[h264 @ ...] co located POCs unavailable` kommt aus dem H.264-Decoder, waehrend `video_features.extract(...)` H.264 bislang ueber `cv2.VideoCapture` gelesen hat.
+  - OpenCVs eingebetteter FFmpeg schreibt solche Decoder-Hinweise direkt nach stderr; dadurch landen sie im Docker-Trainingslog, ohne dass Python sie gezielt filtern kann.
+- Umsetzung:
+  - `backend/services/video_features.py` routet noisy Codecs (`av1`, `h264`, `avc1`, `hevc`, `h265`, `mpeg4`) jetzt ueber den bereits vorhandenen FFmpeg-Rawvideo-Pipe-Decoder.
+  - Der FFmpeg-Pipe-Decoder laeuft mit `-loglevel fatal`, sodass nicht-fatale Decoder-Hinweise den Trainingslog nicht mehr fluten.
+  - OpenCV bleibt als Fallback fuer nicht erkannte Codec-Infos erhalten.
+- Verifiziert mit:
+  - `PYTHONPATH=/home/antonio/ai_clipping/backend /home/antonio/ai_clipping/backend/.venv/bin/python -m unittest backend.tests.test_video_features.VideoFeaturesTests.test_should_use_ffmpeg_frame_decode_for_noisy_codecs backend.tests.test_video_features.VideoFeaturesTests.test_extract_uses_ffmpeg_frame_decode_for_h264_streams backend.tests.test_video_features.VideoFeaturesTests.test_decode_second_frames_ffmpeg_uses_fatal_loglevel`
+  - `PYTHONPATH=/home/antonio/ai_clipping/backend /home/antonio/ai_clipping/backend/.venv/bin/python -m unittest backend.tests.test_video_features`
+  - `env STORAGE_DIR=tmp/storage .venv/bin/python -m unittest tests.test_build_twitch_training_dataset`
+  - `python3 -m py_compile backend/services/video_features.py backend/tests/test_video_features.py`
+  - `python3 -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('backend'))"`
+- Ergebnis:
+  - Gezielt: `3` Tests gruen.
+  - `backend.tests.test_video_features`: `15` Tests gruen.
+  - `tests.test_build_twitch_training_dataset`: `33` Tests gruen.
+  - `py_compile` sauber.
+  - Der Graphify-Rebuild scheitert in dieser Umgebung weiterhin an `ModuleNotFoundError: No module named 'graphify'`.
+- Rest-Risiken / lokale Einschraenkungen:
+  - Zum Zeitpunkt der Analyse lief kein Docker-Container mehr (`docker ps -a` leer), daher konnte kein Live-Log nach dem Fix bestaetigt werden.
+  - Der Fix greift im Docker-Training erst nach Neustart mit aktualisiertem Code beziehungsweise neu gebautem Image.
+
+## 2026-04-23 Plan: Fix VOD Window Cache JSON Serialization
+
+- [x] Den aktuellen Trainingslog gegen den VOD-Window-Feature-Cache-Pfad abgleichen.
+- [x] NumPy-Skalarwerte vor `json.dumps()` in normale Python-Typen wandeln.
+- [x] Regressionstest fuer NumPy-Bool/Number-Frames ergaenzen und ausfuehren.
+- [x] Ergebnis und verbleibende Laufzeit-Einschraenkungen dokumentieren.
+
+### Review Notes
+
+- Ursache / Ziel:
+  - Der Log-Eintrag `[h264 ...] co located POCs unavailable` ist ein Decoder-Hinweis, aber im selben Lauf wurden VOD-Windows wegen `Object of type bool is not JSON serializable` verworfen.
+  - Der Window-Feature-Cache serialisierte `vars(frame)` direkt; `numpy.bool_` und andere NumPy-Skalare sehen fachlich korrekt aus, sind fuer `json.dumps()` aber keine nativen JSON-Typen.
+- Umsetzung:
+  - `backend/ml/build_twitch_training_dataset.py` normalisiert Frame-Werte vor dem Cache-Schreiben ueber `_json_scalar(...)`.
+  - NumPy-Skalare werden per `.item()` in native Python-`bool`/`int`/`float` umgewandelt; nicht-finite Floats werden auf `0.0` gesetzt.
+  - Ein Regressionstest deckt Window-Feature-Frames mit `np.bool_`, `np.int64`, `np.float32` und `np.float64` ab.
+- Verifiziert mit:
+  - `env STORAGE_DIR=tmp/storage .venv/bin/python -m unittest tests.test_build_twitch_training_dataset.BuildTwitchTrainingDatasetTests.test_load_or_build_window_modalities_serializes_numpy_scalars tests.test_build_twitch_training_dataset.BuildTwitchTrainingDatasetTests.test_load_or_build_window_modalities_uses_cache_after_first_build`
+  - `env STORAGE_DIR=tmp/storage .venv/bin/python -m unittest tests.test_build_twitch_training_dataset`
+  - `python3 -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('backend'))"`
+- Ergebnis:
+  - Die gezielten Tests sind gruen.
+  - `tests.test_build_twitch_training_dataset`: `33` Tests gruen.
+  - Der Graphify-Rebuild scheitert in dieser Umgebung weiterhin an `ModuleNotFoundError: No module named 'graphify'`.
+- Rest-Risiken / lokale Einschraenkungen:
+  - Der bereits gestartete Docker-Container nimmt Code-Aenderungen erst nach einem Neustart bzw. Neubuild des Trainingsimages auf.
+  - Zum Zeitpunkt der Pruefung lief kein Trainingscontainer mehr (`docker ps -a` leer).
+
+## 2026-04-23 Plan: Preserve Short-Form Backfill Artifact Even When VOD Training Fails
+
+- [x] Den aktuellen Failure-Pfad in `train_jynxzi_vod.sh` auf den Short-Form-Backfill-Abzweig pruefen.
+- [x] Das erzeugte Short-Form-Artefakt an einen stabilen Ort unter `ml/artifacts` spiegeln, bevor der VOD-Retry laeuft oder spaeter scheitert.
+- [x] Den Shell-Pfad verifizieren und das Verhalten dokumentieren.
+
+### Review Notes
+
+- Ursache / Ziel:
+  - Beim 1-Tages-Lauf wurde ein brauchbares Short-Form-Backfill-Artefakt unter `tmp/short_form_backfill_artifacts/` erzeugt, ging aber im Gesamtergebnis unter, weil der anschliessende VOD-first-Retry an den Qualitaetsgates scheiterte.
+  - Gewuenscht war, dieses Zwischenartefakt fuer spaetere Vergleiche und laengere Runs trotzdem stabil zu behalten.
+- Umsetzung:
+  - `backend/ml/train_jynxzi_vod.sh` spiegelt das erzeugte Short-Form-Backfill-Artefakt jetzt direkt nach dem Backfill in `ml/artifacts/`.
+  - Konkret werden `jynxzi_ranker.json` und `jynxzi_artifact_health.json` aus `tmp/short_form_backfill_artifacts/` nach
+    `ml/artifacts/jynxzi_short_form_backfill_ranker.json` und
+    `ml/artifacts/jynxzi_short_form_backfill_artifact_health.json` kopiert.
+  - Das passiert vor dem erneuten VOD-first-Training, sodass die Dateien auch dann erhalten bleiben, wenn der Retry spaeter wieder mit `insufficient_dataset_quality` endet.
+- Verifiziert mit:
+  - `bash -n backend/ml/train_jynxzi_vod.sh`
+  - `python3 -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('backend'))"`
+- Ergebnis:
+  - Shell-Syntax ist sauber.
+  - Der Graphify-Rebuild scheitert in dieser Umgebung weiterhin an `ModuleNotFoundError: No module named 'graphify'`.
+- Rest-Risiken / lokale Einschraenkungen:
+  - Das gespiegelte Backfill-Artefakt ist bewusst getrennt vom finalen VOD-Artefakt benannt; es wird nicht automatisch als produktives `jynxzi_ranker.json` promoted.
+  - Bei mehreren Backfill-Laeufen wird das gespiegelt gespeicherte Testartefakt jeweils vom neuesten Run ueberschrieben.
+
+## 2026-04-23 Plan: Add Configurable Whisper Language Hint For Local Training
+
+- [x] Relevante Transcriber-, Config- und lokalen Runner-Pfade fuer eine optionale Sprachvorgabe pruefen.
+- [x] Eine konfigurierbare Whisper-Sprachvorgabe einfuehren, die bei leerem Wert weiter Auto-Detect verwendet.
+- [x] Den lokalen Trainingspfad fuer den aktuellen englischen Setup auf `en` vorkonfigurieren.
+- [x] Gezielte Tests ergaenzen und den Fix verifizieren.
+
+### Review Notes
+
+- Ursache / Ziel:
+  - In den Trainingslogs wurden bei kurzen Short-Form-Clips mehrfach offensichtlich falsche Whisper-Spracherkennungen (`Detected language: ...`) sichtbar.
+  - Da der aktuelle Jynxzi-/Twitch-/Short-Form-Setup laut `streamer_sources.csv` durchgehend englisch ist, sollte der lokale Trainingspfad Whisper gezielt mit `en` hinweisen koennen, statt pro Chunk auf Auto-Detect zu vertrauen.
+- Umsetzung:
+  - `backend/config.py` besitzt jetzt `whisper_language` als optionale Konfiguration; leerer Wert bedeutet weiter Auto-Detect.
+  - `backend/services/transcriber.py` reicht die Sprachvorgabe nur dann an `model.transcribe(...)` weiter, wenn sie gesetzt ist, und loggt sie in der Runtime-Zusammenfassung.
+  - `backend/ml/local_train.py` setzt fuer den aktuellen lokalen Trainingspfad standardmaessig `WHISPER_LANGUAGE=en`, ohne den generischen Backend-Default global auf Englisch festzulegen.
+  - Die lokale Trainings-Summary schreibt die aktive Whisper-Sprache ebenfalls mit.
+- Verifiziert mit:
+  - `python3 -m py_compile backend/config.py backend/services/transcriber.py backend/ml/local_train.py backend/tests/test_transcriber.py backend/tests/test_transcriber_progress.py backend/tests/test_local_train.py`
+  - `PYTHONPATH=/home/antonio/ai_clipping/backend /home/antonio/ai_clipping/backend/.venv/bin/python -m unittest backend.tests.test_transcriber backend.tests.test_transcriber_progress backend.tests.test_local_train`
+  - `python3 -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('backend'))"`
+- Ergebnis:
+  - `test_transcriber` + `test_transcriber_progress` + `test_local_train`: `13` Tests gruen.
+  - Der Graphify-Rebuild scheitert in dieser Umgebung weiterhin an `ModuleNotFoundError: No module named 'graphify'`.
+- Rest-Risiken / lokale Einschraenkungen:
+  - Die Vorgabe `en` ist im lokalen Runner bewusst fuer den aktuellen englischen Trainingsfall gesetzt; fuer spaetere mehrsprachige Setups sollte `WHISPER_LANGUAGE` explizit leer oder passend gesetzt werden.
+  - Der bereits laufende Container nutzt den Fix erst nach einem Neustart.
+
+## 2026-04-23 Plan: Clean Top-Level tmp Directory Conservatively
+
+- [x] Inhalt von `tmp/` gegen aktuelle Repo-Referenzen pruefen.
+- [x] Nur klar historische / generierte Artefakte entfernen und noch referenzierte Prewarm-Pfade erhalten.
+- [x] Ergebnisgroesse und verbleibenden Inhalt verifizieren.
+
+### Review Notes
+
+- Ursache / Ziel:
+  - Der top-level Ordner `tmp/` enthielt vor allem alte Vertex-/Cloud-Build-Specs, Pipeline-JSONs und lokale Laufartefakte.
+  - Gleichzeitig referenziert `scripts/train_local_docker.sh` weiterhin `tmp/prewarmed_sentence_transformers_local`, daher sollte die Bereinigung konservativ bleiben.
+- Umsetzung:
+  - Historische Einzeldateien wie `vertex_job_spec_*`, `cloudbuild_*`, `train_pipeline_*`, `_diskspec_probe.json` und `benchmark_local_semantic_models.py` wurden entfernt.
+  - Das alte Laufverzeichnis `tmp/local_train_2x2` wurde ebenfalls geloescht.
+  - `tmp/prewarmed_sentence_transformers_local` blieb bewusst erhalten, weil der lokale Docker-Trainingspfad diesen Ordner optional mountet.
+- Verifiziert mit:
+  - `find /home/antonio/ai_clipping/tmp -maxdepth 2 -mindepth 1 -printf '%y %P\n' | sort`
+  - `du -sh /home/antonio/ai_clipping/tmp /home/antonio/ai_clipping/tmp/* 2>/dev/null | sort -h`
+- Ergebnis:
+  - Der top-level Ordner `tmp/` enthaelt jetzt nur noch `prewarmed_sentence_transformers_local`.
+  - Restgroesse: `8.8M`.
+- Rest-Risiken / lokale Einschraenkungen:
+  - Falls du einzelne geloeschte Vertex-/Pipeline-Specs doch noch brauchst, muessten sie aus Git-Historie oder einem anderen Speicherort wiederhergestellt werden.
+  - Der Cleanup hat absichtlich nur den top-level Ordner `tmp/` betroffen, nicht `backend/tmp`.
+
+## 2026-04-23 Plan: Decouple Short-Form Download I/O With Persistent Media Cache And Prefetch
+
+- [x] Den bestehenden Short-Form-Downloadpfad gegen vorhandene Downloader-Caches und die aktuelle Worker-Topologie abgleichen.
+- [x] Einen persistenten Medien-Cache unter `backend/tmp` fuer Short-Form-URLs einbauen, damit Wiederholungslaeufe vorhandene Quelldateien statt neuer Downloads verwenden.
+- [x] Download-Prefetching im Short-Form-Sammler ergaenzen, damit Medien-I/O und spaetere Feature-Extraktion staerker ueberlappen.
+- [x] Gezielte Tests fuer Cache-Hits, Prefetch-Reuse und die unveraenderte Row-Erzeugung ergaenzen und verifizieren.
+
+### Review Notes
+
+- Ursache / Ziel:
+  - Die Short-Form-Sammlung hatte zwar bereits einen Row-Cache, aber keine Wiederverwendung der heruntergeladenen Medien selbst.
+  - In den Trainingslogs blieb dadurch noch viel Zeit in wiederholten `yt-dlp`-Downloads haengen, und Medien-I/O war nur lose mit der spaeteren CPU-Feature-Extraktion ueberlappt.
+- Umsetzung:
+  - `backend/services/downloader.py` besitzt jetzt mit `ensure_cached_download(...)` einen generischen persistenten Medien-Cache unter `backend/tmp/storage/_download_cache/<namespace>/`; fuer diesen Pfad bleibt die bestehende Twitch-Cache-Logik unveraendert.
+  - `backend/ml/collect_viral_clips.py` nutzt fuer Short-Form-URLs jetzt einen dedizierten Medien-Cache-Namespace (`short_form`) statt bei jedem Lauf neue Job-spezifische Downloads zu erzeugen.
+  - Ein neuer `_ShortFormMediaPrefetcher` zieht kommende URLs mit kleinem Worker-Pool vor und ueberlappt dadurch Download-I/O mit der spaeteren Feature-Extraktion.
+  - `_process_clip()` kann vorab gecachte Medien direkt verwenden und schreibt `audio.wav` dabei weiterhin lokal in das Clip-Arbeitsverzeichnis statt in den Cache.
+- Verifiziert mit:
+  - `python3 -m py_compile backend/services/downloader.py backend/ml/collect_viral_clips.py backend/config.py backend/tests/test_downloader.py backend/tests/test_collect_viral_clips.py`
+  - `PYTHONPATH=/home/antonio/ai_clipping/backend /home/antonio/ai_clipping/backend/.venv/bin/python -m unittest backend.tests.test_downloader backend.tests.test_collect_viral_clips`
+  - `python3 -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('backend'))"`
+- Ergebnis:
+  - `test_downloader` + `test_collect_viral_clips`: `32` Tests gruen.
+  - Der Graphify-Rebuild scheitert in dieser Umgebung weiterhin an `ModuleNotFoundError: No module named 'graphify'`.
+- Rest-Risiken / lokale Einschraenkungen:
+  - Der Short-Form-Medien-Cache ist absichtlich persistent und hat derzeit keine automatische TTL-Eviction; Speicherbedarf bleibt daher der relevante Tradeoff.
+  - Prefetching ist bewusst konservativ gehalten (`2` Prefetch-Worker Default), weil der Lauf in den letzten Messungen eher an CPU-/I/O-Ueberlappung als an fehlender roher Parallelitaet hing.
+
+## 2026-04-23 Plan: Fix DeepFace Warmup For Installed API Signature
+
+- [x] Die im Container installierte DeepFace-`build_model`-Signatur gegen den aktuellen Warmup-Pfad abgleichen.
+- [x] `_ensure_deepface_ready()` versionsrobust auf den korrekten Emotion-Warmup fuer alte und neue DeepFace-Signaturen umstellen.
+- [x] Den betroffenen `video_features`-Testpfad erweitern und den Fix verifizieren.
+
+### Review Notes
+
+- Ursache / Ziel:
+  - Im Lauf erschien `video_features_deepface_init_failed error=Invalid model_name passed - facial_recognition/Emotion`.
+  - Die reale Container-Version ist `deepface 0.0.99`; dort hat `DeepFace.build_model` die Signatur `(model_name, task='facial_recognition')`, waehrend das eigentliche Modeling intern `task='facial_attribute', model_name='Emotion'` fuer den Emotionspfad erwartet.
+- Umsetzung:
+  - `backend/services/video_features.py` erkennt jetzt die `build_model`-Signatur zur Laufzeit und waermt das Emotionsmodell fuer alte und neue DeepFace-APIs korrekt an.
+  - Fuer task-aware Signaturen wird jetzt explizit `task='facial_attribute', model_name='Emotion'` verwendet; einfache Ein-Argument-Signaturen bleiben weiter unterstuetzt.
+- Verifiziert mit:
+  - `docker exec <container> python -c "... inspect.signature(DeepFace.build_model) ..."`
+  - `python3 -m py_compile backend/services/video_features.py backend/tests/test_video_features.py`
+  - `PYTHONPATH=/home/antonio/ai_clipping/backend /home/antonio/ai_clipping/backend/.venv/bin/python -m unittest backend.tests.test_video_features`
+  - `python3 -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('backend'))"`
+- Ergebnis:
+  - `test_video_features`: `13` Tests gruen.
+  - Der Graphify-Rebuild scheitert in dieser Umgebung weiterhin an `ModuleNotFoundError: No module named 'graphify'`.
+- Rest-Risiken / lokale Einschraenkungen:
+  - Der bereits laufende Container nutzt den Fix erst nach einem Neustart.
+  - Der Warnpfad `video_features_deepface_init_failed error=boom:Emotion` bleibt absichtlich in einem Test erhalten, der sicherstellt, dass ein fehlgeschlagener Warmup nicht endlos wiederholt wird.
+
+## 2026-04-23 Plan: Remove Remaining Video Feature Overhead In Short-Form Training
+
+- [x] Den AV1-Softwaredecode im `video_features`-Pfad von Frame-fuer-Frame-Subprozessen auf gebatchten FFmpeg-Decode pro Window umstellen.
+- [x] Den DeepFace-Warmup so absichern, dass ein einmaliger Init-Versuch pro Prozess ausreicht und wiederholte Init-Logs/Versuche im Lauf verschwinden.
+- [x] Gezielte `video_features`-Tests fuer den neuen AV1-Batch-Pfad und den robusteren DeepFace-Warmup ergaenzen und verifizieren.
+
+### Review Notes
+
+- Ursache / Ziel:
+  - Die aktuellen Container-Logs zeigten den AV1-Fallback als CPU-Hotspot: gleichzeitig laufende `ffmpeg -frames:v 1`-Subprozesse verbrauchten mehrere Kerne nur fuer einzelne Frame-Reads.
+  - Gleichzeitig tauchten `video_features_deepface_init`-Logs weiterhin auffaellig oft auf; das deutete darauf hin, dass der Warmup-Pfad bei Build-Problemen oder spaeteren Aufrufen nicht robust genug terminiert.
+- Umsetzung:
+  - `backend/services/video_features.py` dekodiert AV1-Fenster jetzt ueber `_decode_second_frames_ffmpeg(...)` gebatcht mit einem einzigen FFmpeg-Prozess pro Window und liest die 1-fps-Frames direkt aus dem Rawvideo-Stream.
+  - `extract(...)` baut den AV1-Frame-Cache pro Window einmal auf und liest danach nur noch aus dem In-Memory-Frame-Index statt pro Sekunde einen neuen Subprozess zu starten.
+  - `refine_face_reactions(...)` nutzt fuer AV1 ebenfalls einen gebatchten Frame-Puffer fuer den relevanten Sekundenbereich.
+  - `_ensure_deepface_ready()` terminiert jetzt nach dem ersten Warmup-Versuch pro Prozess, auch wenn `DeepFace.build_model("Emotion")` fehlschlaegt; wiederholte Build-Versuche und Init-Logs entfallen damit.
+- Verifiziert mit:
+  - `python3 -m py_compile backend/services/video_features.py backend/tests/test_video_features.py`
+  - `PYTHONPATH=/home/antonio/ai_clipping/backend /home/antonio/ai_clipping/backend/.venv/bin/python -m unittest backend.tests.test_video_features`
+  - `python3 -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('backend'))"`
+- Ergebnis:
+  - `test_video_features`: `12` Tests gruen.
+  - Der Graphify-Rebuild scheitert in dieser Umgebung weiterhin an `ModuleNotFoundError: No module named 'graphify'`.
+- Rest-Risiken / lokale Einschraenkungen:
+  - Der AV1-Batchpfad arbeitet weiterhin absichtlich auf CPU-Softwaredecode; der Gewinn kommt aus weniger Prozess- und Seek-Overhead, nicht aus Hardwaredecode.
+  - Der DeepFace-Warmup gibt bei einem fehlgeschlagenen Build-Versuch bewusst nur noch eine einmalige Warnung aus; die eigentliche `DeepFace.analyze(...)`-Nutzung bleibt davon unberuehrt.
+
+## 2026-04-23 Plan: Speed Up Short-Form Collection Without Quality Loss
+
+- [x] `collect_rows()` auf begrenzte parallele URL-Verarbeitung umstellen, ohne Reihenfolge und Fehlertoleranz zu verlieren.
+- [x] Einen persistenten Per-URL-Row-Cache unter `backend/tmp` nutzen, damit bereits verarbeitete Short-Form-Clips bei Wiederholungslaeufen nicht neu geladen und gefeatured werden.
+- [x] Pro Collection-Worker die teuren Modellruntimes gezielt vorwaermen, statt Initialisierung mehrfach waehrend des eigentlichen Durchlaufs zu bezahlen.
+- [x] In `_process_clip()` unabhaengige Schritte nach dem Audio-Extract parallelisieren und die Aenderungen mit gezielten Tests verifizieren.
+
+### Review Notes
+
+- Ursache / Ziel:
+  - Die aktuellen Trainingslogs zeigten den Short-Form-Backfill als neuen Hauptengpass: `collect_rows()` lief URL fuer URL seriell, bereits verarbeitete Clips wurden bei Wiederholungslaeufen erneut komplett gerechnet, und `_process_clip()` arbeitete Download, Transkript, Audio- und Video-Features streng nacheinander ab.
+  - Gewuenscht waren ausschliesslich qualitaetsneutrale Beschleunigungen, also weniger redundante Arbeit statt weniger oder groberer Features.
+- Umsetzung:
+  - `backend/ml/collect_viral_clips.py` verarbeitet Short-Form-URLs jetzt mit einem begrenzten `ThreadPoolExecutor`, behaelt aber die Reihenfolge der zurueckgegebenen Rows stabil und behandelt Retry-/Unavailable-Faelle weiter pro Entry.
+  - Erfolgreich erzeugte Short-Form-Rows werden unter `backend/tmp/.../_row_cache/` per Hash aus Manifest-Eintrag, Profil und Runtime-Fingerprint persistiert und bei Folgelaeufen als Cache-Hit wiederverwendet.
+  - Die Collection-Worker waermen Whisper-, Video-/DeepFace- und Semantic-Runtimes gezielt vor dem eigentlichen Durchlauf an, statt die Initialisierung mitten im ersten Batch zu bezahlen.
+  - `_process_clip()` und `process_local_video()` extrahieren nach dem Audio-Extract nun Transkript, Audio-Frames und Video-Frames parallel, ohne die Featureinhalte selbst zu aendern.
+  - Der Cache-Fingerprint und der Warmup-Pfad degradieren absichtlich robust, wenn optionale Trainings-Abhaengigkeiten in einer Minimal- oder Testumgebung lokal nicht importierbar sind.
+- Verifiziert mit:
+  - `python3 -m py_compile backend/ml/collect_viral_clips.py backend/tests/test_collect_viral_clips.py`
+  - `PYTHONPATH=/home/antonio/ai_clipping/backend /home/antonio/ai_clipping/backend/.venv/bin/python -m unittest backend.tests.test_collect_viral_clips`
+  - `python3 -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('backend'))"`
+- Ergebnis:
+  - `test_collect_viral_clips`: `16` Tests gruen.
+  - Der Graphify-Rebuild scheitert in dieser Umgebung weiterhin an `ModuleNotFoundError: No module named 'graphify'`.
+- Rest-Risiken / lokale Einschraenkungen:
+  - Der Per-URL-Cache speichert bewusst nur erfolgreiche Rows; fehlgeschlagene oder transient nicht erreichbare URLs werden nicht persistent als Fehler festgeschrieben.
+  - Die neuen Default-Workerzahlen fuer den Short-Form-Sammler sind konservativ gehalten; echte Grenzwerte haengen weiter vom lokalen GPU-/CPU-Budget ab.
+
+## 2026-04-23 Plan: Analyze Current Training Logs For Quality-Neutral Speedups
+
+- [ ] Den aktuell laufenden Trainingscontainer und die relevanten Fortschritts-/Runtime-Logs erfassen.
+- [ ] Die größten Zeitfresser entlang des aktuellen Codepfads mit den Logs gegenprüfen.
+- [ ] Nur Maßnahmen ableiten, die Laufzeit sparen, ohne die Clipfindungsqualität oder Featureinhalte zu verschlechtern.
+
+### Review Notes
+
+- Offen:
+  - Gewünscht ist keine weitere Vermutung anhand alter Läufe, sondern eine Einordnung auf Basis der aktuellen Container-Logs.
+  - Die Empfehlungen sollen explizit auf qualitätsneutrale Hebel beschränkt bleiben.
+
+## 2026-04-23 Plan: Prevent OpenCV AV1 Hardware-Decode Failures In Video Features
+
+- [x] Den aktuellen `cv2.VideoCapture`-Pfad in `video_features.py` auf implizite Hardware-Decode-Nutzung pruefen.
+- [x] OpenCV-Capture standardmaessig auf Software-Decode umstellen, ohne den restlichen Video-Feature-Pfad zu veraendern.
+- [x] Gezielte Tests fuer den neuen Capture-Open-Pfad ergaenzen und den Fix verifizieren.
+
+### Review Notes
+
+- Ursache / Ziel:
+  - Im Trainingslog schlagen AV1-Reads mit `Your platform doesn't support hardware accelerated AV1 decoding`, `Failed to get pixel format` und `Get current frame error` fehl.
+  - Der erste Env-basierte OpenCV-Tweak reichte nicht aus; Ziel war daher ein robuster codec-spezifischer Fallback statt weiterer unbewiesener Decoder-Flags.
+- Umsetzung:
+  - `backend/services/video_features.py` prueft jetzt per `ffprobe` den Videocodec und schaltet fuer `av1` gezielt auf FFmpeg-Softwaredecode pro Sample-Sekunde um.
+  - Nicht-AV1-Quellen bleiben auf dem bisherigen `cv2.VideoCapture`-Pfad.
+  - Sowohl `extract(...)` als auch `refine_face_reactions(...)` nutzen denselben AV1-Fallback, damit die Fehler nicht im Zweitpass wieder auftauchen.
+  - Der fruehere OpenCV-Env-Default bleibt erhalten, ist aber nicht mehr die eigentliche Schutzmassnahme.
+- Verifiziert mit:
+  - `python3 -m py_compile backend/services/video_features.py backend/tests/test_video_features.py`
+  - `PYTHONPATH=/home/antonio/ai_clipping/backend /home/antonio/ai_clipping/backend/.venv/bin/python -m unittest backend.tests.test_video_features`
+  - `python3 -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('backend'))"`
+- Ergebnis:
+  - `test_video_features`: `10` Tests gruen.
+  - Der Graphify-Rebuild scheitert in dieser Umgebung weiterhin an `ModuleNotFoundError: No module named 'graphify'`.
+- Rest-Risiken / lokale Einschraenkungen:
+  - Der AV1-Fallback dekodiert Sample-Frames per FFmpeg-Prozess und ist deshalb fuer AV1 langsamer als der normale OpenCV-Pfad; dafuer vermeidet er die wiederholten Decoder-Fehler und den Verlust visueller Features.
+  - Der Fix greift erst in neu gestarteten Prozessen beziehungsweise Containern.
+
+## 2026-04-23 Plan: Add VOD-Wide Feature Caches Under backend/tmp
+
+- [x] Den begonnenen VOD-Cache-Pfad in `build_twitch_training_dataset.py` bis in die Label-Verarbeitung durchziehen.
+- [x] Transcript und Voll-Audio pro VOD in `backend/tmp` persistieren und Window-Modalitaeten ueber denselben Cache-Kontext wiederverwenden.
+- [x] Gezielte Tests fuer Transcript-Slicing und Window-Cache-Hits ergaenzen sowie den neuen Pfad verifizieren.
+
+### Review Notes
+
+- Ursache / Ziel:
+  - Nach dem Direkt-VOD-Umbau wurden Transcript und Audio weiterhin effektiv pro Label-Fenster neu aufgebaut.
+  - Gewuenscht war ein qualitativer Null-Downgrade: Transcript und Voll-Audio genau einmal pro VOD materialisieren, Window-Modalitaeten exakt aus diesem VOD-Kontext ableiten und die Ergebnisse unter `backend/tmp` persistent halten.
+- Umsetzung:
+  - `backend/ml/build_twitch_training_dataset.py` baut jetzt pro VOD einen `VodFeatureContext` auf und cached Voll-Audio (`audio.wav`) sowie den absoluten Transcript-Export unter `backend/tmp/vod_feature_cache/<vod_id>/`.
+  - Die Label-Phase sliced den Transcript jetzt nur noch fuer das konkrete Fenster und liest Audio-Frames exakt aus dem bereits geladenen Vollsignal.
+  - Window-Modalitaeten werden unterhalb desselben VOD-Cache-Verzeichnisses per Hash aus Quellvideo, Zeitfenster und Video-Runtime-Konfiguration persistiert und beim naechsten Zugriff wiederverwendet.
+  - `backend/services/audio_features.py` kann ueber `extract_window_from_signal(...)` jetzt direkt aus einem vorhandenen Audio-Signal per Fenster extrahieren, ohne erneut FFmpeg oder Dateiloads anzustossen.
+- Verifiziert mit:
+  - `python3 -m py_compile backend/ml/build_twitch_training_dataset.py backend/services/audio_features.py backend/tests/test_build_twitch_training_dataset.py`
+  - `PYTHONPATH=/home/antonio/ai_clipping/backend /home/antonio/ai_clipping/backend/.venv/bin/python -m unittest backend.tests.test_build_twitch_training_dataset`
+  - `python3 -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('backend'))"`
+- Ergebnis:
+  - `test_build_twitch_training_dataset`: `31` Tests gruen.
+  - Der Graphify-Rebuild scheitert in dieser Umgebung weiterhin an `ModuleNotFoundError: No module named 'graphify'`.
+- Rest-Risiken / lokale Einschraenkungen:
+  - Video-Features werden fuer exakte Fenstergrenzen weiter direkt aus dem VOD gelesen und dann per Window-Cache persistiert; der wirklich teure erste Lauf pro neuem Fenster bleibt also bestehen, Folgelaeufe profitieren dafuer direkt.
+  - Der aktuell laufende Trainingscontainer nutzt den neuen Cache-Pfad erst nach einem Neustart mit dem aktualisierten Code.
+
+## 2026-04-23 Plan: Avoid Repeated DeepFace Downloads And Warmups In Local Training
+
+- [x] Den aktuellen DeepFace-Pfad auf vermeidbare Cache-/Initialisierungsarbeit eingrenzen.
+- [x] DeepFace auf einen persistenten Projekt-Cache umstellen und die Modellinitialisierung pro Prozess auf einen einmaligen, gelockten Pfad reduzieren.
+- [x] Die betroffenen Tests ausfuehren und den vorgeschriebenen Graphify-Rebuild fuer `backend` erneut versuchen.
+
+### Review Notes
+
+- Ursache / Ziel:
+  - Im Trainingslog wurden `facial_expression_model_weights.h5` und die DeepFace-Initialisierung von mehreren Label-Workern praktisch gleichzeitig angestossen.
+  - Das ist reine Mehrarbeit: weder der Download noch der Emotionsmodell-Warmup verbessern die Feature-Qualitaet.
+- Umsetzung:
+  - `backend/config.py` setzt jetzt zusaetzlich `DEEPFACE_HOME` auf den projektlokalen Cache unter `backend/tmp/cache/deepface`.
+  - `backend/services/video_features.py` fuehrt DeepFace jetzt ueber einen einmaligen, gelockten `_ensure_deepface_ready()`-Pfad hoch und nutzt nach erfolgreichem Warmup denselben geladenen Zustand fuer spaetere `analyze(...)`-Aufrufe.
+  - `backend/tests/test_video_features.py` deckt den neuen Pfad mit einem Test ab, der `DeepFace.build_model("Emotion")` nur einmal pro Prozess erwartet.
+- Verifiziert mit:
+  - `python3 -m py_compile backend/config.py backend/services/video_features.py backend/tests/test_video_features.py`
+  - `PYTHONPATH=/home/antonio/ai_clipping/backend /home/antonio/ai_clipping/backend/.venv/bin/python -m unittest backend.tests.test_video_features`
+- Rest-Risiken / lokale Einschraenkungen:
+  - Der laufende Trainingscontainer profitiert erst nach einem Neustart mit dem aktualisierten Code.
+  - Wenn eine DeepFace-Version kein `build_model` anbietet, bleibt der Warmup-Pfad absichtlich no-op; die Funktionsfaehigkeit bleibt erhalten, aber der Einmal-Warmup-Vorteil faellt dann weg.
+  - Der Graphify-Rebuild scheitert in dieser Umgebung weiterhin daran, dass das Modul `graphify` lokal nicht installiert ist.
+
+## 2026-04-23 Plan: Restore MediaPipe Face Detection In Local Training Container
+
+- [x] Den Grund dafuer eingrenzen, warum `video_features` im lokalen Trainingscontainer auf `mediapipe=unavailable` faellt.
+- [x] Den lokalen Trainings-Dockerfile so anpassen, dass die fuer MediaPipe Tasks fehlenden Runtime-Libraries im Image vorhanden sind.
+- [x] Das lokale Trainings-Image neu bauen und die MediaPipe-Detector-Erzeugung im Container verifizieren.
+
+### Review Notes
+
+- Ursache / Ziel:
+  - Im laufenden Trainingscontainer war `mediapipe` zwar installiert, aber `hasattr(mediapipe, "solutions")` lieferte `False`, daher fiel der Code auf den Tasks-Pfad zurueck.
+  - `FaceDetector.create_from_options(...)` scheiterte dort reproduzierbar mit `OSError: libGLESv2.so.2: cannot open shared object file`.
+  - `ldd /usr/local/lib/python3.12/dist-packages/mediapipe/tasks/c/libmediapipe.so` zeigte zusaetzlich `libEGL.so.1 => not found`.
+- Umsetzung:
+  - `backend/Dockerfile.local-train` installiert jetzt zusaetzlich `libegl1` und `libgles2`.
+- Verifiziert mit:
+  - `docker exec ... python -c "import mediapipe ..."`
+  - `docker exec ... ldd /usr/local/lib/python3.12/dist-packages/mediapipe/tasks/c/libmediapipe.so`
+  - `docker build -f backend/Dockerfile.local-train -t ai-clipping-train-local:latest .`
+  - `docker run --rm --entrypoint /bin/sh ai-clipping-train-local:latest -lc 'python -c "... FaceDetector.create_from_options(...) ..."'`
+  - `docker run --rm --entrypoint /bin/sh ai-clipping-train-local:latest -lc 'ldd .../libmediapipe.so | grep "not found\\|libGLES\\|libEGL"'`
+- Rest-Risiken / lokale Einschraenkungen:
+  - Der aktuell laufende Container bleibt unveraendert, bis der Trainingslauf mit dem neu gebauten `ai-clipping-train-local:latest` neu gestartet wird.
+  - Eine separate `docker exec`-Direktabfrage von `services.video_features` scheiterte nebenbei an einer in der Container-Umgebung vorhandenen Host-`STORAGE_DIR`-Variable ausserhalb von `/app`; der Trainingslauf selbst umgeht das aktuell, weil `local_train.py` `STORAGE_DIR` vor dem eigentlichen Trainingsprozess ueberschreibt.
+
+## 2026-04-23 Plan: Repair Local Training Docker Build On New CUDA 12.8 Base Image
+
+- [x] Den fehlgeschlagenen `docker build`-Schritt auf dem neuen `cu128`-Base-Image auswerten und die eigentliche Ursache eingrenzen.
+- [x] `backend/Dockerfile.local-train` so anpassen, dass Paketinstallation und Runtime weiter ueber das im PyTorch-Image mitgelieferte Conda-Python laufen statt ueber das extern verwaltete System-Python.
+- [x] Das lokale Trainings-Image erneut bauen und den Build-Abschluss verifizieren.
+
+### Review Notes
+
+- Ursache / Ziel:
+  - Der erste Build gegen `pytorch/pytorch:2.10.0-cuda12.8-cudnn9-runtime` scheiterte bei `python -m pip install ...` mit `externally-managed-environment` nach PEP 668.
+  - Das neue Base-Image zeigt mit `python` auf das systemverwaltete Ubuntu-Python; ein nachgeschobener Versuch ueber `/opt/conda/bin/python` scheiterte ebenfalls, weil dieses Image gar kein Conda mehr mitbringt.
+- Umsetzung:
+  - `backend/Dockerfile.local-train` setzt jetzt `PIP_BREAK_SYSTEM_PACKAGES=1`, damit Container-Builds trotz PEP 668 projektlokale Python-Pakete installieren koennen.
+  - Die Python-Paketinstallation laeuft explizit ueber `/usr/local/bin/pip`, also ueber den im Image vorhandenen Python-Paketmanager statt ueber einen nicht vorhandenen Conda-Pfad.
+  - Der lokale `.venv`-Symlink zeigt jetzt auf `/usr/bin/python`, und der Container-`ENTRYPOINT` verwendet wieder das im Image vorhandene `python`.
+- Verifiziert mit:
+  - `docker build -f backend/Dockerfile.local-train -t ai-clipping-train-local:cuda128 .`
+- Ergebnis:
+  - Die erste Build-Iteration zeigte den PEP-668-Fehler reproduzierbar.
+  - Ein zweiter Versuch belegte, dass das neue Image keinen `/opt/conda/bin/python` mehr mitbringt.
+  - Der darauf angepasste Rebuild lief erfolgreich bis zum Ende durch und taggte das Image als `ai-clipping-train-local:cuda128`.
+- Rest-Risiken / lokale Einschraenkungen:
+  - Wenn einzelne Wheels fuer `.[ml,vision]` gegen `cu128` nicht verfuegbar sind oder weitere Paketkonflikte im neuen Image bestehen, taucht der naechste Fehler erst im erneuten Build auf.
+
+## 2026-04-23 Plan: Raise Local Training Container To PyTorch CUDA 12.8 For 5070 Ti Compatibility
+
+- [x] Alle im Repo verdrahteten lokalen Trainings-Image-/CUDA-Versionen identifizieren.
+- [x] Das lokale Trainings-Base-Image auf einen neueren offiziellen PyTorch/CUDA-Stand anheben, der besser zu Blackwell-/5070-Ti-Hardware passt.
+- [x] Den lokalen Docker-Startpfad gegen offensichtliche Inkonsistenzen pruefen und einen echten Build gegen das neue Base-Image anstossen.
+
+### Review Notes
+
+- Ursache / Ziel:
+  - Der Trainingslauf schlug beim Laden von Whisper-Gewichten mit `CUDA error: no kernel image is available for execution on the device` fehl.
+  - Das passt zu einem zu alten PyTorch/CUDA-Build fuer die eingesetzte GPU; im Repo lief der lokale Trainingscontainer noch auf `pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime`.
+- Umsetzung:
+  - `backend/Dockerfile.local-train` verwendet jetzt `pytorch/pytorch:2.10.0-cuda12.8-cudnn9-runtime`.
+  - Der bestehende lokale Docker-Runner bleibt unveraendert und zeigt weiter auf `backend/Dockerfile.local-train`.
+- Verifiziert mit:
+  - `bash -n scripts/train_local_docker.sh`
+  - `docker build -f backend/Dockerfile.local-train -t ai-clipping-train-local:cuda128 .`
+- Ergebnis:
+  - Der neue Base-Tag wird von Docker Hub erfolgreich aufgeloest und der Build laedt das `2.10.0-cuda12.8-cudnn9-runtime`-Image.
+  - Ein kompletter Build-Abschluss lag zum Dokumentationszeitpunkt noch nicht vor, weil der neue Runtime-Layer mehrere Gigabyte gross ist.
+- Rest-Risiken / lokale Einschraenkungen:
+  - Der Build allein garantiert noch nicht, dass alle Python-Abhaengigkeiten im Image ohne weitere Anpassungen fertig bauen; das muss der vollstaendige Build-/Trainingslauf zeigen.
+  - Wenn auf dem Host noch ein veralteter NVIDIA-Treiber oder ein unpassender Docker-WSL2-GPU-Pfad laeuft, reicht das neue `cu128`-Image allein nicht aus.
+
+## 2026-04-23 Plan: Remove Training window.mp4 Intermediate And Read Features Directly From VOD
+
+- [x] Direkte Abhaengigkeiten des aktuellen `window.mp4`-Pfads lesen und die Sync-/Zeitachsen-Anforderungen fuer Audio, Transcript und Video-Frames ableiten.
+- [x] Trainings-Label-Pfad so umbauen, dass kein `window.mp4` mehr geschrieben wird und Audio-/Video-Features direkt aus dem VOD-Zeitfenster gelesen werden.
+- [x] Checkpoint-Version und bestehende Tests auf den neuen Direkt-VOD-Pfad anpassen.
+- [x] Syntax pruefen, Testlauf versuchen und den vorgeschriebenen `graphify`-Rebuild fuer `backend` erneut versuchen.
+
+### Review Notes
+
+- Ursache / Ziel:
+  - Der Trainingspfad schnitt bisher erst `window.mp4`-Zwischenclips und extrahierte danach Audio, Transcript und Video-Features daraus.
+  - Das kostete zusaetzlichen Re-Encode-/I/O-Aufwand und fuehrte eine unnoetige verlustbehaftete Zwischenstufe ein.
+- Umsetzung:
+  - `backend/ml/build_twitch_training_dataset.py` verwendet fuer die Label-Phase jetzt direkt den VOD-Pfad und loggt `mode=direct_vod` statt vorbereitete Batch-Clips.
+  - `backend/services/audio_extractor.py` kann Audio jetzt direkt aus einem VOD-Zeitfenster (`start_sec`/`end_sec`) in die lokale `audio.wav` des Label-Arbeitsverzeichnisses extrahieren.
+  - `backend/services/video_features.py` akzeptiert jetzt `start_sec`/`end_sec` und liest Frames direkt aus dem entsprechenden VOD-Fenster, waehrend die ausgegebenen `VideoFeatureFrame.second`-Werte weiter clip-lokal bei `0` beginnen.
+  - `backend/ml/build_twitch_training_dataset.py` fuehrt Audio- und Video-Window-Extraktion direkt auf dem VOD aus; die `window.mp4`-Vorbereitung und der Batch-Cut-Pfad sind aus dieser Label-Phase entfernt.
+  - `_VOD_CHECKPOINT_VERSION` wurde erhoeht, damit alte Checkpoints aus dem frueheren Zwischenclip-Pfad nicht still weiterverwendet werden.
+- Verifiziert mit:
+  - `python3 -m py_compile backend/services/audio_extractor.py backend/services/video_features.py backend/ml/build_twitch_training_dataset.py backend/tests/test_build_twitch_training_dataset.py backend/tests/test_video_features.py`
+  - `PYTHONPATH=backend python3 -m unittest backend.tests.test_build_twitch_training_dataset backend.tests.test_video_features`
+  - `python3 -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('backend'))"`
+- Ergebnis:
+  - `py_compile` lief sauber.
+  - Der `unittest`-Lauf konnte in dieser Shell nicht starten, weil Abhaengigkeiten wie `pydantic_settings` und `numpy` fehlen.
+  - Der `graphify`-Rebuild konnte erneut nicht ausgefuehrt werden, weil das Modul `graphify` in der aktuellen Python-Umgebung fehlt.
+- Rest-Risiken / lokale Einschraenkungen:
+  - Die Korrektheit der direkten VOD-Zeitfenster ist derzeit nur ueber den Codepfad und die angepassten Tests abgesichert, nicht ueber einen vollstaendigen lokalen Integrationstest mit echten Medien.
+  - Falls einzelne Downstream-Komponenten implizit auf einen physischen `window.mp4`-Dateipfad vertraut haben sollten, wuerde das erst in einem vollstaendigen Lauf mit realen Projekt-Dependencies sichtbar.
+
+## 2026-04-23 Plan: Expose NVIDIA Video Capability To Local Training Container
+
+- [x] Ursache fuer fehlendes `libnvidia-encode.so.1` im lokalen Docker-Trainingspfad auf die Container-Startparameter eingrenzen.
+- [x] `scripts/train_local_docker.sh` so anpassen, dass die NVIDIA-`video`-Capability standardmaessig gesetzt wird und per Env ueberschreibbar bleibt.
+- [x] Shell-Syntax pruefen und die Wirkung sowie Rest-Risiken in `tasks/todo.md` dokumentieren.
+
+### Review Notes
+
+- Ursache / Ziel:
+  - Der Trainingscontainer lief bereits mit `--gpus all`, aber NVENC scheiterte an `Cannot load libnvidia-encode.so.1`.
+  - Das passt zum NVIDIA-Container-Toolkit-Default: ohne explizite `video`-Capability werden typischerweise nur `compute,utility` in den Container gereicht.
+- Umsetzung:
+  - `scripts/train_local_docker.sh` setzt jetzt standardmaessig `NVIDIA_DRIVER_CAPABILITIES=compute,utility,video`.
+  - Der Wert bleibt per bereits gesetzter Umgebungsvariable ueberschreibbar, falls lokal spaeter `all` oder eine andere Capability-Menge noetig ist.
+- Verifiziert mit:
+  - `bash -n scripts/train_local_docker.sh`
+- Ergebnis:
+  - Shell-Syntax sauber.
+- Rest-Risiken / lokale Einschraenkungen:
+  - Wenn der Windows-NVIDIA-Treiber, Docker-WSL2-GPU-Pfad oder das `ffmpeg`-Build selbst kein NVENC bereitstellen, reicht die neue Capability allein nicht aus.
+  - Der naechste sinnvolle Smoke-Test ist ein Containerlauf mit `ffmpeg -encoders | grep nvenc` oder ein erneuter Trainingsstart ueber `scripts/train_local_docker.sh`.
+
+## 2026-04-22 Plan: Switch Local Training Batch Cuts To Hardware Encoding
+
+- [x] Lokalen Trainingspfad auf die bereits vorhandenen FFmpeg-Settings prüfen und den minimalen Default-Wechsel festlegen.
+- [x] Hardware-Encoding als Standard fuer den lokalen Trainings-Runner setzen, ohne Software-Fallback-Pfad.
+- [x] Tests und Dokumentation der Laufzeit-Zusammenfassung an die neuen Defaults anpassen.
+- [x] Geaenderte Module per Syntax-Check verifizieren und verbleibende Umgebungsgrenzen dokumentieren.
+
+### Review Notes
+
+- Ursache / Ziel:
+  - Der FFmpeg-Cut war zwar bereits konfigurierbar, der lokale Trainings-Runner startete aber weiterhin mit Software-Encoding-Defaults.
+  - Gewuenscht war, dass der lokale Trainingspfad standardmaessig Hardware-Encoding nutzt, ohne stillen Rueckfall auf `libx264`.
+- Umsetzung:
+  - `backend/ml/local_train.py` setzt jetzt standardmaessig `TRAINING_FFMPEG_VIDEO_CODEC=h264_nvenc`.
+  - Der Preset-Default ist leer und `TRAINING_FFMPEG_THREADS=0`, damit der lokale Runner NVENC aktiviert, ohne einen versionsabhaengigen Preset-Namen zu erzwingen oder unnoetig CPU-Threads festzunageln.
+  - `backend/tests/test_local_train.py` erwartet die neuen Defaults und prueft weiter, dass sie in der Laufzeit-Umgebung und der Summary auftauchen.
+- Verifiziert mit:
+  - `python3 -m py_compile backend/ml/local_train.py backend/tests/test_local_train.py`
+  - `PYTHONPATH=backend python3 -m unittest backend.tests.test_local_train`
+- Ergebnis:
+  - Syntax-Check sauber.
+  - `LocalTrainTests`: `2` Tests gruen.
+- Rest-Risiken / lokale Einschraenkungen:
+  - Der lokale Trainings-Runner faellt bei fehlendem NVENC jetzt bewusst hart aus; das ist so gewollt.
+  - Der in `AGENTS.md` geforderte `graphify`-Rebuild konnte erneut nicht ausgefuehrt werden, weil das Modul `graphify` in der aktuellen Python-Umgebung fehlt.
+
+## 2026-04-22 Plan: Make FFmpeg Batch Cutting Configurable Without Fallback
+
+- [x] Bestehenden FFmpeg-Batch-Cut-Pfad auf feste Encoder-/Preset-/Thread-Annahmen reduzieren und die Low-Risk-Aenderungen festlegen.
+- [x] `+faststart` aus dem Trainings-Cut entfernen und explizite FFmpeg-Cut-Konfiguration ueber Runtime-Settings einbauen, ohne automatische Fallback-Logik.
+- [x] Lokalen Trainings-Wrapper und Tests auf die neuen FFmpeg-Settings erweitern.
+- [x] Betroffene Tests und Syntax-Checks ausfuehren.
+- [x] Review Notes mit Wirkung, Konfigurationsoberflaeche und Rest-Risiken dokumentieren.
+
+### Review Notes
+
+- Ursache / Ziel:
+  - Der Trainings-Cut war auf `libx264`/`aac`/`veryfast`/`threads=1` fest verdrahtet und setzte zusaetzlich `+faststart`, obwohl die erzeugten `window.mp4`-Dateien nur lokale Zwischenartefakte sind.
+  - Gewuenscht war die Low-Risk-Beschleunigung ueber konfigurierbare FFmpeg-Parameter, aber ausdruecklich ohne automatische Encoder-Fallback-Logik.
+- Umsetzung:
+  - `backend/config.py` definiert jetzt `training_ffmpeg_video_codec`, `training_ffmpeg_audio_codec`, `training_ffmpeg_preset` und `training_ffmpeg_threads`.
+  - `backend/ml/collect_viral_clips.py` baut den Batch-Cut-Command jetzt direkt aus diesen Settings auf und entfernt `-movflags +faststart`.
+  - Leere Codec-/Preset-Werte werden nur weggelassen; es gibt keinen versteckten Rueckfall auf andere Encoder.
+  - `backend/ml/local_train.py` nimmt die neuen Werte als CLI-/Env-Parameter an und schreibt sie in die Laufzeit-Umgebung sowie in die Trainings-Zusammenfassung.
+  - Tests decken jetzt ab, dass `+faststart` weg ist und ein explizit gesetzter Codec unveraendert verwendet wird.
+- Verifiziert mit:
+  - `python3 -m py_compile backend/config.py backend/ml/collect_viral_clips.py backend/ml/local_train.py backend/tests/test_collect_viral_clips.py backend/tests/test_local_train.py`
+  - `PYTHONPATH=backend python3 -m unittest backend.tests.test_collect_viral_clips backend.tests.test_local_train`
+- Ergebnis:
+  - `py_compile` lief sauber.
+  - Der `local_train`-Testpfad lief unter `unittest`; der `collect_viral_clips`-Import scheiterte in dieser Shell vor Testausfuehrung an der fehlenden Abhaengigkeit `pydantic_settings`.
+- Rest-Risiken / lokale Einschraenkungen:
+  - `python3 -m pytest ...` konnte hier nicht laufen, weil `pytest` nicht installiert ist.
+  - Der in `AGENTS.md` geforderte `graphify`-Rebuild konnte nicht ausgefuehrt werden, weil das Modul `graphify` in der aktuellen Python-Umgebung fehlt.
+  - Wenn ein explizit konfigurierter Hardware-Encoder auf der Zielmaschine nicht verfuegbar ist, faellt der Cut jetzt absichtlich klar aus, statt still auf Software-Encoding zurueckzugehen.
+
+## 2026-04-22 Plan: Make Local Training Preprocessing Visible
+
+- [x] Bestehende Blindstellen im lokalen Trainingslauf fuer VOD-Fensterschnitt und Label-Verarbeitung identifizieren.
+- [x] Fortschrittslogs fuer `ffmpeg`-Batch-Cuts einbauen, damit pro VOD sichtbar ist, welcher Batch laeuft und wann er fertig ist.
+- [x] Fortschrittslogs fuer die nachgelagerte Label-/Window-Verarbeitung einbauen, damit sichtbare VOD-Fortschritte waehrend Feature-Extraktion und Ranking-Dataset-Build entstehen.
+- [x] Betroffene Tests ausfuehren oder anpassen und die neue Sichtbarkeit gegen den lokalen Trainingspfad verifizieren.
+- [x] Review Notes mit beobachtetem Problem, Umsetzung und Rest-Risiken dokumentieren.
+
+### Review Notes
+
+- Beobachtetes Problem:
+  - Die lange Vorverarbeitungsphase bestand aus grossen `ffmpeg`-Batch-Cuts und nachgelagerter Window-/Feature-Verarbeitung, erzeugte aber ueber viele Minuten keine aussagekraeftigen Fortschrittslogs.
+  - Dadurch wirkte der lokale Docker-Trainingslauf haeufig wie ein Hanger, obwohl CPU/RAM sichtbar ausgelastet waren.
+- Umsetzung:
+  - `backend/ml/collect_viral_clips.py` loggt jetzt fuer jeden Batch einen Plan-, Start- und Done-Eintrag.
+  - Der eigentliche `ffmpeg`-Subprozess laeuft jetzt ueber `_run_ffmpeg_command(...)` mit Heartbeat-Logs alle 15 Sekunden, solange ein Batch noch codiert.
+  - `backend/ml/build_twitch_training_dataset.py` loggt jetzt den Start der Label-Phase pro VOD, den Status der vorbereiteten `window.mp4`-Clips, laufende Progress-Updates waehrend der Label-Verarbeitung und einen Abschluss-Eintrag fuer die Phase.
+  - Die Progress-Logs funktionieren sowohl fuer den sequentiellen als auch fuer den parallelen Label-Pfad.
+- Verifikation:
+  - `python3 -m py_compile backend/ml/collect_viral_clips.py backend/ml/build_twitch_training_dataset.py`
+  - Testdateien angepasst:
+    - `backend/tests/test_collect_viral_clips.py`
+    - `backend/tests/test_build_twitch_training_dataset.py`
+  - Direkter lokaler Smoke-Test mit Stub-Modulen erfolgreich: Batch-Cut-Logs und Label-Progress-Logs werden auf den geaenderten Pfaden erzeugt.
+- Rest-Risiken / lokale Einschraenkungen:
+  - Die vollstaendigen `unittest`-/`pytest`-Laeufe konnten in dieser Shell nicht nativ ausgefuehrt werden, weil Projekt-Dependencies wie `pytest`, `yt_dlp` und `pydantic_settings` fehlen.
+  - Der in `AGENTS.md` geforderte `graphify`-Rebuild liess sich hier ebenfalls nicht ausfuehren, weil das Modul `graphify` in der aktuellen Python-Umgebung nicht importierbar ist.
+
 ## 2026-04-22 Plan: Remove GCloud Training Path And Rebuild For Local Docker
 
 - [x] Alle produktiven `gcloud`-/Vertex-/GCS-/Secret-Manager-Einstiegspunkte im Trainingsstack inventarisieren und in lokale A/Bloesung aufteilen: `entfernen`, `ersetzen`, `tests anpassen`.

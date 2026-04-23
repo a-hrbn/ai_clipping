@@ -26,6 +26,10 @@ WORKFLOW_STATE_PATH="$ARTIFACT_DIR/jynxzi_training_workflow_state.json"
 WORK_DIR_BASE="${AI_CLIPPING_TRAIN_TMPDIR:-$BACKEND_DIR/tmp/training_runs}"
 WORK_DIR="$WORK_DIR_BASE/jynxzi_resume"
 SHORT_FORM_BACKFILL_ARTIFACT_DIR="$BACKEND_DIR/tmp/short_form_backfill_artifacts"
+SHORT_FORM_BACKFILL_ARTIFACT_JSON_PATH="$SHORT_FORM_BACKFILL_ARTIFACT_DIR/jynxzi_ranker.json"
+SHORT_FORM_BACKFILL_ARTIFACT_HEALTH_PATH="$SHORT_FORM_BACKFILL_ARTIFACT_DIR/jynxzi_artifact_health.json"
+PERSISTED_SHORT_FORM_BACKFILL_ARTIFACT_JSON_PATH="$ARTIFACT_DIR/jynxzi_short_form_backfill_ranker.json"
+PERSISTED_SHORT_FORM_BACKFILL_ARTIFACT_HEALTH_PATH="$ARTIFACT_DIR/jynxzi_short_form_backfill_artifact_health.json"
 
 cd "$BACKEND_DIR"
 
@@ -36,6 +40,10 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
 fi
 
 mkdir -p "$ARTIFACT_DIR" "$MPLCONFIGDIR" "$WORK_DIR_BASE" "$WORK_DIR"
+
+if [[ "${AI_CLIPPING_CACHE_CLEANUP:-1}" != "0" ]]; then
+  "$PYTHON_BIN" -m ml.cache_cleanup --backend-root "$BACKEND_DIR"
+fi
 
 DATE_FROM=""
 DATE_TO=""
@@ -244,6 +252,17 @@ generate_short_form_backfill() {
     --work-dir "$BACKEND_DIR/tmp/short_form_training"
 }
 
+persist_short_form_backfill_artifact() {
+  if [[ -f "$SHORT_FORM_BACKFILL_ARTIFACT_JSON_PATH" ]]; then
+    cp "$SHORT_FORM_BACKFILL_ARTIFACT_JSON_PATH" "$PERSISTED_SHORT_FORM_BACKFILL_ARTIFACT_JSON_PATH"
+    echo "Persisted short-form backfill artifact to $PERSISTED_SHORT_FORM_BACKFILL_ARTIFACT_JSON_PATH"
+  fi
+  if [[ -f "$SHORT_FORM_BACKFILL_ARTIFACT_HEALTH_PATH" ]]; then
+    cp "$SHORT_FORM_BACKFILL_ARTIFACT_HEALTH_PATH" "$PERSISTED_SHORT_FORM_BACKFILL_ARTIFACT_HEALTH_PATH"
+    echo "Persisted short-form backfill artifact health to $PERSISTED_SHORT_FORM_BACKFILL_ARTIFACT_HEALTH_PATH"
+  fi
+}
+
 if [[ ! -f "$SHORT_FORM_PATH" ]]; then
   echo "Warning: optional short-form dataset not found at $SHORT_FORM_PATH" >&2
   echo "Training will continue with Twitch VOD labels only." >&2
@@ -343,6 +362,7 @@ if [[ "$SHOULD_TRAIN" == "yes" ]]; then
 
     if [[ "$DATASET_STATE" == one_class_* || "$SHORT_FORM_STATE" == missing:* || "$SHORT_FORM_STATE" == empty:* || "$SHORT_FORM_STATE" == one_class_* ]]; then
       generate_short_form_backfill
+      persist_short_form_backfill_artifact
       SHORT_FORM_STATE="$(dataset_label_state "$SHORT_FORM_PATH")"
       echo "Short-form backfill state: $SHORT_FORM_STATE"
       if [[ "$SHORT_FORM_STATE" != balanced:* ]]; then

@@ -50,17 +50,20 @@ def _model_device_name(model: whisper.Whisper) -> str:
 
 
 def runtime_summary() -> dict[str, object]:
+    configured_language = str(settings.whisper_language or "").strip().lower()
     if _whisper_model is None:
         device = _resolved_whisper_device()
         return {
             "whisper_model": settings.whisper_model,
             "device": device,
             "precision": _resolved_precision(device),
+            "language": configured_language,
         }
     return {
         "whisper_model": settings.whisper_model,
         "device": _model_device_name(_whisper_model),
         "precision": _resolved_precision(_model_device_name(_whisper_model)),
+        "language": configured_language,
     }
 
 
@@ -84,10 +87,11 @@ def _get_model() -> whisper.Whisper:
     if not _whisper_runtime_logged:
         summary = runtime_summary()
         logger.info(
-            "transcriber_runtime whisper_model=%s device=%s precision=%s",
+            "transcriber_runtime whisper_model=%s device=%s precision=%s language=%s",
             summary["whisper_model"],
             summary["device"],
             summary["precision"],
+            summary["language"] or "auto",
         )
         _whisper_runtime_logged = True
     return _whisper_model
@@ -268,11 +272,17 @@ def _calc_tempo(seg: dict, time_offset: float) -> float:
 def _transcribe_chunk(model: whisper.Whisper, chunk_file: pathlib.Path) -> dict:
     with _whisper_inference_lock:
         use_fp16 = str(_model_device_name(model)).startswith("cuda")
+        transcribe_kwargs: dict[str, object] = {
+            "word_timestamps": True,
+            "verbose": False,
+            "fp16": use_fp16,
+        }
+        configured_language = str(settings.whisper_language or "").strip().lower()
+        if configured_language:
+            transcribe_kwargs["language"] = configured_language
         return model.transcribe(
             str(chunk_file),
-            word_timestamps=True,
-            verbose=False,
-            fp16=use_fp16,
+            **transcribe_kwargs,
         )
 
 

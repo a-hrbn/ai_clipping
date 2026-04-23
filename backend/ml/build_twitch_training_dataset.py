@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+from dataclasses import dataclass
 import hashlib
 import json
 import logging
+import math
 import os
 import pathlib
 import shutil
 import sys
+import time
 
 BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
@@ -28,7 +31,8 @@ _BOUNDARY_NEAR_MISS_SAMPLE_WEIGHT = 0.45
 _BOUNDARY_NEAR_MISS_LIMIT = 6
 _MAX_CANDIDATE_SOURCE_SHARE = 0.40
 _DATASET_BUILD_LLM_PROVIDER = (os.environ.get("TRAINING_DATASET_LLM_PROVIDER") or "none").strip() or "none"
-_VOD_CHECKPOINT_VERSION = 3
+_VOD_CHECKPOINT_VERSION = 4
+_VOD_FEATURE_CACHE_VERSION = 1
 _BOUNDARY_PERTURBATION_SPECS = (
     ("start_late_small", 0.8, 0.0),
     ("start_late_large", 1.8, 0.0),
@@ -39,6 +43,14 @@ _BOUNDARY_PERTURBATION_SPECS = (
     ("both_tight", 0.8, -1.0),
     ("both_loose", -1.0, 1.2),
 )
+
+
+@dataclass(frozen=True)
+class VodFeatureContext:
+    transcript: list
+    audio_signal: object
+    audio_sample_rate: int
+    cache_dir: pathlib.Path
 
 def _dataset_build_fingerprint(profile: str) -> str:
     # Fingerprint the code-path knobs that materially change generated rows.
@@ -57,6 +69,433 @@ def _dataset_build_fingerprint(profile: str) -> str:
     }
     normalized = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _vod_feature_cache_root() -> pathlib.Path:
+    root = pathlib.Path(settings.storage_dir).resolve().parent / "vod_feature_cache"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _vod_feature_cache_dir(vod_id: str) -> pathlib.Path:
+    path = _vod_feature_cache_root() / str(vod_id)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _source_video_signature(vod_path: pathlib.Path) -> dict[str, object]:
+    stat = vod_path.stat()
+    return {
+        "path": str(vod_path.resolve()),
+        "size": int(stat.st_size),
+        "mtime_ns": int(stat.st_mtime_ns),
+    }
+
+
+def _stable_vod_source_signature(vod_id: str, vod_path: pathlib.Path) -> dict[str, object]:
+    cache_path = downloader._cache_path_for_url(f"https://www.twitch.tv/videos/{vod_id}", namespace="twitch")
+    try:
+        source_stat = vod_path.stat()
+    except OSError:
+        source_stat = None
+    if cache_path.exists() and source_stat is not None:
+        try:
+            cache_stat = cache_path.stat()
+        except OSError:
+            cache_stat = None
+        if cache_stat is not None and int(cache_stat.st_size) == int(source_stat.st_size):
+            return {
+                "kind": "twitch_download_cache",
+                "vod_id": str(vod_id),
+                "size": int(cache_stat.st_size),
+            }
+    return {
+        "kind": "local_source",
+        **_source_video_signature(vod_path),
+    }
+
+
+def _audio_cache_payload(vod_id: str, vod_path: pathlib.Path) -> dict[str, object]:
+    return {
+        "version": _VOD_FEATURE_CACHE_VERSION,
+        "kind": "vod_audio",
+        "vod_id": str(vod_id),
+        "source": _stable_vod_source_signature(vod_id, vod_path),
+        "audio_codec": "pcm_s16le",
+        "audio_sample_rate": 16000,
+        "audio_channels": 1,
+    }
+
+
+def _audio_cache_metadata_path(cache_dir: pathlib.Path) -> pathlib.Path:
+    return cache_dir / "audio.metadata.json"
+
+
+def _audio_cache_is_usable(audio_path: pathlib.Path, metadata_path: pathlib.Path, payload: dict[str, object]) -> bool:
+    if not audio_path.exists():
+        return False
+    if not metadata_path.exists():
+        # Existing caches predate metadata. Keep them usable for compatibility;
+        # the current run will write metadata after accepting the file.
+        return True
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return metadata == payload
+
+
+def _transcript_cache_payload(vod_id: str) -> dict[str, object]:
+    return {
+        "version": _VOD_FEATURE_CACHE_VERSION,
+        "kind": "transcript",
+        "vod_id": str(vod_id),
+        "whisper_model": str(settings.whisper_model),
+        "whisper_language": str(settings.whisper_language or "").strip().lower(),
+    }
+
+
+def _window_feature_cache_payload(
+    vod_id: str,
+    vod_path: pathlib.Path,
+    *,
+    window_start: float,
+    window_end: float,
+) -> dict[str, object]:
+    from services import video_features
+
+    runtime = video_features.runtime_summary()
+    return {
+        "version": _VOD_FEATURE_CACHE_VERSION,
+        "kind": "window_modalities",
+        "vod_id": str(vod_id),
+        "source": _stable_vod_source_signature(vod_id, vod_path),
+        "window_start": round(float(window_start), 3),
+        "window_end": round(float(window_end), 3),
+        "video_expression_sample_sec": int(max(settings.video_expression_sample_sec, 1)),
+        "video_face_detector": str(runtime.get("face_detector") or ""),
+        "video_deepface_status": str(runtime.get("deepface_status") or ""),
+    }
+
+
+def _cache_key(payload: dict[str, object]) -> str:
+    normalized = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _transcript_cache_path(cache_dir: pathlib.Path, payload: dict[str, object]) -> pathlib.Path:
+    return cache_dir / f"transcript_{_cache_key(payload)}.json"
+
+
+def _window_feature_cache_path(cache_dir: pathlib.Path, payload: dict[str, object]) -> pathlib.Path:
+    return cache_dir / "windows" / f"{_cache_key(payload)}.json"
+
+
+def _serialize_rich_segment(segment) -> dict[str, object]:
+    return {
+        "start": float(segment.start),
+        "end": float(segment.end),
+        "text": str(segment.text),
+        "speaker": str(getattr(segment, "speaker", "UNKNOWN")),
+        "emotions": list(getattr(segment, "emotions", []) or []),
+        "words_per_second": float(getattr(segment, "words_per_second", 0.0) or 0.0),
+        "laughter_prob": float(getattr(segment, "laughter_prob", 0.0) or 0.0),
+        "max_rms_db": float(getattr(segment, "max_rms_db", 0.0) or 0.0),
+        "mean_rms_db": float(getattr(segment, "mean_rms_db", 0.0) or 0.0),
+        "max_pitch_hz": float(getattr(segment, "max_pitch_hz", 0.0) or 0.0),
+        "max_onset_rate": float(getattr(segment, "max_onset_rate", 0.0) or 0.0),
+        "hype_score": float(getattr(segment, "hype_score", 0.0) or 0.0),
+        "arc_score": float(getattr(segment, "arc_score", 0.0) or 0.0),
+        "max_motion_score": float(getattr(segment, "max_motion_score", 0.0) or 0.0),
+        "mean_face_size": float(getattr(segment, "mean_face_size", 0.0) or 0.0),
+        "max_face_count": int(getattr(segment, "max_face_count", 0) or 0),
+        "max_face_reaction": float(getattr(segment, "max_face_reaction", 0.0) or 0.0),
+        "has_scene_change": bool(getattr(segment, "has_scene_change", False)),
+        "visual_activity": float(getattr(segment, "visual_activity", 0.0) or 0.0),
+        "chat_spike_score": float(getattr(segment, "chat_spike_score", 0.0) or 0.0),
+    }
+
+
+def _deserialize_rich_segment(payload: dict[str, object]):
+    from services.transcriber import RichSegment
+
+    return RichSegment(
+        start=float(payload.get("start") or 0.0),
+        end=float(payload.get("end") or 0.0),
+        text=str(payload.get("text") or ""),
+        speaker=str(payload.get("speaker") or "UNKNOWN"),
+        emotions=list(payload.get("emotions") or []),
+        words_per_second=float(payload.get("words_per_second") or 0.0),
+        laughter_prob=float(payload.get("laughter_prob") or 0.0),
+        max_rms_db=float(payload.get("max_rms_db") or 0.0),
+        mean_rms_db=float(payload.get("mean_rms_db") or 0.0),
+        max_pitch_hz=float(payload.get("max_pitch_hz") or 0.0),
+        max_onset_rate=float(payload.get("max_onset_rate") or 0.0),
+        hype_score=float(payload.get("hype_score") or 0.0),
+        arc_score=float(payload.get("arc_score") or 0.0),
+        max_motion_score=float(payload.get("max_motion_score") or 0.0),
+        mean_face_size=float(payload.get("mean_face_size") or 0.0),
+        max_face_count=int(payload.get("max_face_count") or 0),
+        max_face_reaction=float(payload.get("max_face_reaction") or 0.0),
+        has_scene_change=bool(payload.get("has_scene_change") or False),
+        visual_activity=float(payload.get("visual_activity") or 0.0),
+        chat_spike_score=float(payload.get("chat_spike_score") or 0.0),
+    )
+
+
+def _load_transcript_cache(path: pathlib.Path) -> tuple[dict[str, object], list] | None:
+    try:
+        cached = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    metadata = cached.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    try:
+        transcript = [_deserialize_rich_segment(item) for item in list(cached.get("transcript") or [])]
+    except (TypeError, ValueError):
+        return None
+    return metadata, transcript
+
+
+def _transcript_cache_metadata_matches(metadata: dict[str, object], vod_id: str) -> bool:
+    if int(metadata.get("version") or 0) != _VOD_FEATURE_CACHE_VERSION:
+        return False
+    if str(metadata.get("kind") or "") != "transcript":
+        return False
+    if str(metadata.get("vod_id") or "") != str(vod_id):
+        return False
+    if str(metadata.get("whisper_model") or "") != str(settings.whisper_model):
+        return False
+    cached_language = metadata.get("whisper_language")
+    if cached_language is not None:
+        current_language = str(settings.whisper_language or "").strip().lower()
+        return str(cached_language or "").strip().lower() == current_language
+    return True
+
+
+def _load_compatible_transcript_cache(cache_dir: pathlib.Path, vod_id: str) -> tuple[pathlib.Path, list] | None:
+    paths = sorted(
+        cache_dir.glob("transcript_*.json"),
+        key=lambda path: path.stat().st_mtime_ns if path.exists() else 0,
+        reverse=True,
+    )
+    for path in paths:
+        cached = _load_transcript_cache(path)
+        if cached is None:
+            continue
+        metadata, transcript = cached
+        if _transcript_cache_metadata_matches(metadata, vod_id):
+            return path, transcript
+    return None
+
+
+def _prune_compatible_transcript_caches(
+    cache_dir: pathlib.Path,
+    *,
+    keep_path: pathlib.Path,
+    vod_id: str,
+) -> None:
+    keep_path = keep_path.resolve()
+    for path in cache_dir.glob("transcript_*.json"):
+        try:
+            if path.resolve() == keep_path:
+                continue
+        except OSError:
+            continue
+        cached = _load_transcript_cache(path)
+        if cached is None:
+            continue
+        metadata, _transcript = cached
+        if not _transcript_cache_metadata_matches(metadata, vod_id):
+            continue
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            continue
+
+
+def _write_transcript_cache(
+    path: pathlib.Path,
+    payload: dict[str, object],
+    transcript: list,
+) -> None:
+    _write_json_atomic(
+        path,
+        {
+            "metadata": payload,
+            "transcript": [_serialize_rich_segment(segment) for segment in transcript],
+        },
+    )
+
+
+def _write_json_atomic(path: pathlib.Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(f"{path.suffix}.tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=True), encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def _prune_transcript_chunks(cache_dir: pathlib.Path) -> None:
+    chunks_dir = cache_dir / "chunks"
+    if chunks_dir.exists():
+        shutil.rmtree(chunks_dir, ignore_errors=True)
+
+
+def _serialize_frame(frame) -> dict[str, object]:
+    return {
+        key: _json_scalar(value)
+        for key, value in vars(frame).items()
+    }
+
+
+def _json_scalar(value):
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        if isinstance(value, float) and not math.isfinite(value):
+            return 0.0
+        return value
+    item = getattr(value, "item", None)
+    if callable(item):
+        scalar = item()
+        if scalar is value:
+            return value
+        return _json_scalar(scalar)
+    return value
+
+
+def _load_or_build_vod_feature_context(
+    vod_id: str,
+    *,
+    vod_path: pathlib.Path,
+    job_id: str,
+) -> VodFeatureContext:
+    from services import audio_extractor, transcriber
+    import librosa
+
+    cache_dir = _vod_feature_cache_dir(vod_id)
+    audio_path = cache_dir / "audio.wav"
+    audio_payload = _audio_cache_payload(vod_id, vod_path)
+    audio_metadata_path = _audio_cache_metadata_path(cache_dir)
+    if not _audio_cache_is_usable(audio_path, audio_metadata_path, audio_payload):
+        audio_path.unlink(missing_ok=True)
+        audio_extractor.extract(
+            vod_path,
+            f"{job_id}:vod_audio_cache",
+            output_path=audio_path,
+        )
+    _write_json_atomic(audio_metadata_path, audio_payload)
+
+    transcript_payload = _transcript_cache_payload(vod_id)
+    transcript_path = _transcript_cache_path(cache_dir, transcript_payload)
+    transcript: list
+    if transcript_path.exists():
+        cached = _load_transcript_cache(transcript_path)
+        if cached is not None:
+            transcript = cached[1]
+            _prune_compatible_transcript_caches(cache_dir, keep_path=transcript_path, vod_id=vod_id)
+            _prune_transcript_chunks(cache_dir)
+        else:
+            compatible = _load_compatible_transcript_cache(cache_dir, vod_id)
+            if compatible is None:
+                transcript = transcriber.transcribe(audio_path)
+            else:
+                _compatible_path, transcript = compatible
+            _write_transcript_cache(transcript_path, transcript_payload, transcript)
+            _prune_compatible_transcript_caches(cache_dir, keep_path=transcript_path, vod_id=vod_id)
+            _prune_transcript_chunks(cache_dir)
+    else:
+        compatible = _load_compatible_transcript_cache(cache_dir, vod_id)
+        if compatible is None:
+            transcript = transcriber.transcribe(audio_path)
+        else:
+            _compatible_path, transcript = compatible
+        _write_transcript_cache(transcript_path, transcript_payload, transcript)
+        _prune_compatible_transcript_caches(cache_dir, keep_path=transcript_path, vod_id=vod_id)
+        _prune_transcript_chunks(cache_dir)
+
+    audio_signal, audio_sample_rate = librosa.load(str(audio_path), sr=None, mono=True)
+    return VodFeatureContext(
+        transcript=transcript,
+        audio_signal=audio_signal,
+        audio_sample_rate=int(audio_sample_rate),
+        cache_dir=cache_dir,
+    )
+
+
+def _slice_transcript_for_window(
+    transcript: list,
+    *,
+    window_start: float,
+    window_end: float,
+) -> list:
+    sliced: list = []
+    for segment in transcript:
+        if float(segment.end) <= window_start or float(segment.start) >= window_end:
+            continue
+        payload = _serialize_rich_segment(segment)
+        payload["start"] = max(float(segment.start), window_start) - window_start
+        payload["end"] = min(float(segment.end), window_end) - window_start
+        if float(payload["end"]) <= float(payload["start"]):
+            continue
+        sliced.append(_deserialize_rich_segment(payload))
+    return sliced
+
+
+def _load_or_build_window_modalities(
+    vod_id: str,
+    *,
+    vod_path: pathlib.Path,
+    vod_context: VodFeatureContext,
+    window_start: float,
+    window_end: float,
+) -> tuple[list, list]:
+    from services import audio_features, video_features
+    from services.audio_features import AudioFeatureFrame
+    from services.video_features import VideoFeatureFrame
+
+    payload = _window_feature_cache_payload(
+        vod_id,
+        vod_path,
+        window_start=window_start,
+        window_end=window_end,
+    )
+    cache_path = _window_feature_cache_path(vod_context.cache_dir, payload)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    if cache_path.exists():
+        try:
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            audio_frames = [
+                AudioFeatureFrame(**dict(item))
+                for item in list(cached.get("audio_frames") or [])
+            ]
+            visual_frames = [
+                VideoFeatureFrame(**dict(item))
+                for item in list(cached.get("visual_frames") or [])
+            ]
+            return audio_frames, visual_frames
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            cache_path.unlink(missing_ok=True)
+
+    audio_frames = audio_features.extract_window_from_signal(
+        vod_context.audio_signal,
+        vod_context.audio_sample_rate,
+        start_sec=window_start,
+        end_sec=window_end,
+    )
+    visual_frames = video_features.extract(
+        vod_path,
+        start_sec=window_start,
+        end_sec=window_end,
+    )
+    _write_json_atomic(
+        cache_path,
+        {
+            "metadata": payload,
+            "audio_frames": [_serialize_frame(frame) for frame in audio_frames],
+            "visual_frames": [_serialize_frame(frame) for frame in visual_frames],
+        },
+    )
+    return audio_frames, visual_frames
 
 
 def main() -> int:
@@ -287,11 +726,30 @@ def _build_rows_for_vod_labels(
     ordered_labels = sorted(vod_rows, key=lambda item: float(item["window_start"]))
     if not ordered_labels:
         return []
-    prepared_clip_paths = _prepare_vod_label_clip_paths(vod_id, ordered_labels, vod_path=vod_path, vod_dir=vod_dir)
+    vod_feature_context = _load_or_build_vod_feature_context(
+        vod_id,
+        vod_path=vod_path,
+        job_id=job_id,
+    )
+    total_labels = len(ordered_labels)
+    resolved_workers = min(_resolved_training_label_workers(), total_labels)
+    logger.info(
+        "training_vod_label_phase_start vod_id=%s labels=%s label_workers=%s",
+        vod_id,
+        total_labels,
+        resolved_workers,
+    )
+    logger.info(
+        "training_vod_label_window_source vod_id=%s mode=%s labels=%s",
+        vod_id,
+        "direct_vod",
+        total_labels,
+    )
 
-    resolved_workers = min(_resolved_training_label_workers(), len(ordered_labels))
+    started_at = time.perf_counter()
     if resolved_workers <= 1:
         rows: list[dict] = []
+        progress_interval = _label_progress_interval(total_labels)
         for index, label in enumerate(ordered_labels, start=1):
             rows.extend(
                 _process_vod_label(
@@ -300,34 +758,88 @@ def _build_rows_for_vod_labels(
                     label,
                     vod_path=vod_path,
                     vod_dir=vod_dir,
+                    vod_feature_context=vod_feature_context,
                     job_id=job_id,
                     profile=profile,
                     context_index=context_index,
-                    clip_path=prepared_clip_paths.get(index),
                 )
             )
+            if _should_log_label_progress(index, total_labels, progress_interval):
+                logger.info(
+                    "training_vod_label_progress vod_id=%s completed=%s/%s rows=%s elapsed_sec=%.1f mode=sequential",
+                    vod_id,
+                    index,
+                    total_labels,
+                    len(rows),
+                    time.perf_counter() - started_at,
+                )
+        logger.info(
+            "training_vod_label_phase_done vod_id=%s completed=%s rows=%s elapsed_sec=%.1f",
+            vod_id,
+            total_labels,
+            len(rows),
+            time.perf_counter() - started_at,
+        )
         return rows
 
-    futures: dict[int, concurrent.futures.Future[list[dict]]] = {}
+    progress_interval = _label_progress_interval(total_labels)
+    futures: dict[concurrent.futures.Future[list[dict]], int] = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=resolved_workers) as executor:
         for index, label in enumerate(ordered_labels, start=1):
-            futures[index] = executor.submit(
+            future = executor.submit(
                 _process_vod_label,
                 vod_id,
                 index,
                 label,
                 vod_path=vod_path,
                 vod_dir=vod_dir,
+                vod_feature_context=vod_feature_context,
                 job_id=job_id,
                 profile=profile,
                 context_index=context_index,
-                clip_path=prepared_clip_paths.get(index),
             )
+            futures[future] = index
+
+        completed = 0
+        row_results: dict[int, list[dict]] = {}
+        for future in concurrent.futures.as_completed(futures):
+            index = futures[future]
+            row_results[index] = future.result()
+            completed += 1
+            if _should_log_label_progress(completed, total_labels, progress_interval):
+                logger.info(
+                    "training_vod_label_progress vod_id=%s completed=%s/%s latest_window=%s rows=%s elapsed_sec=%.1f mode=parallel",
+                    vod_id,
+                    completed,
+                    total_labels,
+                    index,
+                    sum(len(result) for result in row_results.values()),
+                    time.perf_counter() - started_at,
+                )
 
         rows: list[dict] = []
-        for index in range(1, len(ordered_labels) + 1):
-            rows.extend(futures[index].result())
+        for index in range(1, total_labels + 1):
+            rows.extend(row_results.get(index, []))
+        logger.info(
+            "training_vod_label_phase_done vod_id=%s completed=%s rows=%s elapsed_sec=%.1f",
+            vod_id,
+            total_labels,
+            len(rows),
+            time.perf_counter() - started_at,
+        )
         return rows
+
+
+def _label_progress_interval(total_labels: int) -> int:
+    if total_labels <= 10:
+        return 1
+    if total_labels <= 50:
+        return 5
+    return 25
+
+
+def _should_log_label_progress(completed: int, total_labels: int, interval: int) -> bool:
+    return completed == 1 or completed == total_labels or completed % max(interval, 1) == 0
 
 
 def _process_vod_label(
@@ -337,10 +849,10 @@ def _process_vod_label(
     *,
     vod_path: pathlib.Path,
     vod_dir: pathlib.Path,
+    vod_feature_context: VodFeatureContext,
     job_id: str,
     profile: str,
     context_index: dict,
-    clip_path: pathlib.Path | None = None,
 ) -> list[dict]:
     clip_dir = vod_dir / f"window_{index:04d}"
     clip_dir.mkdir(parents=True, exist_ok=True)
@@ -350,9 +862,9 @@ def _process_vod_label(
                 label,
                 vod_path=vod_path,
                 clip_dir=clip_dir,
+                vod_feature_context=vod_feature_context,
                 job_prefix=f"{job_id}_{index}",
                 profile=profile,
-                clip_path=clip_path,
             )
         except Exception as exc:
             logger.warning(
@@ -398,32 +910,6 @@ def _finalize_label_rows(label_rows: list[dict], label: dict, context_index: dic
     return rows
 
 
-def _prepare_vod_label_clip_paths(
-    vod_id: str,
-    ordered_labels: list[dict],
-    *,
-    vod_path: pathlib.Path,
-    vod_dir: pathlib.Path,
-) -> dict[int, pathlib.Path]:
-    if len(ordered_labels) <= 1:
-        return {}
-
-    windows: list[tuple[pathlib.Path, float, float]] = []
-    clip_paths: dict[int, pathlib.Path] = {}
-    for index, label in enumerate(ordered_labels, start=1):
-        clip_path = vod_dir / f"window_{index:04d}" / "window.mp4"
-        expanded_start, expanded_end = _expanded_training_window(label)
-        windows.append((clip_path, expanded_start, expanded_end))
-        clip_paths[index] = clip_path
-
-    try:
-        collect_viral_clips.cut_video_windows(vod_path, windows)
-    except RuntimeError as exc:
-        logger.warning("training_vod_batch_cut_failed %s: %s", vod_id, exc)
-        return {}
-    return clip_paths
-
-
 def _schedule_prefetch(
     executor: concurrent.futures.ThreadPoolExecutor,
     vod_items: list[tuple[str, list[dict]]],
@@ -449,24 +935,28 @@ def _build_rows_for_label(
     *,
     vod_path: pathlib.Path,
     clip_dir: pathlib.Path,
+    vod_feature_context: VodFeatureContext,
     job_prefix: str,
     profile: str,
-    clip_path: pathlib.Path | None = None,
 ) -> list[dict]:
     from services import (
-        audio_extractor, audio_features, feature_builder, scorer, video_features,
+        audio_features, feature_builder, scorer, video_features,
     )
     from services.timeline_types import Candidate
 
     expanded_start, expanded_end = _expanded_training_window(label)
-    resolved_clip_path = clip_path or collect_viral_clips.cut_video_window(
-        vod_path,
-        clip_dir / "window.mp4",
-        expanded_start,
-        expanded_end,
+    transcript = _slice_transcript_for_window(
+        vod_feature_context.transcript,
+        window_start=expanded_start,
+        window_end=expanded_end,
     )
-    audio_path = audio_extractor.extract(resolved_clip_path, job_prefix)
-    transcript, audio_frames, visual_frames = _extract_clip_modalities(resolved_clip_path, audio_path)
+    audio_frames, visual_frames = _load_or_build_window_modalities(
+        str(label.get("vod_id") or ""),
+        vod_path=vod_path,
+        vod_context=vod_feature_context,
+        window_start=expanded_start,
+        window_end=expanded_end,
+    )
     if not transcript:
         return []
 
@@ -546,15 +1036,23 @@ def _build_rows_for_label(
 
 
 def _extract_clip_modalities(
-    clip_path: pathlib.Path,
+    source_video_path: pathlib.Path,
     audio_path: pathlib.Path,
+    *,
+    window_start: float,
+    window_end: float,
 ) -> tuple[list, list, list]:
     from services import audio_features, transcriber, video_features
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
         transcript_future = executor.submit(transcriber.transcribe, audio_path)
         audio_future = executor.submit(audio_features.extract, audio_path)
-        visual_future = executor.submit(video_features.extract, clip_path)
+        visual_future = executor.submit(
+            video_features.extract,
+            source_video_path,
+            start_sec=window_start,
+            end_sec=window_end,
+        )
 
         transcript = transcript_future.result()
         audio_frames = audio_future.result()

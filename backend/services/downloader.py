@@ -1,9 +1,12 @@
 import pathlib
+import json
 import shutil
 import time
 from hashlib import sha256
 import os
 import re
+import threading
+import uuid
 
 import yt_dlp
 from config import settings
@@ -20,6 +23,12 @@ class DownloadPausedError(RuntimeError):
 
 class DownloadCancelledError(RuntimeError):
     pass
+
+
+_CACHE_LOCKS_GUARD = threading.Lock()
+_CACHE_LOCKS: dict[str, threading.Lock] = {}
+_VIDEO_FILE_SUFFIXES = {".mp4", ".mkv", ".webm", ".mov", ".ts", ".m4v"}
+_CACHE_METADATA_VERSION = 1
 
 
 def _is_twitch_url(url: str) -> bool:
@@ -67,8 +76,8 @@ def _twitch_download_ydl_opts(job_dir: pathlib.Path) -> dict[str, object]:
     return opts
 
 
-def _cache_dir() -> pathlib.Path:
-    return pathlib.Path(settings.storage_dir) / "_download_cache" / "twitch"
+def _cache_dir(namespace: str) -> pathlib.Path:
+    return pathlib.Path(settings.storage_dir) / "_download_cache" / namespace
 
 
 def _twitch_vod_id(url: str) -> str | None:
@@ -76,16 +85,78 @@ def _twitch_vod_id(url: str) -> str | None:
     return match.group(1) if match else None
 
 
-def _cache_path_for_url(url: str) -> pathlib.Path:
+def _cache_path_for_url(url: str, *, namespace: str = "twitch") -> pathlib.Path:
+    vod_id = _twitch_vod_id(url)
+    if namespace == "twitch" and vod_id:
+        return _cache_dir(namespace) / f"vod_{vod_id}.mp4"
+    digest = sha256(url.strip().encode("utf-8")).hexdigest()
+    return _cache_dir(namespace) / f"{digest}.mp4"
+
+
+def _cache_metadata_path(cache_path: pathlib.Path) -> pathlib.Path:
+    return cache_path.with_suffix(f"{cache_path.suffix}.metadata.json")
+
+
+def _cache_metadata_payload(url: str, namespace: str, cache_path: pathlib.Path) -> dict[str, object]:
+    stat = cache_path.stat()
+    payload: dict[str, object] = {
+        "version": _CACHE_METADATA_VERSION,
+        "namespace": namespace,
+        "url": url.strip(),
+        "size": int(stat.st_size),
+        "cache_file": cache_path.name,
+        "complete": True,
+    }
     vod_id = _twitch_vod_id(url)
     if vod_id:
-        return _cache_dir() / f"vod_{vod_id}.mp4"
-    digest = sha256(url.strip().encode("utf-8")).hexdigest()
-    return _cache_dir() / f"{digest}.mp4"
+        payload["vod_id"] = vod_id
+    return payload
 
 
-def _evict_expired_cache(cache_dir: pathlib.Path) -> None:
-    ttl = int(settings.twitch_download_cache_ttl_sec or 0)
+def _write_cache_metadata(url: str, namespace: str, cache_path: pathlib.Path) -> None:
+    metadata_path = _cache_metadata_path(cache_path)
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = metadata_path.with_suffix(f"{metadata_path.suffix}.tmp")
+    tmp_path.write_text(
+        json.dumps(_cache_metadata_payload(url, namespace, cache_path), ensure_ascii=True, sort_keys=True),
+        encoding="utf-8",
+    )
+    tmp_path.replace(metadata_path)
+
+
+def _cache_entry_usable(cache_path: pathlib.Path, url: str, namespace: str) -> bool:
+    try:
+        if cache_path.stat().st_size <= 0:
+            return False
+    except OSError:
+        return False
+    metadata_path = _cache_metadata_path(cache_path)
+    if not metadata_path.exists():
+        # Backward-compatible legacy cache hit. New writes create metadata.
+        return True
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(metadata, dict):
+        return False
+    if int(metadata.get("version") or 0) != _CACHE_METADATA_VERSION:
+        return False
+    if str(metadata.get("namespace") or "") != namespace:
+        return False
+    if bool(metadata.get("complete")) is not True:
+        return False
+    try:
+        if int(metadata.get("size") or -1) != int(cache_path.stat().st_size):
+            return False
+    except OSError:
+        return False
+    if namespace == "twitch":
+        return str(metadata.get("vod_id") or "") == str(_twitch_vod_id(url) or "")
+    return str(metadata.get("url") or "") == url.strip()
+
+
+def _evict_expired_cache(cache_dir: pathlib.Path, ttl: int) -> None:
     if ttl <= 0 or not cache_dir.exists():
         return
 
@@ -94,12 +165,23 @@ def _evict_expired_cache(cache_dir: pathlib.Path) -> None:
         try:
             if path.stat().st_mtime < cutoff:
                 path.unlink(missing_ok=True)
+                _cache_metadata_path(path).unlink(missing_ok=True)
         except OSError:
             continue
 
 
 def _twitch_cache_enabled(url: str) -> bool:
     return _is_twitch_url(url) and int(settings.twitch_download_cache_ttl_sec or 0) != 0
+
+
+def _cache_lock(cache_path: pathlib.Path) -> threading.Lock:
+    key = str(cache_path)
+    with _CACHE_LOCKS_GUARD:
+        lock = _CACHE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _CACHE_LOCKS[key] = lock
+        return lock
 
 
 def _copy_into_job(source: pathlib.Path, target: pathlib.Path) -> pathlib.Path:
@@ -118,18 +200,43 @@ def _link_or_copy_into_job(source: pathlib.Path, target: pathlib.Path) -> pathli
     return target
 
 
-def _store_in_cache(source: pathlib.Path, cache_path: pathlib.Path) -> pathlib.Path:
+def _cleanup_redundant_job_download_artifacts(job_dir: pathlib.Path, keep_path: pathlib.Path) -> None:
+    keep_path = keep_path.resolve(strict=False)
+    for path in job_dir.iterdir():
+        if not path.is_file() or path.resolve(strict=False) == keep_path:
+            continue
+        name = path.name
+        suffix = path.suffix.lower()
+        is_video_sibling = name.startswith("video") and suffix in _VIDEO_FILE_SUFFIXES
+        is_transient_fragment = name.startswith("video") and (
+            ".part" in name
+            or name.endswith(".aria2")
+            or name.endswith(".ytdl")
+        )
+        if not is_video_sibling and not is_transient_fragment:
+            continue
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            continue
+
+
+def _store_in_cache(source: pathlib.Path, cache_path: pathlib.Path, *, url: str, namespace: str) -> pathlib.Path:
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     needs_refresh = not cache_path.exists()
     if not needs_refresh:
         try:
-            needs_refresh = cache_path.stat().st_size != source.stat().st_size
+            needs_refresh = (
+                cache_path.stat().st_size != source.stat().st_size
+                or not _cache_entry_usable(cache_path, url, namespace)
+            )
         except OSError:
             needs_refresh = True
     if needs_refresh:
         tmp_path = cache_path.with_suffix(f"{cache_path.suffix}.tmp")
         shutil.copy2(source, tmp_path)
         tmp_path.replace(cache_path)
+    _write_cache_metadata(url, namespace, cache_path)
     return cache_path
 
 
@@ -140,7 +247,7 @@ def _resolve_downloaded_video(job_dir: pathlib.Path, preferred_path: pathlib.Pat
     candidates = [
         path for path in job_dir.rglob("*")
         if path.is_file()
-        and path.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov", ".ts", ".m4v"}
+        and path.suffix.lower() in _VIDEO_FILE_SUFFIXES
         and not path.name.endswith((".part", ".ytdl"))
     ]
     if not candidates:
@@ -188,36 +295,13 @@ def _is_transient_network_error(message: str) -> bool:
     )
 
 
-def download(url: str, job_id: str, proxy: str | None = None) -> pathlib.Path:
+def _download_uncached(url: str, job_id: str, proxy: str | None = None) -> pathlib.Path:
     job_dir = pathlib.Path(settings.storage_dir) / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
     output_path = job_dir / "video.mp4"
-    use_twitch_cache = _twitch_cache_enabled(url)
 
     if is_job_cancelled(job_id):
         raise DownloadCancelledError(f"Download cancelled for job {job_id}")
-
-    if use_twitch_cache:
-        cache_dir = _cache_dir()
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        _evict_expired_cache(cache_dir)
-        cache_path = _cache_path_for_url(url)
-        if cache_path.exists():
-            if is_job_cancelled(job_id):
-                raise DownloadCancelledError(f"Download cancelled for job {job_id}")
-            cache_path.touch()
-            _link_or_copy_into_job(cache_path, output_path)
-            try:
-                update_job(
-                    job_id,
-                    progress_pct=19,
-                    download_speed=None,
-                    download_eta=0,
-                    download_cached=True,
-                )
-            except KeyError:
-                pass
-            return output_path
 
     def progress_hook(d: dict) -> None:
         if is_job_cancelled(job_id):
@@ -285,14 +369,76 @@ def download(url: str, job_id: str, proxy: str | None = None) -> pathlib.Path:
         resolved_output.replace(output_path)
         resolved_output = output_path
 
-    if use_twitch_cache:
-        try:
-            _store_in_cache(resolved_output, cache_path)
-        except OSError:
-            pass
-
     try:
         update_job(job_id, download_speed=None, download_eta=None, download_cached=False)
     except KeyError:
         pass
     return resolved_output
+
+
+def ensure_cached_download(
+    url: str,
+    *,
+    cache_namespace: str,
+    cache_ttl_sec: int = -1,
+    proxy: str | None = None,
+) -> pathlib.Path:
+    cache_dir = _cache_dir(cache_namespace)
+    cache_path = _cache_path_for_url(url, namespace=cache_namespace)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    with _cache_lock(cache_path):
+        _evict_expired_cache(cache_dir, int(cache_ttl_sec or 0))
+        if cache_path.exists() and _cache_entry_usable(cache_path, url, cache_namespace):
+            cache_path.touch()
+            return cache_path
+
+        temp_job_id = f"_cache_fill_{cache_namespace}_{uuid.uuid4().hex[:12]}"
+        temp_job_dir = pathlib.Path(settings.storage_dir) / temp_job_id
+        downloaded_path = _download_uncached(url, temp_job_id, proxy=proxy)
+        try:
+            _store_in_cache(downloaded_path, cache_path, url=url, namespace=cache_namespace)
+        finally:
+            shutil.rmtree(temp_job_dir, ignore_errors=True)
+        return cache_path
+
+
+def download(url: str, job_id: str, proxy: str | None = None) -> pathlib.Path:
+    job_dir = pathlib.Path(settings.storage_dir) / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    output_path = job_dir / "video.mp4"
+
+    if _twitch_cache_enabled(url):
+        cache_dir = _cache_dir("twitch")
+        cache_path = _cache_path_for_url(url, namespace="twitch")
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        with _cache_lock(cache_path):
+            _evict_expired_cache(cache_dir, int(settings.twitch_download_cache_ttl_sec or 0))
+            if cache_path.exists() and _cache_entry_usable(cache_path, url, "twitch"):
+                if is_job_cancelled(job_id):
+                    raise DownloadCancelledError(f"Download cancelled for job {job_id}")
+                cache_path.touch()
+                _link_or_copy_into_job(cache_path, output_path)
+                _cleanup_redundant_job_download_artifacts(job_dir, output_path)
+                try:
+                    update_job(
+                        job_id,
+                        progress_pct=19,
+                        download_speed=None,
+                        download_eta=0,
+                        download_cached=True,
+                    )
+                except KeyError:
+                    pass
+                return output_path
+
+            resolved_output = _download_uncached(url, job_id, proxy=proxy)
+            try:
+                _store_in_cache(resolved_output, cache_path, url=url, namespace="twitch")
+                resolved_output = _link_or_copy_into_job(cache_path, output_path)
+            except OSError:
+                pass
+            _cleanup_redundant_job_download_artifacts(job_dir, output_path)
+            return resolved_output
+
+    return _download_uncached(url, job_id, proxy=proxy)

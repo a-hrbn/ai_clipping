@@ -37,6 +37,24 @@ class TranscriberChunkingTests(unittest.TestCase):
         _, kwargs = load_model_mock.call_args
         self.assertEqual(kwargs["device"], "cuda")
 
+    def test_transcribe_chunk_passes_configured_language_hint(self) -> None:
+        class _Model:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def transcribe(self, path, **kwargs):
+                self.calls.append((path, kwargs))
+                return {"segments": []}
+
+        model = _Model()
+        with patch.object(transcriber.settings, "whisper_language", "en"), \
+             patch("services.transcriber._model_device_name", return_value="cpu"):
+            transcriber._transcribe_chunk(model, Path("/tmp/chunk.wav"))
+
+        self.assertEqual(len(model.calls), 1)
+        self.assertEqual(model.calls[0][1]["language"], "en")
+        self.assertFalse(model.calls[0][1]["fp16"])
+
 
 if __name__ == "__main__":
     unittest.main()

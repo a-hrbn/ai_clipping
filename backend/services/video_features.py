@@ -26,9 +26,16 @@ from __future__ import annotations
 
 import os
 import sys
+import inspect
+import json
 import logging
 import pathlib
+import selectors
+import subprocess
+import threading
+import time
 from dataclasses import dataclass
+from functools import lru_cache
 from statistics import mean
 
 import numpy as np
@@ -41,6 +48,15 @@ logger = logging.getLogger(__name__)
 
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 
+
+def _configure_opencv_capture_env() -> None:
+    # OpenCV/FFmpeg may otherwise try implicit hardware decode paths that fail
+    # on AV1 sources in environments without supported video decode hardware.
+    os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "hwaccel;none")
+
+
+_configure_opencv_capture_env()
+
 _VIDEO_RUNTIME_LOGGED = False
 _MEDIAPIPE_STATUS = "unavailable"
 _MEDIAPIPE_DETAIL = ""
@@ -48,6 +64,10 @@ _MTCNN_STATUS = "unavailable"
 _MTCNN_DETAIL = ""
 _DEEPFACE_STATUS = "unavailable"
 _DEEPFACE_DETAIL = ""
+_DEEPFACE_MODEL_READY = False
+_DEEPFACE_WARMUP_ATTEMPTED = False
+_DEEPFACE_INIT_LOCK = threading.Lock()
+_FFMPEG_FRAME_DECODE_CODECS = {"av1", "h264", "avc1", "hevc", "h265", "mpeg4"}
 
 # ---------------------------------------------------------------------------
 # Optional dependency guards
@@ -156,6 +176,53 @@ def _deepface_reaction_prob(result: object) -> float | None:
     )
 
 
+def _ensure_deepface_ready() -> None:
+    global _DEEPFACE_MODEL_READY, _DEEPFACE_WARMUP_ATTEMPTED
+    if not _DEEPFACE_AVAILABLE or _DEEPFACE_WARMUP_ATTEMPTED:
+        return
+
+    with _DEEPFACE_INIT_LOCK:
+        if _DEEPFACE_WARMUP_ATTEMPTED:
+            return
+        _DEEPFACE_WARMUP_ATTEMPTED = True
+
+        build_model = getattr(DeepFace, "build_model", None)
+        if callable(build_model):
+            try:
+                logger.info(
+                    "video_features_deepface_init cache_home=%s",
+                    os.environ.get("DEEPFACE_HOME", ""),
+                )
+                _warm_deepface_emotion_model(build_model)
+                _DEEPFACE_MODEL_READY = True
+            except Exception as exc:
+                logger.warning("video_features_deepface_init_failed error=%s", exc)
+                return
+
+        _DEEPFACE_MODEL_READY = True
+
+
+def _warm_deepface_emotion_model(build_model) -> None:
+    try:
+        signature = inspect.signature(build_model)
+    except (TypeError, ValueError):
+        signature = None
+
+    if signature is not None:
+        parameter_names = list(signature.parameters)
+        if "task" in signature.parameters and "model_name" in signature.parameters:
+            build_model(task="facial_attribute", model_name="Emotion")
+            return
+        if parameter_names[:2] == ["task", "model_name"]:
+            build_model("facial_attribute", "Emotion")
+            return
+        if "model_name" in signature.parameters:
+            build_model(model_name="Emotion")
+            return
+
+    build_model("Emotion")
+
+
 def runtime_summary() -> dict[str, object]:
     if _MP_FACE_DETECTION is not None:
         face_detector = "mediapipe"
@@ -199,7 +266,12 @@ class VideoFeatureFrame:
 # Main extraction entry point
 # ---------------------------------------------------------------------------
 
-def extract(video_path: pathlib.Path) -> list[VideoFeatureFrame]:
+def extract(
+    video_path: pathlib.Path,
+    *,
+    start_sec: float = 0.0,
+    end_sec: float | None = None,
+) -> list[VideoFeatureFrame]:
     """
     Extract per-second visual features from a video file.
 
@@ -222,15 +294,33 @@ def extract(video_path: pathlib.Path) -> list[VideoFeatureFrame]:
         )
         _VIDEO_RUNTIME_LOGGED = True
 
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        print(f"[video_features] Could not open {video_path}", file=sys.stderr)
-        return []
-
+    stream_info = _video_stream_info(video_path)
+    use_ffmpeg_decode = _should_use_ffmpeg_frame_decode(stream_info)
+    cap = None
+    ffmpeg_frames: dict[int, np.ndarray] = {}
+    if not use_ffmpeg_decode:
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            print(f"[video_features] Could not open {video_path}", file=sys.stderr)
+            return []
     try:
-        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-        total_ms = cap.get(cv2.CAP_PROP_FRAME_COUNT) / fps * 1000
-        duration_sec = int(total_ms / 1000)
+        if cap is not None:
+            fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+            total_duration_sec = (cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0) / max(fps, 1e-6)
+        else:
+            total_duration_sec = float(stream_info.get("duration_sec") or 0.0)
+        window_start_sec = max(float(start_sec), 0.0)
+        window_end_sec = total_duration_sec if end_sec is None else max(float(end_sec), window_start_sec)
+        if total_duration_sec > 0.0:
+            window_end_sec = min(window_end_sec, total_duration_sec)
+        duration_sec = int(max(window_end_sec - window_start_sec, 0.0))
+        if use_ffmpeg_decode and duration_sec > 0:
+            ffmpeg_frames = _decode_second_frames_ffmpeg(
+                video_path,
+                start_sec=window_start_sec,
+                sample_count=duration_sec,
+                stream_info=stream_info,
+            )
 
         # --- First pass: extract raw frames and raw metrics ----------------
         raw_frames: list[tuple[int, np.ndarray]] = []  # (second, bgr_frame)
@@ -247,7 +337,13 @@ def extract(video_path: pathlib.Path) -> list[VideoFeatureFrame]:
             detector_name = "haar"
         else:
             detector_name = "none"
-        logger.info("video_features face_detector=%s path=%s", detector_name, video_path)
+        logger.info(
+            "video_features face_detector=%s path=%s window_start=%.3f window_end=%.3f",
+            detector_name,
+            video_path,
+            window_start_sec,
+            window_end_sec,
+        )
 
         frames_data: list[VideoFeatureFrame] = []
         prev_gray_small: np.ndarray | None = None
@@ -255,7 +351,14 @@ def extract(video_path: pathlib.Path) -> list[VideoFeatureFrame]:
         last_reaction: float = 0.0
 
         for sec in range(duration_sec):
-            frame = _seek_frame(cap, sec)
+            frame = _frame_at_second(
+                video_path,
+                cap,
+                window_start_sec + sec,
+                use_ffmpeg_decode=use_ffmpeg_decode,
+                ffmpeg_frames=ffmpeg_frames,
+                ffmpeg_start_sec=window_start_sec,
+            )
             if frame is None:
                 frames_data.append(VideoFeatureFrame(second=sec))
                 raw_motion.append(0.0)
@@ -308,6 +411,7 @@ def extract(video_path: pathlib.Path) -> list[VideoFeatureFrame]:
             # Expression — sample sparsely; DeepFace dominates runtime on long VODs.
             if _DEEPFACE_AVAILABLE and sec % max(settings.video_expression_sample_sec, 1) == 0:
                 try:
+                    _ensure_deepface_ready()
                     result = DeepFace.analyze(
                         frame,
                         actions=["emotion"],
@@ -326,7 +430,8 @@ def extract(video_path: pathlib.Path) -> list[VideoFeatureFrame]:
 
             frames_data.append(vf)
 
-        cap.release()
+        if cap is not None:
+            cap.release()
 
         # --- Second pass: normalise motion to 0–1 using 95th percentile ---
         if raw_motion:
@@ -347,7 +452,8 @@ def extract(video_path: pathlib.Path) -> list[VideoFeatureFrame]:
 
     except Exception as e:
         print(f"[video_features] Extraction failed: {e}", file=sys.stderr)
-        cap.release()
+        if cap is not None:
+            cap.release()
         return []
 
 
@@ -421,22 +527,46 @@ def refine_face_reactions(
     if not segments or not candidates or not _CV2_AVAILABLE or not _DEEPFACE_AVAILABLE:
         return segments
 
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        return segments
+    stream_info = _video_stream_info(video_path)
+    use_ffmpeg_decode = _should_use_ffmpeg_frame_decode(stream_info)
+    cap = None
+    ffmpeg_frames: dict[int, np.ndarray] = {}
+    if not use_ffmpeg_decode:
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            return segments
 
     try:
         target_seconds = _candidate_seconds(candidates, sample_every_sec=max(sample_every_sec, 1))
         if not target_seconds:
             return segments
+        if use_ffmpeg_decode:
+            batch_start_sec = float(min(target_seconds))
+            batch_sample_count = max(target_seconds) - min(target_seconds) + 1
+            ffmpeg_frames = _decode_second_frames_ffmpeg(
+                video_path,
+                start_sec=batch_start_sec,
+                sample_count=batch_sample_count,
+                stream_info=stream_info,
+            )
+        else:
+            batch_start_sec = 0.0
 
         reaction_by_second: dict[int, float] = {}
         last_reaction = 0.0
         for sec in target_seconds:
-            frame = _seek_frame(cap, sec)
+            frame = _frame_at_second(
+                video_path,
+                cap,
+                sec,
+                use_ffmpeg_decode=use_ffmpeg_decode,
+                ffmpeg_frames=ffmpeg_frames,
+                ffmpeg_start_sec=batch_start_sec,
+            )
             if frame is None:
                 continue
             try:
+                _ensure_deepface_ready()
                 result = DeepFace.analyze(
                     frame,
                     actions=["emotion"],
@@ -470,14 +600,322 @@ def refine_face_reactions(
 
         return segments
     finally:
-        cap.release()
+        if cap is not None:
+            cap.release()
 
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _seek_frame(cap: "cv2.VideoCapture", second: int) -> "np.ndarray | None":
+@lru_cache(maxsize=128)
+def _probe_video_stream_info(video_path: str) -> dict[str, object]:
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=codec_name,width,height,duration:format=duration",
+        "-of",
+        "json",
+        video_path,
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        payload = json.loads(completed.stdout or "{}")
+    except Exception:
+        return {}
+
+    stream = {}
+    streams = payload.get("streams")
+    if isinstance(streams, list) and streams:
+        stream = streams[0] or {}
+    format_info = payload.get("format") or {}
+
+    duration_value = stream.get("duration")
+    if duration_value in {None, "", "N/A"}:
+        duration_value = format_info.get("duration")
+
+    try:
+        duration_sec = float(duration_value)
+    except (TypeError, ValueError):
+        duration_sec = 0.0
+
+    try:
+        width = int(stream.get("width") or 0)
+    except (TypeError, ValueError):
+        width = 0
+
+    try:
+        height = int(stream.get("height") or 0)
+    except (TypeError, ValueError):
+        height = 0
+
+    return {
+        "codec_name": str(stream.get("codec_name") or "").strip().lower(),
+        "width": width,
+        "height": height,
+        "duration_sec": duration_sec,
+    }
+
+
+def _video_stream_info(video_path: pathlib.Path) -> dict[str, object]:
+    return _probe_video_stream_info(str(video_path))
+
+
+def _should_use_ffmpeg_frame_decode(stream_info: dict[str, object]) -> bool:
+    codec = str(stream_info.get("codec_name") or "").strip().lower()
+    return codec in _FFMPEG_FRAME_DECODE_CODECS
+
+
+def _ffmpeg_frame_decode_timeout_sec(sample_count: int) -> float:
+    configured = float(settings.video_feature_ffmpeg_timeout_sec or 0.0)
+    if configured > 0.0:
+        return configured
+    return min(max(float(max(sample_count, 1)) * 3.0, 30.0), 300.0)
+
+
+def _kill_process(process: subprocess.Popen) -> None:
+    try:
+        process.kill()
+    except Exception:
+        return
+    try:
+        process.wait(timeout=2)
+    except Exception:
+        return
+
+
+def _wait_process(process: subprocess.Popen, timeout_sec: float | None = None) -> int:
+    try:
+        if timeout_sec is None:
+            return int(process.wait())
+        return int(process.wait(timeout=timeout_sec))
+    except TypeError:
+        return int(process.wait())
+
+
+def _decode_frame_ffmpeg(
+    video_path: pathlib.Path,
+    second: float,
+    *,
+    stream_info: dict[str, object],
+) -> "np.ndarray | None":
+    width = int(stream_info.get("width") or 0)
+    height = int(stream_info.get("height") or 0)
+    if width <= 0 or height <= 0:
+        return None
+
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "fatal",
+        "-ss",
+        f"{max(float(second), 0.0):.3f}",
+        "-i",
+        str(video_path),
+        "-frames:v",
+        "1",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "bgr24",
+        "-",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=True,
+            timeout=_ffmpeg_frame_decode_timeout_sec(1),
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "video_features_ffmpeg_frame_decode_timeout path=%s second=%.3f timeout_sec=%.1f",
+            video_path,
+            max(float(second), 0.0),
+            _ffmpeg_frame_decode_timeout_sec(1),
+        )
+        return None
+    except Exception:
+        return None
+
+    expected_size = width * height * 3
+    payload = completed.stdout or b""
+    if len(payload) != expected_size:
+        return None
+    return np.frombuffer(payload, dtype=np.uint8).reshape((height, width, 3))
+
+
+def _decode_second_frames_ffmpeg(
+    video_path: pathlib.Path,
+    *,
+    start_sec: float,
+    sample_count: int,
+    stream_info: dict[str, object],
+) -> dict[int, np.ndarray]:
+    width = int(stream_info.get("width") or 0)
+    height = int(stream_info.get("height") or 0)
+    if width <= 0 or height <= 0 or sample_count <= 0:
+        return {}
+
+    frame_size = width * height * 3
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "fatal",
+        "-ss",
+        f"{max(float(start_sec), 0.0):.3f}",
+        "-t",
+        f"{max(float(sample_count), 0.0):.3f}",
+        "-i",
+        str(video_path),
+        "-vf",
+        "fps=1:start_time=0:round=down",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "bgr24",
+        "-",
+    ]
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        return {}
+
+    frames: dict[int, np.ndarray] = {}
+    buffer = bytearray()
+    timed_out = False
+    timeout_sec = _ffmpeg_frame_decode_timeout_sec(sample_count)
+    try:
+        stdout = process.stdout
+        if stdout is None:
+            return {}
+        try:
+            fd = stdout.fileno()
+        except Exception:
+            for offset in range(sample_count):
+                payload = stdout.read(frame_size)
+                if len(payload) != frame_size:
+                    break
+                frames[offset] = np.frombuffer(payload, dtype=np.uint8).reshape((height, width, 3)).copy()
+            _wait_process(process, timeout_sec)
+            return frames if process.returncode == 0 or frames else {}
+
+        try:
+            os.set_blocking(fd, False)
+        except (AttributeError, OSError):
+            pass
+
+        expected_size = frame_size * sample_count
+        deadline = time.monotonic() + timeout_sec
+        selector = selectors.DefaultSelector()
+        try:
+            selector.register(stdout, selectors.EVENT_READ)
+            while len(buffer) < expected_size:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    timed_out = True
+                    break
+                events = selector.select(timeout=min(1.0, remaining))
+                if not events:
+                    if process.poll() is not None:
+                        break
+                    continue
+                try:
+                    chunk = os.read(fd, min(1024 * 1024, expected_size - len(buffer)))
+                except BlockingIOError:
+                    continue
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                buffer.extend(chunk)
+        finally:
+            selector.close()
+
+        for offset in range(min(sample_count, len(buffer) // frame_size)):
+            start = offset * frame_size
+            payload = bytes(buffer[start:start + frame_size])
+            frames[offset] = np.frombuffer(payload, dtype=np.uint8).reshape((height, width, 3)).copy()
+
+        if timed_out:
+            logger.warning(
+                "video_features_ffmpeg_batch_decode_timeout path=%s start_sec=%.3f sample_count=%s timeout_sec=%.1f frames=%s",
+                video_path,
+                max(float(start_sec), 0.0),
+                sample_count,
+                timeout_sec,
+                len(frames),
+            )
+            _kill_process(process)
+        else:
+            try:
+                _wait_process(process, 2)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                logger.warning(
+                    "video_features_ffmpeg_batch_decode_wait_timeout path=%s start_sec=%.3f sample_count=%s frames=%s",
+                    video_path,
+                    max(float(start_sec), 0.0),
+                    sample_count,
+                    len(frames),
+                )
+                _kill_process(process)
+        return frames if process.returncode == 0 or frames else {}
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "video_features_ffmpeg_batch_decode_timeout path=%s start_sec=%.3f sample_count=%s timeout_sec=%.1f frames=%s",
+            video_path,
+            max(float(start_sec), 0.0),
+            sample_count,
+            timeout_sec,
+            len(frames),
+        )
+        _kill_process(process)
+        return frames
+    finally:
+        if process.stdout is not None:
+            process.stdout.close()
+
+
+def _frame_at_second(
+    video_path: pathlib.Path,
+    cap: "cv2.VideoCapture | None",
+    second: float,
+    *,
+    use_ffmpeg_decode: bool,
+    ffmpeg_frames: dict[int, np.ndarray] | None = None,
+    ffmpeg_start_sec: float = 0.0,
+) -> "np.ndarray | None":
+    if use_ffmpeg_decode:
+        if ffmpeg_frames is not None:
+            offset = int(round(float(second) - float(ffmpeg_start_sec)))
+            return ffmpeg_frames.get(offset)
+        return _decode_frame_ffmpeg(
+            video_path,
+            second,
+            stream_info=_video_stream_info(video_path),
+        )
+    if cap is None:
+        return None
+    return _seek_frame(cap, second)
+
+def _seek_frame(cap: "cv2.VideoCapture", second: float) -> "np.ndarray | None":
     """Seek to `second` and decode one frame. Returns None on failure."""
     try:
         cap.set(cv2.CAP_PROP_POS_MSEC, second * 1000.0)

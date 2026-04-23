@@ -37,6 +37,30 @@ class TranscriberProgressTests(unittest.TestCase):
         self.assertEqual(len(result), 3)
         self.assertEqual(updates, [(1, 3, "chunk_000.wav"), (2, 3, "chunk_001.wav"), (3, 3, "chunk_002.wav")])
 
+    def test_progress_path_forwards_configured_language_to_whisper(self) -> None:
+        seen_kwargs = []
+
+        class _Model:
+            def transcribe(self, *_args, **kwargs):
+                seen_kwargs.append(kwargs)
+                return {"segments": [{"start": 0.0, "end": 1.0, "text": "hello"}]}
+
+        fake_chunks = [pathlib.Path("/tmp/chunk_000.wav")]
+
+        with patch("services.transcriber.subprocess.run") as run_mock, \
+             patch.object(transcriber, "_whisper_model", None), \
+             patch.object(transcriber, "_whisper_runtime_logged", False), \
+             patch("services.transcriber.whisper.load_model", return_value=_Model()), \
+             patch.object(transcriber.settings, "whisper_language", "en"), \
+             patch("services.transcriber.settings.hf_token", None), \
+             patch("pathlib.Path.glob", return_value=fake_chunks), \
+             patch("services.transcriber._chunk_frame_count", return_value=16000):
+            run_mock.return_value = None
+            transcriber.transcribe_with_progress(pathlib.Path("/tmp/audio.wav"))
+
+        self.assertEqual(len(seen_kwargs), 1)
+        self.assertEqual(seen_kwargs[0]["language"], "en")
+
     def test_skips_empty_chunks_without_shifting_offsets(self) -> None:
         seen_paths = []
 

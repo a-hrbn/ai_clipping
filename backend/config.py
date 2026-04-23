@@ -13,6 +13,16 @@ DEFAULT_CACHE_DIR = DEFAULT_TMP_DIR / "cache"
 DEFAULT_MPLCONFIGDIR = DEFAULT_TMP_DIR / "matplotlib"
 
 
+def _prepare_local_cache_path(path: Path, *, fallback_name: str) -> Path:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+    except PermissionError:
+        fallback = (DEFAULT_TMP_DIR / fallback_name).resolve()
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
+
+
 def _resolve_local_project_path(
     value: str | None,
     *,
@@ -43,15 +53,20 @@ def _configure_local_cache_env() -> None:
     cache_root = DEFAULT_CACHE_DIR.resolve()
     mpl_dir = DEFAULT_MPLCONFIGDIR.resolve()
     env_paths = {
-        "XDG_CACHE_HOME": cache_root,
-        "HF_HOME": cache_root / "huggingface",
-        "HUGGINGFACE_HUB_CACHE": cache_root / "huggingface" / "hub",
-        "TRANSFORMERS_CACHE": cache_root / "huggingface" / "transformers",
-        "TORCH_HOME": cache_root / "torch",
-        "MPLCONFIGDIR": mpl_dir,
+        "XDG_CACHE_HOME": _prepare_local_cache_path(cache_root, fallback_name="cache"),
+        "HF_HOME": _prepare_local_cache_path(cache_root / "huggingface", fallback_name="cache_huggingface"),
+        "HUGGINGFACE_HUB_CACHE": _prepare_local_cache_path(
+            cache_root / "huggingface" / "hub",
+            fallback_name="cache_huggingface_hub",
+        ),
+        "TRANSFORMERS_CACHE": _prepare_local_cache_path(
+            cache_root / "huggingface" / "transformers",
+            fallback_name="cache_transformers",
+        ),
+        "TORCH_HOME": _prepare_local_cache_path(cache_root / "torch", fallback_name="cache_torch"),
+        "MPLCONFIGDIR": _prepare_local_cache_path(mpl_dir, fallback_name="matplotlib"),
+        "DEEPFACE_HOME": _prepare_local_cache_path(cache_root / "deepface", fallback_name="cache_deepface"),
     }
-    for path in env_paths.values():
-        path.mkdir(parents=True, exist_ok=True)
     for key, path in env_paths.items():
         os.environ[key] = str(path)
 
@@ -64,6 +79,7 @@ class Settings(BaseSettings):
 
     whisper_model: str = "base"
     whisper_device: str = "auto"
+    whisper_language: str = ""
     # Comma-separated list in env (ALLOWED_ORIGINS="https://app.example.com,https://staging.example.com").
     # Defaults cover the common local dev frontend ports.
     allowed_origins: list[str] = [
@@ -94,6 +110,13 @@ class Settings(BaseSettings):
     twitch_download_aria2_connections: int = 16
     training_vod_workers: int = 2
     training_label_workers: int = 2
+    short_form_collection_workers: int = 3
+    short_form_prefetch_workers: int = 2
+    training_ffmpeg_video_codec: str = "libx264"
+    training_ffmpeg_audio_codec: str = "aac"
+    training_ffmpeg_preset: str = "veryfast"
+    training_ffmpeg_threads: int = 1
+    video_feature_ffmpeg_timeout_sec: float = 120.0
     semantic_device: str = "auto"
     semantic_batch_size: int = 0
     video_expression_sample_sec: int = 3

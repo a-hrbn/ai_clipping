@@ -25,6 +25,16 @@ class _FakeYoutubeDL:
         return {"filepath": str(normalized)}
 
 
+class _FakeYoutubeDLWithTemp(_FakeYoutubeDL):
+    def extract_info(self, url: str, download: bool = True):
+        info = super().extract_info(url, download=download)
+        target = Path(self.opts["outtmpl"])
+        target.parent.mkdir(parents=True, exist_ok=True)
+        (target.parent / "video.temp.mp4").write_bytes(b"stale-temp-copy")
+        (target.parent / "video.mp4.part-Frag1").write_bytes(b"stale-fragment")
+        return info
+
+
 class DownloaderTests(unittest.TestCase):
     def test_coerces_float_eta_to_integer_seconds(self) -> None:
         self.assertEqual(downloader._coerce_eta_seconds(715.6143084933422), 716)
@@ -83,6 +93,9 @@ class DownloaderTests(unittest.TestCase):
             cache_path.mkdir(parents=True, exist_ok=True)
             cached_file = cache_path / "vod_123456.mp4"
             cached_file.write_bytes(b"cached-video")
+            job_dir = storage_dir / "job-cache-hit"
+            job_dir.mkdir()
+            (job_dir / "video.temp.mp4").write_bytes(b"old-temp")
 
             with patch.object(downloader.settings, "storage_dir", str(storage_dir)), \
                  patch.object(downloader.settings, "twitch_download_cache_ttl_sec", -1), \
@@ -91,6 +104,7 @@ class DownloaderTests(unittest.TestCase):
                 output_path = downloader.download(url, "job-cache-hit")
 
             self.assertEqual(output_path.read_bytes(), b"cached-video")
+            self.assertFalse((job_dir / "video.temp.mp4").exists())
             update_job_mock.assert_called_with(
                 "job-cache-hit",
                 progress_pct=19,
@@ -98,6 +112,40 @@ class DownloaderTests(unittest.TestCase):
                 download_eta=0,
                 download_cached=True,
             )
+
+    def test_ensure_cached_download_reuses_existing_generic_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage_dir = Path(tmp)
+            url = "https://www.youtube.com/shorts/abc"
+            cache_dir = storage_dir / "_download_cache" / "short_form"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            cached_file = cache_dir / f"{downloader.sha256(url.encode('utf-8')).hexdigest()}.mp4"
+            cached_file.write_bytes(b"cached-short-form")
+
+            with patch.object(downloader.settings, "storage_dir", str(storage_dir)), \
+                 patch.object(downloader.yt_dlp, "YoutubeDL", side_effect=AssertionError("network should not run")):
+                output_path = downloader.ensure_cached_download(url, cache_namespace="short_form")
+
+            self.assertEqual(output_path, cached_file)
+            self.assertEqual(output_path.read_bytes(), b"cached-short-form")
+
+    def test_ensure_cached_download_populates_generic_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage_dir = Path(tmp)
+            url = "https://www.tiktok.com/@jynxzi/video/123"
+            expected_cache_file = storage_dir / "_download_cache" / "short_form" / f"{downloader.sha256(url.encode('utf-8')).hexdigest()}.mp4"
+
+            with patch.object(downloader.settings, "storage_dir", str(storage_dir)), \
+                 patch.object(downloader, "update_job", create=True), \
+                 patch.object(downloader.yt_dlp, "YoutubeDL", _FakeYoutubeDL):
+                output_path = downloader.ensure_cached_download(url, cache_namespace="short_form")
+
+            self.assertEqual(output_path, expected_cache_file)
+            self.assertTrue(expected_cache_file.exists())
+            self.assertEqual(expected_cache_file.read_bytes(), b"downloaded:https://www.tiktok.com/@jynxzi/video/123")
+            metadata = downloader.json.loads(downloader._cache_metadata_path(expected_cache_file).read_text(encoding="utf-8"))
+            self.assertTrue(metadata["complete"])
+            self.assertEqual(metadata["namespace"], "short_form")
 
     def test_stores_fresh_twitch_download_in_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -108,12 +156,42 @@ class DownloaderTests(unittest.TestCase):
             with patch.object(downloader.settings, "storage_dir", str(storage_dir)), \
                  patch.object(downloader.settings, "twitch_download_cache_ttl_sec", -1), \
                  patch.object(downloader, "update_job", create=True), \
-                 patch.object(downloader.yt_dlp, "YoutubeDL", _FakeYoutubeDL):
+                 patch.object(downloader.yt_dlp, "YoutubeDL", _FakeYoutubeDLWithTemp):
                 output_path = downloader.download(url, "job-cache-miss")
 
             self.assertTrue(output_path.exists())
             self.assertTrue(expected_cache_file.exists())
             self.assertEqual(expected_cache_file.read_bytes(), output_path.read_bytes())
+            self.assertFalse((storage_dir / "job-cache-miss" / "video.temp.mp4").exists())
+            self.assertFalse((storage_dir / "job-cache-miss" / "video.mp4.part-Frag1").exists())
+
+            output_stat = output_path.stat()
+            cache_stat = expected_cache_file.stat()
+            self.assertEqual((output_stat.st_dev, output_stat.st_ino), (cache_stat.st_dev, cache_stat.st_ino))
+            metadata = downloader.json.loads(downloader._cache_metadata_path(expected_cache_file).read_text(encoding="utf-8"))
+            self.assertEqual(metadata["vod_id"], "7890")
+            self.assertEqual(metadata["size"], expected_cache_file.stat().st_size)
+
+    def test_invalid_cache_metadata_forces_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage_dir = Path(tmp)
+            url = "https://www.twitch.tv/videos/7890"
+            cache_file = storage_dir / "_download_cache" / "twitch" / "vod_7890.mp4"
+            cache_file.parent.mkdir(parents=True)
+            cache_file.write_bytes(b"stale")
+            downloader._cache_metadata_path(cache_file).write_text(
+                downloader.json.dumps({"version": 1, "namespace": "wrong", "size": 5, "complete": True}),
+                encoding="utf-8",
+            )
+
+            with patch.object(downloader.settings, "storage_dir", str(storage_dir)), \
+                 patch.object(downloader.settings, "twitch_download_cache_ttl_sec", -1), \
+                 patch.object(downloader, "update_job", create=True), \
+                 patch.object(downloader.yt_dlp, "YoutubeDL", _FakeYoutubeDL):
+                output_path = downloader.download(url, "job-refresh")
+
+            self.assertEqual(output_path.read_bytes(), b"downloaded:https://www.twitch.tv/videos/7890")
+            self.assertEqual(cache_file.read_bytes(), output_path.read_bytes())
 
     def test_skips_twitch_cache_when_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

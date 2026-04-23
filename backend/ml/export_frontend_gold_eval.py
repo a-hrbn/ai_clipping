@@ -40,9 +40,6 @@ def main() -> int:
         pathlib.Path(args.storage_dir),
         creator_id=(args.creator_id or "").strip().lower() or None,
     )
-    if not payload["rows"]:
-        print("No frontend gold-eval rows found.", file=sys.stderr)
-        return 1
 
     rows_out = pathlib.Path(args.rows_out)
     rows_out.parent.mkdir(parents=True, exist_ok=True)
@@ -58,6 +55,8 @@ def main() -> int:
         json.dumps(payload["summary"], ensure_ascii=True, indent=2),
         encoding="utf-8",
     )
+    if not payload["rows"]:
+        print("No frontend gold-eval rows found; wrote empty gold-eval artifacts.", file=sys.stderr)
     print(json.dumps(payload["summary"], ensure_ascii=True))
     return 0
 
