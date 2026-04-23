@@ -1,0 +1,41 @@
+{
+  "rows": 97,
+  "eval_dataset": {
+    "rows": 97,
+    "positive_rows": 16,
+    "negative_rows": 81,
+    "eval_groups": 19,
+    "dataset_roles": {
+      "gold_eval": 97
+    },
+    "by_label_class": {
+      "gold_negative": 81,
+      "gold_positive": 16
+    },
+    "by_supervision_tier": {
+      "gold_eval": 97
+    },
+    "by_platform": {
+      "twitch": 97
+    },
+    "by_variant": {
+      "balanced": 97
+    },
+    "by_source": {
+      "controversy": 8,
+      "narrative_reveal": 5,
+      "peak": 72,
+      "quote": 4,
+      "tension_build": 8
+    },
+    "by_content_bucket": {
+      "general": 72,
+      "quote_driven": 12,
+      "story": 13
+    },
+    "gold_holdout_splits": {
+      "holdout": 30,
+      "train": 67
+    }
+  }
+}

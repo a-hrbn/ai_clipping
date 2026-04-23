@@ -1,0 +1,4 @@
+job_id,vod_url,creator_id,platform,vod_id
+example-job-001,https://www.twitch.tv/videos/1234567890,jynxzi,twitch,1234567890
+example-job-002,https://www.youtube.com/watch?v=abcdefghijk,caseoh_,youtube,abcdefghijk
+example-job-003,https://www.tiktok.com/@creator/video/1234567890123456789,creator,tiktok,1234567890123456789

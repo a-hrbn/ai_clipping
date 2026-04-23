@@ -17,8 +17,15 @@ backend/.venv314/
 backend/.pytest_cache/
 backend/__pycache__/
 backend/tests/__pycache__/
-backend/ml/artifacts/
-backend/tmp/
+backend/ml/artifacts/*
+!backend/ml/artifacts/*gold_eval*
+
+backend/tmp/*
+!backend/tmp/storage/
+backend/tmp/storage/*
+!backend/tmp/storage/feedback/
+backend/tmp/storage/feedback/*
+!backend/tmp/storage/feedback/gold_eval_updates.jsonl
 
 frontend/node_modules/
 frontend/node_modules.bad/
