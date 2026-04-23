@@ -1,0 +1,12 @@
+{
+  "code_hash": "b0e4fdf5c6b630e561c7e18e3b45269010f9b7e9a8bd963427fb3d12ecad909d",
+  "dataset_llm_provider": "none",
+  "date_from": "2026-03-01",
+  "date_to": "2026-03-14",
+  "merge_output": true,
+  "ranker_short_form_mode": "off",
+  "skip_covered": true,
+  "storage_dir": "/app/backend/tmp/storage",
+  "whisper_model": "base",
+  "workflow": "jynxzi_vod_training"
+}

@@ -1,0 +1,41 @@
+{
+  "rows": 86,
+  "positive_rows": 18,
+  "negative_rows": 68,
+  "eval_groups": 12,
+  "dataset_roles": {
+    "pipeline_negative_eval": 68,
+    "pipeline_positive_eval": 18
+  },
+  "by_label_class": {
+    "boundary_near_miss_negative": 34,
+    "hard_negative": 34,
+    "positive": 14,
+    "weak_positive": 4
+  },
+  "by_supervision_tier": {
+    "boundary_near_miss": 34,
+    "twitch_clip_proxy": 52
+  },
+  "by_platform": {
+    "general": 86
+  },
+  "by_variant": {
+    "balanced": 86
+  },
+  "by_source": {
+    "boundary_perturbation": 34,
+    "narrative_reveal": 3,
+    "quote": 8,
+    "reaction": 1,
+    "tension_build": 6,
+    "twitch_label_proxy": 34
+  },
+  "by_content_bucket": {
+    "general": 68,
+    "quote_driven": 8,
+    "reaction": 1,
+    "story": 9
+  },
+  "gold_holdout_splits": {}
+}

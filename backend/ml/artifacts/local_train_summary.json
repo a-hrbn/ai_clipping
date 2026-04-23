@@ -1,0 +1,28 @@
+{
+  "streamer": "jynxzi",
+  "date_from": "2026-03-01",
+  "date_to": "2026-03-14",
+  "training_return_code": 0,
+  "artifact_only": false,
+  "hardware_profile": {
+    "cpu_count": 24,
+    "whisper_device": "cuda",
+    "whisper_language": "en",
+    "semantic_device": "cuda",
+    "training_vod_workers": "1",
+    "training_label_workers": "3",
+    "training_ffmpeg_video_codec": "h264_nvenc",
+    "training_ffmpeg_audio_codec": "aac",
+    "training_ffmpeg_preset": "",
+    "training_ffmpeg_threads": "0",
+    "semantic_batch_size": "256",
+    "dataset_llm_provider": "none",
+    "ranker_short_form_mode": "off",
+    "video_expression_sample_sec": "6"
+  },
+  "paths": {
+    "storage_dir": "tmp/storage",
+    "train_tmpdir": "tmp/training_runs",
+    "artifact_dir": "/app/backend/ml/artifacts"
+  }
+}
