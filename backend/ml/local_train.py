@@ -78,11 +78,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _recommended_worker_plan(cpu_count: int) -> WorkerPlan:
-    if cpu_count >= 12:
-        return WorkerPlan(vod_workers=2, label_workers=3)
-    if cpu_count >= 8:
-        return WorkerPlan(vod_workers=2, label_workers=2)
-    return WorkerPlan(vod_workers=1, label_workers=1)
+    return WorkerPlan(vod_workers=1, label_workers=3)
 
 
 def _configure_runtime_env(args: argparse.Namespace) -> dict[str, str]:
@@ -111,6 +107,7 @@ def _configure_runtime_env(args: argparse.Namespace) -> dict[str, str]:
             "TRAINING_FFMPEG_AUDIO_CODEC": args.training_ffmpeg_audio_codec,
             "TRAINING_FFMPEG_PRESET": args.training_ffmpeg_preset,
             "TRAINING_FFMPEG_THREADS": str(args.training_ffmpeg_threads),
+            "VOD_RANKER_SHORT_FORM_MODE": env.get("VOD_RANKER_SHORT_FORM_MODE", "off"),
             "VIDEO_EXPRESSION_SAMPLE_SEC": str(max(args.video_expression_sample_sec, 1)),
             "SHORTLIST_FACE_REACTION_SAMPLE_SEC": "2",
             "TOKENIZERS_PARALLELISM": "false",
@@ -164,6 +161,7 @@ def _build_summary(args: argparse.Namespace, env: dict[str, str], training_retur
             "training_ffmpeg_threads": env.get("TRAINING_FFMPEG_THREADS", ""),
             "semantic_batch_size": env.get("SEMANTIC_BATCH_SIZE", ""),
             "dataset_llm_provider": env.get("TRAINING_DATASET_LLM_PROVIDER", ""),
+            "ranker_short_form_mode": env.get("VOD_RANKER_SHORT_FORM_MODE", "off"),
             "video_expression_sample_sec": env.get("VIDEO_EXPRESSION_SAMPLE_SEC", ""),
         },
         "paths": {

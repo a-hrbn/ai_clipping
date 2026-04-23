@@ -29,6 +29,7 @@ _SUPPLEMENTAL_CANDIDATE_LIMIT = 2
 _SUPPLEMENTAL_CANDIDATE_WEIGHT = 0.65
 _BOUNDARY_NEAR_MISS_SAMPLE_WEIGHT = 0.45
 _BOUNDARY_NEAR_MISS_LIMIT = 6
+_MAX_VOD_NEGATIVE_ROWS_PER_POSITIVE = 8
 _MAX_CANDIDATE_SOURCE_SHARE = 0.40
 _DATASET_BUILD_LLM_PROVIDER = (os.environ.get("TRAINING_DATASET_LLM_PROVIDER") or "none").strip() or "none"
 _VOD_CHECKPOINT_VERSION = 4
@@ -53,22 +54,50 @@ class VodFeatureContext:
     cache_dir: pathlib.Path
 
 def _dataset_build_fingerprint(profile: str) -> str:
-    # Fingerprint the code-path knobs that materially change generated rows.
+    # Fingerprint the full dataset build, including cheap postprocessing. This is
+    # useful for audits, but raw VOD checkpoints use _raw_vod_rows_fingerprint().
+    payload = _raw_vod_rows_fingerprint_payload(profile)
+    payload.update({
+        "ranker_positive_dedupe": 1,
+        "max_vod_negative_rows_per_positive": _MAX_VOD_NEGATIVE_ROWS_PER_POSITIVE,
+    })
+    normalized = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _raw_vod_rows_fingerprint(profile: str) -> str:
+    payload = _raw_vod_rows_fingerprint_payload(profile)
+    normalized = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _raw_vod_rows_fingerprint_payload(profile: str) -> dict[str, object]:
+    # Fingerprint only the expensive row-generation path. Dataset-level
+    # postprocessing such as dedupe, balancing, and source capping runs after all
+    # VOD rows are loaded and must not force a VOD re-download.
     from services import feature_builder
 
-    payload = {
+    return {
         "profile": profile,
         "feature_build_version": int(getattr(feature_builder, "FEATURE_BUILD_VERSION", 1)),
         "llm_provider": _DATASET_BUILD_LLM_PROVIDER,
         "supplemental_candidate_limit": _SUPPLEMENTAL_CANDIDATE_LIMIT,
         "supplemental_candidate_weight": _SUPPLEMENTAL_CANDIDATE_WEIGHT,
-        "ranker_positive_dedupe": 1,
         "boundary_near_miss_limit": _BOUNDARY_NEAR_MISS_LIMIT,
         "boundary_near_miss_sample_weight": _BOUNDARY_NEAR_MISS_SAMPLE_WEIGHT,
         "boundary_perturbation_specs": list(_BOUNDARY_PERTURBATION_SPECS),
     }
+
+
+def _legacy_vod_checkpoint_fingerprints(profile: str) -> set[str]:
+    payload = _raw_vod_rows_fingerprint_payload(profile)
+    payload["ranker_positive_dedupe"] = 1
     normalized = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    legacy_before_postprocessing_split = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    return {
+        legacy_before_postprocessing_split,
+        _dataset_build_fingerprint(profile),
+    }
 
 
 def _vod_feature_cache_root() -> pathlib.Path:
@@ -573,6 +602,8 @@ def build_dataset(labels: list[dict], profile: str, work_dir: pathlib.Path) -> l
                         executor,
                         vod_items,
                         position + 1,
+                        profile=profile,
+                        work_dir=work_dir,
                     )
                     continue
 
@@ -593,6 +624,8 @@ def build_dataset(labels: list[dict], profile: str, work_dir: pathlib.Path) -> l
                     executor,
                     vod_items,
                     position + 1,
+                    profile=profile,
+                    work_dir=work_dir,
                 )
 
                 label_rows = _build_rows_for_vod_labels(
@@ -613,7 +646,7 @@ def build_dataset(labels: list[dict], profile: str, work_dir: pathlib.Path) -> l
                 shutil.rmtree(download_dir, ignore_errors=True)
                 if prefetched_download_dir is not None and prefetched_download_dir != download_dir:
                     shutil.rmtree(prefetched_download_dir, ignore_errors=True)
-    return _cap_candidate_source_mix(_dedupe_ranker_rows(rows))
+    return _prepare_ranker_rows(rows)
 
 
 def _build_dataset_parallel(
@@ -660,7 +693,7 @@ def _build_dataset_parallel(
                 rows.extend(result)
             else:
                 rows.extend(result.result())
-    return _cap_candidate_source_mix(_dedupe_ranker_rows(rows))
+    return _prepare_ranker_rows(rows)
 
 
 def _build_rows_for_vod(
@@ -914,12 +947,19 @@ def _schedule_prefetch(
     executor: concurrent.futures.ThreadPoolExecutor,
     vod_items: list[tuple[str, list[dict]]],
     next_index: int,
+    *,
+    profile: str,
+    work_dir: pathlib.Path,
 ) -> tuple[concurrent.futures.Future[pathlib.Path] | None, str | None, str | None]:
     if next_index >= len(vod_items):
         logger.info("training_vod_prefetch_skip end_of_queue")
         return None, None, None
 
     next_vod_id, next_rows = vod_items[next_index]
+    if _load_vod_checkpoint(work_dir, profile, next_vod_id, next_rows) is not None:
+        logger.info("training_vod_prefetch_skip checkpoint_hit %s", next_rows[0]["vod_url"])
+        return None, None, None
+
     next_url = str(next_rows[0]["vod_url"])
     prefetch_job_id = f"twitch_vod_prefetch_{next_vod_id}"
     logger.info("training_vod_prefetch_start %s", next_url)
@@ -1133,8 +1173,14 @@ def _load_vod_checkpoint(
         return None
     if str(payload.get("vod_id") or "") != vod_id:
         return None
-    if str(payload.get("dataset_build_fingerprint") or "") != _dataset_build_fingerprint(profile):
-        return None
+    raw_fingerprint = str(payload.get("raw_vod_rows_fingerprint") or "")
+    if raw_fingerprint:
+        if raw_fingerprint != _raw_vod_rows_fingerprint(profile):
+            return None
+    else:
+        legacy_fingerprint = str(payload.get("dataset_build_fingerprint") or "")
+        if legacy_fingerprint not in _legacy_vod_checkpoint_fingerprints(profile):
+            return None
     if str(payload.get("label_signature") or "") != _vod_checkpoint_signature(vod_rows):
         return None
     rows = payload.get("rows")
@@ -1156,6 +1202,8 @@ def _write_vod_checkpoint(
         "version": _VOD_CHECKPOINT_VERSION,
         "profile": profile,
         "vod_id": vod_id,
+        "checkpoint_kind": "raw_vod_rows",
+        "raw_vod_rows_fingerprint": _raw_vod_rows_fingerprint(profile),
         "dataset_build_fingerprint": _dataset_build_fingerprint(profile),
         "label_signature": _vod_checkpoint_signature(vod_rows),
         "rows": rows,
@@ -1703,6 +1751,129 @@ def _dedupe_ranker_rows(rows: list[dict]) -> list[dict]:
     return merged
 
 
+def _prepare_ranker_rows(rows: list[dict]) -> list[dict]:
+    deduped = _dedupe_ranker_rows(rows)
+    balanced = _balance_vod_negative_rows(deduped)
+    return _cap_candidate_source_mix(balanced)
+
+
+def _balance_vod_negative_rows(
+    rows: list[dict],
+    *,
+    max_negative_rows_per_positive: int = _MAX_VOD_NEGATIVE_ROWS_PER_POSITIVE,
+) -> list[dict]:
+    if not rows or max_negative_rows_per_positive <= 0:
+        return list(rows)
+
+    groups: dict[str, list[dict]] = {}
+    passthrough: list[dict] = []
+    for row in rows:
+        key = _vod_balance_group_key(row)
+        if key:
+            groups.setdefault(key, []).append(row)
+        else:
+            passthrough.append(row)
+
+    keep_ids = {id(row) for row in passthrough}
+    capped_groups = 0
+    dropped_rows = 0
+    for group_rows in groups.values():
+        positive_rows = [row for row in group_rows if int(row.get("label", 0)) == 1]
+        negative_rows = [row for row in group_rows if int(row.get("label", 0)) == 0]
+        neutral_rows = [row for row in group_rows if int(row.get("label", 0)) not in {0, 1}]
+        limit = len(positive_rows) * int(max_negative_rows_per_positive)
+        if not positive_rows or len(negative_rows) <= limit:
+            keep_ids.update(id(row) for row in group_rows)
+            continue
+
+        selected_negative_rows = _select_vod_negative_rows(negative_rows, positive_rows, limit)
+        keep_ids.update(id(row) for row in positive_rows)
+        keep_ids.update(id(row) for row in neutral_rows)
+        keep_ids.update(id(row) for row in selected_negative_rows)
+        capped_groups += 1
+        dropped_rows += len(negative_rows) - len(selected_negative_rows)
+
+    if dropped_rows:
+        logger.info(
+            "training_vod_negative_balance_capped groups=%s rows_dropped=%s max_negative_rows_per_positive=%s",
+            capped_groups,
+            dropped_rows,
+            max_negative_rows_per_positive,
+        )
+    return [row for row in rows if id(row) in keep_ids]
+
+
+def _select_vod_negative_rows(
+    negative_rows: list[dict],
+    positive_rows: list[dict],
+    limit: int,
+) -> list[dict]:
+    if limit >= len(negative_rows):
+        return list(negative_rows)
+    if limit <= 0:
+        return []
+
+    boundary_rows = [row for row in negative_rows if _is_boundary_near_miss_row(row)]
+    primary_rows = [row for row in negative_rows if not _is_boundary_near_miss_row(row)]
+    selected: list[dict] = []
+    if boundary_rows and primary_rows and limit >= 2:
+        boundary_quota = min(len(boundary_rows), max(1, min(limit // 4, limit // 2)))
+        primary_quota = max(limit - boundary_quota, 0)
+        selected.extend(_rank_vod_negative_rows(primary_rows, positive_rows)[:primary_quota])
+        selected.extend(_rank_vod_negative_rows(boundary_rows, positive_rows)[:boundary_quota])
+    else:
+        selected.extend(_rank_vod_negative_rows(negative_rows, positive_rows)[:limit])
+
+    if len(selected) < limit:
+        selected_ids = {id(row) for row in selected}
+        remaining = [row for row in negative_rows if id(row) not in selected_ids]
+        selected.extend(_rank_vod_negative_rows(remaining, positive_rows)[: limit - len(selected)])
+
+    selected_ids = {id(row) for row in selected}
+    return [row for row in negative_rows if id(row) in selected_ids]
+
+
+def _rank_vod_negative_rows(negative_rows: list[dict], positive_rows: list[dict]) -> list[dict]:
+    return sorted(
+        negative_rows,
+        key=lambda row: (
+            -float(row.get("sample_weight") or 0.0),
+            _distance_to_nearest_positive(row, positive_rows),
+            float(row.get("window_start") or 0.0),
+            str(row.get("candidate_id") or ""),
+        ),
+    )
+
+
+def _distance_to_nearest_positive(row: dict, positive_rows: list[dict]) -> float:
+    if not positive_rows:
+        return 0.0
+    center = _window_center(row)
+    return min(abs(center - _window_center(positive_row)) for positive_row in positive_rows)
+
+
+def _window_center(row: dict) -> float:
+    start = float(row.get("window_start") or row.get("proxy_window_start") or 0.0)
+    end = float(row.get("window_end") or row.get("proxy_window_end") or start)
+    return (start + end) / 2.0
+
+
+def _is_boundary_near_miss_row(row: dict) -> bool:
+    return (
+        str(row.get("dataset_source") or "") == "twitch_vod_boundary_near_miss"
+        or str(row.get("supervision_tier") or "") == "boundary_near_miss"
+        or str(row.get("label_class") or "") == "boundary_near_miss_negative"
+    )
+
+
+def _vod_balance_group_key(row: dict) -> str:
+    for key in ("vod_id", "source_url", "job_id"):
+        value = str(row.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
 def _cap_candidate_source_mix(
     rows: list[dict],
     *,
@@ -1729,12 +1900,27 @@ def _cap_candidate_source_mix(
     if current_peak <= max_share + 1e-9:
         return rows
 
+    protected_ids = _candidate_source_cap_protected_row_ids(rows)
     source_counts = {source: 0 for source in buckets}
     kept: list[dict] = []
+    for row in rows:
+        if id(row) not in protected_ids:
+            continue
+        source = str(row.get("candidate_source") or "").strip().lower() or "unknown"
+        kept.append(row)
+        source_counts[source] += 1
+
+    for source, bucket in list(buckets.items()):
+        buckets[source] = [row for row in bucket if id(row) not in protected_ids]
+
     ordered_sources = sorted(buckets, key=lambda source: (-len(buckets[source]), source))
 
     for source in ordered_sources:
         if not buckets[source]:
+            continue
+        next_source_count = source_counts[source] + 1
+        next_total = len(kept) + 1
+        if source_counts[source] > 0 and (next_source_count / next_total) > max_share + 1e-9:
             continue
         kept.append(buckets[source].pop(0))
         source_counts[source] += 1
@@ -1766,6 +1952,24 @@ def _cap_candidate_source_mix(
             max((count / len(kept) for count in source_counts.values()), default=0.0),
         )
     return kept
+
+
+def _candidate_source_cap_protected_row_ids(rows: list[dict]) -> set[int]:
+    protected: set[int] = {id(row) for row in rows if int(row.get("label", 0)) == 1}
+    groups: dict[str, list[dict]] = {}
+    for row in rows:
+        key = _vod_balance_group_key(row)
+        if key:
+            groups.setdefault(key, []).append(row)
+
+    for group_rows in groups.values():
+        positive_rows = [row for row in group_rows if int(row.get("label", 0)) == 1]
+        negative_rows = [row for row in group_rows if int(row.get("label", 0)) == 0]
+        if not positive_rows or not negative_rows:
+            continue
+        best_negative = _rank_vod_negative_rows(negative_rows, positive_rows)[0]
+        protected.add(id(best_negative))
+    return protected
 
 
 def _positive_cluster_key(row: dict) -> tuple[str, tuple[str, ...]] | None:

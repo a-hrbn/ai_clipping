@@ -1,8 +1,12 @@
 import json
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+sys.modules.setdefault("whisper", types.SimpleNamespace(load_model=lambda *_args, **_kwargs: None))
 
 from ml import train_ranker
 
@@ -76,6 +80,19 @@ class TrainRankerTests(unittest.TestCase):
         self.assertTrue(split["train"])
         self.assertTrue(split["validation"])
 
+    def test_count_values_counts_non_empty_values(self) -> None:
+        rows = [
+            {"dataset_source": "twitch_vod_primary"},
+            {"dataset_source": "twitch_vod_primary"},
+            {"dataset_source": "short_form_supplemental"},
+            {"dataset_source": ""},
+        ]
+
+        self.assertEqual(
+            train_ranker._count_values(rows, "dataset_source"),
+            {"short_form_supplemental": 1, "twitch_vod_primary": 2},
+        )
+
     def test_split_rows_keeps_creator_groups_together_when_present(self) -> None:
         rows = [
             {"job_id": "j1", "creator_id": "streamer_a", "candidate_id": "a1", "label": 1, "features": {"x": 1.0}},
@@ -132,6 +149,28 @@ class TrainRankerTests(unittest.TestCase):
         train_vods = {row["vod_id"] for row in split["train"]}
         validation_vods = {row["vod_id"] for row in split["validation"]}
         self.assertTrue(train_vods.isdisjoint(validation_vods))
+
+    def test_split_rows_uses_multiple_mixed_validation_vods(self) -> None:
+        rows = [
+            {"vod_id": "vod_big", "candidate_id": f"big{i}", "label": 0 if i else 1, "features": {"x": float(i)}}
+            for i in range(20)
+        ]
+        rows.extend([
+            {"vod_id": "vod_a", "candidate_id": "a1", "label": 1, "features": {"x": 21.0}},
+            {"vod_id": "vod_a", "candidate_id": "a2", "label": 0, "features": {"x": 22.0}},
+            {"vod_id": "vod_b", "candidate_id": "b1", "label": 1, "features": {"x": 23.0}},
+            {"vod_id": "vod_b", "candidate_id": "b2", "label": 0, "features": {"x": 24.0}},
+            {"vod_id": "vod_c", "candidate_id": "c1", "label": 1, "features": {"x": 25.0}},
+            {"vod_id": "vod_c", "candidate_id": "c2", "label": 0, "features": {"x": 26.0}},
+        ])
+
+        split = train_ranker._split_rows(rows)
+
+        self.assertEqual(split["strategy"], "group_holdout")
+        self.assertEqual(split["unit"], "vod_id")
+        validation_vods = {row["vod_id"] for row in split["validation"]}
+        self.assertGreaterEqual(len(validation_vods), 2)
+        self.assertNotEqual(validation_vods, {"vod_big"})
 
     def test_split_rows_falls_back_when_group_holdout_drops_a_class(self) -> None:
         rows = [
@@ -203,6 +242,29 @@ class TrainRankerTests(unittest.TestCase):
         self.assertEqual(metrics["ndcg_at_5_min"], 0.631)
         self.assertEqual(metrics["ndcg_at_5_p25"], 0.631)
         self.assertLess(metrics["global_ndcg_at_5"], metrics["ndcg_at_5"])
+
+    def test_evaluate_scores_uses_explicit_classification_threshold(self) -> None:
+        labels = train_ranker.np.array([1, 0, 1, 0], dtype=int)
+        scores = train_ranker.np.array([-0.2, -0.1, 0.3, -0.4], dtype=float)
+
+        default_metrics = train_ranker._evaluate_scores(labels, scores)
+        thresholded_metrics = train_ranker._evaluate_scores(labels, scores, threshold=-0.2)
+
+        self.assertEqual(default_metrics["recall"], 0.5)
+        self.assertEqual(thresholded_metrics["classification_threshold"], -0.2)
+        self.assertEqual(thresholded_metrics["recall"], 1.0)
+        self.assertGreater(thresholded_metrics["f1"], default_metrics["f1"])
+
+    def test_calibrate_serving_threshold_prefers_recall_safe_f1(self) -> None:
+        labels = train_ranker.np.array([1, 0, 1, 0], dtype=int)
+        scores = train_ranker.np.array([-0.2, -0.1, 0.3, -0.4], dtype=float)
+
+        calibration = train_ranker._calibrate_serving_threshold(labels, scores)
+
+        self.assertEqual(calibration["source"], "validation")
+        self.assertEqual(calibration["threshold"], -0.2)
+        self.assertEqual(calibration["metrics"]["recall"], 1.0)
+        self.assertGreater(calibration["metrics"]["f1"], calibration["default_metrics"]["f1"])
 
     def test_numeric_feature_names_excludes_offline_only_features(self) -> None:
         names = train_ranker._numeric_feature_names({
@@ -600,6 +662,8 @@ class TrainRankerTests(unittest.TestCase):
         self.assertTrue(artifact["hpo"]["loaded"])
         self.assertEqual(artifact["hpo"]["seed"], 11)
         self.assertIn("blend_calibration", artifact)
+        self.assertIn("serving_threshold", artifact)
+        self.assertEqual(artifact["serving_threshold_calibration"]["source"], "validation")
 
 
 if __name__ == "__main__":

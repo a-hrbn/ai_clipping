@@ -37,12 +37,13 @@ class LocalTrainTests(unittest.TestCase):
         self.assertEqual(env["WHISPER_LANGUAGE"], "en")
         self.assertEqual(env["SEMANTIC_DEVICE"], "cuda")
         self.assertEqual(env["TRAINING_DATASET_LLM_PROVIDER"], "none")
-        self.assertEqual(env["TRAINING_VOD_WORKERS"], "2")
+        self.assertEqual(env["TRAINING_VOD_WORKERS"], "1")
         self.assertEqual(env["TRAINING_LABEL_WORKERS"], "3")
         self.assertEqual(env["TRAINING_FFMPEG_VIDEO_CODEC"], "h264_nvenc")
         self.assertEqual(env["TRAINING_FFMPEG_AUDIO_CODEC"], "aac")
         self.assertEqual(env["TRAINING_FFMPEG_PRESET"], "")
         self.assertEqual(env["TRAINING_FFMPEG_THREADS"], "0")
+        self.assertEqual(env["VOD_RANKER_SHORT_FORM_MODE"], "off")
         self.assertEqual(env["SEMANTIC_BATCH_SIZE"], "256")
         self.assertEqual(env["OMP_NUM_THREADS"], "1")
         self.assertEqual(env["CUDA_VISIBLE_DEVICES"], "0")
@@ -89,6 +90,7 @@ class LocalTrainTests(unittest.TestCase):
         self.assertEqual(summary["hardware_profile"]["whisper_language"], "en")
         self.assertEqual(summary["hardware_profile"]["training_ffmpeg_video_codec"], "h264_nvenc")
         self.assertEqual(summary["hardware_profile"]["training_ffmpeg_threads"], "0")
+        self.assertEqual(summary["hardware_profile"]["ranker_short_form_mode"], "off")
 
 
 if __name__ == "__main__":

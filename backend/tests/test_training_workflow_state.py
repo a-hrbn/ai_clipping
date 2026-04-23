@@ -112,7 +112,11 @@ class TrainingWorkflowStateTests(unittest.TestCase):
         with patch.object(training_workflow_state.settings, "whisper_model", "tiny"), \
              patch.object(training_workflow_state.settings, "storage_dir", "/tmp/storage"), \
              patch("ml.training_workflow_state._code_hash", return_value="abc123"), \
-             patch.dict(os.environ, {"TRAINING_DATASET_LLM_PROVIDER": "groq"}, clear=False):
+             patch.dict(
+                 os.environ,
+                 {"TRAINING_DATASET_LLM_PROVIDER": "groq", "VOD_RANKER_SHORT_FORM_MODE": "supplemental"},
+                 clear=False,
+             ):
             state = training_workflow_state.build_jynxzi_workflow_state(
                 date_from="2026-04-01",
                 date_to="2026-04-10",
@@ -130,6 +134,7 @@ class TrainingWorkflowStateTests(unittest.TestCase):
                 "merge_output": False,
                 "whisper_model": "tiny",
                 "dataset_llm_provider": "groq",
+                "ranker_short_form_mode": "supplemental",
                 "storage_dir": "/tmp/storage",
                 "code_hash": "abc123",
             },

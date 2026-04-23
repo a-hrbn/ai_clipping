@@ -26,6 +26,7 @@ def build_jynxzi_workflow_state(
         "merge_output": bool(merge_output),
         "whisper_model": settings.whisper_model,
         "dataset_llm_provider": (os.environ.get("TRAINING_DATASET_LLM_PROVIDER") or "").strip() or "ollama",
+        "ranker_short_form_mode": (os.environ.get("VOD_RANKER_SHORT_FORM_MODE") or "off").strip().lower() or "off",
         "storage_dir": settings.storage_dir,
         "code_hash": _code_hash(),
     }

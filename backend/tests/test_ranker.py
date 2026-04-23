@@ -191,6 +191,47 @@ class RankerTests(unittest.TestCase):
 
         self.assertGreater(score, 1.0)
 
+    def test_score_details_exposes_serving_threshold_decision(self) -> None:
+        feature = CandidateFeatures(
+            candidate_id="ml",
+            quoteability_score=1.0,
+            source="quote",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_dir = Path(tmp)
+            (artifact_dir / "gaming_ranker.json").write_text(
+                json.dumps(
+                    {
+                        "version": 3,
+                        "profile": "gaming",
+                        "model_type": "linear",
+                        "feature_names": ["quoteability_score"],
+                        "weights": {"quoteability_score": 5.0},
+                        "scales": {"quoteability_score": {"mean": 0.0, "std": 1.0}},
+                        "training_stats": {
+                            "rows": 100,
+                            "positive_rows": 40,
+                            "negative_rows": 60,
+                            "train_rows": 80,
+                            "validation_rows": 20,
+                        },
+                        "validation": {
+                            "accuracy": 0.75,
+                            "precision": 0.7,
+                            "recall": 0.8,
+                        },
+                        "intercept": 0.0,
+                        "blend": 1.0,
+                        "serving_threshold": 2.0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            details = Ranker(artifact_dir=artifact_dir, enable_trained_model=True).score_details([feature], profile="gaming")
+
+        self.assertEqual(details[0]["serving_threshold"], 2.0)
+        self.assertTrue(details[0]["passes_serving_threshold"])
+
     def test_inspect_artifact_reports_rejected_reason(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             artifact_dir = Path(tmp)

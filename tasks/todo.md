@@ -1,5 +1,424 @@
 # Task Plan
 
+## 2026-04-24 Plan: Commit And Push Main
+
+- [x] Inspect branch and pending changes.
+- [x] Run final lightweight verification.
+- [x] Pull latest `main` with fast-forward only.
+- [x] Commit all current changes.
+- [x] Push commit to `origin/main`.
+- [x] Document pushed commit.
+
+### Review Notes
+
+- Branch was `main` tracking `origin/main`.
+- Final verification before commit:
+  - `git diff --check`
+  - `116` focused unittest cases across active queue, threshold calibration, ranker, VOD dataset/ranker, local training, and workflow state.
+  - `python3 -m py_compile` for changed backend Python files.
+  - `bash -n backend/ml/train_jynxzi_vod.sh`
+- `git pull --ff-only origin main` reported `Already up to date`.
+
+## 2026-04-24 Plan: Build Active Gold Label Queue
+
+- [x] Add a script that scores candidate rows and selects active-labeling examples.
+- [x] Cover false positives, false negatives, near-threshold cases, and model/heuristic disagreement.
+- [x] Write a labeling CSV and `.features.jsonl` sidecar compatible with `import_gold_eval_labels.py`.
+- [x] Exclude already labeled gold rows and keep per-VOD diversity.
+- [x] Add focused tests and run syntax/test checks.
+- [x] Attempt graph rebuild and document result.
+
+### Review Notes
+
+- Added `backend/ml/build_active_gold_eval_queue.py`.
+  - Reads candidate JSONL rows with features, normally `jynxzi_vod_eval_dataset.jsonl`.
+  - Scores rows with heuristic and trained rankers.
+  - Uses the current artifact `serving_threshold`.
+  - Selects active-labeling buckets:
+    - `false_negative_proxy`
+    - `false_positive_proxy`
+    - `proxy_positive_review`
+    - `near_threshold`
+    - `model_heuristic_disagreement`
+  - Excludes exact existing gold candidate/window matches.
+  - Enforces `--per-vod-limit` for diversity.
+  - Writes a CSV plus `.features.jsonl` sidecar compatible with `import_gold_eval_labels.py`.
+- Added `backend/tests/test_build_active_gold_eval_queue.py`.
+- Generated the current active queue:
+  - `backend/ml/artifacts/jynxzi_active_gold_eval_queue.csv`
+  - `backend/ml/artifacts/jynxzi_active_gold_eval_queue.features.jsonl`
+  - `backend/ml/artifacts/jynxzi_active_gold_eval_queue.summary.json`
+- Queue summary:
+  - `75` rows selected from `86` scored candidates.
+  - Proxy labels: `18` positive, `57` negative.
+  - Buckets: `1` false negative proxy, `28` false positive proxy, `17` proxy positive review, `3` near threshold, `26` model/heuristic disagreement.
+  - Per-VOD cap: `8`, covering `12` VODs.
+- Verification:
+  - `PYTHONPATH=/home/antonio/ai_clipping/backend /home/antonio/ai_clipping/backend/.venv/bin/python -m unittest backend.tests.test_build_active_gold_eval_queue backend.tests.test_gold_eval_workflow`
+  - `python3 -m py_compile backend/ml/build_active_gold_eval_queue.py backend/tests/test_build_active_gold_eval_queue.py`
+  - `git diff --check`
+  - Graphify rebuild attempted but still fails in this environment with `ModuleNotFoundError: No module named 'graphify'`.
+
+## 2026-04-24 Plan: Analyze Fresh Gold-Calibrated Container Result
+
+- [x] Confirm container/log availability.
+- [x] Inspect fresh timestamps and training summary.
+- [x] Verify threshold calibration report and artifact threshold.
+- [x] Compare proxy, gold, and gold holdout metrics.
+- [x] Inspect dataset composition and workflow state.
+- [x] Document verdict and next step.
+
+### Review Notes
+
+- `docker ps -a` returned no containers, so logs are unavailable for this run.
+- Fresh artifacts were written around `2026-04-24 01:25`.
+- `local_train_summary.json` reports a successful non-artifact-only run:
+  - `training_return_code=0`
+  - `artifact_only=false`
+  - `training_vod_workers=1`
+  - `training_label_workers=3`
+  - `ranker_short_form_mode=off`
+- The gold-train threshold calibration hook ran:
+  - `jynxzi_threshold_calibration.json` exists.
+  - Calibration status is `updated`.
+  - Old threshold: `9.926048`.
+  - New threshold: `-2.606`.
+  - Calibration rows: `67` gold-train rows, `10` positive, `57` negative.
+  - Gold-train calibration metrics: `precision=0.400`, `recall=0.800`, `f1=0.533`.
+- Ranker artifact:
+  - Selected model: `logistic_regression`, `blend=0.95`, `serving_threshold=-2.606`.
+  - Artifact health is usable, no warnings.
+  - Validation ranking remains strong: `ndcg_at_5=0.926`, `mrr=0.900`, `ranking_metric_min=0.500`, `ranking_metric_p25=1.000`.
+- Proxy eval improved versus heuristic and no longer has recall collapse:
+  - Trained runtime: `accuracy=0.616`, `precision=0.347`, `recall=0.944`, `f1=0.507`.
+  - Deltas: `f1 +0.161`, `ndcg_at_5 +0.359`, `mrr +0.355`.
+- Gold eval overall is much better than the bad-threshold run:
+  - Trained runtime: `accuracy=0.773`, `precision=0.385`, `recall=0.625`, `f1=0.476`.
+  - Deltas versus heuristic: `accuracy +0.608`, `precision +0.220`, `f1 +0.193`, `ndcg_at_5 +0.023`, `mrr +0.038`.
+  - Recall remains lower than heuristic by `0.375`, because heuristic predicts almost everything positive.
+- Gold holdout slice is weaker:
+  - Holdout rows: `30`, trained `precision=0.333`, `recall=0.333`, `f1=0.333`.
+  - Holdout deltas: `accuracy +0.533`, `precision +0.133`, `f1 +0.000`, `ndcg_at_5 -0.024`, `mrr -0.034`.
+- Dataset composition remained unchanged:
+  - `86` rows, `18` positives, `68` negatives.
+  - `12` VOD groups, all mixed.
+  - Dataset sources: `52` twitch VOD primary, `34` boundary near miss.
+- Verdict: threshold calibration is fixed operationally. The artifact is usable and no longer zeroes recall. However, holdout ranking/classification is still not convincingly better than heuristic, so the next model-strength step should be to train on more real gold-train signal and/or add more gold positives, while keeping gold-holdout untouched.
+
+## 2026-04-24 Plan: Gold-Train Serving Threshold Calibration
+
+- [x] Add a post-training threshold calibration command that can update an existing ranker artifact.
+- [x] Calibrate only on `gold_holdout_split=train` rows when gold eval data exists.
+- [x] Wire the calibration command into the local VOD training workflow before proxy/gold eval.
+- [x] Report holdout-split bucket metrics so calibrated-vs-holdout behavior is visible.
+- [x] Add focused regression coverage without starting training.
+- [x] Run syntax/tests and graph rebuild.
+- [x] Document result.
+
+### Review Notes
+
+- Added `backend/ml/calibrate_ranker_threshold.py`.
+  - Loads an existing usable ranker artifact.
+  - Scores labeled eval rows with runtime `Ranker`.
+  - Filters calibration rows by `--split-field/--split-value`.
+  - Updates `serving_threshold`, `serving_threshold_calibration`, and artifact health when `--write-artifact` is passed.
+  - Skips safely when there are too few calibration rows or classes.
+- Wired `backend/ml/train_jynxzi_vod.sh` to run threshold calibration after frontend gold export and before proxy/gold eval:
+  - Dataset: `jynxzi_gold_eval_rows.jsonl`.
+  - Calibration filter: `gold_holdout_split=train`.
+  - Source: `gold_eval_train`.
+  - Report: `jynxzi_threshold_calibration.json`.
+- Extended `evaluate_ranker.py` with `by_gold_holdout_split` metrics so train-vs-holdout behavior is visible after calibration.
+- Regression coverage:
+  - `backend/tests/test_calibrate_ranker_threshold.py` verifies artifact update uses only gold-train rows and writes artifact health.
+  - Also verifies missing filtered calibration rows skip without mutating the artifact.
+- Smoke test on a temp copy of the current artifact:
+  - Old threshold: `9.926048`.
+  - Gold-train calibrated threshold: `-2.606`.
+  - All-gold trained metrics with temp artifact: `recall=0.625`, `f1=0.476`, `ndcg_at_5=0.406`, `mrr=0.366`.
+  - Gold-holdout slice: `recall=0.333`, `f1=0.333`, `ndcg_at_5=0.351`, `mrr=0.333`.
+  - This fixes the recall-zero failure, but holdout remains only marginal, so this is calibration repair rather than model-strength improvement.
+- Verification:
+  - `PYTHONPATH=/home/antonio/ai_clipping/backend /home/antonio/ai_clipping/backend/.venv/bin/python -m unittest backend.tests.test_calibrate_ranker_threshold backend.tests.test_train_ranker backend.tests.test_ranker`
+  - `python3 -m py_compile backend/ml/calibrate_ranker_threshold.py backend/ml/train_ranker.py backend/ml/evaluate_ranker.py backend/services/ranker.py backend/tests/test_calibrate_ranker_threshold.py backend/tests/test_train_ranker.py backend/tests/test_ranker.py`
+  - `bash -n backend/ml/train_jynxzi_vod.sh`
+  - `git diff --check`
+  - Graphify rebuild attempted but still fails in this environment with `ModuleNotFoundError: No module named 'graphify'`.
+- No training run was started and the checked-in/current artifact was not modified by the smoke test.
+
+## 2026-04-24 Plan: Analyze Fresh Container Training Result
+
+- [x] Check whether the container is still available for logs.
+- [x] Inspect fresh artifact timestamps and local training summary.
+- [x] Verify whether the new serving-threshold calibration landed in the artifact.
+- [x] Compare proxy and gold eval metrics against the previous run.
+- [x] Inspect VOD dataset composition and workflow state.
+- [x] Document verdict and next step.
+
+### Review Notes
+
+- `docker ps -a` returned no containers, so Docker logs are no longer available for this run.
+- Fresh artifacts were written around `2026-04-24 01:10`; `local_train_summary.json` reports `training_return_code=0`, `artifact_only=false`, `training_vod_workers=1`, `training_label_workers=3`, and `ranker_short_form_mode=off`.
+- The new code landed in the artifact: `jynxzi_ranker.json` contains `serving_threshold=9.926048` and a validation-derived `serving_threshold_calibration`.
+- The artifact itself is still usable: selected model `logistic_regression`, `blend=0.95`, validation `accuracy=0.600`, `f1=0.500`, `ndcg_at_5=0.926`, `mrr=0.900`, `ranking_metric_min=0.500`, `ranking_metric_p25=1.000`.
+- Dataset composition is unchanged from the previous successful VOD-only run: `86` rows, `18` positive, `68` negative, `12` mixed VOD groups, source peak share `0.395`.
+- Ranking quality remains improved versus heuristic:
+  - Proxy trained delta: `ndcg_at_5 +0.359`, `mrr +0.355`.
+  - Gold trained delta: `ndcg_at_5 +0.023`, `mrr +0.038`.
+- The new validation-derived threshold is too high and worsened classification:
+  - Proxy at threshold `9.926048`: `recall=0.000`, `f1=0.000`.
+  - Gold at threshold `9.926048`: `recall=0.000`, `f1=0.000`.
+  - At old threshold `0.0`, proxy would still be strong: `recall=0.944`, `f1=0.576`.
+  - A gold-optimal threshold on the current scores would be around `-2.606`, producing `recall=0.625`, `f1=0.476`.
+- Verdict: the ranker model/artifact is still useful for ranking, but the validation-only serving-threshold calibration overfit a tiny validation split. Do not trust the new `serving_threshold` for rollout yet.
+
+## 2026-04-24 Plan: Implement Ranker Serving Threshold Calibration
+
+- [x] Add an explicit classification threshold to ranker metric evaluation.
+- [x] Calibrate and store a serving threshold when training writes a ranker artifact.
+- [x] Make eval reports use the artifact threshold for trained-runtime classification metrics.
+- [x] Expose threshold metadata from runtime ranker details/inspection.
+- [x] Add regression tests for thresholded metrics and artifact metadata.
+- [x] Run focused tests, syntax checks, and graph rebuild.
+- [x] Document result.
+
+### Review Notes
+
+- Added explicit threshold support to `train_ranker._evaluate_scores()`. Default behavior remains `0.0` for margin scores and `0.5` for probability scores, but callers can now pass a serving threshold.
+- Training now calibrates a validation-derived `serving_threshold` over the final runtime blended score and writes both `serving_threshold` and `serving_threshold_calibration` into the ranker artifact and artifact-health summary.
+- `evaluate_ranker.py` now uses the artifact `serving_threshold` for trained-runtime classification metrics, including bucket and group reports. Existing artifacts without the field still fall back to the old threshold.
+- `Ranker.score_details()` now exposes `serving_threshold` and `passes_serving_threshold` when a trained artifact is used.
+- Regression coverage added for thresholded metric evaluation, threshold calibration, artifact metadata, and runtime detail exposure.
+- Verification:
+  - `PYTHONPATH=/home/antonio/ai_clipping/backend /home/antonio/ai_clipping/backend/.venv/bin/python -m unittest backend.tests.test_train_ranker backend.tests.test_ranker`
+  - `python3 -m py_compile backend/ml/train_ranker.py backend/ml/evaluate_ranker.py backend/services/ranker.py backend/tests/test_train_ranker.py backend/tests/test_ranker.py`
+  - Smoke-tested `evaluate_ranker.py` against current gold rows with a local `whisper` import stub; current artifact has no `serving_threshold` yet, so it correctly falls back to `classification_threshold=0.0`.
+  - Graphify rebuild attempted but still fails in this environment with `ModuleNotFoundError: No module named 'graphify'`.
+- No training run was started. The next freshly trained artifact will contain the calibrated threshold.
+
+## 2026-04-24 Plan: Analyze Latest Container Training Result
+
+- [x] Inspect fresh training summary and artifact timestamps.
+- [x] Inspect VOD dataset composition and checkpoint behavior.
+- [x] Evaluate ranker, proxy, gold, and artifact-health results.
+- [x] Document conclusion and next concrete step.
+
+### Review Notes
+
+- Latest run wrote fresh artifacts around `2026-04-24 00:55`.
+- `local_train_summary.json` shows successful non-artifact-only training:
+  - `training_return_code=0`
+  - `training_vod_workers=1`
+  - `training_label_workers=3`
+  - `ranker_short_form_mode=off`
+- Docker container was already removed, so logs were unavailable. Analysis used persisted artifacts.
+- VOD dataset:
+  - `86` rows, `18` positive, `68` negative.
+  - Sources: `52` `twitch_vod_primary`, `34` `twitch_vod_boundary_near_miss`.
+  - All `12` VOD groups are now mixed positive/negative groups.
+  - Worst negative/positive ratio is capped at `8.0` (`2711274372`, `2712128863`, `2712736206`, `2713838389`).
+- Checkpoints:
+  - `13` VOD checkpoints exist and are legacy raw-row-compatible checkpoints, all with dataset fingerprint prefix `54200270`.
+  - The new loader can accept these as legacy raw-row checkpoints; no new raw-fingerprint fields were written because the run reused them rather than rebuilding raw rows.
+- Ranker artifact:
+  - Selected model: `logistic_regression`.
+  - Validation: `accuracy=0.600`, `f1=0.500`, `ndcg_at_5=0.926`, `mrr=0.900`, `ranking_metric_min=0.500`, `ranking_metric_p25=1.000`, `ranking_groups=5`.
+  - Artifact health status is usable; no warnings.
+- Proxy eval:
+  - `trained_runtime_uses_artifact=true`.
+  - Major lift versus heuristic: `accuracy +0.500`, `f1 +0.230`, `ndcg_at_5 +0.359`, `mrr +0.355`.
+- Gold eval:
+  - `trained_runtime_uses_artifact=true`.
+  - Ranking improves slightly: `ndcg_at_5 +0.023`, `mrr +0.038`, `precision_at_5 +0.011`.
+  - Classification recall drops sharply: `recall -0.875`, `f1 -0.116`; accuracy rises mostly because the model predicts far fewer positives on a negative-heavy gold set.
+- Conclusion:
+  - The artifact is materially better and now passes runtime gates.
+  - Proxy performance is strong, but gold improvement is still thin and classification calibration is too conservative.
+  - Next work should target more gold-positive coverage and/or calibration/thresholding so ranking gains do not collapse recall.
+
+## 2026-04-24 Plan: Split Raw VOD Checkpoints From Dataset Postprocessing
+
+- [x] Inspect current VOD checkpoint fingerprint logic.
+- [x] Separate raw VOD row fingerprint from dataset postprocessing fingerprint.
+- [x] Preserve compatibility with existing raw-row checkpoints where possible.
+- [x] Add regression coverage for postprocessing changes not forcing VOD downloads.
+- [x] Run focused tests and syntax checks without starting training.
+- [x] Document result.
+
+### Review Notes
+
+- Implemented two-stage checkpoint fingerprinting in `backend/ml/build_twitch_training_dataset.py`:
+  - `_raw_vod_rows_fingerprint()` now fingerprints only expensive raw VOD row generation.
+  - `_dataset_build_fingerprint()` still includes cheap dataset postprocessing such as dedupe and negative balancing for auditability.
+  - `_write_vod_checkpoint()` writes `checkpoint_kind=raw_vod_rows`, `raw_vod_rows_fingerprint`, and the full `dataset_build_fingerprint`.
+  - `_load_vod_checkpoint()` validates the raw fingerprint when present and accepts known legacy full-dataset fingerprints when `raw_vod_rows_fingerprint` is absent.
+- Existing local checkpoint for `2711274372` has legacy fingerprint `54200270163c5e2761a647ec758fe69e48b887bb406244cf3f59c95dc234d782`; the new loader accepts it as a legacy raw-row checkpoint.
+- This means future postprocessing-only changes, including `max_vod_negative_rows_per_positive`, should no longer force VOD re-downloads when raw rows are already checkpointed.
+- Added regression tests:
+  - raw fingerprint changes still invalidate a VOD checkpoint.
+  - full dataset/postprocessing fingerprint changes do not invalidate a raw VOD checkpoint.
+  - legacy checkpoints without `raw_vod_rows_fingerprint` are still accepted.
+- Verification:
+  - `PYTHONPATH=/home/antonio/ai_clipping/backend /home/antonio/ai_clipping/backend/.venv/bin/python -m unittest backend.tests.test_build_twitch_training_dataset`
+  - `python3 -m py_compile backend/ml/build_twitch_training_dataset.py backend/tests/test_build_twitch_training_dataset.py`
+  - Graphify rebuild attempted but still fails in this environment with `ModuleNotFoundError: No module named 'graphify'`.
+- No training run was started by this implementation. The already-running container still uses the old image/code and will not pick up this change until the image is rebuilt.
+
+## 2026-04-24 Plan: Strengthen VOD Ranker Dataset Without Training
+
+- [x] Inspect current VOD dataset generation and quality gates.
+- [x] Add VOD-group balancing so positives are retained and negatives are capped per positive.
+- [x] Expose the mixed-VOD contrast target in dataset quality output.
+- [x] Add regression coverage for the balancing and quality reporting.
+- [x] Run focused tests and syntax checks without starting training.
+- [x] Document result and next operational step.
+
+### Review Notes
+
+- Implemented VOD group balancing in `backend/ml/build_twitch_training_dataset.py`:
+  - `_prepare_ranker_rows()` now runs dedupe -> VOD negative balance -> candidate-source cap.
+  - `_balance_vod_negative_rows()` keeps all positives and caps mixed VOD negatives at `8` rows per positive.
+  - Negative selection is deterministic: higher sample weight first, then closer to the positive window, while reserving boundary-near-miss rows when both primary and boundary negatives exist.
+  - Candidate-source capping now protects all positives and at least one negative per mixed VOD, so source balancing cannot accidentally destroy contrast groups.
+  - Dataset build fingerprint now includes `max_vod_negative_rows_per_positive=8`.
+- Extended `ranker_dataset_quality()` in `backend/ml/train_vod_ranker.py`:
+  - Reports `targets.mixed_ranking_groups=20` and `targets.negative_rows_per_positive_max=8`.
+  - Reports `vod_contrast_balance`, including worst negative/positive ratio and groups over the limit.
+- Offline simulation against the current persisted VOD rows, without starting training:
+  - Final prepared rows would move from `86` to `40`.
+  - Positives remain `18`; negatives become `22`.
+  - Mixed VOD groups remain `6`.
+  - Worst mixed-group ratio becomes `8.0`, with no over-limit groups.
+  - `2711274372` moves from `1 positive / 40 negatives` to `1 positive / 8 negatives`.
+  - Candidate-source peak remains at the configured cap: `boundary_perturbation=0.4`.
+- Verification:
+  - `PYTHONPATH=/home/antonio/ai_clipping/backend /home/antonio/ai_clipping/backend/.venv/bin/python -m unittest backend.tests.test_build_twitch_training_dataset backend.tests.test_train_vod_ranker`
+  - `python3 -m py_compile backend/ml/build_twitch_training_dataset.py backend/ml/train_vod_ranker.py backend/tests/test_build_twitch_training_dataset.py backend/tests/test_train_vod_ranker.py`
+  - Graphify rebuild attempted but still fails in this environment with `ModuleNotFoundError: No module named 'graphify'`.
+- No training run was started.
+
+## 2026-04-24 Plan: Set Training Worker Defaults
+
+- [x] Locate all runtime defaults for VOD and label training workers.
+- [x] Set VOD worker default to `1` and label worker default to `3`.
+- [x] Run focused tests and syntax checks.
+- [x] Document verification result.
+
+### Review Notes
+
+- Updated runtime defaults:
+  - `backend/config.py`: `training_vod_workers=1`, `training_label_workers=3`.
+  - `backend/ml/local_train.py`: auto worker plan now resolves to `TRAINING_VOD_WORKERS=1` and `TRAINING_LABEL_WORKERS=3`.
+  - `backend/.env.example`: documents `TRAINING_VOD_WORKERS=1` and `TRAINING_LABEL_WORKERS=3`.
+- Updated `backend/tests/test_local_train.py` to assert the new default VOD worker value.
+- Verification:
+  - `PYTHONPATH=/home/antonio/ai_clipping/backend /home/antonio/ai_clipping/backend/.venv/bin/python -m unittest backend.tests.test_local_train`
+  - `python3 -m py_compile backend/config.py backend/ml/local_train.py backend/tests/test_local_train.py`
+  - Graphify rebuild attempted but still fails in this environment with `ModuleNotFoundError: No module named 'graphify'`.
+
+## 2026-04-24 Plan: Implement VOD Contrast Training Next Step
+
+- [x] Inspect current VOD dataset generation, hard-negative creation, and short-form merge path.
+- [x] Add a concrete VOD-first/contrast training mode that prevents short-form rows from dominating serving gates.
+- [x] Ensure mixed VOD comparison groups are measurable before training.
+- [x] Add regression coverage for VOD-only contrast composition.
+- [x] Run targeted tests and syntax checks.
+- [x] Document result, rollout command, and remaining risks.
+
+### Review Notes
+
+- Implemented VOD-only ranker training as the default path:
+  - `backend/ml/train_vod_ranker.py` now has `--short-form-mode {off,supplemental}` with default `off`.
+  - `backend/ml/train_jynxzi_vod.sh` passes `--short-form-mode "$VOD_RANKER_SHORT_FORM_MODE"` and defaults `VOD_RANKER_SHORT_FORM_MODE=off`.
+  - `backend/ml/local_train.py` includes `VOD_RANKER_SHORT_FORM_MODE=off` in runtime env and summary.
+  - `backend/ml/training_workflow_state.py` fingerprints `ranker_short_form_mode`, forcing retrain/eval when this mode changes.
+- Added dataset quality guard for mixed VOD ranking groups:
+  - `ranker_dataset_quality()` now reports `mixed_ranking_groups` and fails if there are fewer than `2`.
+  - Existing current VOD-only dataset passes quality in simulation: `86` rows, `18` positive, `68` negative, `12` VOD groups, `6` mixed VOD groups, source peak share `0.395`.
+- Improved validation split:
+  - `backend/ml/train_ranker.py` no longer puts one giant VOD group into validation by default.
+  - Group holdout now prefers mixed groups and requires at least two validation groups when possible.
+- Fixed a diagnostics bug:
+  - `_count_values()` in `backend/ml/train_ranker.py` had a mis-indented increment, so `training_stats.dataset_sources` and `candidate_sources` were always empty. It now counts non-empty values.
+- Simulation on current VOD-only rows after the split fix:
+  - `rows=86`, validation `accuracy=0.842`, `f1=0.667`, `ndcg_at_5=0.783`, `mrr=0.708`, `ranking_groups=4`, `ranking_metric_min=0.333`, `ranking_metric_p25=0.333`.
+  - This removes the zero-min failure, but p25 is still below the runtime gate of `0.45`; more real VOD contrast groups are still needed before expecting automatic promotion.
+- Verification:
+  - `PYTHONPATH=/home/antonio/ai_clipping/backend /home/antonio/ai_clipping/backend/.venv/bin/python -m unittest backend.tests.test_train_vod_ranker backend.tests.test_train_ranker backend.tests.test_training_workflow_state backend.tests.test_local_train`
+  - `python3 -m py_compile backend/ml/train_vod_ranker.py backend/ml/train_ranker.py backend/ml/training_workflow_state.py backend/ml/local_train.py backend/tests/test_train_vod_ranker.py backend/tests/test_train_ranker.py backend/tests/test_training_workflow_state.py backend/tests/test_local_train.py`
+  - `bash -n backend/ml/train_jynxzi_vod.sh`
+  - Graphify rebuild still fails in this environment with `ModuleNotFoundError: No module named 'graphify'`.
+- Operational next run:
+  - Rebuild the local training image before Docker training because code is baked into the image.
+  - Run with default VOD-only mode, or explicitly: `VOD_RANKER_SHORT_FORM_MODE=off`.
+
+## 2026-04-24 Plan: Analyze Non-Artifact-Only Training Result
+
+- [x] Inspect fresh training summary and artifact timestamps.
+- [x] Parse ranker, artifact health, boundary, proxy, gold, and pipeline eval reports.
+- [x] Compare trained runtime against heuristic and rollout gates.
+- [x] Identify root causes for failures or weak metrics.
+- [x] Document recommendation and remaining risks.
+
+### Review Notes
+
+- `backend/ml/artifacts/local_train_summary.json` shows `training_return_code=0` and `artifact_only=false` for `jynxzi`, `2026-03-01` to `2026-03-14`.
+- Fresh eval outputs were produced at `2026-04-24 00:14`: proxy eval, gold eval, ranker eval, pipeline eval, VOD eval dataset, artifact health, boundary artifact, and workflow state.
+- Runtime verdict: do not enable `ENABLE_TRAINED_RANKER_V2`. Reconstructed rollout recommendation is `recommend_enable_trained_ranker_v2=false`, reason `inconclusive_rejected:validation_group_ranking_metric_min_below_minimum`.
+- Ranker artifact:
+  - `jynxzi_ranker.json`: `version=4`, `pairwise_logistic_regression`, `rows=1089`, `positive_rows=521`, `negative_rows=568`, validation `accuracy=0.636`, `f1=0.595`, `precision_at_5=0.546`, `ndcg_at_5=0.552`, `mrr=0.547`.
+  - Runtime rejects it because `ranking_metric_min=0.0 < 0.2`; `ranking_metric_p25=0.0 < 0.45` would also fail, and aggregate ranking metrics remain below serving thresholds (`mrr=0.547 < 0.60`, `ndcg_at_5=0.552 < 0.70`, `precision_at_5=0.546 < 0.60`).
+- Proxy eval:
+  - `rows=1089`, `positive_rows=521`, `negative_rows=568`, but `trained_runtime_uses_artifact=false`.
+  - Baseline and trained runtime are identical: `accuracy=0.48`, `precision=0.479`, `recall=1.0`, `f1=0.648`, `precision_at_5=0.503`, `ndcg_at_5=0.504`, `mrr=0.503`, delta all `0`.
+- Gold eval:
+  - `rows=97`, `positive_rows=16`, `negative_rows=81`, `eval_groups=19`, holdout/train split `30/67`.
+  - Baseline and trained runtime are identical because artifact is rejected: `accuracy=0.165`, `precision=0.165`, `recall=1.0`, `f1=0.283`, `precision_at_5=0.168`, `ndcg_at_5=0.383`, `mrr=0.328`, delta all `0`.
+- Pipeline eval:
+  - `rows=1089`, classification `accuracy=0.48`, `precision=0.479`, `recall=1.0`, `false_positive=566`, `true_negative=2`, `top1_positive_rate=0.501`, `recall_at_10=0.997`.
+  - This indicates the heuristic/ranking path is broad-recall but very weak at rejecting negatives.
+- Dataset root cause:
+  - Training remains dominated by short-form supplemental rows: `1003` short-form rows vs `52` Twitch VOD primary rows and `34` VOD boundary near-miss rows.
+  - `source_url` grouping has `1015` groups, `1007` singleton groups, only `6` mixed positive/negative groups, `500` zero-positive groups, and `509` zero-negative groups. This explains zero min/p25 group ranking metrics.
+- Boundary artifact:
+  - `jynxzi_boundary_ranker.json` still looks promising but small: `86` rows, start/end/pair validation accuracy `0.722`, F1 roughly `0.737/0.783/0.762`, `ndcg_at_5=1.0`; validation uses a small fallback split, so it is not enough for promotion by itself.
+- Verification used JSON parsing of all fresh eval artifacts and dataset composition checks.
+
+## 2026-04-24 Plan: Investigate Container Download Despite Existing Artifact
+
+- [x] Inspect running container logs for download source and target path.
+- [x] Inspect container mounts/env to compare `/app` artifact paths with local repo paths.
+- [x] Verify whether required artifact files exist inside the container.
+- [x] Identify root cause and document any fix or operational action.
+
+### Review Notes
+
+- Logs showed the label artifact was reused: `Label-Datei unverändert: /app/backend/ml/artifacts/jynxzi_twitch_clip_labels.jsonl`.
+- The workflow still entered `Training VOD-first ranker for jynxzi` because `should_retrain=True`; the stored workflow state code hash differed from the current code hash after recent code changes.
+- Artifact files existed inside the container: `jynxzi_ranker.json`, `jynxzi_vod_training_rows.jsonl`, `jynxzi_training_workflow_state.json`, and `jynxzi_twitch_clip_labels.jsonl`.
+- The unexpected download was a serial prefetch bug: after a VOD checkpoint hit, `_schedule_prefetch` blindly downloaded the next VOD before checking whether that next VOD also had a checkpoint. The running process showed `aria2c` downloading into `/app/backend/tmp/storage/twitch_vod_prefetch_2712128863`, while `/app/backend/tmp/training_runs/jynxzi_resume/_vod_checkpoints/2712128863.json` already existed.
+- Fixed `backend/ml/build_twitch_training_dataset.py` so serial prefetch skips when the next VOD has a checkpoint. Added `test_build_dataset_skips_serial_prefetch_when_next_vod_has_checkpoint`.
+- Verification:
+  - `PYTHONPATH=/home/antonio/ai_clipping/backend /home/antonio/ai_clipping/backend/.venv/bin/python -m unittest backend.tests.test_build_twitch_training_dataset.BuildTwitchTrainingDatasetTests.test_build_dataset_uses_vod_checkpoint_when_present backend.tests.test_build_twitch_training_dataset.BuildTwitchTrainingDatasetTests.test_build_dataset_skips_serial_prefetch_when_next_vod_has_checkpoint backend.tests.test_build_twitch_training_dataset.BuildTwitchTrainingDatasetTests.test_build_dataset_starts_prefetch_for_next_vod backend.tests.test_build_twitch_training_dataset.BuildTwitchTrainingDatasetTests.test_build_dataset_parallel_path_skips_prefetch_for_checkpoint_hits`
+  - `python3 -m py_compile backend/ml/build_twitch_training_dataset.py backend/tests/test_build_twitch_training_dataset.py`
+  - Graphify rebuild still fails in this environment with `ModuleNotFoundError: No module named 'graphify'`.
+- The original container exited before final log retrieval; `docker ps -a` returned no remaining containers.
+
+## 2026-04-23 Plan: Pull Main And Verify Merge
+
+- [x] Inspect current branch, remote, and dirty worktree.
+- [x] Pull latest `main` without overwriting local/user changes.
+- [x] Check for conflicts or merge state.
+- [x] Run targeted verification after merge.
+- [x] Document result and any remaining risks.
+
+### Review Notes
+
+- Pulled `origin/main` into local `main` with `git pull --ff-only origin main`; HEAD is now `9ff2627` (`Track gold eval data in git`).
+- No merge conflicts remain. `git status --short --branch` reports only the local `tasks/todo.md` planning notes.
+- Verified tracked gold-eval files parse as JSONL: 97 rows in `backend/ml/artifacts/jynxzi_gold_eval_rows.jsonl`, 97 rows in `backend/ml/artifacts/jynxzi_gold_eval_dataset.jsonl`, and 110 rows in `backend/tmp/storage/feedback/gold_eval_updates.jsonl`.
+- The pre-existing `backend/tmp/storage` directory was owned by `nobody:nogroup` and blocked Git from creating `backend/tmp/storage/feedback`; it was preserved as `backend/tmp/storage.pre_pull_backup_20260423`, and Git created a fresh tracked `backend/tmp/storage/feedback` path.
+
 ## 2026-04-23 Plan: Fix Local Training Failure When Gold Eval Rows Are Missing
 
 - [x] Inspect `train_jynxzi_vod.sh` handling of `export_frontend_gold_eval.py`.

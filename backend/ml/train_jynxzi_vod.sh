@@ -19,12 +19,14 @@ RANKER_EVAL_PATH="$ARTIFACT_DIR/jynxzi_ranker_eval.json"
 GOLD_EVAL_ROWS_PATH="$ARTIFACT_DIR/jynxzi_gold_eval_rows.jsonl"
 GOLD_EVAL_DATASET_PATH="$ARTIFACT_DIR/jynxzi_gold_eval_dataset.jsonl"
 GOLD_EVAL_SUMMARY_PATH="$ARTIFACT_DIR/jynxzi_gold_eval_summary.json"
+THRESHOLD_CALIBRATION_PATH="$ARTIFACT_DIR/jynxzi_threshold_calibration.json"
 GOLD_RANKER_EVAL_PATH="$ARTIFACT_DIR/jynxzi_gold_eval.json"
 PROXY_RANKER_EVAL_PATH="$ARTIFACT_DIR/jynxzi_proxy_eval.json"
 PIPELINE_EVAL_PATH="$ARTIFACT_DIR/jynxzi_pipeline_eval.json"
 WORKFLOW_STATE_PATH="$ARTIFACT_DIR/jynxzi_training_workflow_state.json"
 WORK_DIR_BASE="${AI_CLIPPING_TRAIN_TMPDIR:-$BACKEND_DIR/tmp/training_runs}"
 WORK_DIR="$WORK_DIR_BASE/jynxzi_resume"
+VOD_RANKER_SHORT_FORM_MODE="${VOD_RANKER_SHORT_FORM_MODE:-off}"
 SHORT_FORM_BACKFILL_ARTIFACT_DIR="$BACKEND_DIR/tmp/short_form_backfill_artifacts"
 SHORT_FORM_BACKFILL_ARTIFACT_JSON_PATH="$SHORT_FORM_BACKFILL_ARTIFACT_DIR/jynxzi_ranker.json"
 SHORT_FORM_BACKFILL_ARTIFACT_HEALTH_PATH="$SHORT_FORM_BACKFILL_ARTIFACT_DIR/jynxzi_artifact_health.json"
@@ -156,6 +158,7 @@ fi
 export SKIP_COVERED MERGE_OUTPUT
 export ARTIFACT_ONLY
 export DATE_FROM DATE_TO
+export VOD_RANKER_SHORT_FORM_MODE
 "$PYTHON_BIN" - <<'PY'
 from datetime import datetime
 import os
@@ -235,6 +238,7 @@ run_vod_training() {
     --artifact-dir "$ARTIFACT_DIR" \
     --work-dir "$WORK_DIR" \
     --include-short-form "$SHORT_FORM_PATH" \
+    --short-form-mode "$VOD_RANKER_SHORT_FORM_MODE" \
     --workflow-state-path "$WORKFLOW_STATE_PATH" \
     --workflow-state-json "$CURRENT_WORKFLOW_STATE_JSON"
 }
@@ -263,13 +267,14 @@ persist_short_form_backfill_artifact() {
   fi
 }
 
-if [[ ! -f "$SHORT_FORM_PATH" ]]; then
+if [[ "$VOD_RANKER_SHORT_FORM_MODE" == "supplemental" && ! -f "$SHORT_FORM_PATH" ]]; then
   echo "Warning: optional short-form dataset not found at $SHORT_FORM_PATH" >&2
   echo "Training will continue with Twitch VOD labels only." >&2
 fi
 
 echo "Using training temp base: $WORK_DIR_BASE"
 echo "Using resumable work dir: $WORK_DIR"
+echo "Using VOD ranker short-form mode: $VOD_RANKER_SHORT_FORM_MODE"
 echo "Trainiere VOD von ${DATE_FROM} bis ${DATE_TO}"
 echo "Sammle Twitch-Clip-Labels für jynxzi..."
 COLLECT_ARGS=(
@@ -416,6 +421,18 @@ echo "Exporting frontend gold eval rows..."
   --rows-out "$GOLD_EVAL_ROWS_PATH" \
   --output "$GOLD_EVAL_DATASET_PATH" \
   --summary-out "$GOLD_EVAL_SUMMARY_PATH"
+
+echo "Calibrating ranker serving threshold on gold-train rows..."
+"$PYTHON_BIN" ml/calibrate_ranker_threshold.py \
+  --dataset "$GOLD_EVAL_ROWS_PATH" \
+  --profile jynxzi \
+  --artifact-dir "$ARTIFACT_DIR" \
+  --split-field gold_holdout_split \
+  --split-value train \
+  --source gold_eval_train \
+  --write-artifact \
+  --report-out "$THRESHOLD_CALIBRATION_PATH" \
+  > /dev/null
 
 echo "Evaluating trained ranker against heuristic baseline on proxy eval rows..."
 "$PYTHON_BIN" ml/evaluate_ranker.py \

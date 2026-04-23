@@ -638,6 +638,47 @@ class BuildTwitchTrainingDatasetTests(unittest.TestCase):
         materialize_mock.assert_not_called()
         build_rows_mock.assert_not_called()
 
+    def test_build_dataset_skips_serial_prefetch_when_next_vod_has_checkpoint(self) -> None:
+        labels = [
+            {
+                "broadcaster": "jynxzi",
+                "vod_id": "123",
+                "vod_url": "https://www.twitch.tv/videos/123",
+                "window_start": 10.0,
+                "window_end": 20.0,
+                "label_class": "positive",
+                "label_score": 0.8,
+                "clip_ids": ["c1"],
+                "label_source": "twitch_clip_api",
+                "platform_source": "twitch_clip",
+            },
+            {
+                "broadcaster": "jynxzi",
+                "vod_id": "456",
+                "vod_url": "https://www.twitch.tv/videos/456",
+                "window_start": 30.0,
+                "window_end": 42.0,
+                "label_class": "positive",
+                "label_score": 0.7,
+                "clip_ids": ["c2"],
+                "label_source": "twitch_clip_api",
+                "platform_source": "twitch_clip",
+            },
+        ]
+        checkpoint_123 = [{"vod_id": "123", "label": 1, "features": {"candidate_id": "cached-123"}}]
+        checkpoint_456 = [{"vod_id": "456", "label": 1, "features": {"candidate_id": "cached-456"}}]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp) / "work"
+            build_twitch_training_dataset._write_vod_checkpoint(work_dir, "jynxzi", "123", [labels[0]], checkpoint_123)
+            build_twitch_training_dataset._write_vod_checkpoint(work_dir, "jynxzi", "456", [labels[1]], checkpoint_456)
+            with patch.object(settings, "training_vod_workers", 1), \
+                 patch("ml.build_twitch_training_dataset._materialize_vod") as materialize_mock:
+                rows = build_twitch_training_dataset.build_dataset(labels, "jynxzi", work_dir)
+
+        self.assertEqual(rows, checkpoint_123 + checkpoint_456)
+        materialize_mock.assert_not_called()
+
     def test_build_dataset_writes_vod_checkpoint_after_processing(self) -> None:
         labels = [
             {
@@ -692,10 +733,75 @@ class BuildTwitchTrainingDatasetTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             work_dir = Path(tmp) / "work"
             build_twitch_training_dataset._write_vod_checkpoint(work_dir, "jynxzi", "123", labels, checkpoint_rows)
-            with patch("ml.build_twitch_training_dataset._dataset_build_fingerprint", side_effect=["fingerprint-a", "fingerprint-b"]):
+            with patch("ml.build_twitch_training_dataset._raw_vod_rows_fingerprint", side_effect=["fingerprint-a", "fingerprint-b"]):
                 checkpoint = build_twitch_training_dataset._load_vod_checkpoint(work_dir, "jynxzi", "123", labels)
 
         self.assertIsNone(checkpoint)
+
+    def test_vod_checkpoint_survives_dataset_postprocessing_fingerprint_change(self) -> None:
+        labels = [
+            {
+                "broadcaster": "jynxzi",
+                "vod_id": "123",
+                "vod_url": "https://www.twitch.tv/videos/123",
+                "window_start": 10.0,
+                "window_end": 20.0,
+                "label_class": "positive",
+                "label_score": 0.8,
+                "clip_ids": ["c1"],
+                "label_source": "twitch_clip_api",
+                "platform_source": "twitch_clip",
+            },
+        ]
+        checkpoint_rows = [{"label": 1, "label_class": "positive", "features": {"candidate_id": "cached"}}]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp) / "work"
+            build_twitch_training_dataset._write_vod_checkpoint(work_dir, "jynxzi", "123", labels, checkpoint_rows)
+            with patch("ml.build_twitch_training_dataset._dataset_build_fingerprint", return_value="postprocess-changed"):
+                checkpoint = build_twitch_training_dataset._load_vod_checkpoint(work_dir, "jynxzi", "123", labels)
+
+        self.assertEqual(checkpoint, checkpoint_rows)
+
+    def test_vod_checkpoint_accepts_legacy_dataset_fingerprint_without_raw_key(self) -> None:
+        labels = [
+            {
+                "broadcaster": "jynxzi",
+                "vod_id": "123",
+                "vod_url": "https://www.twitch.tv/videos/123",
+                "window_start": 10.0,
+                "window_end": 20.0,
+                "label_class": "positive",
+                "label_score": 0.8,
+                "clip_ids": ["c1"],
+                "label_source": "twitch_clip_api",
+                "platform_source": "twitch_clip",
+            },
+        ]
+        checkpoint_rows = [{"label": 1, "label_class": "positive", "features": {"candidate_id": "cached"}}]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp) / "work"
+            path = build_twitch_training_dataset._vod_checkpoint_path(work_dir, "123")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": build_twitch_training_dataset._VOD_CHECKPOINT_VERSION,
+                        "profile": "jynxzi",
+                        "vod_id": "123",
+                        "dataset_build_fingerprint": next(iter(build_twitch_training_dataset._legacy_vod_checkpoint_fingerprints("jynxzi"))),
+                        "label_signature": build_twitch_training_dataset._vod_checkpoint_signature(labels),
+                        "rows": checkpoint_rows,
+                    },
+                    ensure_ascii=True,
+                ),
+                encoding="utf-8",
+            )
+
+            checkpoint = build_twitch_training_dataset._load_vod_checkpoint(work_dir, "jynxzi", "123", labels)
+
+        self.assertEqual(checkpoint, checkpoint_rows)
 
     def test_materialize_vod_always_downloads_directly_without_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, \
@@ -1334,6 +1440,116 @@ class BuildTwitchTrainingDatasetTests(unittest.TestCase):
         rows = build_twitch_training_dataset._dedupe_ranker_rows([primary, supplemental, other_positive, negative])
 
         self.assertEqual([row["candidate_id"] for row in rows], ["cand-primary", "cand-other", "cand-negative"])
+
+    def test_balance_vod_negative_rows_caps_negative_heavy_mixed_vod(self) -> None:
+        rows = [{
+            "candidate_id": "pos",
+            "label": 1,
+            "label_class": "positive",
+            "vod_id": "vod-heavy",
+            "dataset_source": "twitch_vod_primary",
+            "candidate_source": "reaction",
+            "sample_weight": 1.5,
+            "window_start": 100.0,
+            "window_end": 130.0,
+        }]
+        rows.extend(
+            {
+                "candidate_id": f"primary-neg-{index}",
+                "label": 0,
+                "label_class": "hard_negative",
+                "vod_id": "vod-heavy",
+                "dataset_source": "twitch_vod_primary",
+                "candidate_source": "twitch_label_proxy",
+                "sample_weight": 1.8,
+                "window_start": 20.0 + index * 20.0,
+                "window_end": 40.0 + index * 20.0,
+            }
+            for index in range(12)
+        )
+        rows.extend(
+            {
+                "candidate_id": f"boundary-neg-{index}",
+                "label": 0,
+                "label_class": "boundary_near_miss_negative",
+                "vod_id": "vod-heavy",
+                "dataset_source": "twitch_vod_boundary_near_miss",
+                "candidate_source": "boundary_perturbation",
+                "sample_weight": 0.45,
+                "window_start": 101.0 + index,
+                "window_end": 129.0 + index,
+            }
+            for index in range(4)
+        )
+
+        balanced = build_twitch_training_dataset._balance_vod_negative_rows(
+            rows,
+            max_negative_rows_per_positive=8,
+        )
+
+        self.assertEqual(sum(1 for row in balanced if int(row["label"]) == 1), 1)
+        self.assertEqual(sum(1 for row in balanced if int(row["label"]) == 0), 8)
+        self.assertEqual(
+            sum(1 for row in balanced if row["dataset_source"] == "twitch_vod_boundary_near_miss"),
+            2,
+        )
+
+    def test_prepare_ranker_rows_preserves_mixed_vod_groups_when_source_capping(self) -> None:
+        rows = []
+        for index, source in enumerate(("quote", "reaction", "tension_build"), start=1):
+            rows.append({
+                "candidate_id": f"vod-{index}-pos",
+                "label": 1,
+                "label_class": "positive",
+                "vod_id": f"vod-{index}",
+                "clip_ids": [f"clip-{index}"],
+                "dataset_source": "twitch_vod_primary",
+                "candidate_source": source,
+                "sample_weight": 1.5,
+                "window_start": index * 100.0,
+                "window_end": index * 100.0 + 30.0,
+            })
+            rows.extend(
+                {
+                    "candidate_id": f"vod-{index}-boundary-{neg_index}",
+                    "label": 0,
+                    "label_class": "boundary_near_miss_negative",
+                    "vod_id": f"vod-{index}",
+                    "dataset_source": "twitch_vod_boundary_near_miss",
+                    "candidate_source": "boundary_perturbation",
+                    "sample_weight": 0.45,
+                    "window_start": index * 100.0 + neg_index,
+                    "window_end": index * 100.0 + 30.0 + neg_index,
+                }
+                for neg_index in range(4)
+            )
+        rows.extend(
+            {
+                "candidate_id": f"extra-{index}",
+                "label": 0,
+                "label_class": "hard_negative",
+                "vod_id": f"extra-{index}",
+                "dataset_source": "twitch_vod_primary",
+                "candidate_source": "twitch_label_proxy" if index % 2 else "moment",
+                "sample_weight": 1.8,
+                "window_start": 1000.0 + index,
+                "window_end": 1030.0 + index,
+            }
+            for index in range(8)
+        )
+
+        prepared = build_twitch_training_dataset._prepare_ranker_rows(rows)
+        mixed_vods = {
+            row["vod_id"]
+            for row in prepared
+            if row["vod_id"].startswith("vod-")
+        }
+
+        self.assertEqual(mixed_vods, {"vod-1", "vod-2", "vod-3"})
+        for vod_id in mixed_vods:
+            group = [row for row in prepared if row["vod_id"] == vod_id]
+            self.assertTrue(any(int(row["label"]) == 1 for row in group))
+            self.assertTrue(any(int(row["label"]) == 0 for row in group))
 
     def test_boundary_perturbation_candidates_generate_valid_near_misses(self) -> None:
         transcript = [

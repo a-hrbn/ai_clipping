@@ -52,8 +52,15 @@ def main() -> int:
     labels = train_ranker.np.array([int(row["label"]) for row in rows], dtype=int)
     baseline_score_array = train_ranker.np.array([float(baseline_scores.get(row["candidate_id"], 0.0)) for row in rows], dtype=float)
     trained_score_array = train_ranker.np.array([float(trained_scores.get(row["candidate_id"], 0.0)) for row in rows], dtype=float)
+    trained_threshold = train_ranker._artifact_serving_threshold(artifact)
     baseline_metrics = train_ranker._evaluate_scores(labels, baseline_score_array, score_kind="margin", groups=groups)
-    trained_metrics = train_ranker._evaluate_scores(labels, trained_score_array, score_kind="margin", groups=groups)
+    trained_metrics = train_ranker._evaluate_scores(
+        labels,
+        trained_score_array,
+        score_kind="margin",
+        groups=groups,
+        threshold=trained_threshold,
+    )
     report = {
         "artifact": {
             "available": artifact is not None,
@@ -64,6 +71,8 @@ def main() -> int:
             "source": artifact_inspection.get("source", ""),
             "selected_model": raw_artifact.get("selected_model") if raw_artifact else "",
             "model_type": raw_artifact.get("model_type") if raw_artifact else "",
+            "serving_threshold": raw_artifact.get("serving_threshold") if raw_artifact else None,
+            "serving_threshold_calibration": raw_artifact.get("serving_threshold_calibration", {}) if raw_artifact else {},
             "training_stats": raw_artifact.get("training_stats", {}) if raw_artifact else {},
             "validation": raw_artifact.get("validation", {}) if raw_artifact else {},
         },
@@ -79,13 +88,14 @@ def main() -> int:
         "split_strategy": split["strategy"],
         "split_unit": split.get("unit", ""),
         "leakage_risk": split.get("leakage_risk", "unknown"),
-        "by_label_class": _bucket_metrics(rows, baseline_scores, trained_scores, "label_class"),
-        "by_supervision_tier": _bucket_metrics(rows, baseline_scores, trained_scores, "supervision_tier"),
-        "by_platform": _bucket_metrics(rows, baseline_scores, trained_scores, _bucket_key(rows, "platform_bucket", "publish_platform")),
-        "by_content_bucket": _bucket_metrics(rows, baseline_scores, trained_scores, "content_bucket"),
-        "by_source_bucket": _bucket_metrics(rows, baseline_scores, trained_scores, _bucket_key(rows, "source_bucket", "candidate_source")),
-        "by_variant": _bucket_metrics(rows, baseline_scores, trained_scores, _bucket_key(rows, "variant_bucket", "final_variant_key")),
-        "top_groups": _group_metrics(rows, baseline_scores, trained_scores, split.get("unit", ""), args.top_groups),
+        "by_label_class": _bucket_metrics(rows, baseline_scores, trained_scores, "label_class", trained_threshold),
+        "by_supervision_tier": _bucket_metrics(rows, baseline_scores, trained_scores, "supervision_tier", trained_threshold),
+        "by_platform": _bucket_metrics(rows, baseline_scores, trained_scores, _bucket_key(rows, "platform_bucket", "publish_platform"), trained_threshold),
+        "by_gold_holdout_split": _bucket_metrics(rows, baseline_scores, trained_scores, "gold_holdout_split", trained_threshold),
+        "by_content_bucket": _bucket_metrics(rows, baseline_scores, trained_scores, "content_bucket", trained_threshold),
+        "by_source_bucket": _bucket_metrics(rows, baseline_scores, trained_scores, _bucket_key(rows, "source_bucket", "candidate_source"), trained_threshold),
+        "by_variant": _bucket_metrics(rows, baseline_scores, trained_scores, _bucket_key(rows, "variant_bucket", "final_variant_key"), trained_threshold),
+        "top_groups": _group_metrics(rows, baseline_scores, trained_scores, split.get("unit", ""), args.top_groups, trained_threshold),
     }
     payload = json.dumps(report, ensure_ascii=True)
     if args.report_out:
@@ -120,6 +130,8 @@ def _empty_report(profile: str) -> dict[str, object]:
             "source": "",
             "selected_model": "",
             "model_type": "",
+            "serving_threshold": None,
+            "serving_threshold_calibration": {},
             "training_stats": {},
             "validation": {},
         },
@@ -134,6 +146,7 @@ def _empty_report(profile: str) -> dict[str, object]:
         "by_label_class": {},
         "by_supervision_tier": {},
         "by_platform": {},
+        "by_gold_holdout_split": {},
         "by_content_bucket": {},
         "by_source_bucket": {},
         "by_variant": {},
@@ -147,7 +160,13 @@ def _bucket_key(rows: list[dict], preferred: str, fallback: str) -> str:
     return fallback
 
 
-def _bucket_metrics(rows: list[dict], baseline_scores: dict[str, float], trained_scores: dict[str, float], key: str) -> dict[str, dict]:
+def _bucket_metrics(
+    rows: list[dict],
+    baseline_scores: dict[str, float],
+    trained_scores: dict[str, float],
+    key: str,
+    trained_threshold: float | None = None,
+) -> dict[str, dict]:
     bucketed: dict[str, dict] = {}
     values = sorted({str(row.get(key) or "").strip() for row in rows if str(row.get(key) or "").strip()})
     for value in values:
@@ -157,7 +176,13 @@ def _bucket_metrics(rows: list[dict], baseline_scores: dict[str, float], trained
         subset_trained = train_ranker.np.array([float(trained_scores.get(row["candidate_id"], 0.0)) for row in subset], dtype=float)
         groups = train_ranker._ranking_group_labels(subset, key if key in {"creator_id", "vod_id", "source_url"} else "")
         baseline_metrics = train_ranker._evaluate_scores(labels, subset_baseline, score_kind="margin", groups=groups)
-        trained_metrics = train_ranker._evaluate_scores(labels, subset_trained, score_kind="margin", groups=groups)
+        trained_metrics = train_ranker._evaluate_scores(
+            labels,
+            subset_trained,
+            score_kind="margin",
+            groups=groups,
+            threshold=trained_threshold,
+        )
         bucketed[value] = {
             "rows": len(subset),
             "baseline_heuristic": baseline_metrics,
@@ -173,6 +198,7 @@ def _group_metrics(
     trained_scores: dict[str, float],
     split_unit: str,
     top_k: int,
+    trained_threshold: float | None = None,
 ) -> list[dict]:
     unit = split_unit or "creator_id"
     grouped: dict[str, list[dict]] = {}
@@ -187,7 +213,13 @@ def _group_metrics(
         subset_trained = train_ranker.np.array([float(trained_scores.get(row["candidate_id"], 0.0)) for row in subset], dtype=float)
         groups = train_ranker._ranking_group_labels(subset, unit)
         baseline_metrics = train_ranker._evaluate_scores(labels, subset_baseline, score_kind="margin", groups=groups)
-        trained_metrics = train_ranker._evaluate_scores(labels, subset_trained, score_kind="margin", groups=groups)
+        trained_metrics = train_ranker._evaluate_scores(
+            labels,
+            subset_trained,
+            score_kind="margin",
+            groups=groups,
+            threshold=trained_threshold,
+        )
         summaries.append(
             {
                 "group": group,

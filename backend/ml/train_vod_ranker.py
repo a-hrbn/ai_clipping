@@ -16,7 +16,11 @@ _MIN_PRIMARY_POSITIVE_ROWS = 6
 _MIN_PRIMARY_UNIQUE_VODS = 2
 _MIN_PRIMARY_POSITIVE_CLUSTERS = 3
 _MIN_PRIMARY_RANKING_GROUPS = 2
+_MIN_PRIMARY_MIXED_RANKING_GROUPS = 2
+_TARGET_PRIMARY_MIXED_RANKING_GROUPS = 20
+_TARGET_NEGATIVE_ROWS_PER_POSITIVE_MAX = 8
 _MAX_CANDIDATE_SOURCE_SHARE = 0.40
+_SHORT_FORM_MODES = {"off", "supplemental"}
 
 
 def _load_workflow_state(raw: str | None) -> dict[str, object] | None:
@@ -64,6 +68,15 @@ def main() -> int:
         help="Relative weight multiplier for supplemental short-form rows.",
     )
     parser.add_argument(
+        "--short-form-mode",
+        choices=sorted(_SHORT_FORM_MODES),
+        default="off",
+        help=(
+            "Use 'off' for VOD-only contrast training. Use 'supplemental' to append "
+            "short-form rows as low-weight auxiliary data."
+        ),
+    )
+    parser.add_argument(
         "--per-streamer",
         action="store_true",
         help="Train one artifact per broadcaster using that broadcaster's VOD windows as the primary data.",
@@ -104,6 +117,7 @@ def main() -> int:
             artifact_dir=pathlib.Path(args.artifact_dir),
             work_dir=pathlib.Path(args.work_dir),
             short_form_weight=args.short_form_weight,
+            short_form_mode=args.short_form_mode,
         )
 
     artifact_dir = pathlib.Path(args.artifact_dir)
@@ -139,6 +153,7 @@ def main() -> int:
         work_dir=pathlib.Path(args.work_dir),
         supplemental_rows=short_form_rows,
         supplemental_weight=args.short_form_weight,
+        short_form_mode=args.short_form_mode,
     )
     _write_jsonl(dataset_out, rows)
     print(json.dumps(dataset_summary(rows), ensure_ascii=True))
@@ -158,9 +173,10 @@ def build_composite_dataset(
     work_dir: pathlib.Path,
     supplemental_rows: list[dict] | None = None,
     supplemental_weight: float = 0.35,
+    short_form_mode: str = "off",
 ) -> list[dict]:
     vod_rows = build_twitch_training_dataset.build_dataset(labels, profile, work_dir)
-    if not supplemental_rows:
+    if _normalize_short_form_mode(short_form_mode) == "off" or not supplemental_rows:
         return vod_rows
     merged = list(vod_rows)
     merged.extend(_prepare_short_form_rows(supplemental_rows, profile, supplemental_weight))
@@ -216,6 +232,8 @@ def ranker_dataset_quality(rows: list[dict]) -> dict[str, object]:
         for row in evaluated_rows
         if str(train_ranker._ranking_group_key(row, "vod_id")).strip()
     }
+    mixed_ranking_groups = _mixed_ranking_groups(evaluated_rows, "vod_id")
+    contrast_balance = _vod_contrast_balance(evaluated_rows)
     source_mix = _candidate_source_mix(evaluated_rows)
 
     violations: list[str] = []
@@ -229,6 +247,8 @@ def ranker_dataset_quality(rows: list[dict]) -> dict[str, object]:
         violations.append("primary_positive_clusters_below_minimum")
     if len(ranking_groups) < _MIN_PRIMARY_RANKING_GROUPS:
         violations.append("primary_ranking_groups_below_minimum")
+    if len(mixed_ranking_groups) < _MIN_PRIMARY_MIXED_RANKING_GROUPS:
+        violations.append("primary_mixed_ranking_groups_below_minimum")
     if source_mix["peak_share"] > _MAX_CANDIDATE_SOURCE_SHARE:
         violations.append("candidate_source_peak_share_above_maximum")
 
@@ -241,13 +261,20 @@ def ranker_dataset_quality(rows: list[dict]) -> dict[str, object]:
         "unique_vods": len(unique_vods),
         "unique_positive_clusters": len(positive_clusters),
         "ranking_groups": len(ranking_groups),
+        "mixed_ranking_groups": len(mixed_ranking_groups),
         "thresholds": {
             "positive_rows": _MIN_PRIMARY_POSITIVE_ROWS,
             "unique_vods": _MIN_PRIMARY_UNIQUE_VODS,
             "unique_positive_clusters": _MIN_PRIMARY_POSITIVE_CLUSTERS,
             "ranking_groups": _MIN_PRIMARY_RANKING_GROUPS,
+            "mixed_ranking_groups": _MIN_PRIMARY_MIXED_RANKING_GROUPS,
             "candidate_source_peak_share": _MAX_CANDIDATE_SOURCE_SHARE,
         },
+        "targets": {
+            "mixed_ranking_groups": _TARGET_PRIMARY_MIXED_RANKING_GROUPS,
+            "negative_rows_per_positive_max": _TARGET_NEGATIVE_ROWS_PER_POSITIVE_MAX,
+        },
+        "vod_contrast_balance": contrast_balance,
         "candidate_source_mix": source_mix,
         "violations": violations,
     }
@@ -274,6 +301,50 @@ def _candidate_source_mix(rows: list[dict]) -> dict[str, object]:
     }
 
 
+def _vod_contrast_balance(rows: list[dict]) -> dict[str, object]:
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        key = str(train_ranker._ranking_group_key(row, "vod_id") or "").strip()
+        if key:
+            groups[key].append(row)
+
+    mixed_groups = 0
+    worst_ratio = 0.0
+    over_limit_groups: list[dict[str, object]] = []
+    for key, group_rows in groups.items():
+        positive_count = sum(1 for row in group_rows if int(row.get("label", 0)) == 1)
+        negative_count = sum(1 for row in group_rows if int(row.get("label", 0)) == 0)
+        if positive_count <= 0 or negative_count <= 0:
+            continue
+        mixed_groups += 1
+        ratio = negative_count / positive_count
+        worst_ratio = max(worst_ratio, ratio)
+        if ratio > _TARGET_NEGATIVE_ROWS_PER_POSITIVE_MAX:
+            over_limit_groups.append(
+                {
+                    "group": key,
+                    "positive_rows": positive_count,
+                    "negative_rows": negative_count,
+                    "negative_rows_per_positive": round(ratio, 3),
+                }
+            )
+
+    over_limit_groups.sort(
+        key=lambda item: (
+            -float(item["negative_rows_per_positive"]),
+            str(item["group"]),
+        )
+    )
+    return {
+        "mixed_ranking_groups": mixed_groups,
+        "target_mixed_ranking_groups": _TARGET_PRIMARY_MIXED_RANKING_GROUPS,
+        "target_negative_rows_per_positive_max": _TARGET_NEGATIVE_ROWS_PER_POSITIVE_MAX,
+        "worst_negative_rows_per_positive": round(worst_ratio, 3),
+        "over_limit_group_count": len(over_limit_groups),
+        "over_limit_groups": over_limit_groups[:10],
+    }
+
+
 def _train_per_streamer(
     labels: list[dict],
     short_form_rows: list[dict],
@@ -281,6 +352,7 @@ def _train_per_streamer(
     artifact_dir: pathlib.Path,
     work_dir: pathlib.Path,
     short_form_weight: float,
+    short_form_mode: str,
 ) -> int:
     grouped: dict[str, list[dict]] = defaultdict(list)
     for row in labels:
@@ -301,6 +373,7 @@ def _train_per_streamer(
             work_dir=work_dir / broadcaster,
             supplemental_rows=_filter_short_form_rows(short_form_rows, broadcaster),
             supplemental_weight=short_form_weight,
+            short_form_mode=short_form_mode,
         )
         dataset_out = artifact_dir / f"{broadcaster}_vod_training_rows.jsonl"
         _write_jsonl(dataset_out, dataset_rows)
@@ -422,6 +495,27 @@ def _filter_short_form_rows(rows: list[dict], broadcaster: str) -> list[dict]:
         if str(row.get("creator_id") or row.get("streamer") or "").strip().lower() == normalized
     ]
     return filtered
+
+
+def _normalize_short_form_mode(mode: str) -> str:
+    normalized = str(mode or "off").strip().lower()
+    if normalized not in _SHORT_FORM_MODES:
+        raise ValueError(f"Unsupported short-form mode: {mode!r}")
+    return normalized
+
+
+def _mixed_ranking_groups(rows: list[dict], split_unit: str) -> set[str]:
+    labels_by_group: dict[str, set[int]] = defaultdict(set)
+    for row in rows:
+        key = train_ranker._ranking_group_key(row, split_unit)
+        if not str(key).strip():
+            continue
+        labels_by_group[key].add(int(row.get("label", 0)))
+    return {
+        group
+        for group, labels in labels_by_group.items()
+        if 0 in labels and 1 in labels
+    }
 
 
 def _positive_cluster_key(row: dict) -> tuple[str, str] | None:

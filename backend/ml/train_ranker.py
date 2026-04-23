@@ -50,6 +50,9 @@ _MIN_GROUP_NDCG_AT_5_P25 = 0.45
 _MIN_GROUP_NDCG_AT_5_MIN = 0.2
 _MIN_GROUP_RANKING_METRIC_P25 = 0.45
 _MIN_GROUP_RANKING_METRIC_MIN = 0.2
+_DEFAULT_MARGIN_CLASSIFICATION_THRESHOLD = 0.0
+_DEFAULT_PROBABILITY_CLASSIFICATION_THRESHOLD = 0.5
+_SERVING_THRESHOLD_MIN_RECALL = 0.5
 
 
 def _inject_heuristic_features(rows: list[dict], profile: str) -> None:
@@ -293,6 +296,20 @@ def train_from_rows(
             selected_model,
             split.get("unit", ""),
         )
+        serving_score_array = _runtime_blended_scores(
+            validation_rows,
+            profile,
+            feature_names,
+            scales,
+            selected_model,
+            float(blend_calibration["best_blend"]),
+        )
+        serving_threshold_calibration = _calibrate_serving_threshold(
+            validation_labels,
+            serving_score_array,
+            groups=validation_groups,
+            source="validation",
+        )
 
         model_path = None
         if selected_model["artifact_model_type"] in {"gradient_boosting", "lightgbm_ranker"}:
@@ -321,6 +338,8 @@ def train_from_rows(
             "model_path": model_path.name if model_path else "",
             "blend": float(blend_calibration["best_blend"]),
             "blend_calibration": blend_calibration,
+            "serving_threshold": float(serving_threshold_calibration["threshold"]),
+            "serving_threshold_calibration": serving_threshold_calibration,
             "hpo": _artifact_hpo_summary(hpo_artifact),
             "top_feature_importances": _feature_importance_map(selected_model, feature_names),
             "training_stats": {
@@ -449,6 +468,8 @@ def _artifact_health_summary(artifact: dict[str, object]) -> dict[str, object]:
         "feature_schema_version": int(artifact.get("feature_schema_version") or 0),
         "label_schema_version": int(artifact.get("label_schema_version") or 0),
         "semantic_score_config": artifact.get("semantic_score_config") or {},
+        "serving_threshold": float(artifact.get("serving_threshold") or _DEFAULT_MARGIN_CLASSIFICATION_THRESHOLD),
+        "serving_threshold_calibration": artifact.get("serving_threshold_calibration") or {},
         "excluded_feature_names": sorted(
             str(name)
             for name in (artifact.get("excluded_feature_names") or [])
@@ -633,12 +654,14 @@ def _group_holdout_by_unit(
     if len(grouped) < min_groups:
         return None
 
-    ordered_groups = sorted(grouped.items(), key=lambda item: (len(item[1]), item[0]), reverse=True)
+    ordered_groups = sorted(grouped.items(), key=_holdout_group_order_key)
     target_validation_size = max(2, len(rows) // 5)
+    target_validation_groups = 2
     train: list[dict] = []
     validation: list[dict] = []
     validation_positive = 0
     validation_negative = 0
+    validation_group_count = 0
 
     for _, group_rows in ordered_groups:
         group_positive = sum(1 for row in group_rows if int(row["label"]) == 1)
@@ -647,12 +670,14 @@ def _group_holdout_by_unit(
             len(validation) < target_validation_size
             or validation_positive == 0
             or validation_negative == 0
+            or validation_group_count < target_validation_groups
         )
         bucket = validation if put_in_validation else train
         bucket.extend(group_rows)
         if put_in_validation:
             validation_positive += group_positive
             validation_negative += group_negative
+            validation_group_count += 1
 
     if not train or not validation:
         return None
@@ -664,6 +689,14 @@ def _group_holdout_by_unit(
         "leakage_risk": leakage_risk,
     }
     return split if _split_has_both_classes(train) and _split_has_both_classes(validation) else None
+
+
+def _holdout_group_order_key(item: tuple[str, list[dict]]) -> tuple[int, int, str]:
+    key, group_rows = item
+    positive = sum(1 for row in group_rows if int(row["label"]) == 1)
+    negative = len(group_rows) - positive
+    mixed_rank = 0 if positive > 0 and negative > 0 else 1
+    return mixed_rank, len(group_rows), key
 
 
 def _stratified_fallback_split(rows: list[dict], strategy: str, unit: str) -> dict[str, list[dict] | str]:
@@ -996,13 +1029,15 @@ def _evaluate_scores(
     scores: np.ndarray,
     score_kind: str = "margin",
     groups: list[str] | None = None,
+    threshold: float | None = None,
 ) -> dict[str, float]:
     total = int(len(labels)) or 1
+    classification_threshold = _default_classification_threshold(score_kind) if threshold is None else float(threshold)
     if score_kind == "probability":
-        predicted = (scores >= 0.5).astype(int)
+        predicted = (scores >= classification_threshold).astype(int)
         ranking_scores = scores
     else:
-        predicted = (scores >= 0.0).astype(int)
+        predicted = (scores >= classification_threshold).astype(int)
         ranking_scores = 1.0 / (1.0 + np.exp(-np.clip(scores, -20.0, 20.0)))
 
     true_positive = int(np.sum((predicted == 1) & (labels == 1)))
@@ -1023,6 +1058,7 @@ def _evaluate_scores(
         "false_negative": false_negative,
         "true_negative": true_negative,
         "positive_rate": round(float(np.mean(labels == 1)), 3),
+        "classification_threshold": round(float(classification_threshold), 6),
     }
     for k in (3, 5):
         precision_k, recall_k = _grouped_precision_recall_at_k(labels, ranking_scores, k, groups)
@@ -1057,6 +1093,114 @@ def _evaluate_scores(
     metrics["min_group_positive_rows"] = _min_group_positive_rows(labels, groups)
     metrics["rows"] = total
     return metrics
+
+
+def _default_classification_threshold(score_kind: str) -> float:
+    if str(score_kind).strip().lower() == "probability":
+        return _DEFAULT_PROBABILITY_CLASSIFICATION_THRESHOLD
+    return _DEFAULT_MARGIN_CLASSIFICATION_THRESHOLD
+
+
+def _artifact_serving_threshold(artifact: dict | None) -> float | None:
+    if not isinstance(artifact, dict) or "serving_threshold" not in artifact:
+        return None
+    try:
+        threshold = float(artifact.get("serving_threshold"))
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(threshold):
+        return None
+    return threshold
+
+
+def _calibrate_serving_threshold(
+    labels: np.ndarray,
+    scores: np.ndarray,
+    *,
+    groups: list[str] | None = None,
+    source: str = "validation",
+    score_kind: str = "margin",
+    min_recall: float = _SERVING_THRESHOLD_MIN_RECALL,
+) -> dict[str, object]:
+    default_threshold = _default_classification_threshold(score_kind)
+    default_metrics = _evaluate_scores(
+        labels,
+        scores,
+        score_kind=score_kind,
+        groups=groups,
+        threshold=default_threshold,
+    )
+    if len(labels) == 0 or len(scores) == 0:
+        return {
+            "source": source,
+            "metric": "f1",
+            "score_kind": score_kind,
+            "min_recall": float(min_recall),
+            "threshold": float(default_threshold),
+            "metrics": default_metrics,
+            "default_threshold": float(default_threshold),
+            "default_metrics": default_metrics,
+            "candidate_count": 0,
+        }
+
+    finite_scores = [float(score) for score in scores.tolist() if math.isfinite(float(score))]
+    if not finite_scores:
+        return {
+            "source": source,
+            "metric": "f1",
+            "score_kind": score_kind,
+            "min_recall": float(min_recall),
+            "threshold": float(default_threshold),
+            "metrics": default_metrics,
+            "default_threshold": float(default_threshold),
+            "default_metrics": default_metrics,
+            "candidate_count": 0,
+        }
+
+    epsilon = 1e-6
+    candidates = {float(default_threshold), min(finite_scores) - epsilon, max(finite_scores) + epsilon}
+    candidates.update(finite_scores)
+    best_threshold = float(default_threshold)
+    best_metrics = default_metrics
+    best_key = _serving_threshold_key(best_metrics, best_threshold, min_recall)
+    for threshold_candidate in sorted(candidates):
+        metrics = _evaluate_scores(
+            labels,
+            scores,
+            score_kind=score_kind,
+            groups=groups,
+            threshold=float(threshold_candidate),
+        )
+        key = _serving_threshold_key(metrics, float(threshold_candidate), min_recall)
+        if key > best_key:
+            best_threshold = float(threshold_candidate)
+            best_metrics = metrics
+            best_key = key
+
+    return {
+        "source": source,
+        "metric": "f1",
+        "score_kind": score_kind,
+        "min_recall": float(min_recall),
+        "threshold": round(float(best_threshold), 6),
+        "metrics": best_metrics,
+        "default_threshold": float(default_threshold),
+        "default_metrics": default_metrics,
+        "candidate_count": len(candidates),
+    }
+
+
+def _serving_threshold_key(metrics: dict[str, float], threshold: float, min_recall: float) -> tuple:
+    recall = float(metrics.get("recall", 0.0))
+    meets_recall = 1 if recall >= float(min_recall) else 0
+    return (
+        meets_recall,
+        float(metrics.get("f1", 0.0)),
+        recall,
+        float(metrics.get("precision", 0.0)),
+        float(metrics.get("accuracy", 0.0)),
+        -float(threshold),
+    )
 
 
 def _precision_recall_at_k(labels: np.ndarray, scores: np.ndarray, k: int) -> tuple[float, float]:
@@ -1377,6 +1521,39 @@ def _calibrate_blend(
     }
 
 
+def _runtime_blended_scores(
+    rows: list[dict],
+    profile: str,
+    feature_names: list[str],
+    scales: dict[str, dict[str, float]],
+    selected_model: dict,
+    blend: float,
+) -> np.ndarray:
+    ranker = Ranker(enable_trained_model=False)
+    feature_rows = [
+        CandidateFeatures.from_dict(
+            {
+                "candidate_id": str(row.get("candidate_id") or "unknown"),
+                **dict(row.get("features") or {}),
+            }
+        )
+        for row in rows
+    ]
+    heuristic_scores = np.array(
+        [score for score, _ in ranker._heuristic_scores(feature_rows, profile)],
+        dtype=float,
+    )
+    trained_scores = _runtime_trained_scores(
+        rows,
+        feature_names,
+        scales,
+        selected_model,
+        ranker,
+    )
+    safe_blend = max(0.0, min(1.0, float(blend)))
+    return heuristic_scores * (1.0 - safe_blend) + trained_scores * safe_blend
+
+
 def _runtime_trained_scores(
     rows: list[dict],
     feature_names: list[str],
@@ -1630,7 +1807,7 @@ def _count_values(rows: list[dict], key: str) -> dict[str, int]:
         value = str(row.get(key) or "").strip()
         if not value:
             continue
-            counts[value] = counts.get(value, 0) + 1
+        counts[value] = counts.get(value, 0) + 1
     return dict(sorted(counts.items()))
 
 

@@ -1,8 +1,12 @@
 import json
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+sys.modules.setdefault("whisper", types.SimpleNamespace(load_model=lambda *_args, **_kwargs: None))
 
 from ml import train_vod_ranker
 
@@ -116,6 +120,7 @@ class TrainVodRankerTests(unittest.TestCase):
                 work_dir=Path("/tmp/ignored"),
                 supplemental_rows=short_form_rows,
                 supplemental_weight=0.35,
+                short_form_mode="supplemental",
             )
 
         self.assertEqual(len(rows), 2)
@@ -126,6 +131,28 @@ class TrainVodRankerTests(unittest.TestCase):
         self.assertEqual(rows[1]["ordinal_label"], 3)
         self.assertTrue(rows[1]["feature_provenance"]["has_llm_semantics"])
         self.assertAlmostEqual(rows[1]["sample_weight"], 0.35)
+
+    def test_build_composite_dataset_defaults_to_vod_only(self) -> None:
+        vod_rows = [
+            {
+                "candidate_id": "vod-1",
+                "label": 1,
+                "dataset_source": "twitch_vod_primary",
+                "features": {},
+            }
+        ]
+        short_form_rows = [
+            {"candidate_id": "sf-1", "label": 1, "features": {}}
+        ]
+        with patch("ml.train_vod_ranker.build_twitch_training_dataset.build_dataset", return_value=vod_rows):
+            rows = train_vod_ranker.build_composite_dataset(
+                labels=[{"broadcaster": "jynxzi"}],
+                profile="jynxzi",
+                work_dir=Path("/tmp/ignored"),
+                supplemental_rows=short_form_rows,
+            )
+
+        self.assertEqual(rows, vod_rows)
 
     def test_filter_short_form_rows_matches_broadcaster(self) -> None:
         rows = [
@@ -142,7 +169,14 @@ class TrainVodRankerTests(unittest.TestCase):
             {"broadcaster": "tarik", "label_class": "hard_negative"},
         ]
 
-        def _fake_build_composite_dataset(streamer_labels, profile, work_dir, supplemental_rows, supplemental_weight):
+        def _fake_build_composite_dataset(
+            streamer_labels,
+            profile,
+            work_dir,
+            supplemental_rows,
+            supplemental_weight,
+            short_form_mode,
+        ):
             return [{
                 "candidate_id": f"{profile}-1",
                 "label": 1,
@@ -162,6 +196,7 @@ class TrainVodRankerTests(unittest.TestCase):
                 artifact_dir=Path(tmp),
                 work_dir=Path(tmp) / "work",
                 short_form_weight=0.35,
+                short_form_mode="supplemental",
             )
 
             self.assertEqual(rc, 0)
@@ -201,6 +236,67 @@ class TrainVodRankerTests(unittest.TestCase):
         self.assertIn("primary_unique_vods_below_minimum", quality["violations"])
         self.assertIn("primary_positive_clusters_below_minimum", quality["violations"])
         self.assertIn("primary_ranking_groups_below_minimum", quality["violations"])
+        self.assertIn("primary_mixed_ranking_groups_below_minimum", quality["violations"])
+
+    def test_ranker_dataset_quality_accepts_multiple_mixed_vod_groups_without_short_form(self) -> None:
+        rows = []
+        for vod in ("vod-a", "vod-b", "vod-c"):
+            rows.append({
+                "candidate_id": f"{vod}-pos",
+                "label": 1,
+                "label_class": "positive",
+                "dataset_source": "twitch_vod_primary",
+                "vod_id": vod,
+                "clip_ids": [f"clip-{vod}"],
+                "candidate_source": "quote",
+            })
+            rows.append({
+                "candidate_id": f"{vod}-neg",
+                "label": 0,
+                "label_class": "hard_negative",
+                "dataset_source": "twitch_vod_primary",
+                "vod_id": vod,
+                "clip_ids": [],
+                "candidate_source": "twitch_label_proxy",
+            })
+        rows.extend([
+            {
+                "candidate_id": "vod-d-pos",
+                "label": 1,
+                "label_class": "positive",
+                "dataset_source": "twitch_vod_primary",
+                "vod_id": "vod-d",
+                "clip_ids": ["clip-vod-d"],
+                "candidate_source": "tension_build",
+            },
+            {
+                "candidate_id": "vod-e-pos",
+                "label": 1,
+                "label_class": "positive",
+                "dataset_source": "twitch_vod_primary",
+                "vod_id": "vod-e",
+                "clip_ids": ["clip-vod-e"],
+                "candidate_source": "narrative_reveal",
+            },
+            {
+                "candidate_id": "vod-f-pos",
+                "label": 1,
+                "label_class": "positive",
+                "dataset_source": "twitch_vod_primary",
+                "vod_id": "vod-f",
+                "clip_ids": ["clip-vod-f"],
+                "candidate_source": "reaction",
+            },
+        ])
+
+        quality = train_vod_ranker.ranker_dataset_quality(rows)
+
+        self.assertTrue(quality["ok"])
+        self.assertEqual(quality["mixed_ranking_groups"], 3)
+        self.assertEqual(quality["targets"]["mixed_ranking_groups"], 20)
+        self.assertEqual(quality["vod_contrast_balance"]["target_negative_rows_per_positive_max"], 8)
+        self.assertEqual(quality["vod_contrast_balance"]["worst_negative_rows_per_positive"], 1.0)
+        self.assertEqual(quality["vod_contrast_balance"]["over_limit_group_count"], 0)
 
     def test_ranker_dataset_quality_rejects_candidate_source_dominance(self) -> None:
         rows = [

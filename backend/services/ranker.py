@@ -92,6 +92,7 @@ class Ranker:
             feature.heuristic_score = float(heur_score)
         trained_scores = self._trained_scores(features, artifact)
         blend = self._safe_blend(artifact)
+        serving_threshold = self._safe_serving_threshold(artifact)
         merged: list[dict[str, object]] = []
         for feature, (heur_score, rationale), trained_score in zip(features, heuristic, trained_scores):
             score = round(self._clamp_score(heur_score * (1.0 - blend) + trained_score * blend), 3)
@@ -104,6 +105,8 @@ class Ranker:
                     "heuristic_score": round(float(heur_score), 3),
                     "trained_score": round(float(trained_score), 3),
                     "blend": round(float(blend), 3),
+                    "serving_threshold": round(float(serving_threshold), 6),
+                    "passes_serving_threshold": score >= serving_threshold,
                     "trained_model_used": True,
                     "rationale": enriched,
                 }
@@ -522,6 +525,15 @@ class Ranker:
     def _safe_blend(self, artifact: dict) -> float:
         requested = float(artifact.get("blend", _MAX_BLEND))
         return max(_MIN_BLEND, min(_MAX_BLEND, requested))
+
+    def _safe_serving_threshold(self, artifact: dict) -> float:
+        try:
+            requested = float(artifact.get("serving_threshold", 0.0))
+        except (TypeError, ValueError):
+            requested = 0.0
+        if not math.isfinite(requested):
+            return 0.0
+        return self._clamp_score(requested)
 
     def _normalize_trained_score(self, raw_score: float, model_type: str = "linear") -> float:
         if model_type == "gradient_boosting":

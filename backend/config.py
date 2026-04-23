@@ -108,8 +108,8 @@ class Settings(BaseSettings):
     twitch_download_concurrent_fragments: int = 8
     twitch_download_use_aria2c: bool = True
     twitch_download_aria2_connections: int = 16
-    training_vod_workers: int = 2
-    training_label_workers: int = 2
+    training_vod_workers: int = 1
+    training_label_workers: int = 3
     short_form_collection_workers: int = 3
     short_form_prefetch_workers: int = 2
     training_ffmpeg_video_codec: str = "libx264"
