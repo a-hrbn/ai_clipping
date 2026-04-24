@@ -1,5 +1,33 @@
 # Task Plan
 
+## 2026-04-24 Plan: Push Active Gold Labels
+
+- [x] Inspect branch and changed files.
+- [x] Validate labeled CSV import.
+- [x] Commit active gold label updates.
+- [x] Push commit to `origin/main`.
+- [x] Document pushed commit.
+
+### Review Notes
+
+- Validated `backend/ml/artifacts/jynxzi_active_gold_eval_queue.csv` imports with `75` labeled rows and `0` skipped rows.
+- Grade distribution is `0=36`, `1=26`, `2=10`, `3=3`, producing `13` positive gold-eval rows at threshold `2`.
+- `git diff --check` passed after normalizing CSV line endings.
+- Changes were committed and pushed to `origin/main`.
+
+## 2026-04-24 Plan: Suggest Gold Grade Notes
+
+- [x] Inspect active gold queue schema.
+- [x] Summarize buckets and labeling constraints.
+- [x] Draft reusable `gold_grade` note guidance.
+- [x] Document review notes.
+
+### Review Notes
+
+- `backend/ml/artifacts/jynxzi_active_gold_eval_queue.csv` has `75` rows with blank `gold_grade` and `notes` columns.
+- Import validation requires notes for grades `2` and `3`, and for grade `0` when `heuristic_score >= 8.0`.
+- Active buckets are mainly `false_positive_proxy`, `model_heuristic_disagreement`, and `proxy_positive_review`, so notes should explain human-visible hook/payoff/context quality rather than model scores alone.
+
 ## 2026-04-24 Plan: Commit And Push Main
 
 - [x] Inspect branch and pending changes.
