@@ -23,10 +23,16 @@ THRESHOLD_CALIBRATION_PATH="$ARTIFACT_DIR/jynxzi_threshold_calibration.json"
 GOLD_RANKER_EVAL_PATH="$ARTIFACT_DIR/jynxzi_gold_eval.json"
 PROXY_RANKER_EVAL_PATH="$ARTIFACT_DIR/jynxzi_proxy_eval.json"
 PIPELINE_EVAL_PATH="$ARTIFACT_DIR/jynxzi_pipeline_eval.json"
+RANKER_HOLDOUT_DIAGNOSIS_JSON_PATH="$ARTIFACT_DIR/jynxzi_ranker_holdout_diagnosis.json"
+RANKER_HOLDOUT_DIAGNOSIS_CSV_PATH="$ARTIFACT_DIR/jynxzi_ranker_holdout_diagnosis.csv"
+HARD_NEGATIVE_ROWS_PATH="$ARTIFACT_DIR/jynxzi_ranker_hard_negative_train_rows.jsonl"
+HARD_NEGATIVE_SUMMARY_PATH="$ARTIFACT_DIR/jynxzi_ranker_hard_negative_train_summary.json"
 WORKFLOW_STATE_PATH="$ARTIFACT_DIR/jynxzi_training_workflow_state.json"
 WORK_DIR_BASE="${AI_CLIPPING_TRAIN_TMPDIR:-$BACKEND_DIR/tmp/training_runs}"
 WORK_DIR="$WORK_DIR_BASE/jynxzi_resume"
 VOD_RANKER_SHORT_FORM_MODE="${VOD_RANKER_SHORT_FORM_MODE:-off}"
+VOD_RANKER_GOLD_TRAIN_WEIGHT="${VOD_RANKER_GOLD_TRAIN_WEIGHT:-2.0}"
+VOD_RANKER_HARD_NEGATIVE_WEIGHT="${VOD_RANKER_HARD_NEGATIVE_WEIGHT:-2.5}"
 SHORT_FORM_BACKFILL_ARTIFACT_DIR="$BACKEND_DIR/tmp/short_form_backfill_artifacts"
 SHORT_FORM_BACKFILL_ARTIFACT_JSON_PATH="$SHORT_FORM_BACKFILL_ARTIFACT_DIR/jynxzi_ranker.json"
 SHORT_FORM_BACKFILL_ARTIFACT_HEALTH_PATH="$SHORT_FORM_BACKFILL_ARTIFACT_DIR/jynxzi_artifact_health.json"
@@ -159,6 +165,8 @@ export SKIP_COVERED MERGE_OUTPUT
 export ARTIFACT_ONLY
 export DATE_FROM DATE_TO
 export VOD_RANKER_SHORT_FORM_MODE
+export VOD_RANKER_GOLD_TRAIN_WEIGHT
+export VOD_RANKER_HARD_NEGATIVE_WEIGHT
 "$PYTHON_BIN" - <<'PY'
 from datetime import datetime
 import os
@@ -239,8 +247,36 @@ run_vod_training() {
     --work-dir "$WORK_DIR" \
     --include-short-form "$SHORT_FORM_PATH" \
     --short-form-mode "$VOD_RANKER_SHORT_FORM_MODE" \
+    --include-gold-train "$GOLD_EVAL_ROWS_PATH" \
+    --gold-train-weight "$VOD_RANKER_GOLD_TRAIN_WEIGHT" \
+    --include-hard-negative-train "$HARD_NEGATIVE_ROWS_PATH" \
+    --hard-negative-weight "$VOD_RANKER_HARD_NEGATIVE_WEIGHT" \
     --workflow-state-path "$WORKFLOW_STATE_PATH" \
     --workflow-state-json "$CURRENT_WORKFLOW_STATE_JSON"
+}
+
+export_gold_eval_rows() {
+  "$PYTHON_BIN" ml/export_frontend_gold_eval.py \
+    --storage-dir "tmp/storage" \
+    --creator-id jynxzi \
+    --rows-out "$GOLD_EVAL_ROWS_PATH" \
+    --output "$GOLD_EVAL_DATASET_PATH" \
+    --summary-out "$GOLD_EVAL_SUMMARY_PATH" \
+    --merge-existing \
+    --preserve-existing-if-empty
+}
+
+export_hard_negative_rows() {
+  if [[ ! -f "$RANKER_HOLDOUT_DIAGNOSIS_CSV_PATH" ]]; then
+    echo "No ranker holdout diagnosis CSV found at $RANKER_HOLDOUT_DIAGNOSIS_CSV_PATH. Skipping hard-negative export."
+    return 0
+  fi
+  "$PYTHON_BIN" ml/export_ranker_hard_negatives.py \
+    --diagnosis-csv "$RANKER_HOLDOUT_DIAGNOSIS_CSV_PATH" \
+    --gold-rows "$GOLD_EVAL_ROWS_PATH" \
+    --rows-out "$HARD_NEGATIVE_ROWS_PATH" \
+    --summary-out "$HARD_NEGATIVE_SUMMARY_PATH" \
+    --profile jynxzi
 }
 
 generate_short_form_backfill() {
@@ -275,6 +311,8 @@ fi
 echo "Using training temp base: $WORK_DIR_BASE"
 echo "Using resumable work dir: $WORK_DIR"
 echo "Using VOD ranker short-form mode: $VOD_RANKER_SHORT_FORM_MODE"
+echo "Using VOD ranker gold-train weight: $VOD_RANKER_GOLD_TRAIN_WEIGHT"
+echo "Using VOD ranker hard-negative weight: $VOD_RANKER_HARD_NEGATIVE_WEIGHT"
 echo "Trainiere VOD von ${DATE_FROM} bis ${DATE_TO}"
 echo "Sammle Twitch-Clip-Labels für jynxzi..."
 COLLECT_ARGS=(
@@ -292,6 +330,12 @@ if [[ "$MERGE_OUTPUT" -eq 1 ]]; then
 fi
 "$PYTHON_BIN" ml/collect_twitch_clip_labels.py "${COLLECT_ARGS[@]}"
 
+echo "Exporting frontend gold eval rows for training merge..."
+export_gold_eval_rows
+
+echo "Exporting diagnosis hard-negative rows for training merge..."
+export_hard_negative_rows
+
 SHOULD_TRAIN="$("$PYTHON_BIN" - <<'PY'
 import json
 from pathlib import Path
@@ -308,6 +352,10 @@ print(
         artifact_path=Path("ml/artifacts/jynxzi_ranker.json"),
         state_path=Path("ml/artifacts/jynxzi_training_workflow_state.json"),
         current_state=json.loads(os.environ["CURRENT_WORKFLOW_STATE_JSON"]),
+        dependency_paths=[
+            Path("ml/artifacts/jynxzi_gold_eval_rows.jsonl"),
+            Path("ml/artifacts/jynxzi_ranker_hard_negative_train_rows.jsonl"),
+        ],
     )
     else "no"
 )
@@ -415,12 +463,7 @@ echo "Building eval dataset..."
   --summary-out "$EVAL_SUMMARY_PATH"
 
 echo "Exporting frontend gold eval rows..."
-"$PYTHON_BIN" ml/export_frontend_gold_eval.py \
-  --storage-dir "tmp/storage" \
-  --creator-id jynxzi \
-  --rows-out "$GOLD_EVAL_ROWS_PATH" \
-  --output "$GOLD_EVAL_DATASET_PATH" \
-  --summary-out "$GOLD_EVAL_SUMMARY_PATH"
+export_gold_eval_rows
 
 echo "Calibrating ranker serving threshold on gold-train rows..."
 "$PYTHON_BIN" ml/calibrate_ranker_threshold.py \
@@ -451,6 +494,16 @@ echo "Evaluating trained ranker against heuristic baseline on gold eval rows..."
   > /dev/null
 
 cp "$GOLD_RANKER_EVAL_PATH" "$RANKER_EVAL_PATH"
+
+echo "Diagnosing ranker hard negatives for the next run..."
+"$PYTHON_BIN" ml/diagnose_ranker_holdout.py \
+  --dataset "$GOLD_EVAL_ROWS_PATH" \
+  --profile jynxzi \
+  --artifact-dir "$ARTIFACT_DIR" \
+  --report-out "$RANKER_HOLDOUT_DIAGNOSIS_JSON_PATH" \
+  --csv-out "$RANKER_HOLDOUT_DIAGNOSIS_CSV_PATH" \
+  > /dev/null || true
+export_hard_negative_rows
 
 echo "Evaluating heuristic pipeline ranking..."
 "$PYTHON_BIN" ml/evaluate_pipeline.py \
@@ -531,3 +584,4 @@ echo "Gold eval:      $GOLD_RANKER_EVAL_PATH"
 echo "Proxy eval:     $PROXY_RANKER_EVAL_PATH"
 echo "Ranker eval:    $RANKER_EVAL_PATH"
 echo "Pipeline eval:  $PIPELINE_EVAL_PATH"
+echo "Hard negatives: $HARD_NEGATIVE_ROWS_PATH"

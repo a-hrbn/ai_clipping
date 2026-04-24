@@ -27,6 +27,8 @@ def build_jynxzi_workflow_state(
         "whisper_model": settings.whisper_model,
         "dataset_llm_provider": (os.environ.get("TRAINING_DATASET_LLM_PROVIDER") or "").strip() or "ollama",
         "ranker_short_form_mode": (os.environ.get("VOD_RANKER_SHORT_FORM_MODE") or "off").strip().lower() or "off",
+        "ranker_gold_train_weight": (os.environ.get("VOD_RANKER_GOLD_TRAIN_WEIGHT") or "2.0").strip() or "2.0",
+        "ranker_hard_negative_weight": (os.environ.get("VOD_RANKER_HARD_NEGATIVE_WEIGHT") or "2.5").strip() or "2.5",
         "storage_dir": settings.storage_dir,
         "code_hash": _code_hash(),
     }
@@ -39,13 +41,18 @@ def should_retrain(
     artifact_path: Path,
     state_path: Path,
     current_state: dict[str, object],
+    dependency_paths: list[Path] | None = None,
 ) -> bool:
     if not labels_path.exists() or not dataset_path.exists() or not artifact_path.exists():
         return True
     stored_state = _read_state(state_path)
     if stored_state != current_state:
         return True
-    labels_mtime = labels_path.stat().st_mtime
+    upstream_paths = [labels_path]
+    for path in dependency_paths or []:
+        if path.exists():
+            upstream_paths.append(path)
+    labels_mtime = max(path.stat().st_mtime for path in upstream_paths)
     dataset_mtime = dataset_path.stat().st_mtime
     artifact_mtime = artifact_path.stat().st_mtime
     return labels_mtime > min(dataset_mtime, artifact_mtime)

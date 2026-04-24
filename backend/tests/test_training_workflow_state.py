@@ -108,13 +108,46 @@ class TrainingWorkflowStateTests(unittest.TestCase):
                 )
             )
 
+    def test_should_retrain_uses_dependency_mtime_when_state_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            labels = root / "labels.jsonl"
+            gold_rows = root / "gold_rows.jsonl"
+            dataset = root / "dataset.jsonl"
+            artifact = root / "artifact.json"
+            state = root / "state.json"
+            current_state = {"code_hash": "same"}
+            for path in (labels, gold_rows, dataset, artifact):
+                path.write_text("x", encoding="utf-8")
+            os.utime(labels, (100, 100))
+            os.utime(dataset, (200, 200))
+            os.utime(artifact, (300, 300))
+            os.utime(gold_rows, (500, 500))
+            training_workflow_state.write_state(state, current_state)
+
+            self.assertTrue(
+                training_workflow_state.should_retrain(
+                    labels_path=labels,
+                    dataset_path=dataset,
+                    artifact_path=artifact,
+                    state_path=state,
+                    current_state=current_state,
+                    dependency_paths=[gold_rows],
+                )
+            )
+
     def test_build_jynxzi_workflow_state_includes_runtime_knobs(self) -> None:
         with patch.object(training_workflow_state.settings, "whisper_model", "tiny"), \
              patch.object(training_workflow_state.settings, "storage_dir", "/tmp/storage"), \
              patch("ml.training_workflow_state._code_hash", return_value="abc123"), \
              patch.dict(
                  os.environ,
-                 {"TRAINING_DATASET_LLM_PROVIDER": "groq", "VOD_RANKER_SHORT_FORM_MODE": "supplemental"},
+                 {
+                     "TRAINING_DATASET_LLM_PROVIDER": "groq",
+                     "VOD_RANKER_SHORT_FORM_MODE": "supplemental",
+                     "VOD_RANKER_GOLD_TRAIN_WEIGHT": "2.5",
+                     "VOD_RANKER_HARD_NEGATIVE_WEIGHT": "3.5",
+                 },
                  clear=False,
              ):
             state = training_workflow_state.build_jynxzi_workflow_state(
@@ -135,6 +168,8 @@ class TrainingWorkflowStateTests(unittest.TestCase):
                 "whisper_model": "tiny",
                 "dataset_llm_provider": "groq",
                 "ranker_short_form_mode": "supplemental",
+                "ranker_gold_train_weight": "2.5",
+                "ranker_hard_negative_weight": "3.5",
                 "storage_dir": "/tmp/storage",
                 "code_hash": "abc123",
             },

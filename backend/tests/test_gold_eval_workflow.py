@@ -157,6 +157,62 @@ class GoldEvalWorkflowTests(unittest.TestCase):
         self.assertEqual(eval_rows[0]["source_bucket"], "reaction")
         self.assertEqual(eval_rows[1]["label"], 0)
 
+    def test_import_gold_eval_labels_cli_writes_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            labeled_csv = root / "gold_eval_queue.csv"
+            sidecar = labeled_csv.with_suffix(".features.jsonl")
+            rows_out = root / "rows.jsonl"
+            dataset_out = root / "dataset.jsonl"
+            summary_out = root / "summary.json"
+            labeled_csv.write_text(
+                "queue_id,job_id,candidate_id,vod_id,creator_id,platform,source_url,gold_grade,notes\n"
+                "job-1:cand-1,job-1,cand-1,12345,jynxzi,twitch,https://www.twitch.tv/videos/12345,3,strong winner\n",
+                encoding="utf-8",
+            )
+            sidecar.write_text(
+                json.dumps(
+                    {
+                        "queue_id": "job-1:cand-1",
+                        "job_id": "job-1",
+                        "candidate_id": "cand-1",
+                        "vod_id": "12345",
+                        "creator_id": "jynxzi",
+                        "platform": "twitch",
+                        "source_url": "https://www.twitch.tv/videos/12345",
+                        "window_start": 12.0,
+                        "window_end": 24.0,
+                        "features": {"candidate_id": "cand-1", "source": "reaction", "hook_strength": 0.9},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch(
+                "sys.argv",
+                [
+                    "import_gold_eval_labels.py",
+                    "--labeled-csv",
+                    str(labeled_csv),
+                    "--features-jsonl",
+                    str(sidecar),
+                    "--rows-out",
+                    str(rows_out),
+                    "--output",
+                    str(dataset_out),
+                    "--summary-out",
+                    str(summary_out),
+                ],
+            ):
+                rc = import_gold_eval_labels.main()
+
+            self.assertEqual(rc, 0)
+            self.assertTrue(rows_out.exists())
+            self.assertTrue(dataset_out.exists())
+            self.assertTrue(summary_out.exists())
+            summary = json.loads(summary_out.read_text(encoding="utf-8"))
+            self.assertEqual(summary["labeled_rows"], 1)
+
     def test_import_gold_eval_labels_requires_notes_for_grade_three(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

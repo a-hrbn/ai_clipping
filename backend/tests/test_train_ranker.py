@@ -80,6 +80,42 @@ class TrainRankerTests(unittest.TestCase):
         self.assertTrue(split["train"])
         self.assertTrue(split["validation"])
 
+    def test_split_rows_forces_gold_train_rows_out_of_validation(self) -> None:
+        rows = []
+        for vod in ("vod-a", "vod-b", "vod-c", "vod-d"):
+            rows.append({"vod_id": vod, "candidate_id": f"{vod}-p", "label": 1, "features": {"x": 1.0}})
+            rows.append({"vod_id": vod, "candidate_id": f"{vod}-n", "label": 0, "features": {"x": -1.0}})
+        rows.extend(
+            [
+                {
+                    "vod_id": "vod-gold",
+                    "candidate_id": "gold-p",
+                    "label": 1,
+                    "supervision_tier": "gold_eval",
+                    "gold_holdout_split": "train",
+                    "features": {"x": 2.0},
+                },
+                {
+                    "vod_id": "vod-gold",
+                    "candidate_id": "gold-n",
+                    "label": 0,
+                    "label_source": "gold_eval",
+                    "gold_holdout_split": "train",
+                    "features": {"x": -2.0},
+                },
+            ]
+        )
+
+        split = train_ranker._split_rows(rows)
+
+        validation_ids = {row["candidate_id"] for row in split["validation"]}
+        train_ids = {row["candidate_id"] for row in split["train"]}
+        self.assertEqual(split["gold_train_rows_forced_to_train"], 2)
+        self.assertIn("gold-p", train_ids)
+        self.assertIn("gold-n", train_ids)
+        self.assertNotIn("gold-p", validation_ids)
+        self.assertNotIn("gold-n", validation_ids)
+
     def test_count_values_counts_non_empty_values(self) -> None:
         rows = [
             {"dataset_source": "twitch_vod_primary"},

@@ -154,6 +154,130 @@ class TrainVodRankerTests(unittest.TestCase):
 
         self.assertEqual(rows, vod_rows)
 
+    def test_build_composite_dataset_merges_gold_train_and_excludes_holdout(self) -> None:
+        vod_rows = [
+            {
+                "queue_id": "q-1",
+                "candidate_id": "cand-1",
+                "job_id": "job-1",
+                "vod_id": "vod-1",
+                "label": 0,
+                "label_class": "hard_negative",
+                "dataset_source": "twitch_vod_primary",
+                "supervision_tier": "twitch_clip_proxy",
+                "sample_weight": 1.0,
+                "features": {"hook_strength": 0.1},
+            },
+            {
+                "queue_id": "q-2",
+                "candidate_id": "cand-2",
+                "job_id": "job-1",
+                "vod_id": "vod-1",
+                "label": 0,
+                "label_class": "hard_negative",
+                "dataset_source": "twitch_vod_primary",
+                "supervision_tier": "twitch_clip_proxy",
+                "features": {"hook_strength": 0.2},
+            },
+        ]
+        gold_rows = [
+            {
+                "queue_id": "q-1",
+                "candidate_id": "cand-1",
+                "job_id": "job-1",
+                "vod_id": "vod-1",
+                "label": 1,
+                "label_class": "gold_positive",
+                "supervision_tier": "gold_eval",
+                "label_source": "gold_eval",
+                "gold_holdout_split": "train",
+                "sample_weight": 1.5,
+                "features": {"hook_strength": 0.9},
+            },
+            {
+                "queue_id": "q-3",
+                "candidate_id": "cand-3",
+                "job_id": "job-1",
+                "vod_id": "vod-1",
+                "label": 1,
+                "supervision_tier": "gold_eval",
+                "label_source": "gold_eval",
+                "gold_holdout_split": "holdout",
+                "features": {"hook_strength": 1.0},
+            },
+        ]
+        with patch("ml.train_vod_ranker.build_twitch_training_dataset.build_dataset", return_value=vod_rows):
+            rows = train_vod_ranker.build_composite_dataset(
+                labels=[{"broadcaster": "jynxzi"}],
+                profile="jynxzi",
+                work_dir=Path("/tmp/ignored"),
+                gold_train_rows=gold_rows,
+                gold_train_weight=2.0,
+            )
+
+        self.assertEqual(len(rows), 2)
+        rows_by_queue = {row["queue_id"]: row for row in rows}
+        self.assertEqual(rows_by_queue["q-1"]["dataset_source"], "gold_eval_train")
+        self.assertEqual(rows_by_queue["q-1"]["label"], 1)
+        self.assertEqual(rows_by_queue["q-1"]["sample_weight"], 3.0)
+        self.assertEqual(rows_by_queue["q-1"]["features"]["hook_strength"], 0.9)
+        self.assertEqual(rows_by_queue["q-2"]["dataset_source"], "twitch_vod_primary")
+        self.assertNotIn("q-3", rows_by_queue)
+
+    def test_build_composite_dataset_merges_weighted_hard_negatives(self) -> None:
+        vod_rows = [
+            {
+                "queue_id": "q-1",
+                "candidate_id": "cand-1",
+                "job_id": "job-1",
+                "vod_id": "vod-1",
+                "label": 1,
+                "label_class": "positive",
+                "dataset_source": "twitch_vod_primary",
+                "sample_weight": 1.0,
+                "features": {"hook_strength": 0.9},
+            },
+            {
+                "queue_id": "q-2",
+                "candidate_id": "cand-2",
+                "job_id": "job-1",
+                "vod_id": "vod-1",
+                "label": 1,
+                "dataset_source": "twitch_vod_primary",
+                "features": {"hook_strength": 0.7},
+            },
+        ]
+        hard_negative_rows = [
+            {
+                "queue_id": "q-2",
+                "candidate_id": "cand-2",
+                "job_id": "job-1",
+                "vod_id": "vod-1",
+                "label": 0,
+                "gold_holdout_split": "train",
+                "sample_weight": 1.2,
+                "features": {"hook_strength": 0.1},
+            }
+        ]
+        with patch("ml.train_vod_ranker.build_twitch_training_dataset.build_dataset", return_value=vod_rows):
+            rows = train_vod_ranker.build_composite_dataset(
+                labels=[{"broadcaster": "jynxzi"}],
+                profile="jynxzi",
+                work_dir=Path("/tmp/ignored"),
+                hard_negative_rows=hard_negative_rows,
+                hard_negative_weight=2.5,
+            )
+
+        self.assertEqual(len(rows), 2)
+        rows_by_queue = {row["queue_id"]: row for row in rows}
+        self.assertEqual(rows_by_queue["q-2"]["label"], 0)
+        self.assertEqual(rows_by_queue["q-2"]["dataset_source"], "gold_eval_hard_negative_train")
+        self.assertEqual(rows_by_queue["q-2"]["label_class"], "gold_hard_negative")
+        self.assertEqual(rows_by_queue["q-2"]["supervision_tier"], "gold_eval")
+        self.assertEqual(rows_by_queue["q-2"]["gold_holdout_split"], "train")
+        self.assertEqual(rows_by_queue["q-2"]["sample_weight"], 3.0)
+        self.assertEqual(rows_by_queue["q-2"]["features"]["hook_strength"], 0.1)
+
     def test_filter_short_form_rows_matches_broadcaster(self) -> None:
         rows = [
             {"streamer": "jynxzi", "label": 1},
@@ -176,6 +300,10 @@ class TrainVodRankerTests(unittest.TestCase):
             supplemental_rows,
             supplemental_weight,
             short_form_mode,
+            gold_train_rows,
+            gold_train_weight,
+            hard_negative_rows,
+            hard_negative_weight,
         ):
             return [{
                 "candidate_id": f"{profile}-1",
@@ -193,6 +321,7 @@ class TrainVodRankerTests(unittest.TestCase):
             rc = train_vod_ranker._train_per_streamer(
                 labels,
                 short_form_rows=[{"streamer": "jynxzi", "label": 1, "features": {}}],
+                hard_negative_rows=[{"streamer": "jynxzi", "label": 0, "features": {}}],
                 artifact_dir=Path(tmp),
                 work_dir=Path(tmp) / "work",
                 short_form_weight=0.35,

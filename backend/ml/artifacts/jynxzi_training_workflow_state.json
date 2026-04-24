@@ -1,9 +1,11 @@
 {
-  "code_hash": "b0e4fdf5c6b630e561c7e18e3b45269010f9b7e9a8bd963427fb3d12ecad909d",
+  "code_hash": "e8b5f6cee75affd06793deb9e0b9f09c9bf3b357a422b3592b61f1a37e03eab5",
   "dataset_llm_provider": "none",
   "date_from": "2026-03-01",
   "date_to": "2026-03-14",
   "merge_output": true,
+  "ranker_gold_train_weight": "2.0",
+  "ranker_hard_negative_weight": "2.5",
   "ranker_short_form_mode": "off",
   "skip_covered": true,
   "storage_dir": "/app/backend/tmp/storage",

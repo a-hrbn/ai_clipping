@@ -1,5 +1,457 @@
 # Task Plan
 
+## 2026-04-24 Plan: Evaluate New Hard-Negative Training Run
+
+- [x] Check fresh artifact timestamps and training summary.
+- [x] Verify hard-negative rows were included in the training dataset.
+- [x] Inspect ranker artifact status and validation gates.
+- [x] Compare proxy, gold, and holdout metrics.
+- [x] Inspect updated holdout diagnosis and next hard-negative export.
+- [x] Document verdict and next step.
+
+### Review Notes
+
+- Fresh artifacts were written around `2026-04-24 14:53`.
+- `local_train_summary.json` reports a successful full run:
+  - `training_return_code=0`
+  - `artifact_only=false`
+  - date range `2026-03-01` to `2026-03-14`
+  - `training_vod_workers=1`
+  - `training_label_workers=3`
+  - `ranker_short_form_mode=off`
+- Workflow state includes:
+  - `ranker_gold_train_weight=2.0`
+  - `ranker_hard_negative_weight=2.5`
+- The training dataset used the hard negatives:
+  - rows: `221`
+  - labels: `38` positive, `183` negative
+  - dataset sources: `126` `gold_eval_train`, `9` `gold_eval_hard_negative_train`, `52` VOD primary, `34` boundary near miss
+  - hard-negative sample weight: `2.5`
+  - the 9 hard negatives came from previous holdout diagnosis and had original split `holdout`, then were promoted to train for this run.
+- Ranker artifact:
+  - status now `usable`
+  - selected model `logistic_regression`
+  - blend `0.55`
+  - serving threshold `5.531`
+  - validation: `mrr=0.767`, `ndcg_at_5=0.826`, `ranking_metric_p25=0.5`
+  - this clears the previous failed gate `validation_group_ranking_metric_p25_below_minimum`.
+- Gold threshold calibration succeeded:
+  - status `updated`
+  - old threshold `-0.583427`
+  - new threshold `5.531`
+  - calibration rows `126`, positives `20`, negatives `106`
+  - calibrated train precision/recall/f1: `0.857` / `0.9` / `0.878`
+- Full gold eval:
+  - rows `172`
+  - trained runtime uses artifact: `true`
+  - trained: `accuracy=0.907`, `precision=0.724`, `recall=0.724`, `f1=0.724`, `ndcg_at_5=0.424`, `mrr=0.415`
+  - deltas vs heuristic: `f1 +0.435`, `ndcg_at_5 +0.104`, `mrr +0.144`
+- Gold train split:
+  - trained: `accuracy=0.96`, `precision=0.857`, `recall=0.9`, `f1=0.878`, `ndcg_at_5=0.387`, `mrr=0.387`
+  - strong improvement vs heuristic, mostly from suppressing false positives.
+- Reported full holdout (`46` rows) is partly contaminated because 9 old holdout negatives are now training hard negatives:
+  - trained: `accuracy=0.761`, `precision=0.375`, `recall=0.333`, `f1=0.353`, `ndcg_at_5=0.290`, `mrr=0.280`
+  - deltas vs heuristic: `f1 +0.026`, `ndcg_at_5 -0.015`, `mrr -0.020`
+- Clean holdout excluding the 9 promoted hard negatives:
+  - rows `37`, positives `9`, negatives `28`
+  - trained: `accuracy=0.784`, `precision=0.600`, `recall=0.333`, `f1=0.429`, `ndcg_at_5=0.320`, `mrr=0.320`
+  - deltas vs heuristic: `f1 +0.038`, `ndcg_at_5 +0.000`, `mrr +0.000`
+- Updated holdout diagnosis:
+  - diagnosis rows dropped from previous `36` to `20`
+  - errors changed from false-positive-heavy to recall-heavy:
+    - `6` false negatives
+    - `3` false positives
+    - `10` true negatives
+    - `1` true positive
+  - next hard-negative export dropped from `9` rows to `3` rows.
+- Verdict:
+  - The hard-negative step fixed the runtime gate and reduced false positives substantially.
+  - It did not yet improve clean holdout ranking; clean holdout `mrr`/`ndcg_at_5` are flat.
+  - The model is now too conservative on positives, with holdout recall only `0.333`.
+
+## 2026-04-24 Plan: Add Hard-Negative Training From Diagnosis
+
+- [x] Define a leakage-aware hard-negative export flow.
+- [x] Implement hard-negative JSONL export from ranker diagnosis CSV.
+- [x] Wire VOD ranker training to include weighted hard-negative rows.
+- [x] Generate the current Jynxzi hard-negative training artifact.
+- [x] Run focused tests, syntax checks, and graphify rebuild attempt.
+- [x] Document usage, caveat, and next training command.
+
+### Review Notes
+
+- Added `backend/ml/export_ranker_hard_negatives.py`.
+  - Reads `jynxzi_ranker_holdout_diagnosis.csv`.
+  - Selects `error_type=false_positive`, `label=0`, default `forced_score >= 0.0`.
+  - Joins back to `jynxzi_gold_eval_rows.jsonl` to preserve full features.
+  - Writes hard-negative train rows and a summary.
+  - Avoids rewriting unchanged outputs so mtime alone does not force retraining.
+- Generated current Jynxzi hard-negative artifacts:
+  - `backend/ml/artifacts/jynxzi_ranker_hard_negative_train_rows.jsonl`
+  - `backend/ml/artifacts/jynxzi_ranker_hard_negative_train_summary.json`
+- Current export result:
+  - diagnosis rows: `36`
+  - selected false positives: `9`
+  - exported rows: `9`
+  - source rows found: `9/9`
+  - candidate sources: `peak=3`, `quote=2`, `narrative_reveal=2`, `boundary_perturbation=2`
+  - original split: `holdout=9`, promoted to train in the hard-negative artifact.
+- Wired `backend/ml/train_vod_ranker.py`:
+  - new `--include-hard-negative-train`
+  - new `--hard-negative-weight`, default `2.5`
+  - hard negatives are prepared as `dataset_source=gold_eval_hard_negative_train`.
+  - They are marked `gold_holdout_split=train` and `supervision_tier=gold_eval`, so `train_ranker` forces them into train, not validation.
+- Wired `backend/ml/train_jynxzi_vod.sh`:
+  - exports hard negatives before the retrain decision if a diagnosis CSV exists.
+  - passes hard-negative rows and weight into VOD ranker training.
+  - includes the hard-negative rows file as a retrain dependency.
+  - regenerates diagnosis and hard-negative rows after eval for the next run.
+- Updated workflow state:
+  - includes `ranker_hard_negative_weight`.
+- Dry-run merge against the current dataset:
+  - base rows: `212`
+  - hard negatives: `9`
+  - merged rows for next training: `221`
+  - effective hard-negative sample weight: `2.5`
+  - hard holdout rows remaining in prepared training rows: `0`
+- Caveat:
+  - These 9 rows came from the current holdout diagnosis. They are now promoted into training, so the same candidates should not be treated as untouched holdout evidence after the next training run.
+- Verification:
+  - `PYTHONPATH=/home/antonio/ai_clipping/backend /home/antonio/ai_clipping/backend/.venv/bin/python -m unittest backend.tests.test_diagnose_ranker_holdout backend.tests.test_export_ranker_hard_negatives backend.tests.test_train_vod_ranker backend.tests.test_training_workflow_state`
+  - `python3 -m py_compile backend/ml/diagnose_ranker_holdout.py backend/ml/export_ranker_hard_negatives.py backend/ml/train_vod_ranker.py backend/ml/training_workflow_state.py backend/tests/test_diagnose_ranker_holdout.py backend/tests/test_export_ranker_hard_negatives.py backend/tests/test_train_vod_ranker.py backend/tests/test_training_workflow_state.py`
+  - `bash -n backend/ml/train_jynxzi_vod.sh`
+  - `git diff --check`
+  - Graphify rebuild attempted but still fails in this environment with `ModuleNotFoundError: No module named 'graphify'`.
+
+## 2026-04-24 Plan: Analyze Holdout Diagnosis CSV Patterns
+
+- [x] Summarize error distribution and affected groups.
+- [x] Aggregate candidate sources and feature contributions by error type.
+- [x] Inspect ranking inversions in mixed positive/negative groups.
+- [x] Document pattern and recommended next step.
+
+### Review Notes
+
+- Diagnosis CSV rows: `36`.
+- Error types: `27` false positives, `7` true positives, `2` true negatives.
+- Predictions are too permissive in the problem subset: `34/36` rows predicted positive.
+- False positives are mostly `peak` candidates: `15/27`.
+- False-positive top positive feature contributions are dominated by:
+  - `speaker_context_clarity`: `20/27`
+  - `profile_fit_score`: `15/27`
+  - `standalone_score`: `15/27`
+  - `quoteability_score`: `14/27`
+  - `chapter_position`: `11/27`
+- All-negative false-positive groups are a major issue:
+  - `2744998185`: `4/4` false positives
+  - `2697967639`: `3/3` false positives
+  - `2712128863`: `3/3` false positives
+  - `2722404357`: `3/3` false positives
+- Ranking inversions where a `label=0` ranks above a `label=1`:
+  - `2750220507`: negative `narrative_reveal` at rank 1 beats positive `peak`.
+  - `2698737426`: negative `narrative_reveal` at rank 1 beats positive `peak`.
+  - `2697130608`: negative `peak` at rank 1 beats positive `peak`.
+- Pattern: current model/threshold over-promotes plausible-looking setup/semantic/position signals and still does not separate "clip-like but not viral" negatives from true winners reliably.
+
+## 2026-04-24 Plan: Add Forced Holdout Diagnosis Script
+
+- [x] Review existing ranker eval conventions.
+- [x] Implement a reusable forced-artifact holdout diagnosis script.
+- [x] Add regression coverage for grouped metrics and CSV output.
+- [x] Run focused tests, syntax checks, and graphify rebuild attempt.
+- [x] Document usage and findings.
+
+### Review Notes
+
+- Added `backend/ml/diagnose_ranker_holdout.py`.
+  - Defaults to `backend/ml/artifacts/jynxzi_gold_eval_rows.jsonl`.
+  - Defaults to `gold_holdout_split=holdout`.
+  - Loads the local ranker artifact even when runtime inspection rejects it.
+  - Uses the same safe runtime blend cap as `Ranker` while bypassing the usability gate for diagnosis.
+  - Writes JSON and CSV reports by default:
+    - `backend/ml/artifacts/jynxzi_ranker_holdout_diagnosis.json`
+    - `backend/ml/artifacts/jynxzi_ranker_holdout_diagnosis.csv`
+  - CSV includes review URLs with Twitch timestamps, row-level forced scores, heuristic scores, trained scores, error type, and top feature contributions.
+- Added `backend/tests/test_diagnose_ranker_holdout.py`.
+- Real Jynxzi diagnosis run:
+  - selected holdout rows: `46`
+  - artifact status: `rejected`
+  - rejection reason: `validation_group_ranking_metric_p25_below_minimum`
+  - forced holdout metrics: `accuracy=0.283`, `precision=0.214`, `recall=1.0`, `f1=0.353`, `ndcg_at_5=0.276`, `mrr=0.260`
+  - deltas vs heuristic: `f1 +0.026`, `ndcg_at_5 -0.029`, `mrr -0.040`
+  - worst positive-ranking groups: `2697130608`, `2698737426`, `2750220507`
+  - strongest all-negative false-positive groups: `2744998185`, `2697967639`, `2712128863`, `2722404357`
+- Verification:
+  - `PYTHONPATH=/home/antonio/ai_clipping/backend /home/antonio/ai_clipping/backend/.venv/bin/python -m unittest backend.tests.test_diagnose_ranker_holdout backend.tests.test_train_ranker`
+  - `python3 -m py_compile backend/ml/diagnose_ranker_holdout.py backend/tests/test_diagnose_ranker_holdout.py`
+  - `git diff --check`
+  - Graphify rebuild attempted but still fails in this environment with `ModuleNotFoundError: No module named 'graphify'`.
+
+## 2026-04-24 Plan: Evaluate Gold-Train Weighted Training Run
+
+- [x] Check container/log availability.
+- [x] Inspect fresh artifact timestamps and local training summary.
+- [x] Verify ranker dataset includes gold-train rows and excludes holdout.
+- [x] Verify ranker artifact training stats include gold-train rows.
+- [x] Compare proxy, gold, and holdout metrics.
+- [x] Document verdict and next step.
+
+### Review Notes
+
+- `docker ps -a` returned no containers, so live/container logs were unavailable.
+- Fresh artifacts were written around `2026-04-24 14:14` to `14:15`.
+- `local_train_summary.json` reports a successful non-artifact-only run:
+  - `training_return_code=0`
+  - `artifact_only=false`
+  - date range `2026-03-01` to `2026-03-14`
+  - `training_vod_workers=1`
+  - `training_label_workers=3`
+  - `ranker_short_form_mode=off`
+  - `ranker_gold_train_weight=2.0` in workflow state.
+- The ranker training dataset now includes the real gold-train signals:
+  - `jynxzi_vod_training_rows.jsonl` has `212` rows.
+  - Dataset sources: `126` `gold_eval_train`, `52` `twitch_vod_primary`, `34` `twitch_vod_boundary_near_miss`.
+  - Gold rows have `sample_weight=2.0`.
+  - Gold holdout rows in the training dataset: `0`.
+- The split guard worked:
+  - `126` gold rows total.
+  - `126` gold rows in train split.
+  - `0` gold rows in validation split.
+  - `gold_train_rows_forced_to_train=126`.
+- The saved ranker artifact confirms it was trained with those rows:
+  - `training_stats.rows=212`
+  - `training_stats.dataset_sources.gold_eval_train=126`
+  - `training_stats.supervision_tiers.gold_eval=126`
+  - `train_rows=192`, `validation_rows=20`.
+- Selected model:
+  - `logistic_regression`
+  - artifact blend `0.9`, runtime safe blend cap `0.65`
+  - serving threshold `-4.666997`.
+- The artifact is currently rejected by runtime inspection:
+  - reason `validation_group_ranking_metric_p25_below_minimum`
+  - validation `mrr=0.733`, `ndcg_at_5=0.8`, but `ranking_metric_p25=0.333`, below the `0.45` runtime gate.
+  - Because of this, `jynxzi_proxy_eval.json`, `jynxzi_gold_eval.json`, and `jynxzi_ranker_eval.json` report `trained_runtime_uses_artifact=false`.
+- The post-training gold calibration also skipped for the same artifact rejection reason:
+  - `jynxzi_threshold_calibration.json`: `status=skipped`, `artifact_status=rejected`, `calibration_rows=126`.
+- Forced offline evaluation of the learned artifact shows it did learn signal:
+  - Full gold set: `f1 0.289 -> 0.320`, `ndcg_at_5 0.320 -> 0.406`, `mrr 0.271 -> 0.383`.
+  - Gold train split: `f1 0.274 -> 0.308`, `ndcg_at_5 0.283 -> 0.387`, `mrr 0.240 -> 0.387`.
+  - Gold holdout split: `f1 0.327 -> 0.353`, but `ndcg_at_5 0.305 -> 0.276`, `mrr 0.300 -> 0.260`.
+- Verdict: yes, the real gold-train signals were trained into the model weights. The artifact is not production-usable yet because validation tail quality fails the runtime gate, and clean holdout ranking regressed slightly.
+
+## 2026-04-24 Plan: Train Ranker With Gold-Train Rows
+
+- [x] Inspect VOD ranker dataset composition and gold safety guards.
+- [x] Add gold-train inclusion to the composite ranker dataset while excluding holdout.
+- [x] Wire Jynxzi VOD training to pass the canonical gold rows file.
+- [x] Add regression tests for gold-train inclusion and holdout exclusion.
+- [x] Run focused tests, syntax checks, shell syntax, and graphify rebuild attempt.
+
+### Review Notes
+
+- Added `--include-gold-train` and `--gold-train-weight` to `backend/ml/train_vod_ranker.py`.
+  - Only `gold_holdout_split=train` rows are prepared for training.
+  - `holdout` rows are ignored before the training dataset is written.
+  - Gold rows get `dataset_source=gold_eval_train`, keep `supervision_tier=gold_eval`, and receive a default `2.0x` sample-weight multiplier.
+  - Gold rows replace matching proxy rows by stable identity (`queue_id`, `job_id/candidate_id`, or candidate/window fallback) instead of creating conflicting duplicates.
+- Updated `backend/ml/train_ranker.py` so gold-train rows are forced into the training split, not the internal validation split, when enough non-gold rows exist for validation.
+- Updated `backend/ml/train_jynxzi_vod.sh`:
+  - Exports/merges frontend gold rows before the retrain decision.
+  - Passes `--include-gold-train "$GOLD_EVAL_ROWS_PATH"` to VOD ranker training.
+  - Uses `VOD_RANKER_GOLD_TRAIN_WEIGHT`, default `2.0`.
+- Updated `backend/ml/training_workflow_state.py`:
+  - `should_retrain` can now consider dependency mtimes.
+  - Jynxzi workflow state includes `ranker_gold_train_weight`.
+  - Gold rows are a retrain dependency in `train_jynxzi_vod.sh`.
+- Updated `backend/ml/export_frontend_gold_eval.py` to avoid rewriting unchanged output content, preventing unchanged gold exports from forcing retraining on every run.
+- Real artifact dry-run using current files:
+  - VOD rows before merge: `86`.
+  - Gold rows total: `172`.
+  - Prepared gold-train rows: `126`.
+  - Merged training rows for next run: `212`.
+  - Labels after merge: `38` positive, `174` negative.
+  - Dataset sources after merge: `126` gold train, `52` VOD primary, `34` VOD boundary near miss.
+  - Gold holdout rows in merged training set: `0`.
+- Verification:
+  - `PYTHONPATH=/home/antonio/ai_clipping/backend /home/antonio/ai_clipping/backend/.venv/bin/python -m unittest backend.tests.test_export_frontend_gold_eval backend.tests.test_gold_eval_workflow backend.tests.test_train_vod_ranker backend.tests.test_train_ranker backend.tests.test_training_workflow_state`
+  - `python3 -m py_compile backend/ml/train_vod_ranker.py backend/ml/train_ranker.py backend/ml/training_workflow_state.py backend/ml/export_frontend_gold_eval.py backend/tests/test_train_vod_ranker.py backend/tests/test_train_ranker.py backend/tests/test_training_workflow_state.py`
+  - `bash -n backend/ml/train_jynxzi_vod.sh`
+  - `git diff --check`
+  - Graphify rebuild attempted but still fails in this environment with `ModuleNotFoundError: No module named 'graphify'`.
+
+## 2026-04-24 Plan: Evaluate Latest 172-Row Gold Training Run
+
+- [x] Check container/log availability.
+- [x] Inspect fresh artifact timestamps and local training summary.
+- [x] Verify merged gold row usage in export, calibration, and eval.
+- [x] Compare proxy, gold, and holdout metrics.
+- [x] Document verdict and next step.
+
+### Review Notes
+
+- `docker ps -a` returned no containers, so live/container logs were unavailable.
+- Fresh artifacts were written around `2026-04-24 14:04`.
+- `local_train_summary.json` reports a successful non-artifact-only run:
+  - `training_return_code=0`
+  - `artifact_only=false`
+  - date range `2026-03-01` to `2026-03-14`
+  - `training_vod_workers=1`
+  - `training_label_workers=3`
+  - `ranker_short_form_mode=off`
+- The gold merge fix worked:
+  - `jynxzi_gold_eval_rows.jsonl` has `172` rows.
+  - `jynxzi_gold_eval_summary.json` has `merged_existing=true`.
+  - Summary source rows: `existing=172`, `frontend=97`, `merged=172`, `duplicates_skipped=97`.
+  - Labels: `29` positive, `143` negative.
+  - Gold split: `126` train, `46` holdout.
+- Gold threshold calibration now used the expanded gold set:
+  - `jynxzi_threshold_calibration.json` has `rows=172`, `calibration_rows=126`.
+  - Calibration positives/negatives: `20` / `106`.
+  - Threshold stayed `-2.606`.
+  - Gold-train calibrated metrics: `precision=0.255`, `recall=0.700`, `f1=0.373`.
+- Ranker artifact remains usable:
+  - selected model `logistic_regression`
+  - `blend=0.95`
+  - `serving_threshold=-2.606`
+  - no artifact health warnings.
+- Proxy eval is unchanged and still strong:
+  - rows `86`, positives `18`, negatives `68`
+  - trained runtime: `accuracy=0.616`, `precision=0.347`, `recall=0.944`, `f1=0.507`
+  - deltas vs heuristic: `f1 +0.161`, `ndcg_at_5 +0.359`, `mrr +0.355`
+- Expanded gold eval:
+  - rows `172`, positives `29`, negatives `143`
+  - trained runtime: `accuracy=0.640`, `precision=0.268`, `recall=0.655`, `f1=0.380`
+  - deltas vs heuristic: `accuracy +0.471`, `precision +0.099`, `f1 +0.091`, `ndcg_at_5 +0.026`, `mrr +0.056`
+- Expanded gold holdout:
+  - rows `46`, positives `9`, negatives `37`
+  - trained runtime: `accuracy=0.674`, `precision=0.312`, `recall=0.556`, `f1=0.400`
+  - deltas vs heuristic: `f1 +0.073`, but `ndcg_at_5 -0.015`, `mrr -0.020`
+- Weak bucket:
+  - `twitch_label_proxy` has `27` rows.
+  - trained runtime predicts no positives there: `precision=0.0`, `recall=0.0`, `f1=0.0`.
+  - ranking also regresses there: `ndcg_at_5 -0.023`, `mrr -0.046`.
+- Verdict: the run now correctly evaluates/calibrates on the expanded gold set. It is not a model-training improvement yet, because ranker training still uses the same `86` proxy rows; the new gold rows currently affect threshold calibration and evaluation, not the learned model weights.
+
+## 2026-04-24 Plan: Merge Manual And Frontend Gold Rows
+
+- [x] Add an export mode that merges existing curated gold rows with frontend rows.
+- [x] Deduplicate rows by stable gold row identity and prefer newer frontend updates on conflict.
+- [x] Wire Jynxzi VOD training to use the merge mode.
+- [x] Restore canonical Jynxzi gold artifacts to the combined 172-row set.
+- [x] Verify with focused tests, syntax checks, shell syntax, artifact dry-run, and graphify rebuild attempt.
+
+### Review Notes
+
+- Added `--merge-existing` to `backend/ml/export_frontend_gold_eval.py`.
+  - Existing curated rows are read from `--rows-out`.
+  - Frontend rows are merged into them instead of replacing the whole file.
+  - Deduplication uses `queue_id`, then `job_id/candidate_id`, then candidate/window fallbacks.
+  - Newer frontend rows replace matching existing rows when `updated_at` is newer.
+  - Manual rows without `updated_at` are not overwritten by untimestamped frontend rows on key collision.
+- Kept `--preserve-existing-if-empty` for empty frontend exports.
+- Updated `backend/ml/train_jynxzi_vod.sh` to call the exporter with both `--merge-existing` and `--preserve-existing-if-empty`.
+- Restored canonical Jynxzi gold artifacts to the combined gold set:
+  - `backend/ml/artifacts/jynxzi_gold_eval_rows.jsonl`
+  - `backend/ml/artifacts/jynxzi_gold_eval_dataset.jsonl`
+  - `backend/ml/artifacts/jynxzi_gold_eval_summary.json`
+- Real artifact dry-run result:
+  - Existing canonical rows: `172`.
+  - Frontend rows discovered: `97`.
+  - Merged rows written: `172`.
+  - Duplicates skipped: `97`.
+  - Labels: `29` positive, `143` negative.
+  - Gold split: `126` train, `46` holdout.
+- Verification:
+  - `PYTHONPATH=/home/antonio/ai_clipping/backend /home/antonio/ai_clipping/backend/.venv/bin/python -m unittest backend.tests.test_export_frontend_gold_eval backend.tests.test_gold_eval_workflow`
+  - `python3 -m py_compile backend/ml/export_frontend_gold_eval.py backend/ml/import_gold_eval_labels.py backend/tests/test_export_frontend_gold_eval.py backend/tests/test_gold_eval_workflow.py`
+  - `bash -n backend/ml/train_jynxzi_vod.sh`
+  - `git diff --check`
+  - Graphify rebuild attempted but still fails in this environment with `ModuleNotFoundError: No module named 'graphify'`.
+
+## 2026-04-24 Plan: Evaluate New Training Run
+
+- [x] Check container/log availability.
+- [x] Inspect fresh artifact timestamps and training summary.
+- [x] Compare proxy, gold, and holdout metrics.
+- [x] Verify whether combined gold rows were used/preserved.
+- [x] Document verdict and next step.
+
+### Review Notes
+
+- `docker ps -a` returned no containers, so live/container logs were unavailable.
+- Fresh artifacts were written around `2026-04-24 13:45`.
+- `local_train_summary.json` reports a successful non-artifact-only run:
+  - `training_return_code=0`
+  - `artifact_only=false`
+  - date range `2026-03-01` to `2026-03-14`
+  - `training_vod_workers=1`
+  - `training_label_workers=3`
+  - `ranker_short_form_mode=off`
+- The run did not use the combined `172` gold rows:
+  - `jynxzi_gold_eval_summary.json` has `97` rows.
+  - `jynxzi_threshold_calibration.json` has `rows=97`, `calibration_rows=67`.
+  - The separate combined file still has `172` rows, but the canonical training gold file was overwritten back to `97`.
+- Ranker artifact remains usable:
+  - selected model `logistic_regression`
+  - `blend=0.95`
+  - `serving_threshold=-2.606`
+  - artifact health has no warnings.
+- Proxy eval:
+  - rows `86`, positives `18`, negatives `68`
+  - trained runtime: `accuracy=0.616`, `precision=0.347`, `recall=0.944`, `f1=0.507`
+  - deltas vs heuristic: `f1 +0.161`, `ndcg_at_5 +0.359`, `mrr +0.355`
+- Gold eval on the old 97-row set:
+  - trained runtime: `accuracy=0.773`, `precision=0.385`, `recall=0.625`, `f1=0.476`
+  - deltas vs heuristic: `accuracy +0.608`, `precision +0.220`, `f1 +0.193`, `ndcg_at_5 +0.023`, `mrr +0.038`
+- Gold holdout remains weak:
+  - holdout rows `30`, positives `6`, negatives `24`
+  - trained runtime: `precision=0.333`, `recall=0.333`, `f1=0.333`
+  - ranking deltas vs heuristic: `ndcg_at_5 -0.024`, `mrr -0.034`
+- Attempted a local eval of the current artifact against `jynxzi_gold_eval_rows_combined.jsonl`, but local execution failed because the venv is missing `whisper`.
+- Verdict: this run is effectively the same model/eval result as the prior 97-row gold run. It confirms the artifact is operational, but it does not prove improvement from the newly labeled active gold data.
+
+## 2026-04-24 Plan: Import Active Gold Labels
+
+- [x] Fix `import_gold_eval_labels.py` CLI entrypoint.
+- [x] Import labeled active gold queue into gold eval row/dataset artifacts.
+- [x] Verify imported row counts, grade distribution, and train/holdout split.
+- [x] Build separate combined gold artifacts from existing plus active labels.
+- [x] Document resulting counts and next training command.
+
+### Review Notes
+
+- Fixed `backend/ml/import_gold_eval_labels.py` so direct script execution calls `main()`.
+- Added CLI regression coverage in `backend/tests/test_gold_eval_workflow.py`.
+- Imported `backend/ml/artifacts/jynxzi_active_gold_eval_queue.csv` into:
+  - `backend/ml/artifacts/jynxzi_gold_eval_rows_active.jsonl`
+  - `backend/ml/artifacts/jynxzi_gold_eval_dataset_active.jsonl`
+  - `backend/ml/artifacts/jynxzi_gold_eval_summary_active.json`
+- Active import result:
+  - `75` labeled rows, `0` skipped.
+  - Grade distribution: `0=36`, `1=26`, `2=10`, `3=3`.
+  - Labels: `13` positive, `62` negative.
+  - Gold split: `59` train, `16` holdout.
+- Built separate combined artifacts without overwriting canonical `jynxzi_gold_eval_rows.jsonl`:
+  - `backend/ml/artifacts/jynxzi_gold_eval_rows_combined.jsonl`
+  - `backend/ml/artifacts/jynxzi_gold_eval_dataset_combined.jsonl`
+  - `backend/ml/artifacts/jynxzi_gold_eval_summary_combined.json`
+- Copied the combined data into the canonical training gold artifacts:
+  - `backend/ml/artifacts/jynxzi_gold_eval_rows.jsonl`
+  - `backend/ml/artifacts/jynxzi_gold_eval_dataset.jsonl`
+  - `backend/ml/artifacts/jynxzi_gold_eval_summary.json`
+- Combined result:
+  - `172` rows total from `97` existing + `75` active.
+  - `0` duplicates skipped.
+  - Labels: `29` positive, `143` negative.
+  - Gold split: `126` train, `46` holdout.
+- Updated `backend/ml/export_frontend_gold_eval.py` and `backend/ml/train_jynxzi_vod.sh` so an empty frontend export preserves existing curated gold artifacts during training.
+- Verification:
+  - `PYTHONPATH=/home/antonio/ai_clipping/backend /home/antonio/ai_clipping/backend/.venv/bin/python -m unittest backend.tests.test_export_frontend_gold_eval backend.tests.test_gold_eval_workflow`
+  - `python3 -m py_compile backend/ml/export_frontend_gold_eval.py backend/ml/import_gold_eval_labels.py backend/tests/test_export_frontend_gold_eval.py backend/tests/test_gold_eval_workflow.py`
+  - `bash -n backend/ml/train_jynxzi_vod.sh`
+  - `git diff --check`
+  - Graphify rebuild attempted but still fails in this environment with `ModuleNotFoundError: No module named 'graphify'`.
+
 ## 2026-04-24 Plan: Push Active Gold Labels
 
 - [x] Inspect branch and changed files.

@@ -11,6 +11,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from ml import build_twitch_training_dataset, train_ranker, training_workflow_state
+from services.gold_eval_policy import GOLD_HOLDOUT_SPLIT_FIELD
 
 _MIN_PRIMARY_POSITIVE_ROWS = 6
 _MIN_PRIMARY_UNIQUE_VODS = 2
@@ -77,6 +78,34 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--include-gold-train",
+        default="",
+        help=(
+            "Optional gold-eval JSONL rows. Only rows with gold_holdout_split=train "
+            "are merged into the ranker training dataset; holdout rows are ignored."
+        ),
+    )
+    parser.add_argument(
+        "--gold-train-weight",
+        type=float,
+        default=2.0,
+        help="Sample-weight multiplier for gold-train rows merged into ranker training.",
+    )
+    parser.add_argument(
+        "--include-hard-negative-train",
+        default="",
+        help=(
+            "Optional hard-negative JSONL rows, usually exported from ranker holdout diagnosis. "
+            "Rows are forced into ranker training with --hard-negative-weight."
+        ),
+    )
+    parser.add_argument(
+        "--hard-negative-weight",
+        type=float,
+        default=2.5,
+        help="Sample-weight multiplier for diagnosis-mined hard-negative rows.",
+    )
+    parser.add_argument(
         "--per-streamer",
         action="store_true",
         help="Train one artifact per broadcaster using that broadcaster's VOD windows as the primary data.",
@@ -109,6 +138,10 @@ def main() -> int:
 
     short_form_path = pathlib.Path(args.include_short_form) if args.include_short_form else None
     short_form_rows = _read_jsonl(short_form_path) if short_form_path and short_form_path.exists() else []
+    gold_train_path = pathlib.Path(args.include_gold_train) if args.include_gold_train else None
+    gold_train_rows = _read_jsonl(gold_train_path) if gold_train_path and gold_train_path.exists() else []
+    hard_negative_path = pathlib.Path(args.include_hard_negative_train) if args.include_hard_negative_train else None
+    hard_negative_rows = _read_jsonl(hard_negative_path) if hard_negative_path and hard_negative_path.exists() else []
 
     if args.per_streamer:
         return _train_per_streamer(
@@ -118,6 +151,10 @@ def main() -> int:
             work_dir=pathlib.Path(args.work_dir),
             short_form_weight=args.short_form_weight,
             short_form_mode=args.short_form_mode,
+            gold_train_rows=gold_train_rows,
+            gold_train_weight=args.gold_train_weight,
+            hard_negative_rows=hard_negative_rows,
+            hard_negative_weight=args.hard_negative_weight,
         )
 
     artifact_dir = pathlib.Path(args.artifact_dir)
@@ -133,6 +170,10 @@ def main() -> int:
             artifact_path=artifact_path,
             state_path=state_path,
             current_state=workflow_state,
+            dependency_paths=[
+                path for path in (gold_train_path, hard_negative_path)
+                if path is not None and path.exists()
+            ],
         ):
             print(
                 json.dumps(
@@ -154,6 +195,10 @@ def main() -> int:
         supplemental_rows=short_form_rows,
         supplemental_weight=args.short_form_weight,
         short_form_mode=args.short_form_mode,
+        gold_train_rows=gold_train_rows,
+        gold_train_weight=args.gold_train_weight,
+        hard_negative_rows=hard_negative_rows,
+        hard_negative_weight=args.hard_negative_weight,
     )
     _write_jsonl(dataset_out, rows)
     print(json.dumps(dataset_summary(rows), ensure_ascii=True))
@@ -174,12 +219,25 @@ def build_composite_dataset(
     supplemental_rows: list[dict] | None = None,
     supplemental_weight: float = 0.35,
     short_form_mode: str = "off",
+    gold_train_rows: list[dict] | None = None,
+    gold_train_weight: float = 2.0,
+    hard_negative_rows: list[dict] | None = None,
+    hard_negative_weight: float = 2.5,
 ) -> list[dict]:
     vod_rows = build_twitch_training_dataset.build_dataset(labels, profile, work_dir)
-    if _normalize_short_form_mode(short_form_mode) == "off" or not supplemental_rows:
-        return vod_rows
     merged = list(vod_rows)
-    merged.extend(_prepare_short_form_rows(supplemental_rows, profile, supplemental_weight))
+    if _normalize_short_form_mode(short_form_mode) != "off" and supplemental_rows:
+        merged.extend(_prepare_short_form_rows(supplemental_rows, profile, supplemental_weight))
+    if gold_train_rows:
+        merged = _merge_gold_train_rows(
+            merged,
+            _prepare_gold_train_rows(gold_train_rows, profile, gold_train_weight),
+        )
+    if hard_negative_rows:
+        merged = _merge_gold_train_rows(
+            merged,
+            _prepare_hard_negative_rows(hard_negative_rows, profile, hard_negative_weight),
+        )
     return merged
 
 
@@ -353,6 +411,10 @@ def _train_per_streamer(
     work_dir: pathlib.Path,
     short_form_weight: float,
     short_form_mode: str,
+    gold_train_rows: list[dict] | None = None,
+    gold_train_weight: float = 2.0,
+    hard_negative_rows: list[dict] | None = None,
+    hard_negative_weight: float = 2.5,
 ) -> int:
     grouped: dict[str, list[dict]] = defaultdict(list)
     for row in labels:
@@ -374,6 +436,10 @@ def _train_per_streamer(
             supplemental_rows=_filter_short_form_rows(short_form_rows, broadcaster),
             supplemental_weight=short_form_weight,
             short_form_mode=short_form_mode,
+            gold_train_rows=_filter_gold_train_rows(gold_train_rows or [], broadcaster),
+            gold_train_weight=gold_train_weight,
+            hard_negative_rows=_filter_gold_train_rows(hard_negative_rows or [], broadcaster),
+            hard_negative_weight=hard_negative_weight,
         )
         dataset_out = artifact_dir / f"{broadcaster}_vod_training_rows.jsonl"
         _write_jsonl(dataset_out, dataset_rows)
@@ -486,6 +552,86 @@ def _prepare_short_form_rows(
     return prepared
 
 
+def _prepare_gold_train_rows(
+    rows: list[dict],
+    profile: str,
+    gold_train_weight: float,
+) -> list[dict]:
+    weight = max(0.0, float(gold_train_weight))
+    prepared: list[dict] = []
+    for row in rows:
+        if int(row.get("label", -1)) not in {0, 1}:
+            continue
+        if str(row.get(GOLD_HOLDOUT_SPLIT_FIELD) or "").strip().lower() != "train":
+            continue
+        copied = dict(row)
+        copied["features"] = dict(row.get("features") or {})
+        copied["dataset_source"] = "gold_eval_train"
+        copied["label_source"] = "gold_eval"
+        copied["supervision_tier"] = "gold_eval"
+        copied["supervision_reason"] = str(copied.get("supervision_reason") or "manual_gold_eval_train")
+        if not copied.get("label_class"):
+            copied["label_class"] = "gold_positive" if int(copied["label"]) == 1 else "gold_negative"
+        copied["ordinal_label"] = int(copied.get("ordinal_label", copied.get("gold_grade", 3 if int(copied["label"]) == 1 else 0)))
+        base_weight = _as_float(copied.get("sample_weight")) or 1.0
+        copied["sample_weight"] = round(base_weight * weight, 3)
+        creator = str(copied.get("creator_id") or copied.get("streamer") or "").strip().lower()
+        copied["profile_hint"] = creator or profile
+        copied["feature_provenance"] = dict(copied.get("feature_provenance") or {})
+        prepared.append(copied)
+    return prepared
+
+
+def _prepare_hard_negative_rows(
+    rows: list[dict],
+    profile: str,
+    hard_negative_weight: float,
+) -> list[dict]:
+    weight = max(0.0, float(hard_negative_weight))
+    prepared: list[dict] = []
+    for row in rows:
+        if int(row.get("label", -1)) != 0:
+            continue
+        copied = dict(row)
+        copied["features"] = dict(row.get("features") or {})
+        copied["label"] = 0
+        copied["dataset_source"] = "gold_eval_hard_negative_train"
+        copied["label_source"] = "gold_eval"
+        copied["supervision_tier"] = "gold_eval"
+        copied["supervision_reason"] = str(copied.get("supervision_reason") or "ranker_diagnosis_false_positive")
+        copied["label_class"] = "gold_hard_negative"
+        copied["ordinal_label"] = int(copied.get("ordinal_label", copied.get("gold_grade", 0)) or 0)
+        copied[GOLD_HOLDOUT_SPLIT_FIELD] = "train"
+        base_weight = _as_float(copied.get("sample_weight")) or 1.0
+        copied["sample_weight"] = round(base_weight * weight, 3)
+        creator = str(copied.get("creator_id") or copied.get("streamer") or "").strip().lower()
+        copied["profile_hint"] = creator or profile
+        copied["feature_provenance"] = dict(copied.get("feature_provenance") or {})
+        prepared.append(copied)
+    return prepared
+
+
+def _merge_gold_train_rows(base_rows: list[dict], gold_rows: list[dict]) -> list[dict]:
+    if not gold_rows:
+        return list(base_rows)
+    merged: list[dict] = []
+    index_by_key: dict[tuple[str, ...], int] = {}
+    for row in base_rows:
+        key = _training_row_key(row)
+        if key:
+            index_by_key[key] = len(merged)
+        merged.append(row)
+    for row in gold_rows:
+        key = _training_row_key(row)
+        if key and key in index_by_key:
+            merged[index_by_key[key]] = row
+            continue
+        if key:
+            index_by_key[key] = len(merged)
+        merged.append(row)
+    return merged
+
+
 def _filter_short_form_rows(rows: list[dict], broadcaster: str) -> list[dict]:
     if not rows:
         return []
@@ -495,6 +641,47 @@ def _filter_short_form_rows(rows: list[dict], broadcaster: str) -> list[dict]:
         if str(row.get("creator_id") or row.get("streamer") or "").strip().lower() == normalized
     ]
     return filtered
+
+
+def _filter_gold_train_rows(rows: list[dict], broadcaster: str) -> list[dict]:
+    if not rows:
+        return []
+    normalized = broadcaster.strip().lower()
+    return [
+        row
+        for row in rows
+        if str(row.get("creator_id") or row.get("streamer") or row.get("profile_hint") or "").strip().lower()
+        in {"", normalized}
+    ]
+
+
+def _training_row_key(row: dict) -> tuple[str, ...] | None:
+    queue_id = str(row.get("queue_id") or "").strip()
+    if queue_id:
+        return ("queue_id", queue_id)
+
+    job_id = str(row.get("job_id") or "").strip()
+    candidate_id = str(row.get("candidate_id") or "").strip()
+    if job_id and candidate_id:
+        return ("job_candidate", job_id, candidate_id)
+
+    vod_id = str(row.get("vod_id") or "").strip()
+    window_start = _stable_time_value(row.get("window_start"))
+    window_end = _stable_time_value(row.get("window_end"))
+    if vod_id and candidate_id:
+        return ("vod_candidate_window", vod_id, candidate_id, window_start, window_end)
+
+    source_url = str(row.get("source_url") or "").strip()
+    if source_url and candidate_id:
+        return ("source_candidate_window", source_url, candidate_id, window_start, window_end)
+    return None
+
+
+def _stable_time_value(value) -> str:
+    try:
+        return f"{float(value or 0.0):.3f}"
+    except (TypeError, ValueError):
+        return "0.000"
 
 
 def _normalize_short_form_mode(mode: str) -> str:

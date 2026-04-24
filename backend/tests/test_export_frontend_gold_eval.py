@@ -37,6 +37,230 @@ class ExportFrontendGoldEvalTests(unittest.TestCase):
             self.assertEqual(output.read_text(encoding="utf-8"), "")
             self.assertEqual(json.loads(summary.read_text(encoding="utf-8")), {"rows": 0, "eval_dataset": {}})
 
+    def test_main_preserves_existing_outputs_when_requested_and_frontend_is_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            storage = root / "storage"
+            storage.mkdir(parents=True, exist_ok=True)
+            rows_out = root / "gold_rows.jsonl"
+            output = root / "gold_dataset.jsonl"
+            summary = root / "gold_summary.json"
+            existing_row = {
+                "queue_id": "manual:c1",
+                "job_id": "manual",
+                "candidate_id": "c1",
+                "vod_id": "vod-1",
+                "creator_id": "jynxzi",
+                "publish_platform": "twitch",
+                "label": 1,
+                "ordinal_label": 3,
+                "gold_grade": 3,
+                "label_source": "gold_eval",
+                "label_class": "gold_positive",
+                "supervision_tier": "gold_eval",
+                "features": {"candidate_id": "c1", "source": "reaction"},
+            }
+            rows_out.write_text(json.dumps(existing_row), encoding="utf-8")
+
+            argv = [
+                "export_frontend_gold_eval.py",
+                "--storage-dir",
+                str(storage),
+                "--rows-out",
+                str(rows_out),
+                "--output",
+                str(output),
+                "--summary-out",
+                str(summary),
+                "--preserve-existing-if-empty",
+            ]
+            with patch.object(sys, "argv", argv):
+                code = export_frontend_gold_eval.main()
+
+            self.assertEqual(code, 0)
+            preserved_rows = [json.loads(line) for line in rows_out.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(preserved_rows, [existing_row])
+            self.assertEqual(len(output.read_text(encoding="utf-8").splitlines()), 1)
+            summary_payload = json.loads(summary.read_text(encoding="utf-8"))
+            self.assertTrue(summary_payload["preserved_existing"])
+            self.assertEqual(summary_payload["rows"], 1)
+
+    def test_main_merges_existing_outputs_with_frontend_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            storage = root / "storage"
+            feedback_dir = storage / "feedback"
+            feedback_dir.mkdir(parents=True, exist_ok=True)
+            rows_out = root / "gold_rows.jsonl"
+            output = root / "gold_dataset.jsonl"
+            summary = root / "gold_summary.json"
+            existing_rows = [
+                {
+                    "queue_id": "job-1:c1",
+                    "job_id": "job-1",
+                    "candidate_id": "c1",
+                    "vod_id": "vod-1",
+                    "creator_id": "jynxzi",
+                    "publish_platform": "twitch",
+                    "label": 0,
+                    "ordinal_label": 0,
+                    "gold_grade": 0,
+                    "label_source": "gold_eval",
+                    "label_class": "gold_negative",
+                    "supervision_tier": "gold_eval",
+                    "dataset_source": "gold_eval_frontend",
+                    "features": {"candidate_id": "c1", "source": "peak"},
+                    "updated_at": 10,
+                },
+                {
+                    "queue_id": "manual:c2",
+                    "job_id": "manual",
+                    "candidate_id": "c2",
+                    "vod_id": "vod-2",
+                    "creator_id": "jynxzi",
+                    "publish_platform": "twitch",
+                    "label": 1,
+                    "ordinal_label": 3,
+                    "gold_grade": 3,
+                    "label_source": "gold_eval",
+                    "label_class": "gold_positive",
+                    "supervision_tier": "gold_eval",
+                    "dataset_source": "gold_eval_manual",
+                    "features": {"candidate_id": "c2", "source": "reaction"},
+                },
+            ]
+            rows_out.write_text(
+                "\n".join(json.dumps(row) for row in existing_rows),
+                encoding="utf-8",
+            )
+            (feedback_dir / "gold_eval_updates.jsonl").write_text(
+                json.dumps(
+                    {
+                        "queue_id": "job-1:c1",
+                        "job_id": "job-1",
+                        "candidate_id": "c1",
+                        "vod_id": "vod-1",
+                        "creator_id": "jynxzi",
+                        "publish_platform": "twitch",
+                        "label": 1,
+                        "ordinal_label": 3,
+                        "gold_grade": 3,
+                        "label_source": "gold_eval",
+                        "label_class": "gold_positive",
+                        "supervision_tier": "gold_eval",
+                        "dataset_source": "gold_eval_frontend",
+                        "features": {"candidate_id": "c1", "source": "peak"},
+                        "updated_at": 20,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            argv = [
+                "export_frontend_gold_eval.py",
+                "--storage-dir",
+                str(storage),
+                "--rows-out",
+                str(rows_out),
+                "--output",
+                str(output),
+                "--summary-out",
+                str(summary),
+                "--creator-id",
+                "jynxzi",
+                "--merge-existing",
+            ]
+            with patch.object(sys, "argv", argv):
+                code = export_frontend_gold_eval.main()
+
+            self.assertEqual(code, 0)
+            merged_rows = [json.loads(line) for line in rows_out.read_text(encoding="utf-8").splitlines()]
+            rows_by_queue = {row["queue_id"]: row for row in merged_rows}
+            self.assertEqual(len(merged_rows), 2)
+            self.assertEqual(rows_by_queue["job-1:c1"]["gold_grade"], 3)
+            self.assertEqual(rows_by_queue["manual:c2"]["dataset_source"], "gold_eval_manual")
+            self.assertEqual(len(output.read_text(encoding="utf-8").splitlines()), 2)
+            summary_payload = json.loads(summary.read_text(encoding="utf-8"))
+            self.assertTrue(summary_payload["merged_existing"])
+            self.assertEqual(summary_payload["source_rows"]["existing"], 2)
+            self.assertEqual(summary_payload["source_rows"]["frontend"], 1)
+            self.assertEqual(summary_payload["source_rows"]["merged"], 2)
+            self.assertEqual(summary_payload["source_rows"]["frontend_updates"], 1)
+
+    def test_main_merge_keeps_manual_row_when_frontend_has_no_timestamp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            storage = root / "storage"
+            feedback_dir = storage / "feedback"
+            feedback_dir.mkdir(parents=True, exist_ok=True)
+            rows_out = root / "gold_rows.jsonl"
+            output = root / "gold_dataset.jsonl"
+            summary = root / "gold_summary.json"
+            rows_out.write_text(
+                json.dumps(
+                    {
+                        "queue_id": "manual:c1",
+                        "job_id": "manual",
+                        "candidate_id": "c1",
+                        "vod_id": "vod-1",
+                        "creator_id": "jynxzi",
+                        "publish_platform": "twitch",
+                        "label": 1,
+                        "ordinal_label": 3,
+                        "gold_grade": 3,
+                        "label_source": "gold_eval",
+                        "label_class": "gold_positive",
+                        "supervision_tier": "gold_eval",
+                        "dataset_source": "gold_eval_manual",
+                        "features": {"candidate_id": "c1", "source": "reaction"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (feedback_dir / "gold_eval_updates.jsonl").write_text(
+                json.dumps(
+                    {
+                        "queue_id": "manual:c1",
+                        "job_id": "manual",
+                        "candidate_id": "c1",
+                        "vod_id": "vod-1",
+                        "creator_id": "jynxzi",
+                        "publish_platform": "twitch",
+                        "label": 0,
+                        "ordinal_label": 0,
+                        "gold_grade": 0,
+                        "label_source": "gold_eval",
+                        "label_class": "gold_negative",
+                        "supervision_tier": "gold_eval",
+                        "dataset_source": "gold_eval_frontend",
+                        "features": {"candidate_id": "c1", "source": "reaction"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            argv = [
+                "export_frontend_gold_eval.py",
+                "--storage-dir",
+                str(storage),
+                "--rows-out",
+                str(rows_out),
+                "--output",
+                str(output),
+                "--summary-out",
+                str(summary),
+                "--creator-id",
+                "jynxzi",
+                "--merge-existing",
+            ]
+            with patch.object(sys, "argv", argv):
+                code = export_frontend_gold_eval.main()
+
+            self.assertEqual(code, 0)
+            merged_row = json.loads(rows_out.read_text(encoding="utf-8"))
+            self.assertEqual(merged_row["dataset_source"], "gold_eval_manual")
+            self.assertEqual(merged_row["gold_grade"], 3)
+
     def test_export_builds_gold_eval_dataset_from_debug_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             storage = Path(tmp) / "storage"

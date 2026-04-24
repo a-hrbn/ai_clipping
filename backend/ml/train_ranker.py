@@ -559,6 +559,27 @@ def _numeric_feature_names(feature_row: dict) -> list[str]:
 
 
 def _split_rows(rows: list[dict]) -> dict[str, list[dict] | str]:
+    gold_train_rows = [
+        row
+        for row in rows
+        if _is_gold_eval_row(row)
+        and str(row.get(GOLD_HOLDOUT_SPLIT_FIELD) or "").strip().lower() == "train"
+    ]
+    if gold_train_rows and len(gold_train_rows) < len(rows):
+        non_gold_rows = [row for row in rows if row not in gold_train_rows]
+        split = _split_rows_without_gold_override(non_gold_rows)
+        validation_rows = list(split.get("validation") or [])
+        if _split_has_both_classes(validation_rows):
+            train_rows = list(split.get("train") or [])
+            train_rows.extend(gold_train_rows)
+            split["train"] = train_rows
+            split["gold_train_rows_forced_to_train"] = len(gold_train_rows)
+            return split
+
+    return _split_rows_without_gold_override(rows)
+
+
+def _split_rows_without_gold_override(rows: list[dict]) -> dict[str, list[dict] | str]:
     grouped_split = _split_rows_by_group(rows)
     if grouped_split is not None:
         return _validated_split(rows, grouped_split)
@@ -738,6 +759,13 @@ def _stratified_fallback_split(rows: list[dict], strategy: str, unit: str) -> di
 def _split_has_both_classes(rows: list[dict]) -> bool:
     labels = {int(row["label"]) for row in rows if row.get("label") in {0, 1}}
     return labels == {0, 1}
+
+
+def _is_gold_eval_row(row: dict) -> bool:
+    return (
+        str(row.get("supervision_tier") or "").strip().lower() == "gold_eval"
+        or str(row.get("label_source") or "").strip().lower() == "gold_eval"
+    )
 
 
 def _validated_split(rows: list[dict], split: dict[str, list[dict] | str]) -> dict[str, list[dict] | str]:

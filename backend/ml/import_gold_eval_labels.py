@@ -233,3 +233,7 @@ def _matching_sidecar(
     raise ValueError(
         f"Ambiguous gold-eval sidecar rows for candidate_id={candidate_id!r}; queue_id is required."
     )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
