@@ -160,6 +160,15 @@ class CandidateFeatures:
     mean_hype: float = 0.0
     arc_score: float = 0.0
     chat_peak: float = 0.0
+    chat_mean: float = 0.0
+    chat_early_peak: float = 0.0
+    chat_post_hook_peak: float = 0.0
+    chat_delta: float = 0.0
+    chat_spike_coverage: float = 0.0
+    chat_hype_score: float = 0.0
+    chat_laugh_score: float = 0.0
+    chat_shock_score: float = 0.0
+    chat_sadge_score: float = 0.0
     motion_peak: float = 0.0
     face_reaction_peak: float = 0.0
     speaker_turns: int = 0

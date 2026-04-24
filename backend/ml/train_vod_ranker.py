@@ -22,6 +22,7 @@ _TARGET_PRIMARY_MIXED_RANKING_GROUPS = 20
 _TARGET_NEGATIVE_ROWS_PER_POSITIVE_MAX = 8
 _MAX_CANDIDATE_SOURCE_SHARE = 0.40
 _SHORT_FORM_MODES = {"off", "supplemental"}
+_DEFAULT_HARD_NEGATIVE_WEIGHT = 4.0
 
 
 def _load_workflow_state(raw: str | None) -> dict[str, object] | None:
@@ -102,7 +103,7 @@ def main() -> int:
     parser.add_argument(
         "--hard-negative-weight",
         type=float,
-        default=2.5,
+        default=_DEFAULT_HARD_NEGATIVE_WEIGHT,
         help="Sample-weight multiplier for diagnosis-mined hard-negative rows.",
     )
     parser.add_argument(
@@ -222,7 +223,7 @@ def build_composite_dataset(
     gold_train_rows: list[dict] | None = None,
     gold_train_weight: float = 2.0,
     hard_negative_rows: list[dict] | None = None,
-    hard_negative_weight: float = 2.5,
+    hard_negative_weight: float = _DEFAULT_HARD_NEGATIVE_WEIGHT,
 ) -> list[dict]:
     vod_rows = build_twitch_training_dataset.build_dataset(labels, profile, work_dir)
     merged = list(vod_rows)
@@ -414,7 +415,7 @@ def _train_per_streamer(
     gold_train_rows: list[dict] | None = None,
     gold_train_weight: float = 2.0,
     hard_negative_rows: list[dict] | None = None,
-    hard_negative_weight: float = 2.5,
+    hard_negative_weight: float = _DEFAULT_HARD_NEGATIVE_WEIGHT,
 ) -> int:
     grouped: dict[str, list[dict]] = defaultdict(list)
     for row in labels:

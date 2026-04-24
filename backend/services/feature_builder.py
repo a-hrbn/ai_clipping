@@ -8,7 +8,7 @@ from services.timeline_types import Candidate, CandidateFeatures, Chapter
 from services.transcriber import RichSegment
 
 _TOKEN_RE = re.compile(r"[a-zA-Z0-9']+")
-FEATURE_BUILD_VERSION = 6
+FEATURE_BUILD_VERSION = 7
 _LLM_SEMANTIC_MAX_WORKERS = 4
 
 
@@ -147,6 +147,15 @@ def _build_candidate_features(
             mean_hype=0.0,
             arc_score=0.0,
             chat_peak=0.0,
+            chat_mean=0.0,
+            chat_early_peak=0.0,
+            chat_post_hook_peak=0.0,
+            chat_delta=0.0,
+            chat_spike_coverage=0.0,
+            chat_hype_score=0.0,
+            chat_laugh_score=0.0,
+            chat_shock_score=0.0,
+            chat_sadge_score=0.0,
             motion_peak=0.0,
             face_reaction_peak=0.0,
             speaker_turns=0,
@@ -224,6 +233,7 @@ def _build_candidate_features(
     mean_hype = sum(seg.hype_score for seg in window) / len(window)
     arc_score = max(seg.arc_score for seg in window)
     chat_peak = max(seg.chat_spike_score for seg in window)
+    chat_stats = _chat_window_stats(window, candidate)
     motion_peak = max(seg.max_motion_score for seg in window)
     face_reaction_peak = max(seg.max_face_reaction for seg in window)
     speaker_turns = sum(
@@ -344,6 +354,15 @@ def _build_candidate_features(
         mean_hype=round(mean_hype, 3),
         arc_score=round(arc_score, 3),
         chat_peak=round(chat_peak, 3),
+        chat_mean=round(chat_stats["mean"], 3),
+        chat_early_peak=round(chat_stats["early_peak"], 3),
+        chat_post_hook_peak=round(chat_stats["post_hook_peak"], 3),
+        chat_delta=round(chat_stats["delta"], 3),
+        chat_spike_coverage=round(chat_stats["coverage"], 3),
+        chat_hype_score=round(chat_stats["hype"], 3),
+        chat_laugh_score=round(chat_stats["laugh"], 3),
+        chat_shock_score=round(chat_stats["shock"], 3),
+        chat_sadge_score=round(chat_stats["sadge"], 3),
         motion_peak=round(motion_peak, 3),
         face_reaction_peak=round(face_reaction_peak, 3),
         speaker_turns=speaker_turns,
@@ -410,6 +429,69 @@ def _build_candidate_features(
         has_vector_similarity=has_vector_similarity,
         feature_build_version=FEATURE_BUILD_VERSION,
         source=candidate.source,
+    )
+
+
+def _chat_window_stats(window: list[RichSegment], candidate: Candidate) -> dict[str, float]:
+    scores = [max(0.0, float(getattr(seg, "chat_spike_score", 0.0) or 0.0)) for seg in window]
+    if not scores:
+        return {
+            "mean": 0.0,
+            "early_peak": 0.0,
+            "post_hook_peak": 0.0,
+            "delta": 0.0,
+            "coverage": 0.0,
+            "hype": 0.0,
+            "laugh": 0.0,
+            "shock": 0.0,
+            "sadge": 0.0,
+        }
+
+    early_end = min(candidate.end, candidate.start + 5.0)
+    early_scores = [
+        score
+        for seg, score in zip(window, scores, strict=False)
+        if seg.end > candidate.start and seg.start < early_end
+    ]
+    pre_hook_scores = [
+        score
+        for seg, score in zip(window, scores, strict=False)
+        if seg.start < candidate.anchor_time
+    ]
+    post_hook_scores = [
+        score
+        for seg, score in zip(window, scores, strict=False)
+        if seg.end > candidate.anchor_time
+    ]
+    spiked_duration = 0.0
+    for seg, score in zip(window, scores, strict=False):
+        if score <= 0.0:
+            continue
+        overlap = min(seg.end, candidate.end) - max(seg.start, candidate.start)
+        spiked_duration += max(0.0, overlap)
+
+    return {
+        "mean": sum(scores) / len(scores),
+        "early_peak": max(early_scores, default=0.0),
+        "post_hook_peak": max(post_hook_scores, default=0.0),
+        "delta": max(post_hook_scores, default=0.0) - max(pre_hook_scores, default=0.0),
+        "coverage": min(spiked_duration / max(candidate.end - candidate.start, 1e-6), 1.0),
+        "hype": _chat_category_peak(window, "hype"),
+        "laugh": _chat_category_peak(window, "laugh"),
+        "shock": _chat_category_peak(window, "shock"),
+        "sadge": _chat_category_peak(window, "sadge"),
+    }
+
+
+def _chat_category_peak(window: list[RichSegment], category: str) -> float:
+    tag = f"chat_{category}"
+    return max(
+        (
+            max(0.0, float(getattr(seg, "chat_spike_score", 0.0) or 0.0))
+            for seg in window
+            if tag in (getattr(seg, "emotions", []) or [])
+        ),
+        default=0.0,
     )
 
 

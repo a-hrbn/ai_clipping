@@ -34,6 +34,8 @@ _MAX_CANDIDATE_SOURCE_SHARE = 0.40
 _DATASET_BUILD_LLM_PROVIDER = (os.environ.get("TRAINING_DATASET_LLM_PROVIDER") or "none").strip() or "none"
 _VOD_CHECKPOINT_VERSION = 4
 _VOD_FEATURE_CACHE_VERSION = 1
+_CHAT_ENRICHMENT_FINGERPRINT_VERSION = 3
+_CHAT_TARGET_NEGATIVE_LABEL_CLASSES = {"hard_negative"}
 _BOUNDARY_PERTURBATION_SPECS = (
     ("start_late_small", 0.8, 0.0),
     ("start_late_large", 1.8, 0.0),
@@ -81,6 +83,11 @@ def _raw_vod_rows_fingerprint_payload(profile: str) -> dict[str, object]:
         "profile": profile,
         "feature_build_version": int(getattr(feature_builder, "FEATURE_BUILD_VERSION", 1)),
         "llm_provider": _DATASET_BUILD_LLM_PROVIDER,
+        "chat_enrichment": {
+            "version": _CHAT_ENRICHMENT_FINGERPRINT_VERSION,
+            "enabled": bool(settings.enable_chat_analysis),
+            "timeout_sec": int(settings.chat_download_timeout_sec),
+        },
         "supplemental_candidate_limit": _SUPPLEMENTAL_CANDIDATE_LIMIT,
         "supplemental_candidate_weight": _SUPPLEMENTAL_CANDIDATE_WEIGHT,
         "boundary_near_miss_limit": _BOUNDARY_NEAR_MISS_LIMIT,
@@ -218,6 +225,424 @@ def _transcript_cache_path(cache_dir: pathlib.Path, payload: dict[str, object]) 
 
 def _window_feature_cache_path(cache_dir: pathlib.Path, payload: dict[str, object]) -> pathlib.Path:
     return cache_dir / "windows" / f"{_cache_key(payload)}.json"
+
+
+def _cached_chat_path(cache_dir: pathlib.Path) -> pathlib.Path | None:
+    chat_dir = cache_dir / "chat"
+    if not chat_dir.exists():
+        return None
+    candidates = sorted(
+        (
+            path
+            for path in chat_dir.glob("chat*.json*")
+            if path.name != "chat.metadata.json" and "metadata" not in path.name
+        ),
+        key=lambda path: path.stat().st_mtime_ns if path.exists() else 0,
+        reverse=True,
+    )
+    return candidates[0] if candidates else None
+
+
+def _normalize_chat_target_offsets(target_offsets: list[float] | tuple[float, ...] | None) -> list[int]:
+    if not target_offsets:
+        return []
+    normalized: set[int] = set()
+    for value in target_offsets:
+        try:
+            offset = int(float(value))
+        except (TypeError, ValueError):
+            continue
+        normalized.add(max(offset, 0))
+    return sorted(normalized)
+
+
+def _read_chat_cache_metadata(cache_dir: pathlib.Path) -> dict[str, object]:
+    path = _chat_cache_metadata_path(cache_dir)
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _read_chat_fetch_metadata(chat_path: pathlib.Path) -> dict[str, object]:
+    metadata_path = chat_path.with_name(f"{chat_path.stem}.fetch_metadata.json")
+    if not metadata_path.exists():
+        return {}
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _chat_messages(path: pathlib.Path) -> list[dict]:
+    if not path.exists():
+        return []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if isinstance(raw, list):
+        return [row for row in raw if isinstance(row, dict)]
+    if not isinstance(raw, dict):
+        return []
+    events = raw.get("events")
+    if not isinstance(events, list):
+        return []
+    rows: list[dict] = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        try:
+            t = float(event.get("tStartMs", 0.0)) / 1000.0
+        except (TypeError, ValueError):
+            continue
+        segments = event.get("segs")
+        if not isinstance(segments, list):
+            continue
+        text = "".join(
+            str(segment.get("utf8", ""))
+            for segment in segments
+            if isinstance(segment, dict)
+        ).strip()
+        if text:
+            rows.append({"t": t, "text": text, "emotes": []})
+    return rows
+
+
+def _chat_time_stats(path: pathlib.Path) -> dict[str, object]:
+    messages = _chat_messages(path)
+    times: list[float] = []
+    for message in messages:
+        try:
+            times.append(float(message.get("t", 0.0)))
+        except (TypeError, ValueError):
+            continue
+    return {
+        "message_count": len(messages),
+        "first_t": round(min(times), 3) if times else None,
+        "last_t": round(max(times), 3) if times else None,
+    }
+
+
+def _chat_dedupe_key(message: dict) -> tuple[str, float, str]:
+    try:
+        t = round(float(message.get("t", 0.0)), 3)
+    except (TypeError, ValueError):
+        t = 0.0
+    return (str(message.get("id") or ""), t, str(message.get("text") or ""))
+
+
+def _merge_chat_files(primary_path: pathlib.Path, refill_path: pathlib.Path, output_path: pathlib.Path) -> pathlib.Path:
+    seen: set[tuple[str, float, str]] = set()
+    merged: list[dict] = []
+    for source in (primary_path, refill_path):
+        for message in _chat_messages(source):
+            key = _chat_dedupe_key(message)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(message)
+    merged.sort(key=lambda row: float(row.get("t", 0.0) or 0.0))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(merged, ensure_ascii=True), encoding="utf-8")
+    return output_path
+
+
+def _metadata_offsets(metadata: dict[str, object], key: str) -> list[int]:
+    values = metadata.get(key)
+    if not isinstance(values, list):
+        return []
+    return _normalize_chat_target_offsets(values)
+
+
+def _missing_chat_target_offsets(cache_dir: pathlib.Path, requested_offsets: list[int]) -> list[int]:
+    if not requested_offsets:
+        return []
+    metadata = _read_chat_cache_metadata(cache_dir)
+    covered = set(_metadata_offsets(metadata, "covered_target_offsets"))
+    if not covered:
+        covered = set(_metadata_offsets(metadata, "target_offsets"))
+    return [offset for offset in requested_offsets if offset not in covered]
+
+
+def _chat_cache_has_complete_coverage(cache_dir: pathlib.Path) -> bool:
+    if _cached_chat_path(cache_dir) is None:
+        return False
+    metadata = _read_chat_cache_metadata(cache_dir)
+    return metadata.get("coverage_status") == "complete"
+
+
+def _chat_cache_metadata_path(cache_dir: pathlib.Path) -> pathlib.Path:
+    return cache_dir / "chat" / "chat.metadata.json"
+
+
+def _write_chat_cache_metadata(
+    cache_dir: pathlib.Path,
+    *,
+    vod_url: str | None,
+    job_id: str,
+    chat_path: pathlib.Path,
+    cache_status: str,
+    target_offsets: list[float] | tuple[float, ...] | list[int] | None = None,
+    covered_target_offsets: list[float] | tuple[float, ...] | list[int] | None = None,
+    missing_target_offsets: list[float] | tuple[float, ...] | list[int] | None = None,
+) -> None:
+    try:
+        stat = chat_path.stat()
+    except OSError:
+        size = 0
+        mtime_ns = 0
+    else:
+        size = int(stat.st_size)
+        mtime_ns = int(stat.st_mtime_ns)
+    requested = _normalize_chat_target_offsets(target_offsets)
+    covered = _normalize_chat_target_offsets(covered_target_offsets)
+    missing = _normalize_chat_target_offsets(missing_target_offsets)
+    stats = _chat_time_stats(chat_path)
+    _write_json_atomic(
+        _chat_cache_metadata_path(cache_dir),
+        {
+            "version": _VOD_FEATURE_CACHE_VERSION,
+            "kind": "vod_chat",
+            "vod_id": str(cache_dir.name),
+            "vod_url": str(vod_url or ""),
+            "job_id": str(job_id),
+            "cache_status": str(cache_status),
+            "chat_path": str(chat_path),
+            "size": size,
+            "mtime_ns": mtime_ns,
+            "cached_at_unix": round(time.time(), 3),
+            "message_count": int(stats["message_count"]),
+            "first_t": stats["first_t"],
+            "last_t": stats["last_t"],
+            "coverage_status": "complete" if requested and not missing else ("partial" if missing else "unscoped"),
+            "partial": bool(missing),
+            "target_offsets": requested,
+            "covered_target_offsets": covered,
+            "missing_target_offsets": missing,
+        },
+    )
+
+
+def _write_chat_cache_miss_metadata(
+    cache_dir: pathlib.Path,
+    *,
+    vod_url: str | None,
+    job_id: str,
+    cache_status: str,
+    reason: str,
+    target_offsets: list[float] | tuple[float, ...] | list[int] | None = None,
+    missing_target_offsets: list[float] | tuple[float, ...] | list[int] | None = None,
+) -> None:
+    requested = _normalize_chat_target_offsets(target_offsets)
+    missing = _normalize_chat_target_offsets(missing_target_offsets)
+    _write_json_atomic(
+        _chat_cache_metadata_path(cache_dir),
+        {
+            "version": _VOD_FEATURE_CACHE_VERSION,
+            "kind": "vod_chat",
+            "vod_id": str(cache_dir.name),
+            "vod_url": str(vod_url or ""),
+            "job_id": str(job_id),
+            "cache_status": str(cache_status),
+            "reason": str(reason),
+            "chat_path": "",
+            "size": 0,
+            "mtime_ns": 0,
+            "cached_at_unix": round(time.time(), 3),
+            "message_count": 0,
+            "first_t": None,
+            "last_t": None,
+            "coverage_status": "partial" if missing else "unscoped",
+            "partial": bool(missing),
+            "target_offsets": requested,
+            "covered_target_offsets": [],
+            "missing_target_offsets": missing,
+        },
+    )
+
+
+def _load_or_download_chat(
+    vod_url: str | None,
+    *,
+    job_id: str,
+    cache_dir: pathlib.Path,
+    target_offsets: list[float] | None = None,
+) -> pathlib.Path | None:
+    vod_id = str(cache_dir.name)
+    requested_offsets = _normalize_chat_target_offsets(target_offsets)
+    logger.info(
+        "training_vod_chat_cache_lookup vod_id=%s job_id=%s cache_dir=%s target_offsets=%s",
+        vod_id,
+        job_id,
+        cache_dir / "chat",
+        len(requested_offsets),
+    )
+    cached_path = _cached_chat_path(cache_dir)
+    if cached_path is not None:
+        missing_offsets = _missing_chat_target_offsets(cache_dir, requested_offsets)
+        if not missing_offsets:
+            covered_offsets = requested_offsets or _metadata_offsets(
+                _read_chat_cache_metadata(cache_dir),
+                "covered_target_offsets",
+            )
+            _write_chat_cache_metadata(
+                cache_dir,
+                vod_url=vod_url,
+                job_id=job_id,
+                chat_path=cached_path,
+                cache_status="hit",
+                target_offsets=requested_offsets,
+                covered_target_offsets=covered_offsets,
+                missing_target_offsets=[],
+            )
+            logger.info(
+                "training_vod_chat_cache_hit vod_id=%s job_id=%s chat_path=%s target_offsets=%s",
+                vod_id,
+                job_id,
+                cached_path,
+                len(requested_offsets),
+            )
+            return cached_path
+        logger.info(
+            "training_vod_chat_cache_partial vod_id=%s job_id=%s chat_path=%s target_offsets=%s missing_offsets=%s first_missing_offset=%s last_missing_offset=%s",
+            vod_id,
+            job_id,
+            cached_path,
+            len(requested_offsets),
+            len(missing_offsets),
+            missing_offsets[0],
+            missing_offsets[-1],
+        )
+    if not vod_url:
+        _write_chat_cache_miss_metadata(
+            cache_dir,
+            vod_url=vod_url,
+            job_id=job_id,
+            cache_status="skipped",
+            reason="missing_vod_url",
+            target_offsets=requested_offsets,
+            missing_target_offsets=requested_offsets,
+        )
+        logger.info(
+            "training_vod_chat_download_skip vod_id=%s job_id=%s reason=missing_vod_url",
+            vod_id,
+            job_id,
+        )
+        return None
+
+    from services import chat_analyzer
+
+    chat_dir = cache_dir / "chat"
+    download_offsets = [float(offset) for offset in (missing_offsets if cached_path is not None else requested_offsets)]
+    if not download_offsets and target_offsets:
+        download_offsets = [float(offset) for offset in requested_offsets]
+    download_target_offsets = download_offsets or target_offsets
+    download_dir = chat_dir
+    if cached_path is not None and download_offsets:
+        download_dir = chat_dir / f"refill_{int(time.time() * 1000)}"
+    logger.info(
+        "training_vod_chat_download_start vod_id=%s job_id=%s vod_url=%s cache_dir=%s target_offsets=%s refill=%s",
+        vod_id,
+        job_id,
+        vod_url,
+        download_dir,
+        len(download_offsets if download_offsets else (target_offsets or [])),
+        cached_path is not None,
+    )
+    chat_path = chat_analyzer.download_chat(
+        vod_url,
+        f"{job_id}:chat_cache",
+        download_dir,
+        target_offsets=download_target_offsets,
+    )
+    if chat_path is None:
+        if cached_path is not None:
+            covered_offsets = sorted(set(requested_offsets) - set(missing_offsets))
+            _write_chat_cache_metadata(
+                cache_dir,
+                vod_url=vod_url,
+                job_id=job_id,
+                chat_path=cached_path,
+                cache_status="partial",
+                target_offsets=requested_offsets,
+                covered_target_offsets=covered_offsets,
+                missing_target_offsets=missing_offsets,
+            )
+            logger.info(
+                "training_vod_chat_refill_unavailable vod_id=%s job_id=%s vod_url=%s missing_offsets=%s reason=download_returned_none_see_twitch_chat_logs",
+                vod_id,
+                job_id,
+                vod_url,
+                len(missing_offsets),
+            )
+            return cached_path
+        _write_chat_cache_miss_metadata(
+            cache_dir,
+            vod_url=vod_url,
+            job_id=job_id,
+            cache_status="unavailable",
+            reason="download_returned_none_see_twitch_chat_logs",
+            target_offsets=requested_offsets,
+            missing_target_offsets=requested_offsets,
+        )
+        logger.info(
+            "training_vod_chat_download_unavailable vod_id=%s job_id=%s vod_url=%s reason=download_returned_none_see_twitch_chat_logs",
+            vod_id,
+            job_id,
+            vod_url,
+        )
+    else:
+        fetch_metadata = _read_chat_fetch_metadata(chat_path)
+        fetch_covered_offsets = _metadata_offsets(fetch_metadata, "covered_target_offsets")
+        fetch_missing_offsets = _metadata_offsets(fetch_metadata, "missing_target_offsets")
+        if requested_offsets and not fetch_covered_offsets and not fetch_missing_offsets:
+            fetch_covered_offsets = download_offsets or requested_offsets
+        if cached_path is not None:
+            merged_path = chat_dir / "chat.twitch_rechat.json"
+            chat_path = _merge_chat_files(cached_path, chat_path, merged_path)
+            shutil.rmtree(download_dir, ignore_errors=True)
+            previous_covered = set(requested_offsets) - set(missing_offsets)
+            covered_offsets = sorted(previous_covered | set(fetch_covered_offsets))
+            missing_after_refill = [offset for offset in requested_offsets if offset not in set(covered_offsets)]
+            cache_status = "refilled" if not missing_after_refill else "partial"
+            logger.info(
+                "training_vod_chat_refill_success vod_id=%s job_id=%s chat_path=%s requested_missing_offsets=%s remaining_missing_offsets=%s",
+                vod_id,
+                job_id,
+                chat_path,
+                len(missing_offsets),
+                len(missing_after_refill),
+            )
+        else:
+            covered_offsets = fetch_covered_offsets
+            missing_after_refill = fetch_missing_offsets or [
+                offset for offset in requested_offsets if offset not in set(covered_offsets)
+            ]
+            cache_status = "downloaded" if not missing_after_refill else "partial"
+        _write_chat_cache_metadata(
+            cache_dir,
+            vod_url=vod_url,
+            job_id=job_id,
+            chat_path=chat_path,
+            cache_status=cache_status,
+            target_offsets=requested_offsets,
+            covered_target_offsets=covered_offsets,
+            missing_target_offsets=missing_after_refill,
+        )
+        logger.info(
+            "training_vod_chat_download_success vod_id=%s job_id=%s chat_path=%s cache_dir=%s cache_status=%s",
+            vod_id,
+            job_id,
+            chat_path,
+            chat_dir,
+            cache_status,
+        )
+    return chat_path
 
 
 def _serialize_rich_segment(segment) -> dict[str, object]:
@@ -397,8 +822,10 @@ def _load_or_build_vod_feature_context(
     *,
     vod_path: pathlib.Path,
     job_id: str,
+    vod_url: str | None = None,
+    chat_target_offsets: list[float] | None = None,
 ) -> VodFeatureContext:
-    from services import audio_extractor, transcriber
+    from services import audio_extractor, chat_analyzer, transcriber
     import librosa
 
     cache_dir = _vod_feature_cache_dir(vod_id)
@@ -441,6 +868,34 @@ def _load_or_build_vod_feature_context(
         _write_transcript_cache(transcript_path, transcript_payload, transcript)
         _prune_compatible_transcript_caches(cache_dir, keep_path=transcript_path, vod_id=vod_id)
         _prune_transcript_chunks(cache_dir)
+
+    chat_path = _load_or_download_chat(
+        vod_url,
+        job_id=job_id,
+        cache_dir=cache_dir,
+        target_offsets=chat_target_offsets,
+    )
+    if chat_path is not None:
+        transcript = chat_analyzer.enrich_segments(transcript, chat_path)
+        chat_segment_count = sum(
+            1
+            for segment in transcript
+            if abs(float(getattr(segment, "chat_spike_score", 0.0) or 0.0)) > 1e-9
+        )
+        logger.info(
+            "training_vod_chat_enrichment_applied vod_id=%s job_id=%s chat_path=%s segments=%s segments_with_chat=%s",
+            vod_id,
+            job_id,
+            chat_path,
+            len(transcript),
+            chat_segment_count,
+        )
+    else:
+        logger.info(
+            "training_vod_chat_enrichment_skipped vod_id=%s job_id=%s reason=no_chat_path",
+            vod_id,
+            job_id,
+        )
 
     audio_signal, audio_sample_rate = librosa.load(str(audio_path), sr=None, mono=True)
     return VodFeatureContext(
@@ -639,7 +1094,7 @@ def build_dataset(labels: list[dict], profile: str, work_dir: pathlib.Path) -> l
                 )
                 rows.extend(label_rows)
                 vod_checkpoint_rows.extend(label_rows)
-                if vod_checkpoint_rows:
+                if vod_checkpoint_rows and _can_write_vod_checkpoint(vod_id):
                     _write_vod_checkpoint(work_dir, profile, vod_id, vod_rows, vod_checkpoint_rows)
             finally:
                 shutil.rmtree(vod_dir, ignore_errors=True)
@@ -738,12 +1193,90 @@ def _build_rows_for_vod(
             )
         )
 
-        if vod_checkpoint_rows:
+        if vod_checkpoint_rows and _can_write_vod_checkpoint(vod_id):
             _write_vod_checkpoint(work_dir, profile, vod_id, vod_rows, vod_checkpoint_rows)
         return vod_checkpoint_rows
     finally:
         shutil.rmtree(vod_dir, ignore_errors=True)
         shutil.rmtree(download_dir, ignore_errors=True)
+
+
+def _chat_target_offsets_for_labels(labels: list[dict]) -> list[float]:
+    offsets: set[int] = set()
+    target_labels = _chat_target_labels_for_offsets(labels)
+    skipped = len(labels) - len(target_labels)
+    if skipped:
+        logger.info(
+            "training_vod_chat_target_labels_filtered labels=%s target_labels=%s skipped=%s",
+            len(labels),
+            len(target_labels),
+            skipped,
+        )
+    for label in target_labels:
+        start, end = _expanded_training_window(label)
+        padded_start = max(float(start) - 5.0, 0.0)
+        padded_end = max(float(end) + 5.0, padded_start)
+        current = int(padded_start)
+        final = int(padded_end)
+        while current <= final:
+            offsets.add(current)
+            current += 10
+        offsets.add(final)
+    return [float(offset) for offset in sorted(offsets)]
+
+
+def _chat_target_labels_for_offsets(labels: list[dict]) -> list[dict]:
+    positives = [
+        label
+        for label in labels
+        if str(label.get("label_class") or "") in _POSITIVE_LABEL_CLASSES
+    ]
+    negative_candidates = [
+        label
+        for label in labels
+        if str(label.get("label_class") or "") in _CHAT_TARGET_NEGATIVE_LABEL_CLASSES
+    ]
+    if not positives:
+        return []
+
+    negative_limit = len(positives) * _MAX_VOD_NEGATIVE_ROWS_PER_POSITIVE
+    selected_negatives = _rank_chat_target_negative_labels(
+        negative_candidates,
+        positives,
+    )[:negative_limit]
+    return sorted(
+        [*positives, *selected_negatives],
+        key=lambda label: (
+            float(label.get("window_start") or 0.0),
+            float(label.get("window_end") or 0.0),
+            str(label.get("label_class") or ""),
+        ),
+    )
+
+
+def _rank_chat_target_negative_labels(negative_labels: list[dict], positive_labels: list[dict]) -> list[dict]:
+    return sorted(
+        negative_labels,
+        key=lambda label: (
+            _distance_to_nearest_label(label, positive_labels),
+            float(label.get("window_start") or 0.0),
+            float(label.get("window_end") or 0.0),
+            str(label.get("candidate_id") or label.get("clip_id") or ""),
+        ),
+    )
+
+
+def _distance_to_nearest_label(label: dict, positive_labels: list[dict]) -> float:
+    if not positive_labels:
+        return 0.0
+    center = _label_window_center(label)
+    return min(abs(center - _label_window_center(positive)) for positive in positive_labels)
+
+
+def _label_window_center(label: dict) -> float:
+    start = float(label.get("window_start") or 0.0)
+    end = float(label.get("window_end") or start)
+    return (start + end) / 2.0
 
 
 def _build_rows_for_vod_labels(
@@ -763,6 +1296,8 @@ def _build_rows_for_vod_labels(
         vod_id,
         vod_path=vod_path,
         job_id=job_id,
+        vod_url=str(ordered_labels[0].get("vod_url") or ""),
+        chat_target_offsets=_chat_target_offsets_for_labels(ordered_labels),
     )
     total_labels = len(ordered_labels)
     resolved_workers = min(_resolved_training_label_workers(), total_labels)
@@ -1152,6 +1687,19 @@ def _vod_checkpoint_signature(vod_rows: list[dict]) -> str:
         separators=(",", ":"),
     )
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _can_write_vod_checkpoint(vod_id: str) -> bool:
+    if not settings.enable_chat_analysis:
+        return True
+    cache_dir = _vod_feature_cache_dir(vod_id)
+    if _chat_cache_has_complete_coverage(cache_dir):
+        return True
+    logger.info(
+        "training_vod_checkpoint_skip vod_id=%s reason=chat_enabled_without_complete_chat_cache",
+        vod_id,
+    )
+    return False
 
 
 def _load_vod_checkpoint(

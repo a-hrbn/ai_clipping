@@ -278,6 +278,30 @@ class TrainVodRankerTests(unittest.TestCase):
         self.assertEqual(rows_by_queue["q-2"]["sample_weight"], 3.0)
         self.assertEqual(rows_by_queue["q-2"]["features"]["hook_strength"], 0.1)
 
+    def test_build_composite_dataset_defaults_to_stronger_hard_negative_weight(self) -> None:
+        hard_negative_rows = [
+            {
+                "queue_id": "q-1",
+                "candidate_id": "cand-1",
+                "job_id": "job-1",
+                "vod_id": "vod-1",
+                "label": 0,
+                "gold_holdout_split": "train",
+                "sample_weight": 1.0,
+                "features": {"hook_strength": 0.1},
+            }
+        ]
+        with patch("ml.train_vod_ranker.build_twitch_training_dataset.build_dataset", return_value=[]):
+            rows = train_vod_ranker.build_composite_dataset(
+                labels=[{"broadcaster": "jynxzi"}],
+                profile="jynxzi",
+                work_dir=Path("/tmp/ignored"),
+                hard_negative_rows=hard_negative_rows,
+            )
+
+        self.assertEqual(rows[0]["dataset_source"], "gold_eval_hard_negative_train")
+        self.assertEqual(rows[0]["sample_weight"], 4.0)
+
     def test_filter_short_form_rows_matches_broadcaster(self) -> None:
         rows = [
             {"streamer": "jynxzi", "label": 1},

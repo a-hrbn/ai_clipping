@@ -1,16 +1,15 @@
 """
 Chat-replay analysis: spike detection + emote/sentiment classification.
 
-Downloads chat replay for a VOD via yt-dlp (Twitch rechat, YouTube live chat,
-etc.), aggregates messages into per-second activity frames, detects message-rate
-spikes above a rolling baseline, and classifies the dominant sentiment
-(hype / laugh / shock / sadge).  The result is a `chat_spike_score` (0–1,
-normalized) on each RichSegment plus optional emotion-category tags — both feed
-into the composite hype_score computed by scorer.score_segments.
+Downloads Twitch VOD chat replay directly from Twitch's GraphQL comments API,
+aggregates messages into per-second activity frames, detects message-rate spikes
+above a rolling baseline, and classifies the dominant sentiment (hype / laugh /
+shock / sadge).  The result is a `chat_spike_score` (0–1, normalized) on each
+RichSegment plus optional emotion-category tags — both feed into the composite
+hype_score computed by scorer.score_segments.
 
-Works with any platform that yt-dlp can extract chat from. Sentiment
-classification uses both platform-specific emote names and universal text
-patterns so it degrades gracefully when emote metadata is unavailable.
+Sentiment classification uses both platform-specific emote names and universal
+text patterns so it degrades gracefully when emote metadata is unavailable.
 
 Usage
 -----
@@ -23,30 +22,65 @@ import json
 import logging
 import pathlib
 import re
-import subprocess
-import sys
+import time
 from dataclasses import dataclass, field
+from typing import Any
+from urllib import error, parse, request
 
 from config import settings
 from services.transcriber import RichSegment
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_TWITCH_WEB_CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
+_TWITCH_GRAPHQL_API = "https://gql.twitch.tv/gql"
+_TWITCH_COMMENTS_QUERY = """
+query VideoCommentsByOffsetOrCursor($videoID: ID!, $contentOffsetSeconds: Int) {
+  video(id: $videoID) {
+    comments(contentOffsetSeconds: $contentOffsetSeconds, first: 100) {
+      edges {
+        node {
+          id
+          contentOffsetSeconds
+          commenter {
+            displayName
+            login
+          }
+          message {
+            fragments {
+              text
+              emote {
+                emoteID
+                id
+              }
+            }
+          }
+        }
+      }
+      pageInfo {
+        hasNextPage
+      }
+    }
+  }
+}
+""".strip()
+
 
 def _is_twitch_vod_url(url: str) -> bool:
-    value = url.strip().lower()
-    return "twitch.tv/videos/" in value
+    return _twitch_vod_id(url) is not None
 
 
-def _is_missing_twitch_chat_replay(message: str) -> bool:
-    normalized = message.lower()
-    return (
-        "unable to download video subtitles for 'rechat'" in normalized
-        and "http error 404" in normalized
-    ) or (
-        "unable to download video subtitles for 'live_chat'" in normalized
-        and "http error 404" in normalized
-    )
+def _twitch_vod_id(url: str) -> str | None:
+    parsed = parse.urlparse(url.strip())
+    host = parsed.netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if host != "twitch.tv":
+        return None
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) >= 2 and parts[0].lower() == "videos" and parts[1].isdigit():
+        return parts[1]
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -172,102 +206,482 @@ class ChatSpike:
 # Chat download
 # ---------------------------------------------------------------------------
 
-def download_chat(url: str, job_id: str, out_dir: pathlib.Path) -> pathlib.Path | None:
-    """
-    Download live chat replay via yt-dlp (Twitch, YouTube, etc.).
+class _TwitchRechatUnavailable(Exception):
+    """Raised when Twitch reports that the replay comments are unavailable."""
 
-    Writes a JSON chat export to *out_dir* and returns its path.
-    Returns None silently on any failure (network error, no chat available,
-    platform does not support chat export, yt-dlp unavailable) so the rest
-    of the pipeline is unaffected.
-    """
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_template = str(out_dir / "chat")
-    is_twitch_vod = _is_twitch_vod_url(url)
 
-    if is_twitch_vod:
-        logger.info("Starting Twitch chat download for job %s: %s", job_id, url)
+def _twitch_headers() -> dict[str, str]:
+    return {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Client-ID": _DEFAULT_TWITCH_WEB_CLIENT_ID,
+        "User-Agent": "Mozilla/5.0",
+    }
 
+
+def _fetch_graphql_comments(
+    vod_id: str,
+    *,
+    job_id: str,
+    offset_seconds: int,
+    headers: dict[str, str],
+    timeout_sec: float,
+) -> dict[str, Any]:
+    started_at = time.perf_counter()
+    offset_seconds = max(int(offset_seconds), 0)
+    logger.info(
+        "twitch_graphql_rechat_request_start job_id=%s vod_id=%s offset=%s timeout_sec=%.1f client_id_source=web",
+        job_id,
+        vod_id,
+        offset_seconds,
+        timeout_sec,
+    )
+    payload = [
+        {
+            "operationName": "VideoCommentsByOffsetOrCursor",
+            "variables": {
+                "videoID": str(vod_id),
+                "contentOffsetSeconds": offset_seconds,
+            },
+            "query": _TWITCH_COMMENTS_QUERY,
+        }
+    ]
+    req = request.Request(
+        _TWITCH_GRAPHQL_API,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
     try:
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "yt_dlp",
-                "--skip-download",
-                "--write-subs",
-                "--sub-langs",
-                "rechat,live_chat",
-                "--sub-format",
-                "json3/json",
-                "-o",
-                out_template,
-                url,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=settings.chat_download_timeout_sec,
-            check=False,          # we handle failure ourselves
-        )
-    except FileNotFoundError:
-        if is_twitch_vod:
-            logger.warning(
-                "Twitch chat download skipped for job %s because yt-dlp is unavailable",
+        with request.urlopen(req, timeout=timeout_sec) as response:
+            status = int(getattr(response, "status", 200))
+            body = response.read()
+    except error.HTTPError as exc:
+        elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+        if exc.code == 404:
+            logger.info(
+                "twitch_graphql_rechat_unavailable job_id=%s vod_id=%s offset=%s status=%s reason=not_found elapsed_ms=%s",
                 job_id,
+                vod_id,
+                offset_seconds,
+                exc.code,
+                elapsed_ms,
             )
+            raise _TwitchRechatUnavailable("twitch_graphql_404") from exc
+        try:
+            error_body = exc.read(1000).decode("utf-8", errors="replace")
+        except Exception:
+            error_body = ""
+        logger.warning(
+            "twitch_graphql_rechat_http_error job_id=%s vod_id=%s offset=%s status=%s reason=%s body=%s elapsed_ms=%s",
+            job_id,
+            vod_id,
+            offset_seconds,
+            exc.code,
+            exc.reason,
+            error_body,
+            elapsed_ms,
+        )
+        raise ValueError(
+            f"Twitch GraphQL HTTP {exc.code}: {error_body or exc.reason}"
+        ) from exc
+    elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+    logger.info(
+        "twitch_graphql_rechat_response job_id=%s vod_id=%s offset=%s status=%s bytes=%s elapsed_ms=%s",
+        job_id,
+        vod_id,
+        offset_seconds,
+        status,
+        len(body),
+        elapsed_ms,
+    )
+    if status == 404:
+        logger.info(
+            "twitch_graphql_rechat_unavailable job_id=%s vod_id=%s offset=%s status=%s reason=not_found elapsed_ms=%s",
+            job_id,
+            vod_id,
+            offset_seconds,
+            status,
+            elapsed_ms,
+        )
+        raise _TwitchRechatUnavailable("twitch_graphql_404")
+    if status >= 400:
+        raise error.HTTPError(_TWITCH_GRAPHQL_API, status, f"HTTP {status}", hdrs=None, fp=None)
+
+    raw = json.loads(body.decode("utf-8", errors="replace"))
+    if isinstance(raw, list) and raw:
+        response_payload = raw[0]
+    else:
+        response_payload = raw
+    if not isinstance(response_payload, dict):
+        raise ValueError("Twitch GraphQL response is not a JSON object")
+
+    errors = response_payload.get("errors")
+    data = response_payload.get("data")
+    if isinstance(data, dict):
+        video = data.get("video")
+    else:
+        video = None
+    if video is None:
+        logger.info(
+            "twitch_graphql_rechat_unavailable job_id=%s vod_id=%s offset=%s status=%s reason=video_missing",
+            job_id,
+            vod_id,
+            offset_seconds,
+            status,
+        )
+        raise _TwitchRechatUnavailable("twitch_graphql_video_missing")
+    if isinstance(errors, list) and errors:
+        messages = ", ".join(
+            str(item.get("message") or "")
+            for item in errors
+            if isinstance(item, dict)
+        )
+        logger.warning(
+            "twitch_graphql_rechat_payload_error job_id=%s vod_id=%s offset=%s status=%s errors=%s",
+            job_id,
+            vod_id,
+            offset_seconds,
+            status,
+            messages,
+        )
+        raise ValueError(f"Twitch GraphQL returned errors: {messages}")
+    if not isinstance(video, dict):
+        raise ValueError("Twitch GraphQL video payload is not an object")
+    comments = video.get("comments")
+    if comments is None:
+        logger.info(
+            "twitch_graphql_rechat_unavailable job_id=%s vod_id=%s offset=%s status=%s reason=comments_missing",
+            job_id,
+            vod_id,
+            offset_seconds,
+            status,
+        )
+        raise _TwitchRechatUnavailable("twitch_graphql_comments_missing")
+    if not isinstance(comments, dict):
+        raise ValueError("Twitch GraphQL comments payload is not an object")
+    return comments
+
+
+def _comment_text(message: dict[str, Any]) -> str:
+    body = message.get("body")
+    if isinstance(body, str) and body.strip():
+        return body.strip()
+    fragments = message.get("fragments")
+    if isinstance(fragments, list):
+        return "".join(
+            str(fragment.get("text", ""))
+            for fragment in fragments
+            if isinstance(fragment, dict)
+        ).strip()
+    return ""
+
+
+def _comment_emotes(message: dict[str, Any]) -> list[str]:
+    emotes: list[str] = []
+    fragments = message.get("fragments")
+    if not isinstance(fragments, list):
+        return emotes
+    for fragment in fragments:
+        if not isinstance(fragment, dict):
+            continue
+        emoticon = fragment.get("emoticon")
+        if not isinstance(emoticon, dict):
+            emoticon = fragment.get("emote")
+        if not isinstance(emoticon, dict):
+            continue
+        for key in ("emoticon_id", "emoteID", "id", "name"):
+            value = emoticon.get(key)
+            if isinstance(value, str) and value:
+                emotes.append(value)
+                break
+        else:
+            text = fragment.get("text")
+            if isinstance(text, str) and text:
+                emotes.append(text)
+    return emotes
+
+
+def _normalize_twitch_comment(comment: dict[str, Any]) -> dict[str, Any] | None:
+    try:
+        t = float(comment.get("content_offset_seconds", comment.get("contentOffsetSeconds", 0.0)))
+    except (TypeError, ValueError):
         return None
-    except subprocess.TimeoutExpired:
-        if is_twitch_vod:
+    message = comment.get("message")
+    if not isinstance(message, dict):
+        return None
+    text = _comment_text(message)
+    if not text:
+        return None
+    commenter = comment.get("commenter")
+    user = ""
+    if isinstance(commenter, dict):
+        display_name = commenter.get("display_name") or commenter.get("displayName")
+        login = commenter.get("name") or commenter.get("login")
+        user = str(display_name or login or "")
+    row: dict[str, Any] = {
+        "t": t,
+        "text": text,
+        "emotes": _comment_emotes(message),
+    }
+    comment_id = comment.get("_id") or comment.get("id")
+    if comment_id:
+        row["id"] = str(comment_id)
+    if user:
+        row["user"] = user
+    return row
+
+
+def _normalize_target_offsets(target_offsets: list[float] | tuple[float, ...] | None) -> list[int]:
+    if not target_offsets:
+        return []
+    offsets: set[int] = set()
+    for value in target_offsets:
+        try:
+            offset = int(float(value))
+        except (TypeError, ValueError):
+            continue
+        offsets.add(max(offset, 0))
+    return sorted(offsets)
+
+
+def _fetch_twitch_rechat(
+    vod_id: str,
+    job_id: str,
+    *,
+    target_offsets: list[float] | tuple[float, ...] | None = None,
+) -> tuple[list[dict[str, Any]], bool, dict[str, Any]]:
+    headers = _twitch_headers()
+    per_request_timeout = max(1.0, min(float(settings.chat_download_timeout_sec), 15.0))
+    deadline = time.monotonic() + max(float(settings.chat_download_timeout_sec), 1.0)
+    offsets = _normalize_target_offsets(target_offsets)
+    offset_index = 0
+    current_offset = offsets[0] if offsets else 0
+    seen_messages: set[tuple[str, float, str]] = set()
+    messages: list[dict[str, Any]] = []
+    partial = False
+    page_count = 0
+    mode = "target_offsets" if offsets else "crawl"
+    attempted_offsets: list[int] = []
+    logger.info(
+        "twitch_rechat_fetch_plan job_id=%s vod_id=%s mode=%s target_offsets=%s first_offset=%s last_offset=%s timeout_sec=%s per_request_timeout_sec=%.1f",
+        job_id,
+        vod_id,
+        mode,
+        len(offsets),
+        offsets[0] if offsets else current_offset,
+        offsets[-1] if offsets else current_offset,
+        settings.chat_download_timeout_sec,
+        per_request_timeout,
+    )
+
+    while True:
+        if time.monotonic() >= deadline:
+            partial = True
             logger.warning(
-                "Twitch chat download timed out for job %s after %ss",
+                "twitch_rechat_fetch_timeout job_id=%s vod_id=%s pages=%s messages=%s timeout_sec=%s",
                 job_id,
+                vod_id,
+                page_count,
+                len(messages),
                 settings.chat_download_timeout_sec,
             )
-        return None
+            break
 
-    # yt-dlp names the file chat.rechat.json / chat.live_chat.json3 (or similar)
-    candidates = sorted(out_dir.glob("chat*.json*"))
-    if candidates:
-        if is_twitch_vod:
-            logger.info(
-                "Twitch chat download finished for job %s: %s",
-                job_id,
-                candidates[0],
-            )
-        return candidates[0]
-
-    if not candidates and result.returncode != 0:
-        message = (result.stderr or result.stdout or "").strip()
-        if is_twitch_vod:
-            if _is_missing_twitch_chat_replay(message):
-                logger.info(
-                    "Twitch chat replay unavailable for job %s (exit=%s); continuing without chat enrichment",
-                    job_id,
-                    result.returncode,
-                )
-            else:
-                logger.warning(
-                    "Twitch chat download failed for job %s (exit=%s): %s",
-                    job_id,
-                    result.returncode,
-                    message,
-                )
-        else:
-            logger.info(
-                "Chat download failed for %s (exit=%s): %s",
-                job_id,
-                result.returncode,
-                message,
-            )
-        return None
-
-    if is_twitch_vod:
-        logger.info(
-            "Twitch chat download produced no chat file for job %s (exit=%s)",
-            job_id,
-            result.returncode,
+        payload = _fetch_graphql_comments(
+            vod_id,
+            job_id=job_id,
+            offset_seconds=current_offset,
+            headers=headers,
+            timeout_sec=per_request_timeout,
         )
-    return None
+        attempted_offsets.append(int(current_offset))
+        page_count += 1
+        edges = payload.get("edges")
+        if not isinstance(edges, list):
+            raise ValueError("Twitch GraphQL rechat response is missing edges list")
+
+        page_messages: list[dict[str, Any]] = []
+        page_new_messages = 0
+        for edge in edges:
+            if not isinstance(edge, dict):
+                continue
+            comment = edge.get("node")
+            if not isinstance(comment, dict):
+                continue
+            normalized = _normalize_twitch_comment(comment)
+            if normalized is None:
+                continue
+            page_messages.append(normalized)
+            dedupe_id = str(normalized.get("id", ""))
+            dedupe_key = (dedupe_id, float(normalized["t"]), str(normalized["text"]))
+            if dedupe_key in seen_messages:
+                continue
+            seen_messages.add(dedupe_key)
+            messages.append(normalized)
+            page_new_messages += 1
+
+        page_info = payload.get("pageInfo")
+        has_next = bool(page_info.get("hasNextPage")) if isinstance(page_info, dict) else False
+        first_page_t = min((float(row.get("t", 0.0)) for row in page_messages), default=0.0)
+        last_page_t = max((float(row.get("t", 0.0)) for row in page_messages), default=0.0)
+        logger.info(
+            "twitch_rechat_fetch_page job_id=%s vod_id=%s page=%s offset=%s edges=%s normalized=%s new_messages=%s total_messages=%s first_t=%.3f last_t=%.3f has_next=%s mode=%s",
+            job_id,
+            vod_id,
+            page_count,
+            current_offset,
+            len(edges),
+            len(page_messages),
+            page_new_messages,
+            len(messages),
+            first_page_t,
+            last_page_t,
+            has_next,
+            mode,
+        )
+
+        if offsets:
+            offset_index += 1
+            if offset_index >= len(offsets):
+                break
+            current_offset = offsets[offset_index]
+            continue
+
+        if not has_next or not page_messages:
+            logger.info(
+                "twitch_rechat_fetch_stop job_id=%s vod_id=%s reason=%s page=%s offset=%s messages=%s has_next=%s",
+                job_id,
+                vod_id,
+                "empty_page" if not page_messages else "no_next_page",
+                page_count,
+                current_offset,
+                len(messages),
+                has_next,
+            )
+            break
+        next_offset = int(max(float(row.get("t", 0.0)) for row in page_messages)) + 1
+        if next_offset <= current_offset:
+            logger.warning(
+                "twitch_rechat_fetch_stopped job_id=%s vod_id=%s reason=no_offset_progress offset=%s",
+                job_id,
+                vod_id,
+                current_offset,
+            )
+            partial = True
+            break
+        current_offset = next_offset
+
+    messages.sort(key=lambda row: float(row.get("t", 0.0)))
+    logger.info(
+        "twitch_rechat_fetch_done job_id=%s vod_id=%s status=%s pages=%s messages=%s first_t=%.3f last_t=%.3f mode=%s",
+        job_id,
+        vod_id,
+        "partial" if partial else "complete",
+        page_count,
+        len(messages),
+        float(messages[0].get("t", 0.0)) if messages else 0.0,
+        float(messages[-1].get("t", 0.0)) if messages else 0.0,
+        mode,
+    )
+    missing_offsets = [offset for offset in offsets if offset not in set(attempted_offsets)]
+    fetch_metadata = {
+        "mode": mode,
+        "target_offsets": offsets,
+        "attempted_offsets": attempted_offsets,
+        "covered_target_offsets": attempted_offsets if offsets else [],
+        "missing_target_offsets": missing_offsets,
+        "partial": bool(partial or missing_offsets),
+        "pages": page_count,
+        "messages": len(messages),
+        "first_t": float(messages[0].get("t", 0.0)) if messages else None,
+        "last_t": float(messages[-1].get("t", 0.0)) if messages else None,
+    }
+    return messages, partial, fetch_metadata
+
+
+def download_chat(
+    url: str,
+    job_id: str,
+    out_dir: pathlib.Path,
+    *,
+    target_offsets: list[float] | tuple[float, ...] | None = None,
+) -> pathlib.Path | None:
+    """
+    Download Twitch VOD chat replay directly from Twitch.
+
+    Writes a normalized JSON chat export to *out_dir* and returns its path.
+    Returns None on any failure (network error, no chat available, unsupported
+    URL) so the rest of the pipeline is unaffected.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    vod_id = _twitch_vod_id(url)
+    if vod_id is None:
+        logger.info(
+            "chat_download_skipped job_id=%s reason=unsupported_url url=%s",
+            job_id,
+            url,
+        )
+        return None
+
+    normalized_offsets = _normalize_target_offsets(target_offsets)
+    logger.info(
+        "twitch_chat_download_start job_id=%s vod_id=%s url=%s out_dir=%s target_offsets=%s first_offset=%s last_offset=%s",
+        job_id,
+        vod_id,
+        url,
+        out_dir,
+        len(normalized_offsets),
+        normalized_offsets[0] if normalized_offsets else 0,
+        normalized_offsets[-1] if normalized_offsets else 0,
+    )
+    try:
+        messages, partial, fetch_metadata = _fetch_twitch_rechat(vod_id, job_id, target_offsets=target_offsets)
+    except _TwitchRechatUnavailable as exc:
+        reason = str(exc) or "missing_rechat"
+        logger.info(
+            "twitch_chat_download_unavailable job_id=%s vod_id=%s reason=%s",
+            job_id,
+            vod_id,
+            reason,
+        )
+        return None
+    except (TimeoutError, error.URLError, error.HTTPError, json.JSONDecodeError, ValueError) as exc:
+        logger.exception(
+            "twitch_chat_download_failed job_id=%s vod_id=%s url=%s error_type=%s error=%s",
+            job_id,
+            vod_id,
+            url,
+            type(exc).__name__,
+            exc,
+        )
+        return None
+
+    if not messages:
+        logger.info(
+            "twitch_chat_download_empty job_id=%s vod_id=%s reason=no_messages_after_fetch",
+            job_id,
+            vod_id,
+        )
+        return None
+
+    chat_path = out_dir / "chat.twitch_rechat.json"
+    chat_path.write_text(json.dumps(messages, ensure_ascii=True), encoding="utf-8")
+    metadata_path = out_dir / "chat.twitch_rechat.fetch_metadata.json"
+    metadata_path.write_text(json.dumps(fetch_metadata, ensure_ascii=True, sort_keys=True), encoding="utf-8")
+    first_t = float(messages[0].get("t", 0.0))
+    last_t = float(messages[-1].get("t", 0.0))
+    logger.info(
+        "twitch_chat_download_success job_id=%s vod_id=%s chat_path=%s messages=%s first_t=%.3f last_t=%.3f partial=%s",
+        job_id,
+        vod_id,
+        chat_path,
+        len(messages),
+        first_t,
+        last_t,
+        partial,
+    )
+    return chat_path
 
 
 # ---------------------------------------------------------------------------
@@ -276,10 +690,11 @@ def download_chat(url: str, job_id: str, out_dir: pathlib.Path) -> pathlib.Path 
 
 def load_messages(path: pathlib.Path) -> list[dict]:
     """
-    Parse a yt-dlp chat file into a flat list of ``{t, text}`` dicts.
+    Parse a chat file into a flat list of ``{t, text, emotes}`` dicts.
 
     Handles two formats:
-    - json3 (YouTube-style): ``{"events": [{tStartMs, segs: [{utf8}]}]}``
+    - normalized direct Twitch export: ``[{t, text, emotes}]``
+    - legacy json3-style export: ``{"events": [{tStartMs, segs: [{utf8}]}]}``
     - Twitch native list: ``[{content_offset_seconds, message: {body}}]``
     """
     try:
@@ -303,20 +718,29 @@ def load_messages(path: pathlib.Path) -> list[dict]:
         return messages
 
     if isinstance(raw, list):
-        # Twitch native API format
+        # Normalized direct export, or Twitch native API format.
         for msg in raw:
-            t = float(msg.get("content_offset_seconds", 0))
-            body = ""
-            fragments: list[dict] = []
+            if not isinstance(msg, dict):
+                continue
+            if "t" in msg or "text" in msg:
+                try:
+                    t = float(msg.get("t", 0.0))
+                except (TypeError, ValueError):
+                    continue
+                body = str(msg.get("text", ""))
+                raw_emotes = msg.get("emotes", [])
+                emotes = [str(emote) for emote in raw_emotes] if isinstance(raw_emotes, list) else []
+                messages.append({"t": t, "text": body, "emotes": emotes})
+                continue
+            try:
+                t = float(msg.get("content_offset_seconds", 0))
+            except (TypeError, ValueError):
+                continue
             m = msg.get("message", {})
-            if isinstance(m, dict):
-                body = m.get("body", "")
-                fragments = m.get("fragments", [])
-            emotes = [
-                frag["emoticon"]["emoticon_id"]
-                for frag in fragments
-                if isinstance(frag.get("emoticon"), dict)
-            ]
+            if not isinstance(m, dict):
+                continue
+            body = _comment_text(m)
+            emotes = _comment_emotes(m)
             messages.append({"t": t, "text": body, "emotes": emotes})
         return messages
 

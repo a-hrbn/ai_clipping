@@ -21,7 +21,7 @@ class FeatureBuilderTests(unittest.TestCase):
                 start=2.0,
                 end=5.0,
                 text="No way!",
-                emotions=["exclamation", "audio_laughter", "face_reaction"],
+                emotions=["exclamation", "audio_laughter", "face_reaction", "chat_hype"],
                 speaker="GUEST_1",
                 hype_score=6.0,
                 arc_score=4.0,
@@ -59,7 +59,15 @@ class FeatureBuilderTests(unittest.TestCase):
         self.assertGreater(features.audio_pop_score, 0.0)
         self.assertGreater(features.projected_hook_score, 0.0)
         self.assertGreater(features.projected_retention_score, 0.0)
-        self.assertEqual(features.feature_build_version, 6)
+        self.assertEqual(features.feature_build_version, 7)
+        self.assertTrue(features.has_chat_features)
+        self.assertEqual(features.chat_peak, 0.6)
+        self.assertGreater(features.chat_mean, 0.0)
+        self.assertEqual(features.chat_early_peak, 0.6)
+        self.assertEqual(features.chat_post_hook_peak, 0.6)
+        self.assertGreater(features.chat_spike_coverage, 0.0)
+        self.assertEqual(features.chat_hype_score, 0.6)
+        self.assertEqual(features.chat_laugh_score, 0.0)
         self.assertGreaterEqual(features.payoff_clarity_score, 0.0)
         self.assertGreaterEqual(features.slow_open_penalty, 0.0)
         self.assertGreaterEqual(features.context_dependency_score, 0.0)

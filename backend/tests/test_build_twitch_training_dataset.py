@@ -268,6 +268,295 @@ class BuildTwitchTrainingDatasetTests(unittest.TestCase):
             [("before", 0.0, 2.0), ("inside", 2.5, 5.0), ("after", 9.0, 10.0)],
         )
 
+    def test_load_or_download_chat_reuses_cached_rechat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "vod_feature_cache" / "123"
+            chat_dir = cache_dir / "chat"
+            chat_dir.mkdir(parents=True)
+            cached = chat_dir / "chat.rechat.json"
+            cached.write_text("[]", encoding="utf-8")
+
+            with patch("services.chat_analyzer.download_chat") as download_mock, \
+                 self.assertLogs(build_twitch_training_dataset.logger, level="INFO") as logs:
+                result = build_twitch_training_dataset._load_or_download_chat(
+                    "https://www.twitch.tv/videos/123",
+                    job_id="job-1",
+                    cache_dir=cache_dir,
+                )
+            metadata = json.loads((chat_dir / "chat.metadata.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(result, cached)
+        download_mock.assert_not_called()
+        self.assertIn("training_vod_chat_cache_hit", "\n".join(logs.output))
+        self.assertEqual(metadata["kind"], "vod_chat")
+        self.assertEqual(metadata["vod_id"], "123")
+        self.assertEqual(metadata["cache_status"], "hit")
+        self.assertEqual(metadata["chat_path"], str(cached))
+
+    def test_load_or_download_chat_downloads_and_persists_cache_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "vod_feature_cache" / "123"
+
+            def _fake_download(_url, _job_id, out_dir, **_kwargs):
+                out_dir.mkdir(parents=True, exist_ok=True)
+                path = out_dir / "chat.rechat.json"
+                path.write_text("[]", encoding="utf-8")
+                return path
+
+            with patch("services.chat_analyzer.download_chat", side_effect=_fake_download) as download_mock, \
+                 self.assertLogs(build_twitch_training_dataset.logger, level="INFO") as logs:
+                result = build_twitch_training_dataset._load_or_download_chat(
+                    "https://www.twitch.tv/videos/123",
+                    job_id="job-1",
+                    cache_dir=cache_dir,
+                )
+            metadata = json.loads((cache_dir / "chat" / "chat.metadata.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(result, cache_dir / "chat" / "chat.rechat.json")
+        download_mock.assert_called_once()
+        self.assertEqual(download_mock.call_args.kwargs["target_offsets"], None)
+        log_text = "\n".join(logs.output)
+        self.assertIn("training_vod_chat_download_start", log_text)
+        self.assertIn("training_vod_chat_download_success", log_text)
+        self.assertEqual(metadata["cache_status"], "downloaded")
+        self.assertEqual(metadata["vod_url"], "https://www.twitch.tv/videos/123")
+
+    def test_load_or_download_chat_passes_target_offsets_to_downloader(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "vod_feature_cache" / "123"
+
+            def _fake_download(_url, _job_id, out_dir, **_kwargs):
+                out_dir.mkdir(parents=True, exist_ok=True)
+                path = out_dir / "chat.rechat.json"
+                path.write_text("[]", encoding="utf-8")
+                return path
+
+            with patch("services.chat_analyzer.download_chat", side_effect=_fake_download) as download_mock:
+                build_twitch_training_dataset._load_or_download_chat(
+                    "https://www.twitch.tv/videos/123",
+                    job_id="job-1",
+                    cache_dir=cache_dir,
+                    target_offsets=[10.0, 20.0],
+                )
+
+        self.assertEqual(download_mock.call_args.kwargs["target_offsets"], [10.0, 20.0])
+
+    def test_load_or_download_chat_hits_complete_target_offset_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "vod_feature_cache" / "123"
+            chat_dir = cache_dir / "chat"
+            chat_dir.mkdir(parents=True)
+            cached = chat_dir / "chat.twitch_rechat.json"
+            cached.write_text('[{"t": 100.0, "text": "cached", "emotes": []}]', encoding="utf-8")
+            build_twitch_training_dataset._write_chat_cache_metadata(
+                cache_dir,
+                vod_url="https://www.twitch.tv/videos/123",
+                job_id="job-old",
+                chat_path=cached,
+                cache_status="downloaded",
+                target_offsets=[90.0, 100.0],
+                covered_target_offsets=[90.0, 100.0],
+                missing_target_offsets=[],
+            )
+
+            with patch("services.chat_analyzer.download_chat") as download_mock:
+                result = build_twitch_training_dataset._load_or_download_chat(
+                    "https://www.twitch.tv/videos/123",
+                    job_id="job-1",
+                    cache_dir=cache_dir,
+                    target_offsets=[90.0, 100.0],
+                )
+            metadata = json.loads((chat_dir / "chat.metadata.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(result, cached)
+        download_mock.assert_not_called()
+        self.assertEqual(metadata["cache_status"], "hit")
+        self.assertEqual(metadata["coverage_status"], "complete")
+        self.assertEqual(metadata["missing_target_offsets"], [])
+
+    def test_load_or_download_chat_refills_stale_cache_missing_target_offsets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "vod_feature_cache" / "123"
+            chat_dir = cache_dir / "chat"
+            chat_dir.mkdir(parents=True)
+            cached = chat_dir / "chat.twitch_rechat.json"
+            cached.write_text('[{"id": "old", "t": 10.0, "text": "old", "emotes": []}]', encoding="utf-8")
+
+            def _fake_download(_url, _job_id, out_dir, **_kwargs):
+                out_dir.mkdir(parents=True, exist_ok=True)
+                path = out_dir / "chat.twitch_rechat.json"
+                path.write_text(
+                    '[{"id": "new", "t": 105.0, "text": "new", "emotes": []}]',
+                    encoding="utf-8",
+                )
+                return path
+
+            with patch("services.chat_analyzer.download_chat", side_effect=_fake_download) as download_mock, \
+                 self.assertLogs(build_twitch_training_dataset.logger, level="INFO") as logs:
+                result = build_twitch_training_dataset._load_or_download_chat(
+                    "https://www.twitch.tv/videos/123",
+                    job_id="job-1",
+                    cache_dir=cache_dir,
+                    target_offsets=[100.0, 110.0],
+                )
+            merged = json.loads(cached.read_text(encoding="utf-8"))
+            metadata = json.loads((chat_dir / "chat.metadata.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(result, cached)
+        self.assertEqual(download_mock.call_args.kwargs["target_offsets"], [100.0, 110.0])
+        self.assertEqual([row["id"] for row in merged], ["old", "new"])
+        self.assertEqual(metadata["cache_status"], "refilled")
+        self.assertEqual(metadata["coverage_status"], "complete")
+        self.assertEqual(metadata["target_offsets"], [100, 110])
+        self.assertEqual(metadata["covered_target_offsets"], [100, 110])
+        self.assertEqual(metadata["missing_target_offsets"], [])
+        log_text = "\n".join(logs.output)
+        self.assertIn("training_vod_chat_cache_partial", log_text)
+        self.assertIn("training_vod_chat_refill_success", log_text)
+
+    def test_load_or_download_chat_marks_partial_when_refill_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "vod_feature_cache" / "123"
+            chat_dir = cache_dir / "chat"
+            chat_dir.mkdir(parents=True)
+            cached = chat_dir / "chat.twitch_rechat.json"
+            cached.write_text('[{"id": "old", "t": 10.0, "text": "old", "emotes": []}]', encoding="utf-8")
+            build_twitch_training_dataset._write_chat_cache_metadata(
+                cache_dir,
+                vod_url="https://www.twitch.tv/videos/123",
+                job_id="job-old",
+                chat_path=cached,
+                cache_status="downloaded",
+                target_offsets=[10.0],
+                covered_target_offsets=[10.0],
+                missing_target_offsets=[],
+            )
+
+            with patch("services.chat_analyzer.download_chat", return_value=None):
+                result = build_twitch_training_dataset._load_or_download_chat(
+                    "https://www.twitch.tv/videos/123",
+                    job_id="job-1",
+                    cache_dir=cache_dir,
+                    target_offsets=[10.0, 100.0],
+                )
+            metadata = json.loads((chat_dir / "chat.metadata.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(result, cached)
+        self.assertEqual(metadata["cache_status"], "partial")
+        self.assertEqual(metadata["coverage_status"], "partial")
+        self.assertTrue(metadata["partial"])
+        self.assertEqual(metadata["covered_target_offsets"], [10])
+        self.assertEqual(metadata["missing_target_offsets"], [100])
+
+    def test_chat_target_offsets_for_labels_cover_expanded_windows(self) -> None:
+        labels = [
+            {
+                "label_class": "positive",
+                "window_start": 100.0,
+                "window_end": 120.0,
+            },
+            {
+                "label_class": "hard_negative",
+                "window_start": 180.0,
+                "window_end": 190.0,
+            },
+            {
+                "label_class": "background_negative",
+                "window_start": 1000.0,
+                "window_end": 1010.0,
+            },
+            {
+                "label_class": "ambiguous",
+                "window_start": 1200.0,
+                "window_end": 1210.0,
+            },
+        ]
+
+        offsets = build_twitch_training_dataset._chat_target_offsets_for_labels(labels)
+
+        self.assertIn(87.0, offsets)
+        self.assertIn(134.0, offsets)
+        self.assertIn(175.0, offsets)
+        self.assertIn(195.0, offsets)
+        self.assertNotIn(995.0, offsets)
+        self.assertNotIn(1195.0, offsets)
+        self.assertEqual(offsets, sorted(offsets))
+
+    def test_chat_target_offsets_cap_hard_negatives_near_positives(self) -> None:
+        labels = [
+            {
+                "label_class": "positive",
+                "window_start": 100.0,
+                "window_end": 120.0,
+            }
+        ]
+        labels.extend(
+            {
+                "label_class": "hard_negative",
+                "window_start": 200.0 + index * 100.0,
+                "window_end": 210.0 + index * 100.0,
+            }
+            for index in range(12)
+        )
+
+        target_labels = build_twitch_training_dataset._chat_target_labels_for_offsets(labels)
+
+        self.assertEqual(len(target_labels), 1 + build_twitch_training_dataset._MAX_VOD_NEGATIVE_ROWS_PER_POSITIVE)
+        self.assertEqual(
+            sum(1 for label in target_labels if label["label_class"] == "hard_negative"),
+            build_twitch_training_dataset._MAX_VOD_NEGATIVE_ROWS_PER_POSITIVE,
+        )
+        self.assertLess(
+            max(float(label["window_start"]) for label in target_labels if label["label_class"] == "hard_negative"),
+            1000.0,
+        )
+
+    def test_chat_target_offsets_return_empty_without_positive_anchor(self) -> None:
+        labels = [
+            {
+                "label_class": "hard_negative",
+                "window_start": 100.0,
+                "window_end": 120.0,
+            },
+            {
+                "label_class": "background_negative",
+                "window_start": 140.0,
+                "window_end": 160.0,
+            },
+        ]
+
+        offsets = build_twitch_training_dataset._chat_target_offsets_for_labels(labels)
+
+        self.assertEqual(offsets, [])
+
+    def test_load_or_download_chat_persists_unavailable_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "vod_feature_cache" / "123"
+
+            with patch("services.chat_analyzer.download_chat", return_value=None), \
+                 self.assertLogs(build_twitch_training_dataset.logger, level="INFO") as logs:
+                result = build_twitch_training_dataset._load_or_download_chat(
+                    "https://www.twitch.tv/videos/123",
+                    job_id="job-1",
+                    cache_dir=cache_dir,
+                )
+            metadata = json.loads((cache_dir / "chat" / "chat.metadata.json").read_text(encoding="utf-8"))
+
+        self.assertIsNone(result)
+        self.assertEqual(metadata["cache_status"], "unavailable")
+        self.assertEqual(metadata["reason"], "download_returned_none_see_twitch_chat_logs")
+        self.assertEqual(metadata["chat_path"], "")
+        self.assertIn("training_vod_chat_download_unavailable", "\n".join(logs.output))
+
+    def test_cached_chat_path_ignores_metadata_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "vod_feature_cache" / "123"
+            chat_dir = cache_dir / "chat"
+            chat_dir.mkdir(parents=True)
+            (chat_dir / "chat.metadata.json").write_text("{}", encoding="utf-8")
+
+            self.assertIsNone(build_twitch_training_dataset._cached_chat_path(cache_dir))
+
     def test_load_or_build_vod_feature_context_reuses_cached_transcript_and_audio(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             storage_dir = Path(tmp) / "storage"
@@ -735,6 +1024,68 @@ class BuildTwitchTrainingDatasetTests(unittest.TestCase):
             build_twitch_training_dataset._write_vod_checkpoint(work_dir, "jynxzi", "123", labels, checkpoint_rows)
             with patch("ml.build_twitch_training_dataset._raw_vod_rows_fingerprint", side_effect=["fingerprint-a", "fingerprint-b"]):
                 checkpoint = build_twitch_training_dataset._load_vod_checkpoint(work_dir, "jynxzi", "123", labels)
+
+        self.assertIsNone(checkpoint)
+
+    def test_vod_checkpoint_invalidates_when_chat_enrichment_enabled_changes(self) -> None:
+        labels = [
+            {
+                "broadcaster": "jynxzi",
+                "vod_id": "123",
+                "vod_url": "https://www.twitch.tv/videos/123",
+                "window_start": 10.0,
+                "window_end": 20.0,
+                "label_class": "positive",
+                "label_score": 0.8,
+                "clip_ids": ["c1"],
+                "label_source": "twitch_clip_api",
+                "platform_source": "twitch_clip",
+            },
+        ]
+        checkpoint_rows = [{"label": 1, "label_class": "positive", "features": {"candidate_id": "cached"}}]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp) / "work"
+            with patch.object(settings, "enable_chat_analysis", False):
+                build_twitch_training_dataset._write_vod_checkpoint(work_dir, "jynxzi", "123", labels, checkpoint_rows)
+            with patch.object(settings, "enable_chat_analysis", True):
+                checkpoint = build_twitch_training_dataset._load_vod_checkpoint(work_dir, "jynxzi", "123", labels)
+
+        self.assertIsNone(checkpoint)
+
+    def test_build_dataset_does_not_checkpoint_when_chat_enabled_without_chat_file(self) -> None:
+        labels = [
+            {
+                "broadcaster": "jynxzi",
+                "vod_id": "123",
+                "vod_url": "https://www.twitch.tv/videos/123",
+                "window_start": 10.0,
+                "window_end": 20.0,
+                "label_class": "positive",
+                "label_score": 0.8,
+                "clip_ids": ["c1"],
+                "label_source": "twitch_clip_api",
+                "platform_source": "twitch_clip",
+            },
+        ]
+        built_rows = [
+            {
+                "label": 1,
+                "label_class": "positive",
+                "label_source": "twitch_clip_api",
+                "features": {"candidate_id": "x"},
+            }
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(settings, "enable_chat_analysis", True), \
+             patch.object(settings, "storage_dir", str(Path(tmp) / "storage")), \
+             patch("ml.build_twitch_training_dataset._materialize_vod", return_value=Path(tmp) / "vod.mp4"), \
+             patch("ml.build_twitch_training_dataset._load_or_build_vod_feature_context", return_value=self._fake_vod_feature_context(Path(tmp))), \
+             patch("ml.build_twitch_training_dataset._build_rows_for_label", return_value=built_rows):
+            work_dir = Path(tmp) / "work"
+            build_twitch_training_dataset.build_dataset(labels, "jynxzi", work_dir)
+            checkpoint = build_twitch_training_dataset._load_vod_checkpoint(work_dir, "jynxzi", "123", labels)
 
         self.assertIsNone(checkpoint)
 

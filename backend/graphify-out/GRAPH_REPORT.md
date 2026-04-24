@@ -1,25 +1,65 @@
-# Graph Report - backend  (2026-04-22)
+# Graph Report - backend  (2026-04-25)
 
 ## Corpus Check
-- 140 files · ~100,603 words
+- 152 files · ~120,839 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1599 nodes · 2757 edges · 105 communities detected
-- Extraction: 94% EXTRACTED · 6% INFERRED · 0% AMBIGUOUS · INFERRED: 170 edges (avg confidence: 0.5)
+- 2034 nodes · 5262 edges · 38 communities detected
+- Extraction: 62% EXTRACTED · 38% INFERRED · 0% AMBIGUOUS · INFERRED: 2001 edges (avg confidence: 0.76)
 - Token cost: 0 input · 0 output
 
+## Community Hubs (Navigation)
+- [[_COMMUNITY_Community 0|Community 0]]
+- [[_COMMUNITY_Community 1|Community 1]]
+- [[_COMMUNITY_Community 2|Community 2]]
+- [[_COMMUNITY_Community 3|Community 3]]
+- [[_COMMUNITY_Community 4|Community 4]]
+- [[_COMMUNITY_Community 5|Community 5]]
+- [[_COMMUNITY_Community 6|Community 6]]
+- [[_COMMUNITY_Community 7|Community 7]]
+- [[_COMMUNITY_Community 8|Community 8]]
+- [[_COMMUNITY_Community 9|Community 9]]
+- [[_COMMUNITY_Community 10|Community 10]]
+- [[_COMMUNITY_Community 11|Community 11]]
+- [[_COMMUNITY_Community 12|Community 12]]
+- [[_COMMUNITY_Community 13|Community 13]]
+- [[_COMMUNITY_Community 14|Community 14]]
+- [[_COMMUNITY_Community 15|Community 15]]
+- [[_COMMUNITY_Community 16|Community 16]]
+- [[_COMMUNITY_Community 17|Community 17]]
+- [[_COMMUNITY_Community 18|Community 18]]
+- [[_COMMUNITY_Community 19|Community 19]]
+- [[_COMMUNITY_Community 20|Community 20]]
+- [[_COMMUNITY_Community 21|Community 21]]
+- [[_COMMUNITY_Community 22|Community 22]]
+- [[_COMMUNITY_Community 23|Community 23]]
+- [[_COMMUNITY_Community 24|Community 24]]
+- [[_COMMUNITY_Community 25|Community 25]]
+- [[_COMMUNITY_Community 26|Community 26]]
+- [[_COMMUNITY_Community 27|Community 27]]
+- [[_COMMUNITY_Community 28|Community 28]]
+- [[_COMMUNITY_Community 29|Community 29]]
+- [[_COMMUNITY_Community 30|Community 30]]
+- [[_COMMUNITY_Community 31|Community 31]]
+- [[_COMMUNITY_Community 32|Community 32]]
+- [[_COMMUNITY_Community 33|Community 33]]
+- [[_COMMUNITY_Community 34|Community 34]]
+- [[_COMMUNITY_Community 35|Community 35]]
+- [[_COMMUNITY_Community 36|Community 36]]
+- [[_COMMUNITY_Community 37|Community 37]]
+
 ## God Nodes (most connected - your core abstractions)
-1. `RichSegment` - 67 edges
-2. `Candidate` - 45 edges
-3. `BuildTwitchTrainingDatasetTests` - 30 edges
-4. `TrainRankerTests` - 28 edges
-5. `train_from_rows()` - 27 edges
-6. `TwitchClipLabelsTests` - 26 edges
-7. `Ranker` - 22 edges
-8. `AutoTrainShortFormTests` - 18 edges
-9. `_build_candidate_features()` - 18 edges
-10. `_window_candidate()` - 17 edges
+1. `RichSegment` - 178 edges
+2. `write_text()` - 139 edges
+3. `Candidate` - 106 edges
+4. `read_text()` - 103 edges
+5. `BuildTwitchTrainingDatasetTests` - 58 edges
+6. `Ranker` - 49 edges
+7. `train_from_rows()` - 40 edges
+8. `CandidateFeatures` - 37 edges
+9. `RankedCandidate` - 35 edges
+10. `_evaluate_scores()` - 34 edges
 
 ## Surprising Connections (you probably didn't know these)
 - `Collect real viral clip training data from YouTube Shorts / TikTok URLs.  Each m` --uses--> `Candidate`  [INFERRED]
@@ -30,455 +70,191 @@
   backend/services/semantic_candidates.py → backend/services/transcriber.py
 - `Return a dict mapping category → list of segment indices that exceed the     sim` --uses--> `RichSegment`  [INFERRED]
   backend/services/semantic_candidates.py → backend/services/transcriber.py
-- `Remove jobs older than _JOB_TTL_SECONDS from the in-memory store.` --uses--> `JobStatus`  [INFERRED]
-  backend/job_manager.py → backend/models.py
+- `Chat-replay analysis: spike detection + emote/sentiment classification.  Downloa` --uses--> `RichSegment`  [INFERRED]
+  backend/services/chat_analyzer.py → backend/services/transcriber.py
+
+## Hyperedges (group relationships)
+- **Viral Clip Training Input Formats** — viral_clips_training_data, viral_clips_youtube_shorts_url, viral_clips_tiktok_url, viral_clips_csv_tsv_metadata [EXTRACTED 1.00]
+- **Trend Prior Scoring Outputs** — readme_trend_prior_service, readme_trend_hook_score, readme_trend_topic_score, readme_trend_prior_score [EXTRACTED 1.00]
+- **Trend Prior Update Inputs** — readme_update_process, readme_qualitative_review, readme_creator_domain_needs, readme_offline_eval_results [EXTRACTED 1.00]
+- **Shorts Pattern Seed Domains** — readme_seed_phrases, readme_short_categories, readme_hook_patterns_manifest [EXTRACTED 1.00]
 
 ## Communities
 
 ### Community 0 - "Community 0"
-Cohesion: 0.03
-Nodes (91): build_frames(), ChatFrame, ChatSpike, _classify(), detect_spikes(), download_chat(), enrich_segments(), _is_missing_twitch_chat_replay() (+83 more)
+Cohesion: 0.02
+Nodes (180): _allowed_boundaries(), analyze(), _append_unique_reason(), _apply_variant_spec(), _boundary_at_or_after(), _boundary_at_or_before(), _boundary_selection_reason(), _build_context_summary() (+172 more)
 
 ### Community 1 - "Community 1"
 Cohesion: 0.03
-Nodes (43): BaseModel, append_feedback_events(), append_feedback_snapshot(), append_gold_eval_snapshot(), _as_float(), build_pipeline_feedback(), CandidateFeedback, _creator_id_from_url() (+35 more)
+Nodes (136): _eval_group(), _row_identity_keys(), _split_leak_summary(), main(), diagnose_holdout(), _diagnostic_csv_rows(), _empty_report(), _error_type() (+128 more)
 
 ### Community 2 - "Community 2"
 Cohesion: 0.03
-Nodes (22): BaseSettings, _resolve_local_project_path(), Settings, _validate_storage_dir(), _build_context(), main(), _objective(), run_hpo() (+14 more)
+Nodes (93): read_annotations(), audit_artifacts(), main(), _annotated_eval_row(), build_eval_dataset(), _content_bucket(), _count_values(), _dataset_role() (+85 more)
 
 ### Community 3 - "Community 3"
-Cohesion: 0.05
-Nodes (18): AnalyzerApplyVariantSpecTests, AnalyzerBoundaryReasonTests, AnalyzerDedupMomentsTests, AnalyzerHelperTests, AnalyzerPairSelectionTests, AnalyzerValidationTests, _row(), TrainBoundaryRankerTests (+10 more)
+Cohesion: 0.03
+Nodes (109): _absolute_candidate(), _apply_vod_context_features(), _audio_cache_is_usable(), _audio_cache_metadata_path(), _audio_cache_payload(), _balance_vod_negative_rows(), _boundary_perturbation_candidates(), build_dataset() (+101 more)
 
 ### Community 4 - "Community 4"
-Cohesion: 0.08
-Nodes (58): _artifact_health_summary(), _artifact_hpo_summary(), _best_hpo_params(), _bucketed_validation(), _calibrate_blend(), _candidate_is_promoted(), _candidate_source_mix(), _compute_scales() (+50 more)
+Cohesion: 0.03
+Nodes (91): BaseModel, _axes_to_score(), _blend_scores(), _build_context_summary(), _call_gemini(), _call_gemini_multimodal(), _call_groq(), _call_llm_judge() (+83 more)
 
 ### Community 5 - "Community 5"
-Cohesion: 0.08
-Nodes (51): _blended_gap_duration(), build_label_rows(), _clamp_negative_duration(), _classify_clip_views(), _clip_merge_end(), _clip_window_bounds(), collect_clip_labels(), _collection_chunks() (+43 more)
+Cohesion: 0.05
+Nodes (66): _adaptive_window(), _dense_coarse_score(), _dense_window_proposals(), _filter_candidates(), _generate_audio_burst_candidates(), generate_candidates(), _generate_chat_sync_candidates(), _generate_clean_reaction_candidates() (+58 more)
 
 ### Community 6 - "Community 6"
-Cohesion: 0.09
-Nodes (47): _absolute_candidate(), _apply_vod_context_features(), _boundary_perturbation_candidates(), build_dataset(), _build_dataset_parallel(), _build_rows_for_label(), _build_rows_for_vod(), _build_rows_for_vod_labels() (+39 more)
+Cohesion: 0.05
+Nodes (53): _blended_gap_duration(), build_label_rows(), _clamp_negative_duration(), _classify_clip_views(), _clip_merge_end(), _clip_window_bounds(), collect_clip_labels(), _collection_chunks() (+45 more)
 
 ### Community 7 - "Community 7"
 Cohesion: 0.05
-Nodes (3): _FakeLGBMRanker, _FakeMlflowSession, TrainRankerTests
+Nodes (54): _build_training_row(), _cacheable_entry(), _canonical_entry_url(), _collect_clip_modalities(), _collect_row_for_entry(), collect_rows(), cut_video_window(), cut_video_windows() (+46 more)
 
 ### Community 8 - "Community 8"
-Cohesion: 0.11
-Nodes (41): _allowed_boundaries(), analyze(), _append_unique_reason(), _apply_variant_spec(), _boundary_at_or_after(), _boundary_at_or_before(), _boundary_selection_reason(), _build_context_summary() (+33 more)
+Cohesion: 0.08
+Nodes (23): get_content_type_for_streamer(), _init(), _load_custom_profiles(), Clip profile configuration.  Built-in profiles are defined in CLIP_PROFILES.  Cu, Merge profiles from a JSON file into CLIP_PROFILES (in-place)., Load custom profiles at import time (deferred to avoid circular imports)., Return the content-type profile for a known streamer, or None if unknown., Ranker (+15 more)
 
 ### Community 9 - "Community 9"
-Cohesion: 0.08
-Nodes (5): Ranker, score_candidates(), _FakeLightGBMModel, RankerTests, test_ranker_scores_with_lightgbm_ranker_artifact()
+Cohesion: 0.07
+Nodes (50): _boundary_score(), chapter_for_time(), _label_for_chapter(), _lexical_distance(), _make_chapter(), _merge_label(), _merge_short_chapters(), segment_chapters() (+42 more)
 
 ### Community 10 - "Community 10"
-Cohesion: 0.12
-Nodes (35): _adaptive_window(), _dense_coarse_score(), _dense_window_proposals(), _filter_candidates(), _generate_audio_burst_candidates(), generate_candidates(), _generate_chat_sync_candidates(), _generate_clean_reaction_candidates() (+27 more)
+Cohesion: 0.07
+Nodes (43): main(), _parse_args(), run(), main(), _parse_args(), run(), _empty_similarity_features(), _load_artifact() (+35 more)
 
 ### Community 11 - "Community 11"
-Cohesion: 0.13
-Nodes (33): _candidate_baselines(), _coerce_publish_timestamp(), _coerce_upload_date(), _dedupe_candidates(), _discover_seed(), _discover_seeds(), _extract_entry_url(), _extract_single_entry_metadata() (+25 more)
+Cohesion: 0.07
+Nodes (32): _ensure_short_form_media_cached(), _aria2c_available(), _base_ydl_opts(), _cache_dir(), _cache_entry_usable(), _cache_lock(), _cache_metadata_path(), _cache_metadata_payload() (+24 more)
 
 ### Community 12 - "Community 12"
-Cohesion: 0.12
-Nodes (27): _aria2c_available(), _base_ydl_opts(), _cache_dir(), _cache_path_for_url(), download(), DownloadCancelledError, DownloadPausedError, DownloadUnavailableError (+19 more)
+Cohesion: 0.08
+Nodes (34): _candidate_baselines(), _coerce_publish_timestamp(), _coerce_upload_date(), _dedupe_candidates(), _discover_seed(), _discover_seeds(), _extract_entry_url(), _extract_single_entry_metadata() (+26 more)
 
 ### Community 13 - "Community 13"
-Cohesion: 0.12
-Nodes (23): _check_gemini(), _check_groq(), _coerce_csv_list(), _coerce_optional_number(), _coerce_optional_text(), get_status(), _package_available(), _pipeline_component_statuses() (+15 more)
+Cohesion: 0.08
+Nodes (37): build_boundary_points(), _delta(), _ends_sentence(), _merge_boundary(), build_boundary_features(), _build_feature(), _duration_prior(), _hook_signal() (+29 more)
 
 ### Community 14 - "Community 14"
-Cohesion: 0.07
-Nodes (1): TwitchClipLabelsTests
+Cohesion: 0.09
+Nodes (28): _boundary_metrics(), _bucket_by_kind(), _has_boundary_reference(), main(), _read_jsonl(), EvaluateBoundaryRefinementTests, TrainVodRankerTests, _as_float() (+20 more)
 
 ### Community 15 - "Community 15"
-Cohesion: 0.14
-Nodes (26): _build_training_row(), _canonical_entry_url(), collect_rows(), cut_video_window(), cut_video_windows(), _cut_video_windows_batch(), _cut_video_windows_chunk(), _dedupe_entries() (+18 more)
+Cohesion: 0.1
+Nodes (34): _active_bucket(), _active_reason(), build_queue(), _candidate_key(), _existing_gold_keys(), _feature_row(), main(), _priority_score() (+26 more)
 
 ### Community 16 - "Community 16"
-Cohesion: 0.22
-Nodes (19): _clean_mapping(), _coerce_scalar(), experiment_name(), finalize_training_run(), _git_sha(), _import_mlflow(), is_configured(), load_registered_ranker_artifact() (+11 more)
+Cohesion: 0.09
+Nodes (24): main(), _read_jsonl(), TranscriberProgressTests, TranscriberChunkingTests, _calc_tempo(), _chunk_frame_count(), _deduplicate(), _diarize() (+16 more)
 
 ### Community 17 - "Community 17"
-Cohesion: 0.15
-Nodes (24): _calc_tempo(), _chunk_frame_count(), _deduplicate(), _diarize(), _dominant_speaker(), _filter_transcribable_chunks(), _fmt(), format_jsonl() (+16 more)
+Cohesion: 0.1
+Nodes (19): _comment_emotes(), _comment_text(), download_chat(), _fetch_graphql_comments(), _fetch_twitch_rechat(), _is_twitch_vod_url(), load_messages(), _normalize_target_offsets() (+11 more)
 
 ### Community 18 - "Community 18"
-Cohesion: 0.2
-Nodes (23): _audio_pop_score(), _build_candidate_features(), build_features(), _candidate_window(), _clamp01(), _context_dependency_score(), _empty_chapter_context(), _empty_memory_context() (+15 more)
+Cohesion: 0.07
+Nodes (29): Candidate Clip, Clip-Worthy Topics, Cheap Deterministic Prior Rationale, High-Performing Short-Form Hooks, hook_patterns.json Manifest, Judge, Avoid Scraping Proprietary or Copyrighted Corpora Rationale, Ranker (+21 more)
 
 ### Community 19 - "Community 19"
-Cohesion: 0.28
-Nodes (21): _arc_payoff_match(), build_memory_spans(), _callback_spans(), candidate_memory_context(), _clamp01(), _context_summary(), _jaccard(), _memory_relevance() (+13 more)
+Cohesion: 0.21
+Nodes (23): VodMemoryTests, MemorySpan, _arc_payoff_match(), build_memory_spans(), _callback_spans(), candidate_memory_context(), _clamp01(), _context_summary() (+15 more)
 
 ### Community 20 - "Community 20"
-Cohesion: 0.22
-Nodes (19): _blend_score_maps(), _blend_value(), _boundary_artifact_is_usable(), _boundary_feature_row(), _boundary_model_is_usable(), _boundary_model_scores(), _heuristic_end_scores(), _heuristic_start_scores() (+11 more)
+Cohesion: 0.13
+Nodes (18): build_peak_candidates(), detect_peaks(), _fallback_peaks(), _walk_base(), _audience_signal(), build_score_timeline(), extract_candidates(), _hook_signal() (+10 more)
 
 ### Community 21 - "Community 21"
-Cohesion: 0.11
-Nodes (1): AutoTrainShortFormTests
+Cohesion: 0.25
+Nodes (17): _clean_mapping(), _coerce_scalar(), finalize_training_run(), _import_mlflow(), is_configured(), load_registered_ranker_artifact(), main(), _metric_value() (+9 more)
 
 ### Community 22 - "Community 22"
-Cohesion: 0.26
-Nodes (18): _binary_label(), _build_end_examples(), _build_pair_examples(), _build_start_examples(), _clamp01(), _count_values(), _duration(), _duration_prior() (+10 more)
+Cohesion: 0.16
+Nodes (14): _cached_media_by_size(), cleanup_backend_runtime_caches(), CleanupResult, _display_path(), _is_safe_to_remove_legacy_short_form_job_dir(), _is_safe_to_remove_twitch_job_dir(), main(), _media_exists_in_cache() (+6 more)
 
 ### Community 23 - "Community 23"
+Cohesion: 0.15
+Nodes (19): AudioFeatureFrame, _best_k(), diarize_speakers(), enrich_segments(), extract(), _extract_frames(), extract_window_from_signal(), LaughterDetector (+11 more)
+
+### Community 24 - "Community 24"
 Cohesion: 0.25
 Nodes (18): _aggregate_score(), _as_float(), _clamp01(), _dynamic_scores(), _empty_result(), _extract_feedback_texts(), _feedback_row_labels(), _feedback_row_score() (+10 more)
 
-### Community 24 - "Community 24"
-Cohesion: 0.16
-Nodes (17): AudioFeatureFrame, _best_k(), diarize_speakers(), enrich_segments(), extract(), LaughterDetector, Per-second audio feature extraction — runs in parallel with Whisper transcriptio, Load audio and return one AudioFeatureFrame per second.      Expects 16 kHz mono (+9 more)
-
 ### Community 25 - "Community 25"
-Cohesion: 0.23
-Nodes (18): build_variant_specs(), candidate_in_time_range(), _clean_text(), _coerce_float(), _coerce_list(), _coerce_variant_count(), infer_goal_family(), _normalize_platform() (+10 more)
+Cohesion: 0.2
+Nodes (17): _apply_min_gap(), _ends_sentence(), enforce_diversity(), _extend_min_duration(), _find_clean_start(), _find_sentence_end(), _is_mid_thought(), Post-processing of LLM-returned clip moments.  Two passes run after the LLM retu (+9 more)
 
 ### Community 26 - "Community 26"
-Cohesion: 0.15
-Nodes (2): TrainVodRankerTests, TrainVodRankerWorkflowStateTests
+Cohesion: 0.22
+Nodes (15): _as_float(), _as_int(), _diagnosis_key(), export_hard_negatives(), _gold_row_index(), _hard_negative_row(), main(), _read_csv() (+7 more)
 
 ### Community 27 - "Community 27"
-Cohesion: 0.11
-Nodes (2): DownloaderTests, _FakeYoutubeDL
+Cohesion: 0.24
+Nodes (13): build_summary(), _cache_summary(), _feature_values(), _features(), _float(), _has_chat_signal(), main(), _parse_args() (+5 more)
 
 ### Community 28 - "Community 28"
-Cohesion: 0.25
-Nodes (17): _axes_to_score(), _blend_scores(), _build_context_summary(), _call_gemini(), _call_gemini_multimodal(), _call_groq(), _call_llm_judge(), _call_ollama() (+9 more)
+Cohesion: 0.19
+Nodes (10): _apply_manual_label(), _manual_label_class(), _manual_ordinal_label(), merge_annotations(), _sample_id(), main(), _queue_reason(), _read_jsonl() (+2 more)
 
 ### Community 29 - "Community 29"
-Cohesion: 0.26
-Nodes (15): copy_directory(), copy_file(), ensure_parent(), is_uri(), materialize_directory(), materialize_file(), normalize_uri(), path_exists() (+7 more)
+Cohesion: 0.22
+Nodes (12): _as_int(), build_reference_manifest(), _default_dataset_path(), _full_text(), _hook_text(), main(), _payoff_text(), _quality_score() (+4 more)
 
 ### Community 30 - "Community 30"
-Cohesion: 0.28
-Nodes (15): _as_float(), _boundary_training_modules(), build_composite_dataset(), _candidate_source_mix(), dataset_summary(), _filter_short_form_rows(), _load_workflow_state(), main() (+7 more)
+Cohesion: 0.19
+Nodes (6): main(), _objective(), run_hpo(), _FakeStudy, _FakeTrial, HpoRankerTests
 
 ### Community 31 - "Community 31"
-Cohesion: 0.26
-Nodes (15): find_semantic_candidates(), _get_model(), _get_pattern_embeddings(), _has_sentence_transformer_metadata(), _has_transformer_weights(), _link_snapshot_contents(), _local_sentence_transformer_model_dir(), _materialize_local_sentence_transformer_model() (+7 more)
+Cohesion: 0.21
+Nodes (7): BaseSettings, _configure_local_cache_env(), _prepare_local_cache_path(), _resolve_local_project_path(), Settings, _validate_storage_dir(), ConfigPathTests
 
 ### Community 32 - "Community 32"
-Cohesion: 0.3
-Nodes (13): _annotated_eval_row(), build_eval_dataset(), _content_bucket(), _count_values(), _dataset_role(), eval_dataset_summary(), _eval_group(), _has_outcome_feedback() (+5 more)
+Cohesion: 0.29
+Nodes (8): _build_summary(), _configure_runtime_env(), main(), _parse_args(), _recommended_worker_plan(), _train_command(), WorkerPlan, LocalTrainTests
 
 ### Community 33 - "Community 33"
-Cohesion: 0.21
-Nodes (13): _audience_signal(), build_score_timeline(), extract_candidates(), _hook_signal(), _payoff_signal(), Pre-scoring and candidate window extraction.  Runs before the LLM analysis step, Measure the emotional arc quality of a candidate clip window.      Supports mult, Compute a composite hype_score for each segment and store it in-place.      Scor (+5 more)
-
-### Community 34 - "Community 34"
-Cohesion: 0.28
-Nodes (12): _format_mmss(), main(), _platform_from_url(), _preview_url(), _queue_id(), Generate a labeling queue for a gold evaluation set.  Reads a manifest of (job_i, _read_jsonl(), _read_manifest() (+4 more)
-
-### Community 35 - "Community 35"
-Cohesion: 0.17
-Nodes (1): CollectViralClipsTests
-
-### Community 36 - "Community 36"
-Cohesion: 0.18
-Nodes (9): get_content_type_for_streamer(), get_effective_heuristic_weights(), _init(), _load_custom_profiles(), Clip profile configuration.  Built-in profiles are defined in CLIP_PROFILES.  Cu, Merge profiles from a JSON file into CLIP_PROFILES (in-place)., Load custom profiles at import time (deferred to avoid circular imports)., Return the content-type profile for a known streamer, or None if unknown. (+1 more)
-
-### Community 37 - "Community 37"
-Cohesion: 0.22
-Nodes (3): _FakeStudy, _FakeTrial, HpoRankerTests
-
-### Community 38 - "Community 38"
-Cohesion: 0.18
-Nodes (2): _FakeSentenceTransformer, SemanticCandidatesTests
-
-### Community 39 - "Community 39"
-Cohesion: 0.36
-Nodes (10): _as_int(), build_reference_manifest(), _default_dataset_path(), _full_text(), _hook_text(), main(), _payoff_text(), _quality_score() (+2 more)
-
-### Community 40 - "Community 40"
-Cohesion: 0.2
-Nodes (1): CandidateGeneratorTests
-
-### Community 41 - "Community 41"
-Cohesion: 0.38
-Nodes (9): build_manifest(), _job_summary(), main(), _read_job_map(), _read_jsonl(), _recover_vod_url(), _url_from_path(), _url_from_payload() (+1 more)
-
-### Community 42 - "Community 42"
-Cohesion: 0.33
-Nodes (7): _boundary_score(), _label_for_chapter(), _lexical_distance(), _make_chapter(), _merge_label(), _merge_short_chapters(), segment_chapters()
-
-### Community 43 - "Community 43"
 Cohesion: 0.38
 Nodes (9): _dedupe_candidates(), _extend_to_sentence_end(), _nearest_boundary_at_or_after(), _nearest_boundary_at_or_before(), _nearest_end_at_or_after(), _nearest_end_at_or_before(), _normalize_candidate(), normalize_candidates() (+1 more)
 
-### Community 44 - "Community 44"
-Cohesion: 0.22
-Nodes (4): BuildDatasetComponentEnvTests, CollectComponentEnvTests, PromoteComponentEnvTests, TrainRankerComponentEnvTests
-
-### Community 45 - "Community 45"
-Cohesion: 0.42
-Nodes (8): _as_optional_float(), import_gold_eval_labels(), main(), _matching_sidecar(), _parse_gold_grade(), _read_csv(), _read_jsonl(), _write_jsonl()
-
-### Community 46 - "Community 46"
+### Community 34 - "Community 34"
 Cohesion: 0.39
 Nodes (8): _clamp(), main(), _make_negative(), _make_positive(), Generate synthetic pre-training data for the ML ranker.  Produces 80 training ro, Strong viral clip: early hook, high hype, clear arc, audience confirmed., Weak clip: late or absent hook, low energy, no arc, no audience signal., _uniform()
 
-### Community 47 - "Community 47"
-Cohesion: 0.61
-Nodes (8): _bucket_metrics(), evaluate_pipeline_rows(), _group_recall_at_k(), _group_rows(), main(), _mean_reciprocal_rank(), _top1_positive_rate(), _top_groups()
+### Community 35 - "Community 35"
+Cohesion: 0.22
+Nodes (9): Broad Pattern Groups, Creator or Domain Needs, Prefer Broad Patterns Rationale, Offline Eval Results, Highly Specific One-Off Phrases, Qualitative Review, Trend Prior Update Process, Trend Prior Validation Tests (+1 more)
 
-### Community 48 - "Community 48"
-Cohesion: 0.42
-Nodes (8): _as_float(), build_transcript_fields(), _clip_window(), enrich_reference_row(), main(), _materialize_reference_clip(), _read_jsonl(), _transcribe_reference_clip()
-
-### Community 49 - "Community 49"
-Cohesion: 0.42
-Nodes (8): build_boundary_features(), _build_feature(), _duration_prior(), _hook_signal(), _lexical_break(), _mid_thought_risk(), _reaction_signal(), _segments_between()
-
-### Community 50 - "Community 50"
-Cohesion: 0.44
-Nodes (8): _content_bucket(), _dataset_source(), export_training_rows(), _feature_provenance(), _has_real_outcome_feedback(), _read_jsonl(), _resolved_feedback_label(), _should_export_feedback()
-
-### Community 51 - "Community 51"
-Cohesion: 0.25
-Nodes (1): TranscriberProgressTests
-
-### Community 52 - "Community 52"
-Cohesion: 0.25
-Nodes (1): ClipJudgeTests
-
-### Community 53 - "Community 53"
-Cohesion: 0.54
-Nodes (7): _bucket_key(), _bucket_metrics(), _empty_report(), _group_metrics(), main(), _metric_delta(), _read_jsonl()
-
-### Community 54 - "Community 54"
-Cohesion: 0.39
-Nodes (5): _apply_manual_label(), _manual_label_class(), _manual_ordinal_label(), merge_annotations(), _sample_id()
-
-### Community 55 - "Community 55"
-Cohesion: 0.29
-Nodes (1): TrainingWorkflowStateTests
-
-### Community 56 - "Community 56"
-Cohesion: 0.29
-Nodes (1): GoldEvalWorkflowTests
-
-### Community 57 - "Community 57"
-Cohesion: 0.29
-Nodes (1): TrainingExportTests
-
-### Community 58 - "Community 58"
-Cohesion: 0.29
-Nodes (1): ExportFrontendGoldEvalTests
-
-### Community 59 - "Community 59"
-Cohesion: 0.52
-Nodes (6): _empty_similarity_features(), _load_artifact(), _neighbor_scores(), _read_jsonl(), score_candidate_window(), _window_texts()
-
-### Community 60 - "Community 60"
+### Community 36 - "Community 36"
 Cohesion: 0.4
-Nodes (2): ClipSimilarityTests, _FakeModel
+Nodes (1): Pipeline backend adapters.
 
-### Community 61 - "Community 61"
-Cohesion: 0.33
-Nodes (1): BuildGoldEvalManifestTests
-
-### Community 62 - "Community 62"
-Cohesion: 0.6
-Nodes (5): export_frontend_gold_eval(), main(), _read_jsonl(), _summary(), _write_jsonl()
-
-### Community 63 - "Community 63"
-Cohesion: 0.67
-Nodes (5): _boundary_metrics(), _bucket_by_kind(), _has_boundary_reference(), main(), _read_jsonl()
-
-### Community 64 - "Community 64"
-Cohesion: 0.53
-Nodes (4): annotate_gold_row(), annotate_gold_rows(), _gold_holdout_bucket(), _gold_holdout_key()
-
-### Community 65 - "Community 65"
-Cohesion: 0.4
-Nodes (1): TranscriberChunkingTests
-
-### Community 66 - "Community 66"
-Cohesion: 0.4
-Nodes (1): PeakDetectorTests
-
-### Community 67 - "Community 67"
-Cohesion: 0.4
-Nodes (1): ClipStrategyTests
-
-### Community 68 - "Community 68"
-Cohesion: 0.7
-Nodes (4): main(), _queue_reason(), _read_jsonl(), _should_queue_row()
-
-### Community 69 - "Community 69"
-Cohesion: 0.7
-Nodes (4): rank_candidates(), select_diverse_ranked_candidates(), select_top_candidates(), _too_close_to_any()
-
-### Community 70 - "Community 70"
-Cohesion: 0.6
-Nodes (3): detect_peaks(), _fallback_peaks(), _walk_base()
-
-### Community 71 - "Community 71"
-Cohesion: 0.7
-Nodes (4): build_boundary_points(), _delta(), _ends_sentence(), _merge_boundary()
-
-### Community 72 - "Community 72"
-Cohesion: 0.5
-Nodes (1): JobCancellationTests
-
-### Community 73 - "Community 73"
-Cohesion: 0.5
-Nodes (1): ProfileConfigTests
-
-### Community 74 - "Community 74"
-Cohesion: 0.5
-Nodes (1): EvaluateBoundaryRefinementTests
-
-### Community 75 - "Community 75"
-Cohesion: 0.5
-Nodes (1): KeyframeSamplerTests
-
-### Community 76 - "Community 76"
-Cohesion: 0.5
-Nodes (1): ChapterSegmenterTests
-
-### Community 77 - "Community 77"
-Cohesion: 0.5
-Nodes (1): LocalTrainTests
-
-### Community 78 - "Community 78"
-Cohesion: 0.5
-Nodes (1): AnnotationFlowTests
-
-### Community 79 - "Community 79"
-Cohesion: 0.5
-Nodes (1): EnrichVectorReferenceTranscriptTests
-
-### Community 80 - "Community 80"
-Cohesion: 0.5
-Nodes (1): ChatAnalyzerDownloadTests
-
-### Community 81 - "Community 81"
-Cohesion: 0.5
-Nodes (1): BuildEvalDatasetTests
-
-### Community 82 - "Community 82"
-Cohesion: 0.83
-Nodes (3): apply_env(), build_env(), resolve_secret_ref()
-
-### Community 83 - "Community 83"
-Cohesion: 0.83
-Nodes (3): main(), _parse_args(), run_local_pipeline()
-
-### Community 84 - "Community 84"
-Cohesion: 0.83
-Nodes (3): main(), _parse_args(), run()
-
-### Community 85 - "Community 85"
-Cohesion: 0.83
-Nodes (3): main(), _parse_args(), run()
-
-### Community 86 - "Community 86"
-Cohesion: 0.83
-Nodes (3): main(), _parse_args(), run()
-
-### Community 87 - "Community 87"
-Cohesion: 0.83
-Nodes (3): main(), _parse_args(), run()
-
-### Community 88 - "Community 88"
-Cohesion: 0.83
-Nodes (3): main(), _parse_args(), run()
-
-### Community 89 - "Community 89"
-Cohesion: 0.83
-Nodes (3): main(), _parse_args(), run()
-
-### Community 90 - "Community 90"
-Cohesion: 0.67
-Nodes (1): EvaluatePipelineTests
-
-### Community 91 - "Community 91"
-Cohesion: 0.67
-Nodes (1): CandidateNormalizerTests
-
-### Community 92 - "Community 92"
-Cohesion: 0.67
-Nodes (1): AuditRankerArtifactsTests
-
-### Community 93 - "Community 93"
-Cohesion: 0.67
-Nodes (1): LocalShellPipelineTests
-
-### Community 94 - "Community 94"
-Cohesion: 0.67
-Nodes (1): ScoreTimelineTests
-
-### Community 95 - "Community 95"
-Cohesion: 0.67
-Nodes (1): PostProcessorTests
-
-### Community 96 - "Community 96"
-Cohesion: 1.0
-Nodes (2): _group_metrics(), main()
-
-### Community 97 - "Community 97"
-Cohesion: 1.0
-Nodes (2): main(), _read_jsonl()
-
-### Community 98 - "Community 98"
+### Community 37 - "Community 37"
 Cohesion: 1.0
 Nodes (2): Invoke-PythonStep(), Write-RunLog()
 
-### Community 99 - "Community 99"
-Cohesion: 1.0
-Nodes (2): main(), _read_jsonl()
-
-### Community 100 - "Community 100"
-Cohesion: 1.0
-Nodes (2): audit_artifacts(), main()
-
-### Community 101 - "Community 101"
-Cohesion: 1.0
-Nodes (2): build_boundary_pairs(), refine_candidate_boundaries()
-
-### Community 102 - "Community 102"
-Cohesion: 1.0
-Nodes (1): CLI-first pipeline components.
-
-### Community 103 - "Community 103"
-Cohesion: 1.0
-Nodes (0): 
-
-### Community 104 - "Community 104"
-Cohesion: 1.0
-Nodes (0): 
-
 ## Knowledge Gaps
-- **27 isolated node(s):** `Generate a labeling queue for a gold evaluation set.  Reads a manifest of (job_i`, `Generate synthetic pre-training data for the ML ranker.  Produces 80 training ro`, `Strong viral clip: early hook, high hype, clear arc, audience confirmed.`, `Weak clip: late or absent hook, low energy, no arc, no audience signal.`, `CLI-first pipeline components.` (+22 more)
+- **71 isolated node(s):** `Generate synthetic pre-training data for the ML ranker.  Produces 80 training ro`, `Strong viral clip: early hook, high hype, clear arc, audience confirmed.`, `Weak clip: late or absent hook, low energy, no arc, no audience signal.`, `Discover and cross-deduplicate manifest rows from a list of seeds.`, `Train a separate artifact for each unique streamer in the seeds list.` (+66 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **Thin community `Community 102`** (2 nodes): `__init__.py`, `CLI-first pipeline components.`
+- **Thin community `Community 36`** (5 nodes): `Pipeline backend adapters.`, `__init__.py`, `__init__.py`, `__init__.py`, `__init__.py`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 103`** (2 nodes): `diagnose_dataset.py`, `main()`
-  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 104`** (2 nodes): `audio_extractor.py`, `extract()`
+- **Thin community `Community 37`** (3 nodes): `train_jynxzi_vod.ps1`, `Invoke-PythonStep()`, `Write-RunLog()`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `RichSegment` connect `Community 0` to `Community 1`, `Community 2`, `Community 3`, `Community 8`, `Community 10`, `Community 17`, `Community 31`?**
-  _High betweenness centrality (0.090) - this node is a cross-community bridge._
-- **Why does `Candidate` connect `Community 0` to `Community 1`, `Community 2`, `Community 3`, `Community 8`, `Community 9`, `Community 10`, `Community 15`?**
-  _High betweenness centrality (0.035) - this node is a cross-community bridge._
-- **Why does `_PlatformUnavailableError` connect `Community 11` to `Community 12`?**
-  _High betweenness centrality (0.023) - this node is a cross-community bridge._
-- **Are the 64 inferred relationships involving `RichSegment` (e.g. with `AnalyzerValidationTests` and `AnalyzerHelperTests`) actually correct?**
-  _`RichSegment` has 64 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 43 inferred relationships involving `Candidate` (e.g. with `AnalyzerValidationTests` and `AnalyzerHelperTests`) actually correct?**
-  _`Candidate` has 43 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 2 inferred relationships involving `BuildTwitchTrainingDatasetTests` (e.g. with `Candidate` and `RichSegment`) actually correct?**
-  _`BuildTwitchTrainingDatasetTests` has 2 INFERRED edges - model-reasoned connections that need verification._
-- **What connects `Generate a labeling queue for a gold evaluation set.  Reads a manifest of (job_i`, `Generate synthetic pre-training data for the ML ranker.  Produces 80 training ro`, `Strong viral clip: early hook, high hype, clear arc, audience confirmed.` to the rest of the system?**
-  _27 weakly-connected nodes found - possible documentation gaps or missing edges._
+- **Why does `write_text()` connect `Community 2` to `Community 1`, `Community 3`, `Community 4`, `Community 5`, `Community 6`, `Community 7`, `Community 8`, `Community 10`, `Community 11`, `Community 12`, `Community 13`, `Community 14`, `Community 15`, `Community 17`, `Community 22`, `Community 26`, `Community 27`, `Community 28`, `Community 29`, `Community 30`, `Community 32`, `Community 34`?**
+  _High betweenness centrality (0.168) - this node is a cross-community bridge._
+- **Why does `read_text()` connect `Community 2` to `Community 0`, `Community 1`, `Community 3`, `Community 4`, `Community 5`, `Community 6`, `Community 7`, `Community 8`, `Community 10`, `Community 11`, `Community 12`, `Community 13`, `Community 14`, `Community 15`, `Community 16`, `Community 17`, `Community 21`, `Community 24`, `Community 26`, `Community 27`, `Community 28`, `Community 29`, `Community 30`?**
+  _High betweenness centrality (0.099) - this node is a cross-community bridge._
+- **Why does `RichSegment` connect `Community 0` to `Community 3`, `Community 5`, `Community 7`, `Community 9`, `Community 10`, `Community 16`, `Community 17`, `Community 19`, `Community 20`, `Community 25`, `Community 29`?**
+  _High betweenness centrality (0.088) - this node is a cross-community bridge._
+- **Are the 175 inferred relationships involving `RichSegment` (e.g. with `VodFeatureContext` and `ClipJudgeTests`) actually correct?**
+  _`RichSegment` has 175 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 134 inferred relationships involving `write_text()` (e.g. with `run_pipeline()` and `_write_jsonl()`) actually correct?**
+  _`write_text()` has 134 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 104 inferred relationships involving `Candidate` (e.g. with `_ShortFormMediaPrefetcher` and `Collect real viral clip training data from YouTube Shorts / TikTok URLs.  Each m`) actually correct?**
+  _`Candidate` has 104 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 99 inferred relationships involving `read_text()` (e.g. with `_load_jobs()` and `_read_jsonl()`) actually correct?**
+  _`read_text()` has 99 INFERRED edges - model-reasoned connections that need verification._

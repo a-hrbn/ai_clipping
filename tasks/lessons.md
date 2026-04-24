@@ -1,5 +1,6 @@
 # Lessons
 
+- When replacing a third-party API path, verify the exact production request shape and log upstream error bodies; a one-VOD happy path is not enough if training sends many offsets through a containerized runtime.
 - Do not equate proxy distribution metrics like views or engagement with intrinsic clip quality. Treat them as noisy supervision that must be combined with exposure context, creator baseline, and stronger outcome signals.
 - When the user asks for a simpler feedback workflow, optimize for the minimum number of stable inputs instead of preserving analytics-heavy schemas.
 - In training collection pipelines, transient network failures must pause and retry the current item instead of being downgraded to skipped/unavailable examples.
@@ -20,3 +21,6 @@
 - When a multi-stage training workflow produces a useful intermediate artifact before the final quality gates fail, persist that intermediate artifact to the standard artifact directory instead of leaving it only in a temporary side path.
 - When migrating cache key schemes, do not only write the new canonical cache entry; also prune compatible superseded entries so the cache does not accumulate duplicates that make later inspection ambiguous.
 - Before adding automatic cache cleanup, verify whether legacy work directories contain the only local copy of raw media; keep or migrate those directories instead of treating name-patterned job folders as safely regenerable.
+- When the user reviews false negatives and identifies label errors, propagate corrections by exact `queue_id` across gold artifacts, and keep true positives as positives with explicit rationale notes instead of changing all rows from the same VOD.
+- For frontend gold-eval corrections, update the append-only `backend/tmp/storage/feedback/gold_eval_updates.jsonl` source snapshots, not only generated `backend/ml/artifacts/*` files; otherwise the next training export will overwrite the correction.
+- When the user revises a previous false-negative rationale, treat the latest review as authoritative and append a newer source snapshot even if an earlier correction note said the opposite.

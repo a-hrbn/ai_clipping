@@ -28,7 +28,7 @@ def build_jynxzi_workflow_state(
         "dataset_llm_provider": (os.environ.get("TRAINING_DATASET_LLM_PROVIDER") or "").strip() or "ollama",
         "ranker_short_form_mode": (os.environ.get("VOD_RANKER_SHORT_FORM_MODE") or "off").strip().lower() or "off",
         "ranker_gold_train_weight": (os.environ.get("VOD_RANKER_GOLD_TRAIN_WEIGHT") or "2.0").strip() or "2.0",
-        "ranker_hard_negative_weight": (os.environ.get("VOD_RANKER_HARD_NEGATIVE_WEIGHT") or "2.5").strip() or "2.5",
+        "ranker_hard_negative_weight": (os.environ.get("VOD_RANKER_HARD_NEGATIVE_WEIGHT") or "4.0").strip() or "4.0",
         "storage_dir": settings.storage_dir,
         "code_hash": _code_hash(),
     }

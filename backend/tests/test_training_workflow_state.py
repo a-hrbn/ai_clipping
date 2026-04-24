@@ -174,3 +174,17 @@ class TrainingWorkflowStateTests(unittest.TestCase):
                 "code_hash": "abc123",
             },
         )
+
+    def test_build_jynxzi_workflow_state_defaults_to_stronger_hard_negative_weight(self) -> None:
+        with patch.object(training_workflow_state.settings, "whisper_model", "tiny"), \
+             patch.object(training_workflow_state.settings, "storage_dir", "/tmp/storage"), \
+             patch("ml.training_workflow_state._code_hash", return_value="abc123"), \
+             patch.dict(os.environ, {}, clear=True):
+            state = training_workflow_state.build_jynxzi_workflow_state(
+                date_from="2026-04-01",
+                date_to="2026-04-10",
+                skip_covered=True,
+                merge_output=False,
+            )
+
+        self.assertEqual(state["ranker_hard_negative_weight"], "4.0")
