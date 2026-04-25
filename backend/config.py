@@ -1,4 +1,5 @@
 import os
+import sys
 from pathlib import Path
 
 from pydantic_settings import BaseSettings
@@ -71,7 +72,19 @@ def _configure_local_cache_env() -> None:
         os.environ[key] = str(path)
 
 
+def _configure_local_tool_path() -> None:
+    venv_bin = Path(sys.prefix).resolve() / "bin"
+    if not (venv_bin / "ffmpeg").exists():
+        return
+    current_path = os.environ.get("PATH", "")
+    parts = current_path.split(os.pathsep) if current_path else []
+    venv_bin_str = str(venv_bin)
+    if venv_bin_str not in parts:
+        os.environ["PATH"] = os.pathsep.join([venv_bin_str, *parts])
+
+
 _configure_local_cache_env()
+_configure_local_tool_path()
 
 
 class Settings(BaseSettings):

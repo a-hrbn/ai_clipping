@@ -180,12 +180,55 @@ def _package_available(module_name: str) -> bool:
         return False
 
 
+def _face_detection_probe_env() -> dict[str, str]:
+    return {
+        **os.environ,
+        "MPLCONFIGDIR": os.environ.get(
+            "MPLCONFIGDIR",
+            str(pathlib.Path(settings.storage_dir).parent / "matplotlib"),
+        ),
+    }
+
+
+def _run_face_detection_probe_script(script: str) -> tuple[dict[str, str | bool | None] | None, str | None]:
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+            env=_face_detection_probe_env(),
+        )
+    except Exception as exc:
+        return None, str(exc)
+
+    payload = (result.stdout or "").strip().splitlines()
+    if payload:
+        try:
+            data = json.loads(payload[-1])
+        except json.JSONDecodeError:
+            data = None
+        if isinstance(data, dict):
+            if data.get("active"):
+                return data, None
+            error = data.get("error")
+            return None, str(error) if error else "Face detection probe inactive"
+
+    stderr = (result.stderr or "").strip().splitlines()
+    stderr_tail = stderr[-1] if stderr else ""
+    if result.returncode < 0:
+        return None, f"Face detection probe exited with signal {-result.returncode}: {stderr_tail}"
+    if result.returncode:
+        return None, f"Face detection probe exited with code {result.returncode}: {stderr_tail}"
+    return None, "Face detection probe produced no status"
+
+
 def _probe_face_detection_status() -> dict[str, str | bool | None]:
-    script = f"""
+    mediapipe_script = f"""
 import json
 import pathlib
 
-mediapipe_error = None
 try:
     import mediapipe as mp
     if hasattr(mp, "solutions"):
@@ -214,83 +257,68 @@ try:
         "error": None,
         "mode": "active",
     }}))
-    raise SystemExit(0)
 except Exception as exc:
-    mediapipe_error = str(exc)
+    print(json.dumps({{"active": False, "error": str(exc)}}))
+"""
+
+    mtcnn_script = """
+import json
 
 try:
     from mtcnn import MTCNN
     MTCNN()
-    print(json.dumps({{
+    print(json.dumps({
         "label": "Face Detection",
         "name": "MTCNN",
         "model": "mtcnn",
         "active": True,
-        "error": mediapipe_error or "MediaPipe nicht verfuegbar",
+        "error": None,
         "mode": "fallback",
-    }}))
-    raise SystemExit(0)
+    }))
 except Exception as exc:
-    mtcnn_error = str(exc)
+    print(json.dumps({"active": False, "error": str(exc)}))
+"""
+
+    opencv_script = """
+import json
 
 try:
     import cv2
     cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
     if cascade.empty():
         raise RuntimeError("Haar cascade not available")
-    print(json.dumps({{
+    print(json.dumps({
         "label": "Face Detection",
         "name": "OpenCV",
         "model": "haar cascade",
         "active": True,
-        "error": mediapipe_error or mtcnn_error,
+        "error": None,
         "mode": "fallback",
-    }}))
+    }))
 except Exception as exc:
-    print(json.dumps({{
-        "label": "Face Detection",
-        "name": "Disabled",
-        "model": "none",
-        "active": False,
-        "error": str(exc) or mtcnn_error or mediapipe_error,
-        "mode": "error",
-    }}))
+    print(json.dumps({"active": False, "error": str(exc)}))
 """
-    try:
-        result = subprocess.run(
-            [sys.executable, "-c", script],
-            capture_output=True,
-            text=True,
-            timeout=20,
-            check=False,
-            env={
-                **os.environ,
-                "MPLCONFIGDIR": os.environ.get(
-                    "MPLCONFIGDIR",
-                    str(pathlib.Path(settings.storage_dir).parent / "matplotlib"),
-                ),
-            },
-        )
-        payload = (result.stdout or "").strip().splitlines()
-        if payload:
-            data = json.loads(payload[-1])
-            if isinstance(data, dict):
-                return data
-    except Exception as exc:
-        return _status_payload(
-            label="Face Detection",
-            name="Disabled",
-            model="none",
-            active=False,
-            error=str(exc),
-            mode="error",
-        )
+
+    data, mediapipe_error = _run_face_detection_probe_script(mediapipe_script)
+    if data:
+        return data
+
+    data, mtcnn_error = _run_face_detection_probe_script(mtcnn_script)
+    if data:
+        data["error"] = mediapipe_error or "MediaPipe nicht verfuegbar"
+        return data
+
+    data, opencv_error = _run_face_detection_probe_script(opencv_script)
+    if data:
+        data["error"] = mtcnn_error or mediapipe_error
+        return data
+
     return _status_payload(
         label="Face Detection",
         name="Disabled",
         model="none",
         active=False,
-        error="Face detection probe failed",
+        error=opencv_error or mtcnn_error or mediapipe_error or "Face detection probe failed",
         mode="error",
     )
 

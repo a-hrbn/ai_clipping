@@ -1,8 +1,8 @@
 {
-  "code_hash": "34577ff33f3eeeb497c987b9cb2972bb7b5c2f56a3889458d09dfd4135275e70",
+  "code_hash": "0a0db31890a2323242e285dcb62f323be2cebc7673401bb09d8d7f52ddc4c29c",
   "dataset_llm_provider": "none",
-  "date_from": "2026-03-01",
-  "date_to": "2026-03-14",
+  "date_from": "2026-03-15",
+  "date_to": "2026-03-28",
   "merge_output": true,
   "ranker_gold_train_weight": "2.0",
   "ranker_hard_negative_weight": "4.0",

@@ -1,52 +1,56 @@
 {
-  "rows": 213,
-  "positive_rows": 38,
-  "negative_rows": 175,
-  "eval_groups": 31,
+  "rows": 324,
+  "positive_rows": 59,
+  "negative_rows": 265,
+  "eval_groups": 42,
   "dataset_roles": {
-    "gold_eval": 127,
-    "pipeline_negative_eval": 68,
-    "pipeline_positive_eval": 18
+    "gold_eval": 133,
+    "pipeline_negative_eval": 152,
+    "pipeline_positive_eval": 39
   },
   "by_label_class": {
-    "boundary_near_miss_negative": 34,
-    "gold_hard_negative": 1,
+    "boundary_near_miss_negative": 76,
+    "gold_hard_negative": 7,
     "gold_negative": 106,
     "gold_positive": 20,
-    "hard_negative": 34,
-    "positive": 14,
-    "weak_positive": 4
+    "hard_negative": 76,
+    "positive": 29,
+    "viral_positive": 2,
+    "weak_positive": 8
   },
   "by_supervision_tier": {
-    "boundary_near_miss": 34,
-    "gold_eval": 127,
-    "twitch_clip_proxy": 52
+    "boundary_near_miss": 76,
+    "gold_eval": 133,
+    "twitch_clip_proxy": 115
   },
   "by_platform": {
-    "general": 86,
-    "twitch": 127
+    "general": 191,
+    "twitch": 133
   },
   "by_variant": {
-    "balanced": 213
+    "balanced": 324
   },
   "by_source": {
-    "boundary_perturbation": 57,
+    "boundary_perturbation": 100,
     "controversy": 6,
     "hype_peak": 2,
-    "narrative_reveal": 7,
-    "peak": 50,
-    "quote": 18,
-    "tension_build": 18,
-    "twitch_label_proxy": 55
+    "narrative_reveal": 11,
+    "peak": 52,
+    "quote": 28,
+    "reaction": 1,
+    "story_payoff": 2,
+    "tension_build": 25,
+    "twitch_label_proxy": 97
   },
   "by_content_bucket": {
-    "general": 162,
-    "quote_driven": 24,
-    "story": 25,
+    "general": 249,
+    "quote_driven": 34,
+    "reaction": 1,
+    "story": 38,
     "visual_action": 2
   },
   "gold_holdout_splits": {
-    "holdout": 1,
+    "holdout": 7,
     "train": 126
   }
 }

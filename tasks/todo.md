@@ -1,5 +1,134 @@
 # Task Plan
 
+## 2026-04-25 Plan: Push Current Changes And Artifacts To Main
+
+- [x] Confirm current branch and remote.
+- [x] Stage all current tracked and untracked workspace changes.
+- [x] Run pre-commit diff sanity checks.
+- [ ] Commit staged changes on `main`.
+- [ ] Push `main` to `origin`.
+- [ ] Document pushed commit.
+
+## 2026-04-25 Plan: Verify Latest Ranker Blend Fix Run
+
+- [x] Confirm latest run timestamp, status, and artifact freshness.
+- [x] Inspect ranker artifact blend calibration fields and serving threshold.
+- [x] Check holdout diagnosis score details for artifact-vs-safe blend mismatch.
+- [x] Summarize model quality separately from whether the blend/threshold bug is fixed.
+- [x] Document review notes.
+
+### Review Notes
+
+- Latest run artifacts were written at `2026-04-25 12:21-12:22`; `local_train_summary.json` reports `training_return_code=0`.
+- Stored workflow code hash matches the current backend hash: `0a0db31890a2323242e285dcb62f323be2cebc7673401bb09d8d7f52ddc4c29c`.
+- The blend/threshold fix is present in the artifact: `blend=0.65`, `requested_best_blend=0.65`, `runtime_max_blend=0.65`, and grid candidate `1.00` has `effective_blend=0.65`.
+- Holdout diagnosis now reports `artifact_blend=0.65`, `safe_blend=0.65`, `serving_threshold=4.573973`, and `diagnosis_threshold=4.573973`, so the old artifact-vs-runtime blend mismatch is gone.
+- Threshold calibration improved validation classification from default threshold F1 `0.519` to calibrated F1 `0.632`, using the runtime-effective blended score.
+- Dataset has `324` rows: `59` positive and `265` negative; `154` rows have non-zero chat features.
+- The model artifact is still rejected for serving/eval usage because `validation_group_ranking_metric_p25_below_minimum`; therefore gold/proxy `trained_runtime` falls back to baseline and shows zero delta. This is a quality gate result, not the fixed blend bug.
+
+## 2026-04-25 Plan: Align Ranker Blend And Threshold Calibration
+
+- [x] Inspect current training/runtime blend and threshold paths.
+- [x] Make training persist/calibrate the same effective blend used at runtime.
+- [x] Add regression coverage for runtime blend capping during threshold calibration.
+- [x] Run targeted ranker/training tests and compile checks.
+- [x] Rebuild backend Graphify output after backend code edits.
+- [x] Document review result and remaining caveats.
+
+### Review Notes
+
+- Root cause was a train/runtime mismatch: training selected and calibrated thresholds on blend values up to `1.0`, while runtime serving clamps artifact blend to `0.65`.
+- `backend/ml/train_ranker.py` now applies the same `Ranker._safe_blend()` cap while evaluating blend candidates and while producing validation scores for serving threshold calibration.
+- New blend calibration metadata records `requested_best_blend`, `runtime_max_blend`, and each grid row's `effective_blend`, so future diagnostics can show when a requested blend was capped.
+- `backend/tests/test_train_ranker.py` now covers both direct runtime blended score capping and blend calibration staying within the runtime effective cap.
+- Verification passed:
+  - `backend.tests.test_train_ranker` -> `34` tests OK.
+  - `backend.tests.test_ranker` -> `18` tests OK.
+  - `backend.tests.test_diagnose_ranker_holdout` -> `2` tests OK.
+  - `py_compile` for the touched ranker/training/diagnosis files -> OK.
+- A combined unittest invocation for all three modules failed before running because `test_train_ranker` installs a simple `whisper` stub without `__spec__`, which breaks `importlib.util.find_spec("whisper")` when `test_diagnose_ranker_holdout` imports afterward. The separated targeted runs passed.
+- Graphify rebuild completed using the installed Graphify interpreter after system `python3` lacked the module; updated report shows `2042` nodes and `5284` edges.
+
+## 2026-04-25 Plan: Install Backend Extras Locally
+
+- [x] Install backend optional extras into `backend/.venv`.
+- [x] Verify key ML/vision imports from the venv.
+- [x] Restart or refresh backend status after installation.
+- [x] Document installed capability state and any remaining blockers.
+
+### Review Notes
+
+- Installed `.[dev,ml,vision]` into `backend/.venv`.
+- Installed `pyannote.audio` as the remaining status-relevant dependency and added it to the backend `ml` extra for future installs.
+- Installed `av` and added local FFmpeg Soname symlinks under `backend/.venv/lib/python3.12/site-packages/av.libs` so `torchcodec` can load FFmpeg 8 shared libraries with `LD_LIBRARY_PATH` pointed at that directory.
+- Installed `imageio-ffmpeg`, linked its static FFmpeg binary to `backend/.venv/bin/ffmpeg`, and updated backend startup config to prepend `sys.prefix/bin` to `PATH` when that binary exists.
+- Re-owned `backend/tmp/cache` and `backend/tmp/matplotlib` from old Docker-owned `nobody:nogroup` to the local user, so local cache paths are writable again.
+- Updated the Face Detection status probe to isolate MediaPipe, MTCNN, and OpenCV checks in separate subprocesses. This lets MTCNN report active when MediaPipe crashes with an EGL/DRI segfault.
+- Verified imports for Whisper, SentenceTransformers, OpenCV, MediaPipe, DeepFace, MTCNN, LightGBM, MLflow, Optuna, pytest, Pyannote, torchaudio, and torchcodec.
+- `pip check` reports no broken requirements.
+- Backend restarted on `http://127.0.0.1:8000` with `LD_LIBRARY_PATH=/home/antonio/ai_clipping/backend/.venv/lib/python3.12/site-packages/av.libs`.
+- `/api/status` now reports active: Whisper transcription, SentenceTransformers embeddings, MTCNN face detection fallback, DeepFace expression analysis, and Pyannote diarization.
+- Targeted Face Detection fallback tests pass. A broader `backend.tests.test_jobs_router` run hung after initial tests, so it was not used as final verification.
+- Graphify rebuild completed after the final backend edits with `2039` nodes, `5275` edges, and `38` communities.
+- Added `backend/graphify-out/cache/` to `.gitignore` because the Graphify rebuild creates that local cache under the backend output directory.
+
+## 2026-04-25 Plan: Run Backend And Frontend Locally
+
+- [x] Inspect current backend/frontend startup configuration and local dependency state.
+- [x] Repair local frontend dependencies for the existing Next app-router code.
+- [x] Make local environment files usable on this Linux workspace.
+- [x] Start backend and frontend dev servers on local ports.
+- [x] Smoke-test backend and frontend over HTTP.
+- [x] Document final URLs and verification result.
+
+### Review Notes
+
+- Repaired `frontend/package.json`, `frontend/package-lock.json`, and `frontend/node_modules` back to Next `14.2.35`, matching the app-router code under `frontend/app`.
+- Added `frontend/.env.local` with `NEXT_PUBLIC_API_URL=http://localhost:8000`.
+- Updated local `backend/.env` storage to `./tmp/storage` so the backend no longer points at the old macOS path.
+- Installed backend package dependencies into `backend/.venv`; `import main` and `py_compile` now pass.
+- `npm run lint` passes with no warnings or errors.
+- The first sandboxed `npm install` failed with `EAI_AGAIN` because network access was restricted; reran it with network access and updated `frontend/node_modules` successfully.
+- Backend is running on `http://127.0.0.1:8000`; frontend is running on `http://127.0.0.1:3000`.
+- Smoke tests passed: `GET /openapi.json` returned `200`, `GET /api/status` returned `200`, and frontend `GET /` returned `200` after Next compiled the page.
+- `/api/status` reports the base API is alive; optional local ML extras such as `openai-whisper`, `sentence-transformers`, and `pyannote.audio` are not installed in this venv.
+
+## 2026-04-25 Plan: Analyze Latest Training Run
+
+- [x] Identify latest training artifacts and completion status.
+- [x] Summarize dataset mix, label balance, and source coverage.
+- [x] Inspect chat feature coverage and cache metadata.
+- [x] Compare ranker, proxy, gold, pipeline, and threshold metrics.
+- [x] Document conclusion and next recommendation.
+
+### Review Notes
+
+- Latest artifacts were written on `2026-04-25 10:22-10:23`; `local_train_summary.json` reports `training_return_code=0`, date range `2026-03-15` to `2026-03-28`, and `artifact_only=false`.
+- Dataset has `323` rows: `59` positive and `264` negative. Main sources are `126` gold-train, `115` Twitch VOD primary, `76` boundary near-miss, and `6` hard-negative train rows.
+- Collected Twitch labels file is cumulative with `13557` labels; only `39` positive-like Twitch labels appear in the raw label classes (`29` positive, `8` weak_positive, `2` viral_positive).
+- Chat feature coverage improved to `112/323` rows overall and `112/191` non-gold VOD rows. Chat cache metadata shows `13` complete, `10` partial, and `4` unscoped VOD chat caches.
+- Chat lexical/emote features remain zero (`chat_hype_score`, `chat_laugh_score`, `chat_shock_score`, `chat_sadge_score`), so the useful chat signal is currently spike/rate based.
+- Model selected `logistic_regression`; internal validation is stronger than the previous weak run: accuracy `0.8`, precision `0.667`, recall `0.545`, F1 `0.6`, NDCG@5 `0.827`, MRR `0.833`.
+- However, artifact inspection in eval reports marks the artifact as rejected because `validation_group_ranking_metric_p25_below_minimum`; gold/proxy trained-runtime eval therefore equals baseline with zero delta.
+- Gold eval remains weak: MRR `0.216`, NDCG@5 `0.255`, precision@5 `0.155`; proxy/pipeline eval is MRR `0.339`, NDCG@5 `0.355`, top1 positive rate `0.119`.
+- Holdout diagnosis exported `7` new hard-negative rows for the next run; forced artifact on holdout improves classification accuracy but hurts ranking MRR slightly versus baseline (`0.16` vs `0.20`).
+- Conclusion: data volume and chat coverage improved, but the artifact should not be treated as accepted for serving until group-level gold ranking stability improves.
+
+## 2026-04-25 Plan: Compare Medium AI Clipping Pipeline
+
+- [x] Read the linked Medium article and extract its described pipeline.
+- [x] Inspect the current backend graph and concrete pipeline entrypoints.
+- [x] Compare article pipeline against this repo's download, candidate, ranking, chat, and rendering flow.
+- [x] Document recommendation and gaps.
+
+### Review Notes
+
+- Article baseline: download/transcribe, ask an LLM for interesting transcript moments, then use face/speaker analysis plus FFmpeg to render clips; reported weak points are hit/miss clip quality, poor start/end boundaries, and cloud/API cost.
+- Current repo runtime pipeline: download or upload video, extract audio, transcribe, extract audio/video features, generate peak/semantic/fallback candidates, build feature rows, rank with heuristic plus trained ranker, optional LLM/multimodal judge, boundary refinement, post-process/diversify, and FFmpeg cut.
+- Current repo training workflow: Twitch VOD labels are collected, VODs are materialized/cached, transcript/audio/video/chat features are cached, labeled windows produce primary/supplemental/boundary-near-miss rows, then gold-train and hard-negative rows are merged into the ranker training set.
+- Main gap versus full commercial clipping tools: runtime chat download is disabled, final rendering currently cuts source aspect ratio without automatic 9:16 face-aware reframing, and review/editor UX remains more artifact/debug oriented than product-editor oriented.
+
 ## 2026-04-25 Plan: Push Current Workspace To Main
 
 - [x] Inspect branch, remote, and full git status.

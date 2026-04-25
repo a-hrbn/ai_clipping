@@ -1,5 +1,6 @@
 import asyncio
 import io
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -88,6 +89,58 @@ class JobsRouterTests(unittest.TestCase):
         self.assertEqual(refinement["error"], "Gemini-Quota erschöpft")
         self.assertEqual(refinement["fallback_name"], "Ollama")
         self.assertEqual(refinement["fallback_model"], "llama3.2")
+
+    def test_face_probe_falls_back_when_mediapipe_subprocess_crashes(self) -> None:
+        crashed = subprocess.CompletedProcess(
+            args=[],
+            returncode=-11,
+            stdout="",
+            stderr="mediapipe segfault",
+        )
+        mtcnn_ok = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout='{"label":"Face Detection","name":"MTCNN","model":"mtcnn","active":true,"error":null,"mode":"fallback"}\n',
+            stderr="",
+        )
+
+        with patch.object(jobs.subprocess, "run", side_effect=[crashed, mtcnn_ok]):
+            result = jobs._probe_face_detection_status()
+
+        self.assertEqual(result["name"], "MTCNN")
+        self.assertTrue(result["active"])
+        self.assertIn("signal 11", result["error"])
+
+    def test_face_probe_falls_back_to_opencv_when_mediapipe_and_mtcnn_fail(self) -> None:
+        mediapipe_failed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout='{"active":false,"error":"mediapipe unavailable"}\n',
+            stderr="",
+        )
+        mtcnn_failed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout='{"active":false,"error":"mtcnn unavailable"}\n',
+            stderr="",
+        )
+        opencv_ok = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout='{"label":"Face Detection","name":"OpenCV","model":"haar cascade","active":true,"error":null,"mode":"fallback"}\n',
+            stderr="",
+        )
+
+        with patch.object(
+            jobs.subprocess,
+            "run",
+            side_effect=[mediapipe_failed, mtcnn_failed, opencv_ok],
+        ):
+            result = jobs._probe_face_detection_status()
+
+        self.assertEqual(result["name"], "OpenCV")
+        self.assertTrue(result["active"])
+        self.assertEqual(result["error"], "mtcnn unavailable")
 
     def test_upload_accepts_large_file_when_limit_is_disabled(self) -> None:
         upload = UploadFile(filename="video.mp4", file=io.BytesIO(b"123456"))

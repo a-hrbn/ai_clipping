@@ -1530,23 +1530,40 @@ def _calibrate_blend(
 
     best_blend = 0.0
     best_metrics = _evaluate_scores(labels, heuristic_scores, groups=groups)
-    results[f"{best_blend:.2f}"] = best_metrics
-    best_key = _metric_key(best_metrics, best_blend)
-    for blend in _BLEND_CANDIDATES:
-        merged = heuristic_scores * (1.0 - blend) + trained_scores * blend
+    best_requested_blend = 0.0
+    best_effective_blend = _effective_serving_blend(best_requested_blend, ranker=ranker)
+    results[f"{best_requested_blend:.2f}"] = {
+        **best_metrics,
+        "effective_blend": round(float(best_effective_blend), 2),
+    }
+    best_key = _metric_key(best_metrics, best_effective_blend)
+    for requested_blend in _BLEND_CANDIDATES:
+        effective_blend = _effective_serving_blend(requested_blend, ranker=ranker)
+        merged = heuristic_scores * (1.0 - effective_blend) + trained_scores * effective_blend
         metrics = _evaluate_scores(labels, merged, groups=groups)
-        results[f"{blend:.2f}"] = metrics
-        key = _metric_key(metrics, blend)
+        results[f"{requested_blend:.2f}"] = {
+            **metrics,
+            "effective_blend": round(float(effective_blend), 2),
+        }
+        key = _metric_key(metrics, effective_blend)
         if key > best_key:
-            best_blend = blend
+            best_requested_blend = requested_blend
+            best_effective_blend = effective_blend
             best_metrics = metrics
             best_key = key
     return {
         "selection_metric": "validation_primary_ranking_metric",
-        "best_blend": round(float(best_blend), 2),
+        "best_blend": round(float(best_effective_blend), 2),
+        "requested_best_blend": round(float(best_requested_blend), 2),
+        "runtime_max_blend": round(float(_effective_serving_blend(1.0, ranker=ranker)), 2),
         "best_metrics": best_metrics,
         "grid_results": results,
     }
+
+
+def _effective_serving_blend(blend: float, *, ranker: Ranker | None = None) -> float:
+    runtime_ranker = ranker or Ranker(enable_trained_model=False)
+    return runtime_ranker._safe_blend({"blend": float(blend)})
 
 
 def _runtime_blended_scores(
@@ -1578,7 +1595,7 @@ def _runtime_blended_scores(
         selected_model,
         ranker,
     )
-    safe_blend = max(0.0, min(1.0, float(blend)))
+    safe_blend = _effective_serving_blend(blend, ranker=ranker)
     return heuristic_scores * (1.0 - safe_blend) + trained_scores * safe_blend
 
 

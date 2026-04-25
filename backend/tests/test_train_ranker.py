@@ -302,6 +302,63 @@ class TrainRankerTests(unittest.TestCase):
         self.assertEqual(calibration["metrics"]["recall"], 1.0)
         self.assertGreater(calibration["metrics"]["f1"], calibration["default_metrics"]["f1"])
 
+    def test_runtime_blended_scores_apply_serving_blend_cap(self) -> None:
+        rows = [
+            {"candidate_id": "positive", "label": 1, "features": {"signal": 1.0}},
+            {"candidate_id": "negative", "label": 0, "features": {"signal": -1.0}},
+        ]
+        selected_model = {"artifact_model_type": "linear", "weights": {"signal": 1.0}, "intercept": 0.0}
+
+        with (
+            patch.object(train_ranker.Ranker, "_heuristic_scores", return_value=[(10.0, []), (10.0, [])]),
+            patch.object(
+                train_ranker,
+                "_runtime_trained_scores",
+                return_value=train_ranker.np.array([-10.0, -10.0], dtype=float),
+            ),
+        ):
+            scores = train_ranker._runtime_blended_scores(
+                rows,
+                "gaming",
+                ["signal"],
+                {},
+                selected_model,
+                1.0,
+            )
+
+        self.assertEqual(scores.tolist(), [-3.0, -3.0])
+
+    def test_calibrate_blend_persists_runtime_effective_blend(self) -> None:
+        rows = [
+            {"candidate_id": "p1", "label": 1, "features": {"signal": 1.0}, "vod_id": "vod-a"},
+            {"candidate_id": "n1", "label": 0, "features": {"signal": -1.0}, "vod_id": "vod-a"},
+            {"candidate_id": "p2", "label": 1, "features": {"signal": 1.0}, "vod_id": "vod-b"},
+            {"candidate_id": "n2", "label": 0, "features": {"signal": -1.0}, "vod_id": "vod-b"},
+        ]
+        selected_model = {"artifact_model_type": "linear", "weights": {"signal": 1.0}, "intercept": 0.0}
+
+        with (
+            patch.object(train_ranker.Ranker, "_heuristic_scores", return_value=[(0.0, []), (10.0, []), (0.0, []), (10.0, [])]),
+            patch.object(
+                train_ranker,
+                "_runtime_trained_scores",
+                return_value=train_ranker.np.array([10.0, 0.0, 10.0, 0.0], dtype=float),
+            ),
+        ):
+            calibration = train_ranker._calibrate_blend(
+                rows,
+                "gaming",
+                ["signal"],
+                {},
+                selected_model,
+                "vod_id",
+            )
+
+        self.assertEqual(calibration["runtime_max_blend"], 0.65)
+        self.assertLessEqual(calibration["best_blend"], calibration["runtime_max_blend"])
+        self.assertEqual(calibration["best_blend"], calibration["requested_best_blend"])
+        self.assertEqual(calibration["grid_results"]["1.00"]["effective_blend"], 0.65)
+
     def test_numeric_feature_names_excludes_offline_only_features(self) -> None:
         names = train_ranker._numeric_feature_names({
             "candidate_id": "c1",
