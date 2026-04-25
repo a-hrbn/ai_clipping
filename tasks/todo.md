@@ -5,9 +5,18 @@
 - [x] Confirm current branch and remote.
 - [x] Stage all current tracked and untracked workspace changes.
 - [x] Run pre-commit diff sanity checks.
-- [ ] Commit staged changes on `main`.
-- [ ] Push `main` to `origin`.
-- [ ] Document pushed commit.
+- [x] Commit staged changes on `main`.
+- [x] Push `main` to `origin`.
+- [x] Document pushed commit.
+
+### Review Notes
+
+- Branch was `main`; remote was `origin` at `git@github.com:a-hrbn/ai_clipping.git`.
+- Staged all tracked changes plus new active gold-eval queue artifacts.
+- Normalized generated CSV line endings for `jynxzi_active_gold_eval_queue_20260425_1222.csv` and `jynxzi_ranker_holdout_diagnosis.csv` so `git diff --cached --check` passed.
+- Committed `271232f` with message `Align ranker calibration and update training artifacts`.
+- Pushed successfully: `6d42c65..271232f main -> main`.
+- A follow-up `git ls-remote origin refs/heads/main` verification failed due temporary DNS resolution for `github.com` after the push had already succeeded.
 
 ## 2026-04-25 Plan: Verify Latest Ranker Blend Fix Run
 
