@@ -8,7 +8,7 @@ from services.timeline_types import Candidate, CandidateFeatures, Chapter
 from services.transcriber import RichSegment
 
 _TOKEN_RE = re.compile(r"[a-zA-Z0-9']+")
-FEATURE_BUILD_VERSION = 7
+FEATURE_BUILD_VERSION = 8
 _LLM_SEMANTIC_MAX_WORKERS = 4
 
 
@@ -152,6 +152,11 @@ def _build_candidate_features(
             chat_post_hook_peak=0.0,
             chat_delta=0.0,
             chat_spike_coverage=0.0,
+            chat_activity_coverage=0.0,
+            chat_message_rate_peak=0.0,
+            chat_message_rate_mean=0.0,
+            chat_density_peak=0.0,
+            chat_density_mean=0.0,
             chat_hype_score=0.0,
             chat_laugh_score=0.0,
             chat_shock_score=0.0,
@@ -232,7 +237,7 @@ def _build_candidate_features(
     max_hype = max(seg.hype_score for seg in window)
     mean_hype = sum(seg.hype_score for seg in window) / len(window)
     arc_score = max(seg.arc_score for seg in window)
-    chat_peak = max(seg.chat_spike_score for seg in window)
+    chat_peak = max(_chat_activity_score(seg) for seg in window)
     chat_stats = _chat_window_stats(window, candidate)
     motion_peak = max(seg.max_motion_score for seg in window)
     face_reaction_peak = max(seg.max_face_reaction for seg in window)
@@ -331,7 +336,7 @@ def _build_candidate_features(
         strategy,
     )
     has_chat_features = any(
-        abs(float(getattr(seg, "chat_spike_score", 0.0) or 0.0)) > 1e-9
+        _chat_activity_score(seg) > 1e-9
         for seg in window
     )
     has_vector_similarity = bool(similarity.get("vector_reference_available", False)) or any(
@@ -359,6 +364,11 @@ def _build_candidate_features(
         chat_post_hook_peak=round(chat_stats["post_hook_peak"], 3),
         chat_delta=round(chat_stats["delta"], 3),
         chat_spike_coverage=round(chat_stats["coverage"], 3),
+        chat_activity_coverage=round(chat_stats["activity_coverage"], 3),
+        chat_message_rate_peak=round(chat_stats["message_rate_peak"], 3),
+        chat_message_rate_mean=round(chat_stats["message_rate_mean"], 3),
+        chat_density_peak=round(chat_stats["density_peak"], 3),
+        chat_density_mean=round(chat_stats["density_mean"], 3),
         chat_hype_score=round(chat_stats["hype"], 3),
         chat_laugh_score=round(chat_stats["laugh"], 3),
         chat_shock_score=round(chat_stats["shock"], 3),
@@ -433,7 +443,10 @@ def _build_candidate_features(
 
 
 def _chat_window_stats(window: list[RichSegment], candidate: Candidate) -> dict[str, float]:
-    scores = [max(0.0, float(getattr(seg, "chat_spike_score", 0.0) or 0.0)) for seg in window]
+    scores = [_chat_activity_score(seg) for seg in window]
+    spike_scores = [max(0.0, float(getattr(seg, "chat_spike_score", 0.0) or 0.0)) for seg in window]
+    density_scores = [max(0.0, float(getattr(seg, "chat_density_score", 0.0) or 0.0)) for seg in window]
+    message_rates = [max(0.0, float(getattr(seg, "chat_message_rate", 0.0) or 0.0)) for seg in window]
     if not scores:
         return {
             "mean": 0.0,
@@ -441,6 +454,11 @@ def _chat_window_stats(window: list[RichSegment], candidate: Candidate) -> dict[
             "post_hook_peak": 0.0,
             "delta": 0.0,
             "coverage": 0.0,
+            "activity_coverage": 0.0,
+            "message_rate_peak": 0.0,
+            "message_rate_mean": 0.0,
+            "density_peak": 0.0,
+            "density_mean": 0.0,
             "hype": 0.0,
             "laugh": 0.0,
             "shock": 0.0,
@@ -464,11 +482,15 @@ def _chat_window_stats(window: list[RichSegment], candidate: Candidate) -> dict[
         if seg.end > candidate.anchor_time
     ]
     spiked_duration = 0.0
-    for seg, score in zip(window, scores, strict=False):
+    activity_duration = 0.0
+    for seg, score, spike_score in zip(window, scores, spike_scores, strict=False):
         if score <= 0.0:
             continue
         overlap = min(seg.end, candidate.end) - max(seg.start, candidate.start)
-        spiked_duration += max(0.0, overlap)
+        overlap = max(0.0, overlap)
+        activity_duration += overlap
+        if spike_score > 0.0:
+            spiked_duration += overlap
 
     return {
         "mean": sum(scores) / len(scores),
@@ -476,6 +498,11 @@ def _chat_window_stats(window: list[RichSegment], candidate: Candidate) -> dict[
         "post_hook_peak": max(post_hook_scores, default=0.0),
         "delta": max(post_hook_scores, default=0.0) - max(pre_hook_scores, default=0.0),
         "coverage": min(spiked_duration / max(candidate.end - candidate.start, 1e-6), 1.0),
+        "activity_coverage": min(activity_duration / max(candidate.end - candidate.start, 1e-6), 1.0),
+        "message_rate_peak": max(message_rates, default=0.0),
+        "message_rate_mean": sum(message_rates) / len(message_rates),
+        "density_peak": max(density_scores, default=0.0),
+        "density_mean": sum(density_scores) / len(density_scores),
         "hype": _chat_category_peak(window, "hype"),
         "laugh": _chat_category_peak(window, "laugh"),
         "shock": _chat_category_peak(window, "shock"),
@@ -483,11 +510,17 @@ def _chat_window_stats(window: list[RichSegment], candidate: Candidate) -> dict[
     }
 
 
+def _chat_activity_score(segment: RichSegment) -> float:
+    spike = max(0.0, float(getattr(segment, "chat_spike_score", 0.0) or 0.0))
+    density = max(0.0, float(getattr(segment, "chat_density_score", 0.0) or 0.0))
+    return min(max(spike, density), 1.0)
+
+
 def _chat_category_peak(window: list[RichSegment], category: str) -> float:
     tag = f"chat_{category}"
     return max(
         (
-            max(0.0, float(getattr(seg, "chat_spike_score", 0.0) or 0.0))
+            _chat_activity_score(seg)
             for seg in window
             if tag in (getattr(seg, "emotions", []) or [])
         ),

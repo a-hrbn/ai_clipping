@@ -9,6 +9,7 @@ import threading
 import uuid
 
 import yt_dlp
+from yt_dlp.utils import download_range_func
 from config import settings
 from job_manager import is_job_cancelled, update_job
 
@@ -295,7 +296,14 @@ def _is_transient_network_error(message: str) -> bool:
     )
 
 
-def _download_uncached(url: str, job_id: str, proxy: str | None = None) -> pathlib.Path:
+def _download_uncached(
+    url: str,
+    job_id: str,
+    proxy: str | None = None,
+    *,
+    ydl_opt_overrides: dict[str, object] | None = None,
+    disable_external_downloader: bool = False,
+) -> pathlib.Path:
     job_dir = pathlib.Path(settings.storage_dir) / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
     output_path = job_dir / "video.mp4"
@@ -334,6 +342,11 @@ def _download_uncached(url: str, job_id: str, proxy: str | None = None) -> pathl
             pass
 
     ydl_opts = _twitch_download_ydl_opts(job_dir) if _is_twitch_url(url) else _base_ydl_opts(job_dir)
+    if ydl_opt_overrides:
+        ydl_opts.update(ydl_opt_overrides)
+    if disable_external_downloader:
+        ydl_opts.pop("external_downloader", None)
+        ydl_opts.pop("external_downloader_args", None)
     ydl_opts["progress_hooks"] = [progress_hook]
     if proxy:
         ydl_opts["proxy"] = proxy
@@ -442,3 +455,25 @@ def download(url: str, job_id: str, proxy: str | None = None) -> pathlib.Path:
             return resolved_output
 
     return _download_uncached(url, job_id, proxy=proxy)
+
+
+def download_range(
+    url: str,
+    job_id: str,
+    *,
+    start_sec: float,
+    end_sec: float,
+    proxy: str | None = None,
+) -> pathlib.Path:
+    start = max(float(start_sec), 0.0)
+    end = max(float(end_sec), start + 1.0)
+    return _download_uncached(
+        url,
+        job_id,
+        proxy=proxy,
+        disable_external_downloader=True,
+        ydl_opt_overrides={
+            "download_ranges": download_range_func(None, [(start, end)]),
+            "force_keyframes_at_cuts": False,
+        },
+    )

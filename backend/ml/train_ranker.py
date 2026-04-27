@@ -32,8 +32,8 @@ from services.ranker import OFFLINE_ONLY_FEATURE_NAMES, Ranker
 from services.timeline_types import CandidateFeatures
 
 
-_LIGHTGBM_PROMOTION_MIN_ROWS = 500
-_GRADIENT_BOOSTING_PROMOTION_MIN_ROWS = 500
+_LIGHTGBM_PROMOTION_MIN_ROWS = 400
+_GRADIENT_BOOSTING_PROMOTION_MIN_ROWS = 400
 _LIGHTGBM_DEFAULT_PARAMS = {
     "n_estimators": 80,
     "learning_rate": 0.08,
@@ -45,6 +45,16 @@ _LIGHTGBM_DEFAULT_PARAMS = {
 _LIGHTGBM_HPO_PARAM_KEYS = frozenset(_LIGHTGBM_DEFAULT_PARAMS)
 _BLEND_CANDIDATES = tuple(round(value, 2) for value in np.arange(0.15, 1.05, 0.05))
 _HEURISTIC_FEATURE_NAME = "heuristic_score"
+# Chat category features are all-zero in current training data (confirmed by audit).
+# chat_delta is also effectively zero (p90/p95 = 0.0, max = 0.36 across all rows).
+# Excluding them from training prevents noise from sparse constant features.
+_SPARSE_TRAINING_FEATURE_NAMES: frozenset[str] = frozenset({
+    "chat_hype_score",
+    "chat_laugh_score",
+    "chat_sadge_score",
+    "chat_shock_score",
+    "chat_delta",
+})
 _SPLIT_RANDOM_SEED = int(settings.ranker_hpo_seed)
 _MIN_GROUP_NDCG_AT_5_P25 = 0.45
 _MIN_GROUP_NDCG_AT_5_MIN = 0.2
@@ -191,12 +201,6 @@ def train_from_rows(
             tracking.set_tags({"training_status": "aborted", "abort_reason": "leakage_risk_high"})
             return 1
 
-        # Make the rule-based heuristic a feature the ranker can learn from.
-        # Scales are computed later over the enriched feature set, so all downstream
-        # models (linear, logistic, GBM, LambdaRank) see the heuristic as a signal.
-        _inject_heuristic_features(train_rows, profile)
-        _inject_heuristic_features(validation_rows, profile)
-
         train_positive = [row["features"] for row in train_rows if row["label"] == 1]
         train_negative = [row["features"] for row in train_rows if row["label"] == 0]
         if not train_positive or not train_negative:
@@ -330,7 +334,9 @@ def train_from_rows(
             "label_schema_version": 3,
             "feature_schema_version": 3,
             "feature_names": feature_names,
-            "excluded_feature_names": sorted(OFFLINE_ONLY_FEATURE_NAMES),
+            "excluded_feature_names": sorted(
+                OFFLINE_ONLY_FEATURE_NAMES | _SPARSE_TRAINING_FEATURE_NAMES | {_HEURISTIC_FEATURE_NAME}
+            ),
             "semantic_score_config": semantic_service.semantic_score_config(),
             "weights": selected_model.get("weights", {}),
             "scales": scales,
@@ -549,9 +555,14 @@ def _gold_eval_training_guard(rows: list[dict]) -> dict[str, int | str] | None:
 
 
 def _numeric_feature_names(feature_row: dict) -> list[str]:
+    _excluded = (
+        {"candidate_id", "source", _HEURISTIC_FEATURE_NAME}
+        | OFFLINE_ONLY_FEATURE_NAMES
+        | _SPARSE_TRAINING_FEATURE_NAMES
+    )
     names: list[str] = []
     for key, value in feature_row.items():
-        if key in {"candidate_id", "source"} or key in OFFLINE_ONLY_FEATURE_NAMES:
+        if key in _excluded:
             continue
         if isinstance(value, (int, float, bool)):
             names.append(key)

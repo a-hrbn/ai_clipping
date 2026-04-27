@@ -13,6 +13,22 @@ from services.transcriber import RichSegment
 
 
 class FeatureBuilderTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._similarity_patch = patch.object(
+            feature_builder.clip_similarity,
+            "score_candidate_window",
+            return_value={
+                "winner_similarity_max": 0.0,
+                "winner_similarity_mean": 0.0,
+                "loser_similarity_max": 0.0,
+                "similarity_margin": 0.0,
+                "neighbor_quality_score": 0.0,
+                "vector_reference_available": False,
+            },
+        )
+        self._similarity_patch.start()
+        self.addCleanup(self._similarity_patch.stop)
+
     def test_build_features_extracts_expected_signals(self) -> None:
         candidate = Candidate(id="x", start=0.0, end=10.0, source="reaction", anchor_time=3.5)
         segments = [
@@ -59,19 +75,47 @@ class FeatureBuilderTests(unittest.TestCase):
         self.assertGreater(features.audio_pop_score, 0.0)
         self.assertGreater(features.projected_hook_score, 0.0)
         self.assertGreater(features.projected_retention_score, 0.0)
-        self.assertEqual(features.feature_build_version, 7)
+        self.assertEqual(features.feature_build_version, 8)
         self.assertTrue(features.has_chat_features)
         self.assertEqual(features.chat_peak, 0.6)
         self.assertGreater(features.chat_mean, 0.0)
         self.assertEqual(features.chat_early_peak, 0.6)
         self.assertEqual(features.chat_post_hook_peak, 0.6)
         self.assertGreater(features.chat_spike_coverage, 0.0)
+        self.assertGreater(features.chat_activity_coverage, 0.0)
         self.assertEqual(features.chat_hype_score, 0.6)
         self.assertEqual(features.chat_laugh_score, 0.0)
         self.assertGreaterEqual(features.payoff_clarity_score, 0.0)
         self.assertGreaterEqual(features.slow_open_penalty, 0.0)
         self.assertGreaterEqual(features.context_dependency_score, 0.0)
         self.assertGreaterEqual(features.weak_resolution_penalty, 0.0)
+
+    def test_build_features_uses_chat_density_without_spike(self) -> None:
+        candidate = Candidate(id="x", start=0.0, end=10.0, source="reaction", anchor_time=4.0)
+        segments = [
+            RichSegment(
+                start=0.0,
+                end=5.0,
+                text="steady chat setup",
+                speaker="STREAMER",
+                hype_score=2.0,
+                chat_spike_score=0.0,
+                chat_message_count=20,
+                chat_message_rate=4.0,
+                chat_density_score=0.8,
+            ),
+            RichSegment(start=5.0, end=10.0, text="payoff", speaker="STREAMER", hype_score=5.0),
+        ]
+
+        features = feature_builder.build_features([candidate], segments)[0]
+
+        self.assertTrue(features.has_chat_features)
+        self.assertEqual(features.chat_peak, 0.8)
+        self.assertGreater(features.chat_mean, 0.0)
+        self.assertEqual(features.chat_spike_coverage, 0.0)
+        self.assertGreater(features.chat_activity_coverage, 0.0)
+        self.assertEqual(features.chat_message_rate_peak, 4.0)
+        self.assertGreater(features.chat_density_mean, 0.0)
 
     def test_build_features_includes_similarity_features(self) -> None:
         candidate = Candidate(id="x", start=0.0, end=10.0, source="reaction", anchor_time=2.5)
@@ -89,6 +133,7 @@ class FeatureBuilderTests(unittest.TestCase):
                 "loser_similarity_max": 0.22,
                 "similarity_margin": 0.69,
                 "neighbor_quality_score": 1.4,
+                "vector_reference_available": True,
             },
         ):
             features = feature_builder.build_features([candidate], segments)[0]

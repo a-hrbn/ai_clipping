@@ -1,0 +1,593 @@
+{
+  "existing_rows_before": 175,
+  "scoped_positive_candidates": 47,
+  "new_rows_available": 47,
+  "new_rows_added": 47,
+  "new_rows_skipped_duplicate": 0,
+  "rows_after": 222,
+  "gold_grade_distribution": {
+    "0": 95,
+    "1": 51,
+    "2": 18,
+    "3": 58
+  },
+  "label_class_distribution": {
+    "gold_negative": 146,
+    "gold_positive": 76
+  },
+  "dataset_source_distribution": {
+    "gold_eval_frontend": 97,
+    "gold_eval_manual": 75,
+    "gold_eval_top_viewed_twitch": 50
+  },
+  "gold_holdout_splits": {
+    "holdout": 60,
+    "train": 162
+  },
+  "added_rows": [
+    {
+      "queue_id": "twitch_vod_2749590872:twitch_vod_2749590872_2:narrative_reveal:0:1903",
+      "vod_id": "2749590872",
+      "candidate_id": "twitch_vod_2749590872_2:narrative_reveal:0:1903",
+      "gold_holdout_split": "train",
+      "gold_grade": 3,
+      "window_start": 819.63,
+      "window_end": 852.05,
+      "original_label_class": "viral_positive",
+      "view_count": 13747
+    },
+    {
+      "queue_id": "twitch_vod_2745548882:twitch_vod_2745548882_1:tension_build:0:1815",
+      "vod_id": "2745548882",
+      "candidate_id": "twitch_vod_2745548882_1:tension_build:0:1815",
+      "gold_holdout_split": "holdout",
+      "gold_grade": 3,
+      "window_start": 11209.19,
+      "window_end": 11241.18,
+      "original_label_class": "positive",
+      "view_count": 7012
+    },
+    {
+      "queue_id": "twitch_vod_2752903388:twitch_vod_2752903388_2:quote:0:3343",
+      "vod_id": "2752903388",
+      "candidate_id": "twitch_vod_2752903388_2:quote:0:3343",
+      "gold_holdout_split": "train",
+      "gold_grade": 3,
+      "window_start": 6552.07,
+      "window_end": 6572.3,
+      "original_label_class": "positive",
+      "view_count": 6919
+    },
+    {
+      "queue_id": "twitch_vod_2735822092:twitch_vod_2735822092_2:tension_build:0:5638",
+      "vod_id": "2735822092",
+      "candidate_id": "twitch_vod_2735822092_2:tension_build:0:5638",
+      "gold_holdout_split": "train",
+      "gold_grade": 3,
+      "window_start": 13478.38,
+      "window_end": 13510.14,
+      "original_label_class": "positive",
+      "view_count": 4764
+    },
+    {
+      "queue_id": "twitch_vod_2743957452:twitch_vod_2743957452_1:quote:0:3536",
+      "vod_id": "2743957452",
+      "candidate_id": "twitch_vod_2743957452_1:quote:0:3536",
+      "gold_holdout_split": "train",
+      "gold_grade": 3,
+      "window_start": 6087.36,
+      "window_end": 6116.73,
+      "original_label_class": "positive",
+      "view_count": 4699
+    },
+    {
+      "queue_id": "twitch_vod_2748008198:twitch_vod_2748008198_1:quote:0:1024",
+      "vod_id": "2748008198",
+      "candidate_id": "twitch_vod_2748008198_1:quote:0:1024",
+      "gold_holdout_split": "holdout",
+      "gold_grade": 3,
+      "window_start": 9225.84,
+      "window_end": 9246.3,
+      "original_label_class": "positive",
+      "view_count": 4662
+    },
+    {
+      "queue_id": "twitch_vod_2753667907:twitch_vod_2753667907_1:quote:0:3810",
+      "vod_id": "2753667907",
+      "candidate_id": "twitch_vod_2753667907_1:quote:0:3810",
+      "gold_holdout_split": "holdout",
+      "gold_grade": 3,
+      "window_start": 2473.1,
+      "window_end": 2490.28,
+      "original_label_class": "positive",
+      "view_count": 4411
+    },
+    {
+      "queue_id": "twitch_vod_2747242788:twitch_vod_2747242788_1:audio_burst:0:848",
+      "vod_id": "2747242788",
+      "candidate_id": "twitch_vod_2747242788_1:audio_burst:0:848",
+      "gold_holdout_split": "train",
+      "gold_grade": 3,
+      "window_start": 3925.0,
+      "window_end": 3955.01,
+      "original_label_class": "positive",
+      "view_count": 4119
+    },
+    {
+      "queue_id": "twitch_vod_2752903388:twitch_vod_2752903388_6:tension_build:0:2815",
+      "vod_id": "2752903388",
+      "candidate_id": "twitch_vod_2752903388_6:tension_build:0:2815",
+      "gold_holdout_split": "train",
+      "gold_grade": 3,
+      "window_start": 18341.15,
+      "window_end": 18374.72,
+      "original_label_class": "positive",
+      "view_count": 3241
+    },
+    {
+      "queue_id": "twitch_vod_2743205387:twitch_vod_2743205387_1:hype_peak:0:1317",
+      "vod_id": "2743205387",
+      "candidate_id": "twitch_vod_2743205387_1:hype_peak:0:1317",
+      "gold_holdout_split": "holdout",
+      "gold_grade": 3,
+      "window_start": 340.58,
+      "window_end": 368.7,
+      "original_label_class": "positive",
+      "view_count": 2992
+    },
+    {
+      "queue_id": "twitch_vod_2746542856:twitch_vod_2746542856_1:quote:0:946",
+      "vod_id": "2746542856",
+      "candidate_id": "twitch_vod_2746542856_1:quote:0:946",
+      "gold_holdout_split": "train",
+      "gold_grade": 3,
+      "window_start": 2026.82,
+      "window_end": 2045.69,
+      "original_label_class": "positive",
+      "view_count": 2886
+    },
+    {
+      "queue_id": "twitch_vod_2751373742:twitch_vod_2751373742_1:quote:0:1227",
+      "vod_id": "2751373742",
+      "candidate_id": "twitch_vod_2751373742_1:quote:0:1227",
+      "gold_holdout_split": "train",
+      "gold_grade": 3,
+      "window_start": 2989.55,
+      "window_end": 3005.79,
+      "original_label_class": "positive",
+      "view_count": 2860
+    },
+    {
+      "queue_id": "twitch_vod_2739085285:twitch_vod_2739085285_4:tension_build:0:4498",
+      "vod_id": "2739085285",
+      "candidate_id": "twitch_vod_2739085285_4:tension_build:0:4498",
+      "gold_holdout_split": "train",
+      "gold_grade": 3,
+      "window_start": 16028.98,
+      "window_end": 16060.79,
+      "original_label_class": "positive",
+      "view_count": 2853
+    },
+    {
+      "queue_id": "twitch_vod_2737446918:twitch_vod_2737446918_1:narrative_reveal:0:1729",
+      "vod_id": "2737446918",
+      "candidate_id": "twitch_vod_2737446918_1:narrative_reveal:0:1729",
+      "gold_holdout_split": "train",
+      "gold_grade": 3,
+      "window_start": 489.93,
+      "window_end": 519.87,
+      "original_label_class": "positive",
+      "view_count": 2662
+    },
+    {
+      "queue_id": "twitch_vod_2740841415:twitch_vod_2740841415_2:quote:0:727",
+      "vod_id": "2740841415",
+      "candidate_id": "twitch_vod_2740841415_2:quote:0:727",
+      "gold_holdout_split": "train",
+      "gold_grade": 3,
+      "window_start": 6212.4,
+      "window_end": 6229.26,
+      "original_label_class": "positive",
+      "view_count": 2510
+    },
+    {
+      "queue_id": "twitch_vod_2748783535:twitch_vod_2748783535_2:quote:0:1945",
+      "vod_id": "2748783535",
+      "candidate_id": "twitch_vod_2748783535_2:quote:0:1945",
+      "gold_holdout_split": "train",
+      "gold_grade": 3,
+      "window_start": 15819.46,
+      "window_end": 15833.83,
+      "original_label_class": "positive",
+      "view_count": 2451
+    },
+    {
+      "queue_id": "twitch_vod_2739085285:twitch_vod_2739085285_2:quote:0:59",
+      "vod_id": "2739085285",
+      "candidate_id": "twitch_vod_2739085285_2:quote:0:59",
+      "gold_holdout_split": "holdout",
+      "gold_grade": 3,
+      "window_start": 11308.6,
+      "window_end": 11323.8,
+      "original_label_class": "positive",
+      "view_count": 2322
+    },
+    {
+      "queue_id": "twitch_vod_2747242788:twitch_vod_2747242788_3:quote:0:1571",
+      "vod_id": "2747242788",
+      "candidate_id": "twitch_vod_2747242788_3:quote:0:1571",
+      "gold_holdout_split": "holdout",
+      "gold_grade": 3,
+      "window_start": 8498.75,
+      "window_end": 8512.34,
+      "original_label_class": "positive",
+      "view_count": 2289
+    },
+    {
+      "queue_id": "twitch_vod_2756055866:twitch_vod_2756055866_2:narrative_reveal:0:0",
+      "vod_id": "2756055866",
+      "candidate_id": "twitch_vod_2756055866_2:narrative_reveal:0:0",
+      "gold_holdout_split": "holdout",
+      "gold_grade": 3,
+      "window_start": 19887.92,
+      "window_end": 19911.52,
+      "original_label_class": "positive",
+      "view_count": 2086
+    },
+    {
+      "queue_id": "twitch_vod_2744769396:twitch_vod_2744769396_1:quote:0:988",
+      "vod_id": "2744769396",
+      "candidate_id": "twitch_vod_2744769396_1:quote:0:988",
+      "gold_holdout_split": "train",
+      "gold_grade": 3,
+      "window_start": 10243.04,
+      "window_end": 10260.35,
+      "original_label_class": "positive",
+      "view_count": 1914
+    },
+    {
+      "queue_id": "twitch_vod_2753667907:twitch_vod_2753667907_2:quote:0:722",
+      "vod_id": "2753667907",
+      "candidate_id": "twitch_vod_2753667907_2:quote:0:722",
+      "gold_holdout_split": "holdout",
+      "gold_grade": 3,
+      "window_start": 2969.58,
+      "window_end": 2992.73,
+      "original_label_class": "positive",
+      "view_count": 1797
+    },
+    {
+      "queue_id": "twitch_vod_2749590872:twitch_vod_2749590872_3:reaction:0:2083",
+      "vod_id": "2749590872",
+      "candidate_id": "twitch_vod_2749590872_3:reaction:0:2083",
+      "gold_holdout_split": "train",
+      "gold_grade": 3,
+      "window_start": 3599.76,
+      "window_end": 3620.07,
+      "original_label_class": "positive",
+      "view_count": 1784
+    },
+    {
+      "queue_id": "twitch_vod_2750220507:twitch_vod_2750220507_1:quote:0:1150",
+      "vod_id": "2750220507",
+      "candidate_id": "twitch_vod_2750220507_1:quote:0:1150",
+      "gold_holdout_split": "holdout",
+      "gold_grade": 3,
+      "window_start": 5137.62,
+      "window_end": 5152.4,
+      "original_label_class": "positive",
+      "view_count": 1533
+    },
+    {
+      "queue_id": "twitch_vod_2740841415:twitch_vod_2740841415_1:quote:0:1238",
+      "vod_id": "2740841415",
+      "candidate_id": "twitch_vod_2740841415_1:quote:0:1238",
+      "gold_holdout_split": "train",
+      "gold_grade": 3,
+      "window_start": 4626.42,
+      "window_end": 4646.44,
+      "original_label_class": "positive",
+      "view_count": 1479
+    },
+    {
+      "queue_id": "twitch_vod_2753667907:twitch_vod_2753667907_3:quote:0:1707",
+      "vod_id": "2753667907",
+      "candidate_id": "twitch_vod_2753667907_3:quote:0:1707",
+      "gold_holdout_split": "train",
+      "gold_grade": 3,
+      "window_start": 11411.96,
+      "window_end": 11426.79,
+      "original_label_class": "positive",
+      "view_count": 1401
+    },
+    {
+      "queue_id": "twitch_vod_2750220507:twitch_vod_2750220507_2:tension_build:0:1186",
+      "vod_id": "2750220507",
+      "candidate_id": "twitch_vod_2750220507_2:tension_build:0:1186",
+      "gold_holdout_split": "train",
+      "gold_grade": 3,
+      "window_start": 7206.46,
+      "window_end": 7236.8,
+      "original_label_class": "positive",
+      "view_count": 1390
+    },
+    {
+      "queue_id": "twitch_vod_2752903388:twitch_vod_2752903388_5:quote:0:436",
+      "vod_id": "2752903388",
+      "candidate_id": "twitch_vod_2752903388_5:quote:0:436",
+      "gold_holdout_split": "train",
+      "gold_grade": 3,
+      "window_start": 13058.08,
+      "window_end": 13074.05,
+      "original_label_class": "positive",
+      "view_count": 1211
+    },
+    {
+      "queue_id": "twitch_vod_2741600222:twitch_vod_2741600222_2:quote:0:2806",
+      "vod_id": "2741600222",
+      "candidate_id": "twitch_vod_2741600222_2:quote:0:2806",
+      "gold_holdout_split": "train",
+      "gold_grade": 3,
+      "window_start": 11641.62,
+      "window_end": 11658.64,
+      "original_label_class": "positive",
+      "view_count": 1074
+    },
+    {
+      "queue_id": "twitch_vod_2739861273:twitch_vod_2739861273_1:narrative_reveal:0:3596",
+      "vod_id": "2739861273",
+      "candidate_id": "twitch_vod_2739861273_1:narrative_reveal:0:3596",
+      "gold_holdout_split": "train",
+      "gold_grade": 3,
+      "window_start": 2059.96,
+      "window_end": 2091.63,
+      "original_label_class": "positive",
+      "view_count": 1042
+    },
+    {
+      "queue_id": "twitch_vod_2754503460:twitch_vod_2754503460_1:hype_peak:0:613",
+      "vod_id": "2754503460",
+      "candidate_id": "twitch_vod_2754503460_1:hype_peak:0:613",
+      "gold_holdout_split": "train",
+      "gold_grade": 3,
+      "window_start": 2974.62,
+      "window_end": 3001.28,
+      "original_label_class": "positive",
+      "view_count": 1030
+    },
+    {
+      "queue_id": "twitch_vod_2748783535:twitch_vod_2748783535_1:reaction:0:2552",
+      "vod_id": "2748783535",
+      "candidate_id": "twitch_vod_2748783535_1:reaction:0:2552",
+      "gold_holdout_split": "train",
+      "gold_grade": 3,
+      "window_start": 10169.16,
+      "window_end": 10189.88,
+      "original_label_class": "weak_positive",
+      "view_count": 988
+    },
+    {
+      "queue_id": "twitch_vod_2749590872:twitch_vod_2749590872_1:tension_build:0:4543",
+      "vod_id": "2749590872",
+      "candidate_id": "twitch_vod_2749590872_1:tension_build:0:4543",
+      "gold_holdout_split": "train",
+      "gold_grade": 3,
+      "window_start": 328.43,
+      "window_end": 358.75,
+      "original_label_class": "weak_positive",
+      "view_count": 807
+    },
+    {
+      "queue_id": "twitch_vod_2747242788:twitch_vod_2747242788_2:tension_build:0:0",
+      "vod_id": "2747242788",
+      "candidate_id": "twitch_vod_2747242788_2:tension_build:0:0",
+      "gold_holdout_split": "train",
+      "gold_grade": 3,
+      "window_start": 7818.64,
+      "window_end": 7845.68,
+      "original_label_class": "weak_positive",
+      "view_count": 668
+    },
+    {
+      "queue_id": "twitch_vod_2752903388:twitch_vod_2752903388_3:quote:0:1500",
+      "vod_id": "2752903388",
+      "candidate_id": "twitch_vod_2752903388_3:quote:0:1500",
+      "gold_holdout_split": "train",
+      "gold_grade": 3,
+      "window_start": 6843.04,
+      "window_end": 6860.65,
+      "original_label_class": "weak_positive",
+      "view_count": 668
+    },
+    {
+      "queue_id": "twitch_vod_2756055866:twitch_vod_2756055866_1:hot_take:0:2624",
+      "vod_id": "2756055866",
+      "candidate_id": "twitch_vod_2756055866_1:hot_take:0:2624",
+      "gold_holdout_split": "holdout",
+      "gold_grade": 3,
+      "window_start": 12499.88,
+      "window_end": 12518.21,
+      "original_label_class": "weak_positive",
+      "view_count": 657
+    },
+    {
+      "queue_id": "twitch_vod_2739085285:twitch_vod_2739085285_3:narrative_reveal:0:5392",
+      "vod_id": "2739085285",
+      "candidate_id": "twitch_vod_2739085285_3:narrative_reveal:0:5392",
+      "gold_holdout_split": "holdout",
+      "gold_grade": 3,
+      "window_start": 15591.92,
+      "window_end": 15619.62,
+      "original_label_class": "weak_positive",
+      "view_count": 632
+    },
+    {
+      "queue_id": "twitch_vod_2752903388:twitch_vod_2752903388_1:narrative_reveal:0:5899",
+      "vod_id": "2752903388",
+      "candidate_id": "twitch_vod_2752903388_1:narrative_reveal:0:5899",
+      "gold_holdout_split": "train",
+      "gold_grade": 3,
+      "window_start": 1269.0,
+      "window_end": 1301.25,
+      "original_label_class": "weak_positive",
+      "view_count": 542
+    },
+    {
+      "queue_id": "twitch_vod_2741600222:twitch_vod_2741600222_1:tension_build:0:2322",
+      "vod_id": "2741600222",
+      "candidate_id": "twitch_vod_2741600222_1:tension_build:0:2322",
+      "gold_holdout_split": "train",
+      "gold_grade": 3,
+      "window_start": 3585.82,
+      "window_end": 3615.78,
+      "original_label_class": "weak_positive",
+      "view_count": 505
+    },
+    {
+      "queue_id": "twitch_vod_2739085285:twitch_vod_2739085285_1:quote:0:955",
+      "vod_id": "2739085285",
+      "candidate_id": "twitch_vod_2739085285_1:quote:0:955",
+      "gold_holdout_split": "train",
+      "gold_grade": 3,
+      "window_start": 970.68,
+      "window_end": 987.79,
+      "original_label_class": "weak_positive",
+      "view_count": 473
+    },
+    {
+      "queue_id": "twitch_vod_2752903388:twitch_vod_2752903388_4:narrative_reveal:0:4426",
+      "vod_id": "2752903388",
+      "candidate_id": "twitch_vod_2752903388_4:narrative_reveal:0:4426",
+      "gold_holdout_split": "holdout",
+      "gold_grade": 3,
+      "window_start": 11613.26,
+      "window_end": 11643.38,
+      "original_label_class": "weak_positive",
+      "view_count": 399
+    },
+    {
+      "queue_id": "twitch_vod_2735822092:twitch_vod_2735822092_1:quote:0:648",
+      "vod_id": "2735822092",
+      "candidate_id": "twitch_vod_2735822092_1:quote:0:648",
+      "gold_holdout_split": "train",
+      "gold_grade": 3,
+      "window_start": 11439.48,
+      "window_end": 11454.84,
+      "original_label_class": "weak_positive",
+      "view_count": 385
+    },
+    {
+      "queue_id": "twitch_vod_2742415454:twitch_vod_2742415454_1:tension_build:0:6028",
+      "vod_id": "2742415454",
+      "candidate_id": "twitch_vod_2742415454_1:tension_build:0:6028",
+      "gold_holdout_split": "train",
+      "gold_grade": 3,
+      "window_start": 1411.28,
+      "window_end": 1441.04,
+      "original_label_class": "weak_positive",
+      "view_count": 350
+    },
+    {
+      "queue_id": "twitch_vod_2749590872:twitch_vod_2749590872_4:tension_build:0:440",
+      "vod_id": "2749590872",
+      "candidate_id": "twitch_vod_2749590872_4:tension_build:0:440",
+      "gold_holdout_split": "train",
+      "gold_grade": 3,
+      "window_start": 4526.08,
+      "window_end": 4556.44,
+      "original_label_class": "weak_positive",
+      "view_count": 334
+    },
+    {
+      "queue_id": "twitch_vod_2736609674:twitch_vod_2736609674_1:tension_build:0:424",
+      "vod_id": "2736609674",
+      "candidate_id": "twitch_vod_2736609674_1:tension_build:0:424",
+      "gold_holdout_split": "train",
+      "gold_grade": 3,
+      "window_start": 6456.24,
+      "window_end": 6485.98,
+      "original_label_class": "weak_positive",
+      "view_count": 326
+    },
+    {
+      "queue_id": "twitch_vod_2735012372:twitch_vod_2735012372_1:narrative_reveal:0:3433",
+      "vod_id": "2735012372",
+      "candidate_id": "twitch_vod_2735012372_1:narrative_reveal:0:3433",
+      "gold_holdout_split": "train",
+      "gold_grade": 3,
+      "window_start": 1083.34,
+      "window_end": 1111.09,
+      "original_label_class": "weak_positive",
+      "view_count": 289
+    },
+    {
+      "queue_id": "twitch_vod_2735012372:twitch_vod_2735012372_2:quote:0:2066",
+      "vod_id": "2735012372",
+      "candidate_id": "twitch_vod_2735012372_2:quote:0:2066",
+      "gold_holdout_split": "train",
+      "gold_grade": 3,
+      "window_start": 10389.66,
+      "window_end": 10406.38,
+      "original_label_class": "weak_positive",
+      "view_count": 289
+    },
+    {
+      "queue_id": "twitch_vod_2737446918:twitch_vod_2737446918_2:quote:0:0",
+      "vod_id": "2737446918",
+      "candidate_id": "twitch_vod_2737446918_2:quote:0:0",
+      "gold_holdout_split": "holdout",
+      "gold_grade": 3,
+      "window_start": 10881.0,
+      "window_end": 10896.33,
+      "original_label_class": "weak_positive",
+      "view_count": 256
+    }
+  ],
+  "skipped_rows": [],
+  "eval_dataset_summary": {
+    "rows": 222,
+    "positive_rows": 76,
+    "negative_rows": 146,
+    "eval_groups": 54,
+    "dataset_roles": {
+      "gold_eval": 222
+    },
+    "by_label_class": {
+      "gold_negative": 146,
+      "gold_positive": 76
+    },
+    "by_supervision_tier": {
+      "gold_eval": 222
+    },
+    "by_platform": {
+      "twitch": 222
+    },
+    "by_variant": {
+      "balanced": 222
+    },
+    "by_source": {
+      "audio_burst": 1,
+      "boundary_perturbation": 31,
+      "controversy": 8,
+      "hot_take": 1,
+      "hype_peak": 2,
+      "narrative_reveal": 17,
+      "peak": 72,
+      "quote": 34,
+      "reaction": 4,
+      "tension_build": 25,
+      "twitch_label_proxy": 27
+    },
+    "by_content_bucket": {
+      "general": 130,
+      "quote_driven": 43,
+      "reaction": 4,
+      "story": 42,
+      "visual_action": 3
+    },
+    "gold_holdout_splits": {
+      "holdout": 60,
+      "train": 162
+    }
+  }
+}

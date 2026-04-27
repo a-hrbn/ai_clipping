@@ -35,6 +35,14 @@ class _FakeYoutubeDLWithTemp(_FakeYoutubeDL):
         return info
 
 
+class _CaptureOptsYoutubeDL(_FakeYoutubeDL):
+    captured_opts: dict | None = None
+
+    def __init__(self, opts: dict):
+        type(self).captured_opts = opts
+        super().__init__(opts)
+
+
 class DownloaderTests(unittest.TestCase):
     def test_coerces_float_eta_to_integer_seconds(self) -> None:
         self.assertEqual(downloader._coerce_eta_seconds(715.6143084933422), 716)
@@ -207,6 +215,27 @@ class DownloaderTests(unittest.TestCase):
 
             self.assertTrue(output_path.exists())
             self.assertFalse(expected_cache_dir.exists())
+
+    def test_download_range_passes_yt_dlp_range_options_without_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage_dir = Path(tmp)
+            url = "https://www.twitch.tv/videos/555"
+
+            with patch.object(downloader.settings, "storage_dir", str(storage_dir)), \
+                 patch.object(downloader.settings, "twitch_download_cache_ttl_sec", -1), \
+                 patch.object(downloader.settings, "twitch_download_use_aria2c", True), \
+                 patch.object(downloader, "_aria2c_available", return_value=True), \
+                 patch.object(downloader, "update_job", create=True), \
+                 patch.object(downloader.yt_dlp, "YoutubeDL", _CaptureOptsYoutubeDL):
+                output_path = downloader.download_range(url, "job-range", start_sec=12.5, end_sec=45.0)
+
+            self.assertTrue(output_path.exists())
+            self.assertFalse((storage_dir / "_download_cache" / "twitch").exists())
+            self.assertIsNotNone(_CaptureOptsYoutubeDL.captured_opts)
+            self.assertIn("download_ranges", _CaptureOptsYoutubeDL.captured_opts)
+            self.assertFalse(_CaptureOptsYoutubeDL.captured_opts["force_keyframes_at_cuts"])
+            self.assertNotIn("external_downloader", _CaptureOptsYoutubeDL.captured_opts)
+            self.assertNotIn("external_downloader_args", _CaptureOptsYoutubeDL.captured_opts)
 
     def test_resolves_downloaded_file_with_nonstandard_extension(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

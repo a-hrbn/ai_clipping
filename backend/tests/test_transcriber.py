@@ -55,6 +55,82 @@ class TranscriberChunkingTests(unittest.TestCase):
         self.assertEqual(model.calls[0][1]["language"], "en")
         self.assertFalse(model.calls[0][1]["fp16"])
 
+    def test_load_pyannote_pipeline_prefers_current_token_kwarg(self) -> None:
+        class _Pipeline:
+            calls = []
+
+            @classmethod
+            def from_pretrained(cls, model_id, **kwargs):
+                cls.calls.append((model_id, kwargs))
+                if "use_auth_token" in kwargs:
+                    raise TypeError("unexpected legacy token kwarg")
+                return object()
+
+        transcriber._load_pyannote_pipeline(_Pipeline, "hf_secret")
+
+        self.assertEqual(
+            _Pipeline.calls,
+            [("pyannote/speaker-diarization-3.1", {"token": "hf_secret"})],
+        )
+
+    def test_load_pyannote_pipeline_falls_back_to_legacy_use_auth_token_kwarg(self) -> None:
+        class _Pipeline:
+            calls = []
+
+            @classmethod
+            def from_pretrained(cls, model_id, **kwargs):
+                cls.calls.append((model_id, kwargs))
+                if "token" in kwargs:
+                    raise TypeError(
+                        "Pipeline.from_pretrained() got an unexpected keyword argument 'token'"
+                    )
+                return object()
+
+        transcriber._load_pyannote_pipeline(_Pipeline, "hf_secret")
+
+        self.assertEqual(
+            _Pipeline.calls,
+            [
+                ("pyannote/speaker-diarization-3.1", {"token": "hf_secret"}),
+                ("pyannote/speaker-diarization-3.1", {"use_auth_token": "hf_secret"}),
+            ],
+        )
+
+    def test_diarize_skips_gated_pyannote_access_failure(self) -> None:
+        audio_module = types.ModuleType("pyannote.audio")
+
+        class _Pipeline:
+            @classmethod
+            def from_pretrained(cls, *_args, **_kwargs):
+                raise RuntimeError(
+                    "403 Client Error. Cannot access gated repo. "
+                    "Access to model pyannote/speaker-diarization-3.1 is restricted "
+                    "and you are not in the authorized list."
+                )
+
+        audio_module.Pipeline = _Pipeline
+        segments = [transcriber.RichSegment(start=0.0, end=1.0, text="hello")]
+
+        with patch.dict(
+            sys.modules,
+            {
+                "pyannote": types.ModuleType("pyannote"),
+                "pyannote.audio": audio_module,
+            },
+        ), patch.object(transcriber.settings, "hf_token", "bad_token"), \
+             patch("services.transcriber.logger.warning") as warning_mock:
+            result = transcriber._diarize(Path("/tmp/audio.wav"), segments)
+
+        self.assertIs(result, segments)
+        self.assertEqual(result[0].speaker, "UNKNOWN")
+        self.assertTrue(
+            any(
+                "transcriber_diarization_unavailable" in str(call.args[0])
+                and "hf_gated_model_access" in str(call.args)
+                for call in warning_mock.call_args_list
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

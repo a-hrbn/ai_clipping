@@ -312,6 +312,31 @@ class ChatAnalyzerDownloadTests(unittest.TestCase):
 
         self.assertEqual(rows, [{"t": 1.5, "text": "KEKW", "emotes": ["KEKW"]}])
 
+    def test_enrich_segments_adds_density_features_without_spike(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "chat.twitch_rechat.json"
+            path.write_text(
+                json.dumps(
+                    [
+                        {"t": float(second), "text": f"normal chat {second}", "emotes": []}
+                        for second in range(10)
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            segments = [
+                chat_analyzer.RichSegment(start=0.0, end=5.0, text="setup"),
+                chat_analyzer.RichSegment(start=5.0, end=10.0, text="payoff"),
+            ]
+
+            enriched = chat_analyzer.enrich_segments(segments, path)
+
+        self.assertEqual(enriched[0].chat_spike_score, 0.0)
+        self.assertEqual(enriched[0].chat_message_count, 5)
+        self.assertGreater(enriched[0].chat_message_rate, 0.0)
+        self.assertGreater(enriched[0].chat_density_score, 0.0)
+        self.assertGreater(enriched[1].chat_density_score, 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

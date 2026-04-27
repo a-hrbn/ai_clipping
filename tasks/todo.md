@@ -1,5 +1,238 @@
 # Task Plan
 
+## 2026-04-26 Plan: Clip-First Top-Viewed Scoped Training
+
+- [x] Trace the current top-viewed scoped path and full-VOD materialization boundary.
+- [x] Add a clip/scoped media materialization path that avoids full-VOD download for all-top-viewed VOD groups.
+- [x] Preserve VOD-chat alignment by reusing `vod_id` and rebased chat windows.
+- [x] Add focused tests proving the top-viewed path does not call full-VOD download.
+- [x] Run syntax checks, targeted tests, and scoped diff checks.
+- [x] Rebuild backend Graphify after backend code edits.
+- [x] Document behavior, caveats, and current-run impact.
+
+### Review Notes
+
+- Added `downloader.download_range(...)`, which uses yt-dlp range options and bypasses the persistent Twitch full-VOD cache.
+- Changed all-top-viewed `window_scoped_top_viewed` VOD groups to skip `_materialize_vod` and build each scoped source directly from the needed VOD time range.
+- Serial prefetch and parallel download scheduling now skip Full-VOD futures for all-top-viewed scoped groups.
+- The scoped source metadata version is now `2`, and the raw VOD row fingerprint includes that version so future checkpoints reflect the new source behavior.
+- Chat alignment is preserved: scoped sources still use the canonical `vod_id`, VOD chat cache, target offsets, and rebased `chat.local.json`.
+- Current label impact: `24` scoped-only VODs containing the `47` top-viewed labels will use the range/scoped path; the remaining `27` VODs still require Full-VOD processing because they contain normal training labels.
+- Verification passed: `python3 -m py_compile` for touched modules/tests.
+- Verification passed: full `backend.tests.test_downloader`.
+- Verification passed: full `backend.tests.test_build_twitch_training_dataset`.
+- Verification passed: scoped `git diff --check`.
+- Rebuilt backend Graphify with the uv tool interpreter: `2097` nodes, `5406` edges, `52` communities.
+- Caveat: already-running training containers use the code baked/mounted into that container at start; this change applies to the next run or a restarted container using the updated workspace/image.
+
+## 2026-04-26 Plan: Inspect Current Training Run Downloads
+
+- [x] Inspect running container, command, and recent training logs.
+- [x] Separate cache hits from real external downloads for VOD, scoped windows, chat, and model assets.
+- [x] Cross-check artifact/cache state for what changed in this run.
+- [x] Summarize what is being re-downloaded and why.
+
+### Review Notes
+
+- Current container `boring_keller` started `2026-04-25T22:18:24Z` and is running `train_vod_ranker.py` for `2026-03-15` through `2026-03-28` with `--skip-covered --merge-output`.
+- The run uses `FEATURE_BUILD_VERSION=8`, `_CHAT_ENRICHMENT_FINGERPRINT_VERSION=4`, and `TWITCH_DOWNLOAD_CACHE_TTL_SEC=0`.
+- Checkpoint status inside the running container: `51` VODs in the label file, `1` currently valid VOD checkpoint, `45` invalid old checkpoints, and `5` missing checkpoints.
+- Because the raw VOD fingerprint changed, old VOD row checkpoints are being rebuilt; this requires full VOD video materialization again for each invalid/missing VOD.
+- Confirmed active real Twitch media downloads: `2711274372` was downloaded and checkpointed; `2712128863` was prefetched and being processed; `2712736206` is actively downloading via `aria2c`.
+- Existing chat cache files are present for all `51` VODs, but only `46` currently have complete chat coverage; `2720629593`, `2724120511`, `2731588015`, `2732418387`, and `2748783535` may trigger targeted chat refill/download for missing offsets.
+- Existing feature cache is mixed: `28/51` VODs have full-VOD audio, `27/51` have full-VOD transcripts, and all have chat cache; missing audio/transcript may still be recomputed from the re-materialized video.
+- Current storage state is healthy: mount has about `847G` free; `backend/tmp/storage` is about `50G`, mostly active/stale VOD materialization directories.
+- There is a stale-looking `twitch_vod_prefetch_2720629593` from before this container start; active current directories are `twitch_vod_prefetch_2712128863` and `twitch_vod_prefetch_2712736206`.
+
+## 2026-04-25 Plan: Improve Scoped Chat Features
+
+- [x] Trace how rebased scoped chat becomes segment and candidate chat features.
+- [x] Add a density/volume fallback so chat presence is represented even without detected spikes.
+- [x] Add focused tests for non-spike scoped chat coverage.
+- [x] Run targeted tests and syntax checks.
+- [x] Rebuild backend Graphify after backend code edits.
+- [x] Document the behavioral impact and remaining caveats.
+
+### Review Notes
+
+- Scoped chat now contributes segment-level `chat_message_count`, `chat_message_rate`, `chat_density_score`, and `chat_emote_score` before spike tagging, so normal sustained chat is no longer invisible.
+- Candidate features now use the maximum of spike and density as chat activity, while keeping `chat_spike_coverage` separate from the new `chat_activity_coverage`.
+- Added candidate-level `chat_message_rate_peak`, `chat_message_rate_mean`, `chat_density_peak`, and `chat_density_mean`.
+- Bumped `FEATURE_BUILD_VERSION` to `8` and `_CHAT_ENRICHMENT_FINGERPRINT_VERSION` to `4`, so VOD training rows are rebuilt with the new chat feature schema.
+- Verified a real scoped cache sample: `52` segments, `46` with density, `0` with spike; candidate features reported `has_chat_features=True`, `chat_peak=1.0`, `chat_activity_coverage=0.694`, and `chat_spike_coverage=0.0`.
+- Verification passed: `python3 -m py_compile` for touched backend modules and tests.
+- Verification passed: `backend.tests.test_chat_analyzer` and `backend.tests.test_feature_builder` with offline HF settings.
+- Verification passed: selected scoped-chat/checkpoint tests from `backend.tests.test_build_twitch_training_dataset`.
+- Rebuilt backend Graphify with the uv tool interpreter: `2088` nodes, `5378` edges, `53` communities.
+- Caveat: existing static gold eval row artifacts remain on their old feature payload until they are refreshed or re-imported from a new feature-backed run.
+
+## 2026-04-25 Plan: Import Feature-Backed Top-Viewed Positives Into Gold Eval
+
+- [x] Identify the 47 newly materialized `window_scoped_top_viewed` positive rows.
+- [x] Convert them into gold-positive rows using the existing gold-eval schema and dedupe keys.
+- [x] Merge them into canonical gold eval artifacts without duplicating the earlier 3 imported rows.
+- [x] Rebuild the gold eval dataset and summaries.
+- [x] Verify row counts, split distribution, duplicate keys, and feature completeness.
+
+### Review Notes
+
+- Imported `47/47` newly feature-backed `window_scoped_top_viewed` positive-like rows as gold grade `3`; no new rows were skipped as duplicates.
+- Canonical `jynxzi_gold_eval_rows.jsonl` now has `222` rows: `76` gold positives and `146` gold negatives.
+- Top-viewed Twitch gold rows now total `50`: the earlier `3` plus the new `47`.
+- The new batch spans `24` VODs and keeps the source label mix: `29` positive, `17` weak_positive, and `1` viral_positive.
+- Deterministic gold split added `34` train rows and `13` holdout rows; total gold split is now `162` train and `60` holdout.
+- Rebuilt `jynxzi_gold_eval_dataset.jsonl` and `jynxzi_gold_eval_summary.json`; summary now reports `222` eval rows and `54` eval groups.
+- Verification passed: no duplicate queue IDs, no duplicate clip IDs, no missing features, and no missing `features.candidate_id`.
+- The full gold set still has one pre-existing duplicate `candidate_id` from frontend rows with different queue IDs and grades; the imported batch has zero duplicate queue IDs or candidate IDs.
+- Verification passed: `backend.tests.test_gold_eval_workflow` and `backend.tests.test_build_eval_dataset`.
+- `git diff --check` still reports trailing whitespace in the pre-existing `jynxzi_ranker_holdout_diagnosis.csv`; scoped diff-check on the files touched by this import passed.
+
+## 2026-04-25 Plan: Analyze Latest Training Run Failure
+
+- [x] Locate latest run logs, workflow state, and artifact timestamps.
+- [x] Quantify progress before failure: VODs processed, checkpoints, rows, and caches.
+- [x] Identify fatal error and separate it from non-fatal warnings.
+- [x] Check whether artifacts were finalized or only intermediate state changed.
+- [x] Summarize next action and rerun impact.
+
+### Review Notes
+
+- Latest persisted run artifacts were written at `2026-04-25 20:24-20:25`; `local_train_summary.json` reports `training_return_code=0`, so the earlier no-space failure was not the final state.
+- The workflow produced final artifacts for `jynxzi` over `2026-03-15` through `2026-03-28`; `jynxzi_ranker.json`, eval JSONs, dataset JSONL, and workflow state were updated.
+- The final VOD eval dataset has `556` rows: `108` positives and `448` negatives across `64` eval groups.
+- The new top-viewed scoped path contributed `139` final rows from `24` VODs: `47` positive-like rows and `92` boundary near-miss negatives.
+- Checkpoints exist for `46` VODs, including the post-cleanup VODs `2752903388`, `2753667907`, `2754503460`, and `2756055866`; total checkpoint rows are `11375`.
+- Chat downloads completed for the latest VODs with `coverage_status=complete`, but final scoped top-viewed rows only have `2/139` rows with non-zero chat spike features; full-VOD rows have `174/287`.
+- The trained model was rejected by the quality gate with `validation_accuracy_below_minimum`; validation accuracy was `0.591`, precision `0.519`, recall `0.737`, F1 `0.609`, and precision@5 `0.485`.
+- Threshold calibration was skipped because the artifact was rejected; serving threshold in artifact health is `-1.449484`.
+- Next recommendation: treat the run as successful for feature materialization, but not successful for model promotion; inspect whether scoped chat should use density/volume features, not only spike features, before expecting chat to help those top-viewed examples.
+
+## 2026-04-25 Plan: Prevent Twitch VOD Download Cache Disk Exhaustion
+
+- [x] Confirm the failed run root cause and current disk usage.
+- [x] Remove only regenerable full-VOD download cache data and failed prefetch fragments.
+- [x] Change local/default Twitch full-VOD download cache behavior to avoid unbounded growth.
+- [x] Run focused downloader/config checks.
+- [x] Rebuild backend Graphify after backend code edits.
+- [x] Document the outcome and rerun caveat.
+
+### Review Notes
+
+- Root cause: the failed VOD-first run hit `[Errno 28] No space left on device`; the host mount was `100%` full, with `backend/tmp/storage/_download_cache` at about `934G` and the failed `twitch_vod_prefetch_2752903388` at about `20G`.
+- Removed only regenerable full-VOD download cache data and the failed prefetch fragments via a short-lived root container because the files were Docker/root-owned.
+- Disk recovered from `0B` available to about `902G` available; `backend/tmp` is now about `24G`, mostly `vod_feature_cache`.
+- Changed `TWITCH_DOWNLOAD_CACHE_TTL_SEC` from `-1` to `0` in `backend/.env`, `backend/.env.example`, and the config default so Twitch full-VOD downloads are not cached indefinitely.
+- Verification passed: `python3 -m py_compile backend/config.py backend/services/downloader.py`.
+- Verification passed: `PYTHONPATH=/home/antonio/ai_clipping/backend /home/antonio/ai_clipping/backend/.venv/bin/python -m unittest backend.tests.test_downloader backend.tests.test_config`.
+- Rebuilt backend Graphify with the uv tool interpreter: `2069` nodes, `5350` edges, `46` communities.
+- Caveat: the failed training run stopped; it needs to be restarted after the cleanup/config change.
+
+## 2026-04-25 Plan: Make Gated Pyannote Diarization Non-Fatal
+
+- [x] Inspect the new Hugging Face gated-model failure path.
+- [x] Treat pyannote load/inference failures as optional diarization misses instead of training failures.
+- [x] Add a regression test for gated/forbidden pyannote access.
+- [x] Run targeted transcriber tests and syntax checks.
+- [x] Rebuild backend Graphify after backend code edits.
+- [x] Document the behavior and caveat.
+
+### Review Notes
+
+- Root cause: Hugging Face accepted the `token=` kwarg but returned `403 Forbidden` for the gated `pyannote/speaker-diarization-3.1` model, so optional diarization aborted the whole VOD training run.
+- Updated `_diarize(...)` to fail open when pyannote pipeline load or inference fails: it logs `transcriber_diarization_unavailable` with a classified reason and returns the Whisper segments unchanged.
+- Added `hf_gated_model_access`, `hf_auth`, `pipeline_download`, and generic `pipeline_error` reason classification for compact logs.
+- Added a regression test that simulates the gated `403` access failure and verifies training receives the original `UNKNOWN` speaker segments.
+- Verification passed: `python3 -m py_compile backend/services/transcriber.py backend/tests/test_transcriber.py`.
+- Verification passed: `PYTHONPATH=/home/antonio/ai_clipping/backend /home/antonio/ai_clipping/backend/.venv/bin/python -m unittest backend.tests.test_transcriber backend.tests.test_transcriber_progress`.
+- Verification passed: `PYTHONPATH=/home/antonio/ai_clipping/backend /home/antonio/ai_clipping/backend/.venv/bin/python -m unittest backend.tests.test_build_twitch_training_dataset`.
+- Rebuilt backend Graphify with the uv tool interpreter: `2069` nodes, `5350` edges, `46` communities.
+- Caveat: diarization-derived speaker labels are skipped until the HF token has accepted/access to the gated pyannote model, but transcript and all non-speaker features continue.
+
+## 2026-04-25 Plan: Fix Pyannote Diarization API Compatibility
+
+- [x] Inspect the current diarization call and installed dependency contract.
+- [x] Make `Pipeline.from_pretrained` compatible with pyannote 3.x and 4.x token kwargs.
+- [x] Add a focused regression test for the new kwarg fallback.
+- [x] Run targeted transcriber tests and quick syntax checks.
+- [x] Rebuild backend Graphify after backend code edits.
+- [x] Record the failure cause and result.
+
+### Review Notes
+
+- Root cause: `backend/pyproject.toml` allows `pyannote.audio>=4.0.0,<5.0.0`, and the installed `Pipeline.from_pretrained` signature uses `token=...`; the old code still passed `use_auth_token=...`.
+- Updated `services/transcriber.py` to load pyannote with `token=...` first, with a fallback to `use_auth_token=...` for older pyannote releases.
+- Added regression tests for both the current token kwarg path and the legacy fallback path.
+- Verification passed: `python3 -m py_compile backend/services/transcriber.py backend/tests/test_transcriber.py`.
+- Verification passed: `PYTHONPATH=/home/antonio/ai_clipping/backend /home/antonio/ai_clipping/backend/.venv/bin/python -m unittest backend.tests.test_transcriber backend.tests.test_transcriber_progress`.
+- Verified local installed signature: `(checkpoint, revision=None, hparams_file=None, token=None, cache_dir=None)`.
+- Rebuilt backend Graphify with the uv tool interpreter: `2063` nodes, `5343` edges, `45` communities.
+- Added the lesson to verify optional ML dependency signatures before long training runs.
+
+## 2026-04-25 Plan: Window-Scoped Top-Viewed Twitch Feature Build
+
+- [x] Inspect current full-VOD materialization, audio, transcript, chat, and window feature cache flow.
+- [x] Add a scoped source mode for manually confirmed top-viewed Twitch labels.
+- [x] Make scoped mode cut only the expanded label window before audio/transcript/window features.
+- [x] Preserve normal full-VOD training behavior for regular labels and mixed VODs.
+- [x] Add focused tests for scoped-materialization decisions and offset mapping.
+- [x] Run targeted tests and rebuild backend Graphify after backend code edits.
+- [x] Document the result and any remaining caveats.
+
+### Review Notes
+
+- Added a `window_scoped_top_viewed` feature context for positive labels from `manual_gold_review_source=top_viewed_twitch_30d`.
+- For eligible VOD label groups, the workflow now cuts the expanded label window into `scoped_windows/<digest>/source.mp4` and builds audio, transcript, chat enrichment, and window modalities against that short source.
+- Chat still uses the root VOD chat cache, but scoped windows write a local rebased chat file so chat offsets align with the clipped source.
+- Regular labels and mixed VOD groups still use the existing full-VOD feature context to avoid changing hard-negative and normal training behavior.
+- Feature provenance now records `vod_feature_source_kind`, making scoped rows auditable in downstream artifacts.
+- Verification passed: `python3 -m py_compile backend/ml/build_twitch_training_dataset.py backend/tests/test_build_twitch_training_dataset.py`.
+- Verification passed: `PYTHONPATH=/home/antonio/ai_clipping/backend /home/antonio/ai_clipping/backend/.venv/bin/python -m unittest backend.tests.test_build_twitch_training_dataset`.
+- Verification passed: `PYTHONPATH=/home/antonio/ai_clipping/backend /home/antonio/ai_clipping/backend/.venv/bin/python -m unittest backend.tests.test_train_vod_ranker`.
+- Verification passed: `git diff --check`.
+- Rebuilt backend Graphify with the uv tool interpreter: `2057` nodes, `5337` edges, `40` communities.
+- Caveat: this removes the expensive full-VOD transcription/window-feature bottleneck for the confirmed top-viewed positives, but it still needs the source VOD available so the short window can be cut.
+
+## 2026-04-25 Plan: Wire Top-Viewed Backlog Into Next Training Run
+
+- [x] Confirm the next training run reads the canonical Jynxzi Twitch label file.
+- [x] Merge the 47 feature-backlog positive labels into the canonical label file without duplicates.
+- [x] Verify the canonical label file now contains those VOD/window labels and will trigger retraining.
+- [x] Document remaining caveat: they become gold only after feature-backed import.
+
+### Review Notes
+
+- `backend/ml/train_jynxzi_vod.sh` reads `backend/ml/artifacts/jynxzi_twitch_clip_labels.jsonl`; `MERGE_OUTPUT=1` is the default, so the collect step preserves existing labels on the normal path.
+- Merged all `47` feature-backlog top-viewed positives from `backend/ml/artifacts/jynxzi_top_viewed_30d_gold_positive_needs_features.jsonl` into `backend/ml/artifacts/jynxzi_twitch_clip_labels.jsonl`.
+- Canonical label file now has `13604` rows and `86` positive-like labels, including `47` rows marked with `manual_gold_review_source=top_viewed_twitch_30d`.
+- Added backlog labels span `24` VODs: `29` positive, `17` weak_positive, and `1` viral_positive.
+- Verification found `0` duplicate label keys after merge.
+- `training_workflow_state.should_retrain(...)` returned `True`, so the next normal run should not skip because of unchanged inputs.
+- Caveat: these `47` will be loaded as Twitch/VOD proxy labels during feature build; they become canonical gold rows only after the run produces matching feature rows and we import them into `jynxzi_gold_eval_rows.jsonl`.
+
+## 2026-04-25 Plan: Add Top-Viewed Jynxzi Twitch Clips As Gold Positives
+
+- [x] Collect or load Jynxzi Twitch clips for the last 30 days into a separate artifact path.
+- [x] Select top-viewed positive clip windows and dedupe against existing gold rows.
+- [x] Build a labeled gold-positive CSV plus features sidecar for import.
+- [x] Import into gold-eval artifacts with a preserved train/holdout split.
+- [x] Verify row counts, grade distribution, and no duplicate gold keys.
+- [x] Document result and next training step.
+
+### Review Notes
+
+- Collected `12766` Jynxzi Twitch clip label rows for `2026-03-26` through `2026-04-25` into `backend/ml/artifacts/jynxzi_top_viewed_30d_twitch_clip_labels.jsonl`.
+- Selected `51` user-confirmed positive-like top-viewed clip windows: `33` positive, `17` weak_positive, and `1` viral_positive.
+- Only `4/51` positive windows currently overlap usable feature rows in the existing VOD training/eval artifacts; `1` of those was already present in gold eval.
+- Imported the `3` new feature-backed top-viewed positives as gold grade `3`; canonical `jynxzi_gold_eval_rows.jsonl` now has `175` rows, `29` gold positives, and `146` gold negatives.
+- Gold split after merge is `128` train and `47` holdout; the new positives add `2` train rows and `1` holdout row.
+- Verification found `0` duplicate gold holdout keys, `0` duplicate queue IDs, and `0` gold rows missing features.
+- Wrote the remaining `47` confirmed positive clip labels that need feature materialization to `backend/ml/artifacts/jynxzi_top_viewed_30d_gold_positive_needs_features.jsonl`.
+- Targeted verification passed: `python -m unittest backend.tests.test_gold_eval_workflow backend.tests.test_build_eval_dataset`.
+
+### Next Step
+
+- Run a focused VOD feature build/training run for `backend/ml/artifacts/jynxzi_top_viewed_30d_gold_positive_needs_features.jsonl`, then import the newly feature-backed windows into gold eval as the second batch.
+
 ## 2026-04-25 Plan: Push Current Changes And Artifacts To Main
 
 - [x] Confirm current branch and remote.
@@ -4111,3 +4344,101 @@ Phase 0-2 zuerst, danach **1 Woche reale Nutzung** bevor Phase 3 angefasst wird.
 - Ergebnis:
   - `37 passed`
   - Batch-Cut-Retry und Single-Window-Fehlerpfad abgesichert
+
+## 2026-04-26 Plan: Chat Feature Smoke Test Without Full VOD Downloads
+
+- [x] Run a zero-download chat-feature smoke test against cached Twitch chat.
+- [x] Run a one-label window-scoped mini dataset build.
+- [x] Check outputs for active `has_chat_features` and non-zero `chat_*` values.
+- [x] Confirm the mini run did not use the Full-VOD download path.
+
+### Review Notes
+
+- Zero-download smoke used cached chat for VOD `2735012372`, window `1067.0-1132.9`.
+- Zero-download output activated chat features: `has_chat_features=true`, `chat_peak=1.0`, `chat_message_rate_peak=14.0`, `chat_density_peak=1.0`, category scores for hype/laugh/shock active.
+- Mini dataset build used a writable temporary cache seeded from the existing scoped video source to avoid any Full-VOD download.
+- Mini build logs confirmed `mode=window_scoped_top_viewed`; no Full-VOD materialization path was used.
+- Mini build produced `6` rows: `1` weak-positive primary row and `5` boundary near-miss negatives.
+- All emitted mini rows had active chat features; representative primary row had `chat_peak=1.0`, `chat_mean=0.891`, `chat_message_rate_peak=17.308`, `chat_density_peak=1.0`, `chat_laugh_score=1.0`, `chat_shock_score=1.0`.
+- The sandbox blocked Twitch DNS during a chat-cache refill attempt, but enrichment still applied from the copied existing chat cache: `segments_with_chat=16`.
+- Mini output: `/tmp/ai_clipping_chat_feature_smoke_rows.jsonl`.
+
+## 2026-04-27 Plan: Stabilize Scoped Twitch Range Downloads
+
+- [x] Diagnose why scoped-only VOD range downloads fail with `ffmpeg exited with code 8`.
+- [x] Patch the range downloader to avoid the fragile ffmpeg re-encode path while preserving clip-scoped downloads.
+- [x] Add/update downloader tests for the safer range options.
+- [x] Run focused tests and compile checks.
+- [x] Rebuild `backend/graphify-out` after backend code changes.
+
+### Review Notes
+
+- Cause: `download_range()` used precise `force_keyframes_at_cuts=True`, which sends scoped Twitch range downloads through a fragile ffmpeg re-encode path; the latest scoped-only VOD failed there with `ffmpeg exited with code 8`.
+- Fix: scoped range downloads still use yt-dlp `download_ranges`, but now disable external downloader options and set `force_keyframes_at_cuts=False`.
+- Full-VOD downloads are unchanged and can still use `aria2c`; only clip-scoped range downloads avoid the risky path.
+- Verification passed: `backend/.venv/bin/python -m pytest backend/tests/test_downloader.py -q` -> `15 passed`.
+- Verification passed: `backend/.venv/bin/python -m pytest backend/tests/test_build_twitch_training_dataset.py -q` -> `61 passed`.
+- Verification passed: `backend/.venv/bin/python -m py_compile backend/services/downloader.py backend/tests/test_downloader.py`.
+- Verification passed: scoped `git diff --check`.
+- Rebuilt backend Graphify: `2097` nodes, `5406` edges, `52` communities.
+- Rebuilt local Docker train image `ai-clipping-train-local:latest` and verified the image contains `force_keyframes_at_cuts=False` plus `disable_external_downloader=True` in `download_range()`.
+
+## 2026-04-27 Plan: Fix Full-VOD Checkpoint Skip For Unscoped Chat
+
+- [x] Confirm why the four already-processed Full-VODs were not checkpointed.
+- [x] Patch checkpoint eligibility so unscoped chat caches without missing offsets can be reused.
+- [x] Add focused regression tests.
+- [x] Run targeted tests and compile checks.
+- [x] Rebuild backend Graphify and local training image.
+
+### Review Notes
+
+- Cause: the four already-processed Full-VOD groups had no chat-target labels, so their chat cache metadata was written as `coverage_status=unscoped` instead of `complete`.
+- The old checkpoint gate accepted only `complete` chat coverage and skipped checkpoint writes with `chat_enabled_without_complete_chat_cache`, even though the unscoped chat cache existed and had no missing target offsets.
+- Fix: `_chat_cache_has_complete_coverage()` now treats unscoped chat caches as checkpoint-safe when a cached chat file exists and `missing_target_offsets` is empty.
+- Partial or missing chat caches still block checkpoint writes.
+- Verification passed: `backend/.venv/bin/python -m pytest backend/tests/test_build_twitch_training_dataset.py -q` -> `63 passed`.
+- Verification passed: `backend/.venv/bin/python -m py_compile backend/ml/build_twitch_training_dataset.py backend/tests/test_build_twitch_training_dataset.py`.
+- Verification passed: scoped `git diff --check`.
+- Rebuilt backend Graphify: `2099` nodes, `5415` edges, `47` communities.
+- Rebuilt local Docker train image `ai-clipping-train-local:latest` and verified the image contains the unscoped chat-cache checkpoint logic.
+- Caveat: a training container started before this image rebuild still runs the old checkpoint gate and should be restarted to benefit from the fix.
+
+## 2026-04-27 Plan: Analyze Completed Jynxzi Training Run
+
+- [x] Confirm final run status and artifact timestamps.
+- [x] Inspect ranker, health, evaluation, holdout, threshold, and dataset summaries.
+- [x] Check whether the recent checkpoint/chat fixes affected the finished run.
+- [x] Summarize result quality, risks, and next action.
+
+### Review Notes
+
+- Run completed successfully: `local_train_summary.json` has `training_return_code=0` for `jynxzi`, `2026-03-15` through `2026-03-28`.
+- Final artifact files were written at `2026-04-27 20:55`, including `jynxzi_ranker.json`, `jynxzi_artifact_health.json`, eval files, threshold calibration, and VOD training rows.
+- Artifact health has no warnings; selected model is `logistic_regression`, serving threshold is `5.298`, and validation gates show low leakage risk with group holdout by `vod_id`.
+- Training dataset has `601` rows: `142` positives and `459` negatives, split into `516` train rows and `85` validation rows.
+- Dataset sources are `256` Twitch VOD primary rows, `170` boundary near-miss rows, `162` gold-eval train rows, and `13` promoted hard-negative rows.
+- Gold eval has `222` rows: trained runtime improves full-set F1 from `0.510` to `0.734`, accuracy from `0.342` to `0.833`, and MRR from `0.556` to `0.657`.
+- True untouched gold holdout is still weak: `60` holdout rows, trained runtime accuracy `0.717`, precision `0.636`, recall `0.350`, F1 `0.452`, MRR `0.443`; ranking is only marginally above heuristic MRR `0.438`.
+- Proxy eval is stronger: `601` rows, trained runtime MRR `0.691` vs baseline `0.427`, NDCG@5 `0.656` vs `0.427`, F1 `0.640` vs `0.382`.
+- Threshold calibration updated from `0.261297` to `5.298`; this improves precision but costs recall, especially on holdout positives.
+- Chat features are present in nested `features`: `has_chat_features` is truthy on `352/601` rows; `chat_activity_coverage`, `chat_density_mean`, and `chat_message_rate_*` are active on `350` rows.
+- Feature provenance shows `287` full-VOD rows and `173` `window_scoped_top_viewed` rows; `141` older/imported gold rows have blank provenance.
+- The four previously problematic Full-VOD checkpoints now exist: `2720629593`, `2724120511`, `2731588015`, and `2732418387`.
+- There are `50` VOD checkpoint files for `51` non-ambiguous label VODs; the missing VOD-level checkpoint is `2748783535`, but its scoped source/cache/rows exist.
+- Holdout diagnosis has `22` rows: `9` false negatives, `2` false positives, `9` true negatives, and `2` true positives. False negatives are mostly grade `2/3` positives that fall below the high calibrated threshold.
+- Recommendation: keep the artifact as usable, but do not treat the gold holdout as solved. Next best step is reviewing/importing feature-backed top-viewed positives and hard false-negative gold examples, then recalibrating threshold or adding a second operating threshold for candidate review.
+
+## 2026-04-27 Plan: Push Training Changes And Artifacts
+
+- [x] Confirm branch and working tree contents.
+- [x] Stage code, task notes, Graphify output, and ML artifacts.
+- [x] Commit with a concise summary.
+- [x] Push `main` to origin and verify clean status.
+
+### Review Notes
+
+- Branch is `main`; `git pull --ff-only` reported `Already up to date`.
+- Staged tracked backend code, tests, Graphify output, task notes, and updated tracked ML artifacts.
+- New ignored run artifacts are intentionally force-added, excluding the Twitch cache directories.
+- `git diff --check` only reported CRLF/trailing whitespace in generated `jynxzi_ranker_holdout_diagnosis.csv`; no code whitespace issues were found.

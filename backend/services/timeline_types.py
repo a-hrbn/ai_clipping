@@ -165,6 +165,11 @@ class CandidateFeatures:
     chat_post_hook_peak: float = 0.0
     chat_delta: float = 0.0
     chat_spike_coverage: float = 0.0
+    chat_activity_coverage: float = 0.0
+    chat_message_rate_peak: float = 0.0
+    chat_message_rate_mean: float = 0.0
+    chat_density_peak: float = 0.0
+    chat_density_mean: float = 0.0
     chat_hype_score: float = 0.0
     chat_laugh_score: float = 0.0
     chat_shock_score: float = 0.0

@@ -1,12 +1,12 @@
 """
-Chat-replay analysis: spike detection + emote/sentiment classification.
+Chat-replay analysis: activity density, spike detection, and sentiment classification.
 
 Downloads Twitch VOD chat replay directly from Twitch's GraphQL comments API,
-aggregates messages into per-second activity frames, detects message-rate spikes
-above a rolling baseline, and classifies the dominant sentiment (hype / laugh /
-shock / sadge).  The result is a `chat_spike_score` (0–1, normalized) on each
-RichSegment plus optional emotion-category tags — both feed into the composite
-hype_score computed by scorer.score_segments.
+aggregates messages into per-second activity frames, attaches density/rate
+signals, detects message-rate spikes above a rolling baseline, and classifies
+the dominant sentiment (hype / laugh / shock / sadge).  The result is a
+`chat_spike_score` plus density fields on each RichSegment and optional
+emotion-category tags — both feed into candidate features.
 
 Sentiment classification uses both platform-specific emote names and universal
 text patterns so it degrades gracefully when emote metadata is unavailable.
@@ -64,6 +64,8 @@ query VideoCommentsByOffsetOrCursor($videoID: ID!, $contentOffsetSeconds: Int) {
   }
 }
 """.strip()
+_CHAT_DENSITY_REFERENCE_MSG_PER_SEC = 5.0
+_CHAT_EMOTE_REFERENCE_WEIGHT_PER_SEC = 3.0
 
 
 def _is_twitch_vod_url(url: str) -> bool:
@@ -955,6 +957,10 @@ def enrich_segments(
         logger.exception("Chat enrichment failed for %s", chat_path)
         return segments
 
+    frame_map = {int(frame.t): frame for frame in frames}
+    for seg in segments:
+        _attach_chat_activity(seg, frame_map)
+
     if not spikes:
         return segments
 
@@ -977,3 +983,55 @@ def enrich_segments(
                 seg.emotions.append(cat_tag)
 
     return segments
+
+
+def _attach_chat_activity(segment: RichSegment, frame_map: dict[int, ChatFrame]) -> None:
+    start = float(segment.start)
+    end = float(segment.end)
+    if end <= start:
+        return
+    frames = [
+        frame
+        for second, frame in frame_map.items()
+        if float(second) + 1.0 > start and float(second) < end
+    ]
+    if not frames:
+        return
+
+    duration = max(end - start, 1e-6)
+    message_count = sum(frame.msgs for frame in frames)
+    emote_weight = sum(frame.emote_weight for frame in frames)
+    message_rate = message_count / duration
+    emote_rate = emote_weight / duration
+    density_score = _activity_score(message_rate, _CHAT_DENSITY_REFERENCE_MSG_PER_SEC)
+    emote_score = _activity_score(emote_rate, _CHAT_EMOTE_REFERENCE_WEIGHT_PER_SEC)
+
+    segment.chat_message_count = int(message_count)
+    segment.chat_message_rate = round(message_rate, 3)
+    segment.chat_density_score = round(max(density_score, emote_score * 0.75), 3)
+    segment.chat_emote_score = round(emote_score, 3)
+
+    dominant_cat = _dominant_activity_category(frames)
+    if dominant_cat != "neutral" and max(segment.chat_density_score, segment.chat_emote_score) > 0.05:
+        cat_tag = f"chat_{dominant_cat}"
+        if cat_tag not in segment.emotions:
+            segment.emotions.append(cat_tag)
+
+
+def _activity_score(rate: float, reference_rate: float) -> float:
+    if rate <= 0.0:
+        return 0.0
+    return min(rate / max(reference_rate, 1e-6), 1.0)
+
+
+def _dominant_activity_category(frames: list[ChatFrame]) -> str:
+    categories: dict[str, int] = {}
+    for frame in frames:
+        for category, count in frame.categories.items():
+            if category == "neutral":
+                continue
+            categories[category] = categories.get(category, 0) + int(count)
+    if not categories:
+        return "neutral"
+    best = max(categories, key=lambda key: categories[key])
+    return best if categories[best] > 0 else "neutral"

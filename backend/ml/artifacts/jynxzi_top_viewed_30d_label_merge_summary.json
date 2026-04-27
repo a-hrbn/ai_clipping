@@ -1,0 +1,43 @@
+{
+  "canonical_labels_before": 13557,
+  "backlog_rows": 47,
+  "backlog_unique_keys": 47,
+  "backlog_already_present": 0,
+  "backlog_added": 47,
+  "canonical_labels_after": 13604,
+  "canonical_positive_like_after": 86,
+  "added_by_label_class": {
+    "positive": 29,
+    "viral_positive": 1,
+    "weak_positive": 17
+  },
+  "added_vod_count": 24,
+  "added_vod_ids": [
+    "2735012372",
+    "2735822092",
+    "2736609674",
+    "2737446918",
+    "2739085285",
+    "2739861273",
+    "2740841415",
+    "2741600222",
+    "2742415454",
+    "2743205387",
+    "2743957452",
+    "2744769396",
+    "2745548882",
+    "2746542856",
+    "2747242788",
+    "2748008198",
+    "2748783535",
+    "2749590872",
+    "2750220507",
+    "2751373742",
+    "2752903388",
+    "2753667907",
+    "2754503460",
+    "2756055866"
+  ],
+  "canonical_path": "backend/ml/artifacts/jynxzi_twitch_clip_labels.jsonl",
+  "backlog_path": "backend/ml/artifacts/jynxzi_top_viewed_30d_gold_positive_needs_features.jsonl"
+}

@@ -1,5 +1,7 @@
 # Lessons
 
+- Optional gated ML models must fail open in training paths: log auth/access/download failures and continue with degraded features instead of aborting the full run.
+- When adding code that calls optional ML dependencies, verify the installed package's actual function signature before launching long training runs, especially when `pyproject.toml` pins a newer major version than the older API examples.
 - When replacing a third-party API path, verify the exact production request shape and log upstream error bodies; a one-VOD happy path is not enough if training sends many offsets through a containerized runtime.
 - Do not equate proxy distribution metrics like views or engagement with intrinsic clip quality. Treat them as noisy supervision that must be combined with exposure context, creator baseline, and stronger outcome signals.
 - When the user asks for a simpler feedback workflow, optimize for the minimum number of stable inputs instead of preserving analytics-heavy schemas.

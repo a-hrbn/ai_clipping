@@ -1,52 +1,56 @@
 {
-  "rows": 172,
+  "rows": 222,
   "eval_dataset": {
-    "rows": 172,
-    "positive_rows": 26,
+    "rows": 222,
+    "positive_rows": 76,
     "negative_rows": 146,
-    "eval_groups": 31,
+    "eval_groups": 54,
     "dataset_roles": {
-      "gold_eval": 172
+      "gold_eval": 222
     },
     "by_label_class": {
       "gold_negative": 146,
-      "gold_positive": 26
+      "gold_positive": 76
     },
     "by_supervision_tier": {
-      "gold_eval": 172
+      "gold_eval": 222
     },
     "by_platform": {
-      "twitch": 172
+      "twitch": 222
     },
     "by_variant": {
-      "balanced": 172
+      "balanced": 222
     },
     "by_source": {
-      "boundary_perturbation": 30,
+      "audio_burst": 1,
+      "boundary_perturbation": 31,
       "controversy": 8,
-      "narrative_reveal": 8,
+      "hot_take": 1,
+      "hype_peak": 2,
+      "narrative_reveal": 17,
       "peak": 72,
-      "quote": 12,
-      "reaction": 1,
-      "tension_build": 14,
+      "quote": 34,
+      "reaction": 4,
+      "tension_build": 25,
       "twitch_label_proxy": 27
     },
     "by_content_bucket": {
-      "general": 129,
-      "quote_driven": 20,
-      "reaction": 1,
-      "story": 22
+      "general": 130,
+      "quote_driven": 43,
+      "reaction": 4,
+      "story": 42,
+      "visual_action": 3
     },
     "gold_holdout_splits": {
-      "holdout": 46,
-      "train": 126
+      "holdout": 60,
+      "train": 162
     }
   },
   "merged_existing": true,
   "source_rows": {
-    "existing": 172,
+    "existing": 222,
     "frontend": 97,
-    "merged": 172,
+    "merged": 222,
     "frontend_additions": 0,
     "frontend_updates": 97,
     "duplicates_skipped": 97

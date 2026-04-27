@@ -34,8 +34,10 @@ _MAX_CANDIDATE_SOURCE_SHARE = 0.40
 _DATASET_BUILD_LLM_PROVIDER = (os.environ.get("TRAINING_DATASET_LLM_PROVIDER") or "none").strip() or "none"
 _VOD_CHECKPOINT_VERSION = 4
 _VOD_FEATURE_CACHE_VERSION = 1
-_CHAT_ENRICHMENT_FINGERPRINT_VERSION = 3
+_CHAT_ENRICHMENT_FINGERPRINT_VERSION = 4
 _CHAT_TARGET_NEGATIVE_LABEL_CLASSES = {"hard_negative"}
+_WINDOW_SCOPED_TOP_VIEWED_SOURCE = "top_viewed_twitch_30d"
+_WINDOW_SCOPED_CONTEXT_VERSION = 2
 _BOUNDARY_PERTURBATION_SPECS = (
     ("start_late_small", 0.8, 0.0),
     ("start_late_large", 1.8, 0.0),
@@ -54,6 +56,9 @@ class VodFeatureContext:
     audio_signal: object
     audio_sample_rate: int
     cache_dir: pathlib.Path
+    source_start_sec: float = 0.0
+    source_end_sec: float = 0.0
+    source_kind: str = "full_vod"
 
 def _dataset_build_fingerprint(profile: str) -> str:
     # Fingerprint the full dataset build, including cheap postprocessing. This is
@@ -88,6 +93,7 @@ def _raw_vod_rows_fingerprint_payload(profile: str) -> dict[str, object]:
             "enabled": bool(settings.enable_chat_analysis),
             "timeout_sec": int(settings.chat_download_timeout_sec),
         },
+        "window_scoped_top_viewed_context": _WINDOW_SCOPED_CONTEXT_VERSION,
         "supplemental_candidate_limit": _SUPPLEMENTAL_CANDIDATE_LIMIT,
         "supplemental_candidate_weight": _SUPPLEMENTAL_CANDIDATE_WEIGHT,
         "boundary_near_miss_limit": _BOUNDARY_NEAR_MISS_LIMIT,
@@ -373,11 +379,41 @@ def _chat_cache_has_complete_coverage(cache_dir: pathlib.Path) -> bool:
     if _cached_chat_path(cache_dir) is None:
         return False
     metadata = _read_chat_cache_metadata(cache_dir)
-    return metadata.get("coverage_status") == "complete"
+    coverage_status = str(metadata.get("coverage_status") or "")
+    if coverage_status == "complete":
+        return True
+    if coverage_status != "unscoped":
+        return False
+    return not _metadata_offsets(metadata, "missing_target_offsets")
 
 
 def _chat_cache_metadata_path(cache_dir: pathlib.Path) -> pathlib.Path:
     return cache_dir / "chat" / "chat.metadata.json"
+
+
+def _write_rebased_chat_file(
+    chat_path: pathlib.Path,
+    output_path: pathlib.Path,
+    *,
+    source_start_sec: float,
+    source_end_sec: float,
+) -> pathlib.Path | None:
+    messages: list[dict] = []
+    for message in _chat_messages(chat_path):
+        try:
+            absolute_t = float(message.get("t", 0.0))
+        except (TypeError, ValueError):
+            continue
+        if absolute_t < source_start_sec or absolute_t > source_end_sec:
+            continue
+        copied = dict(message)
+        copied["t"] = round(max(absolute_t - source_start_sec, 0.0), 3)
+        messages.append(copied)
+    if not messages:
+        return None
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(messages, ensure_ascii=True), encoding="utf-8")
+    return output_path
 
 
 def _write_chat_cache_metadata(
@@ -667,6 +703,10 @@ def _serialize_rich_segment(segment) -> dict[str, object]:
         "has_scene_change": bool(getattr(segment, "has_scene_change", False)),
         "visual_activity": float(getattr(segment, "visual_activity", 0.0) or 0.0),
         "chat_spike_score": float(getattr(segment, "chat_spike_score", 0.0) or 0.0),
+        "chat_message_count": int(getattr(segment, "chat_message_count", 0) or 0),
+        "chat_message_rate": float(getattr(segment, "chat_message_rate", 0.0) or 0.0),
+        "chat_density_score": float(getattr(segment, "chat_density_score", 0.0) or 0.0),
+        "chat_emote_score": float(getattr(segment, "chat_emote_score", 0.0) or 0.0),
     }
 
 
@@ -694,6 +734,10 @@ def _deserialize_rich_segment(payload: dict[str, object]):
         has_scene_change=bool(payload.get("has_scene_change") or False),
         visual_activity=float(payload.get("visual_activity") or 0.0),
         chat_spike_score=float(payload.get("chat_spike_score") or 0.0),
+        chat_message_count=int(payload.get("chat_message_count") or 0),
+        chat_message_rate=float(payload.get("chat_message_rate") or 0.0),
+        chat_density_score=float(payload.get("chat_density_score") or 0.0),
+        chat_emote_score=float(payload.get("chat_emote_score") or 0.0),
     )
 
 
@@ -824,11 +868,17 @@ def _load_or_build_vod_feature_context(
     job_id: str,
     vod_url: str | None = None,
     chat_target_offsets: list[float] | None = None,
+    cache_dir: pathlib.Path | None = None,
+    chat_cache_dir: pathlib.Path | None = None,
+    source_start_sec: float = 0.0,
+    source_end_sec: float = 0.0,
+    source_kind: str = "full_vod",
 ) -> VodFeatureContext:
     from services import audio_extractor, chat_analyzer, transcriber
     import librosa
 
-    cache_dir = _vod_feature_cache_dir(vod_id)
+    cache_dir = cache_dir or _vod_feature_cache_dir(vod_id)
+    chat_cache_dir = chat_cache_dir or cache_dir
     audio_path = cache_dir / "audio.wav"
     audio_payload = _audio_cache_payload(vod_id, vod_path)
     audio_metadata_path = _audio_cache_metadata_path(cache_dir)
@@ -872,15 +922,26 @@ def _load_or_build_vod_feature_context(
     chat_path = _load_or_download_chat(
         vod_url,
         job_id=job_id,
-        cache_dir=cache_dir,
+        cache_dir=chat_cache_dir,
         target_offsets=chat_target_offsets,
     )
+    if chat_path is not None and float(source_start_sec) > 0.0:
+        rebased_chat_path = _write_rebased_chat_file(
+            chat_path,
+            cache_dir / "chat" / "chat.local.json",
+            source_start_sec=float(source_start_sec),
+            source_end_sec=float(source_end_sec or 0.0),
+        )
+        chat_path = rebased_chat_path
     if chat_path is not None:
         transcript = chat_analyzer.enrich_segments(transcript, chat_path)
         chat_segment_count = sum(
             1
             for segment in transcript
-            if abs(float(getattr(segment, "chat_spike_score", 0.0) or 0.0)) > 1e-9
+            if (
+                abs(float(getattr(segment, "chat_spike_score", 0.0) or 0.0)) > 1e-9
+                or abs(float(getattr(segment, "chat_density_score", 0.0) or 0.0)) > 1e-9
+            )
         )
         logger.info(
             "training_vod_chat_enrichment_applied vod_id=%s job_id=%s chat_path=%s segments=%s segments_with_chat=%s",
@@ -903,7 +964,205 @@ def _load_or_build_vod_feature_context(
         audio_signal=audio_signal,
         audio_sample_rate=int(audio_sample_rate),
         cache_dir=cache_dir,
+        source_start_sec=float(source_start_sec),
+        source_end_sec=float(source_end_sec or 0.0),
+        source_kind=str(source_kind or "full_vod"),
     )
+
+
+def _is_window_scoped_top_viewed_label(label: dict) -> bool:
+    if str(label.get("manual_gold_review_source") or "").strip() != _WINDOW_SCOPED_TOP_VIEWED_SOURCE:
+        return False
+    if str(label.get("label_class") or "") not in _POSITIVE_LABEL_CLASSES:
+        return False
+    return bool(label.get("vod_id") and label.get("vod_url"))
+
+
+def _should_use_window_scoped_label_contexts(labels: list[dict]) -> bool:
+    return bool(labels) and all(_is_window_scoped_top_viewed_label(label) for label in labels)
+
+
+def _window_scoped_label_cache_dir(
+    vod_id: str,
+    label: dict,
+    *,
+    expanded_start: float,
+    expanded_end: float,
+) -> pathlib.Path:
+    clip_ids = sorted(str(item) for item in (label.get("clip_ids") or []) if str(item).strip())
+    payload = {
+        "version": _WINDOW_SCOPED_CONTEXT_VERSION,
+        "vod_id": str(vod_id),
+        "window_start": round(float(label.get("window_start") or 0.0), 2),
+        "window_end": round(float(label.get("window_end") or 0.0), 2),
+        "expanded_start": round(float(expanded_start), 2),
+        "expanded_end": round(float(expanded_end), 2),
+        "clip_ids": clip_ids,
+        "source": str(label.get("manual_gold_review_source") or ""),
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:16]
+    path = _vod_feature_cache_dir(vod_id) / "scoped_windows" / digest
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _scoped_source_metadata_path(cache_dir: pathlib.Path) -> pathlib.Path:
+    return cache_dir / "source.metadata.json"
+
+
+def _scoped_source_metadata(
+    vod_id: str,
+    *,
+    expanded_start: float,
+    expanded_end: float,
+    source_kind: str,
+    source_signature: dict[str, object],
+) -> dict[str, object]:
+    return {
+        "version": _WINDOW_SCOPED_CONTEXT_VERSION,
+        "kind": str(source_kind),
+        "vod_id": str(vod_id),
+        "expanded_start": round(float(expanded_start), 3),
+        "expanded_end": round(float(expanded_end), 3),
+        "source": source_signature,
+    }
+
+
+def _scoped_source_is_usable(source_path: pathlib.Path, metadata_path: pathlib.Path, payload: dict[str, object]) -> bool:
+    if not source_path.exists() or not metadata_path.exists():
+        return False
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return metadata == payload
+
+
+def _load_or_build_window_scoped_feature_context(
+    vod_id: str,
+    label: dict,
+    *,
+    vod_path: pathlib.Path | None = None,
+    job_id: str,
+) -> tuple[pathlib.Path, VodFeatureContext]:
+    expanded_start, expanded_end = _expanded_training_window(label)
+    cache_dir = _window_scoped_label_cache_dir(
+        vod_id,
+        label,
+        expanded_start=expanded_start,
+        expanded_end=expanded_end,
+    )
+    scoped_video_path = cache_dir / "source.mp4"
+    metadata_path = _scoped_source_metadata_path(cache_dir)
+    if vod_path is not None:
+        metadata_payload = _scoped_source_metadata(
+            vod_id,
+            expanded_start=expanded_start,
+            expanded_end=expanded_end,
+            source_kind="window_scoped_vod_cut_source",
+            source_signature=_stable_vod_source_signature(vod_id, vod_path),
+        )
+        if not _scoped_source_is_usable(scoped_video_path, metadata_path, metadata_payload):
+            scoped_video_path.unlink(missing_ok=True)
+            collect_viral_clips.cut_video_window(
+                vod_path,
+                scoped_video_path,
+                expanded_start,
+                expanded_end,
+            )
+            _write_json_atomic(metadata_path, metadata_payload)
+    else:
+        _load_or_download_window_scoped_vod_range(
+            vod_id,
+            label,
+            scoped_video_path,
+            metadata_path,
+            metadata_payload=_scoped_source_metadata(
+                vod_id,
+                expanded_start=expanded_start,
+                expanded_end=expanded_end,
+                source_kind="window_scoped_vod_range_source",
+                source_signature=_window_scoped_range_source_signature(label),
+            ),
+            job_id=job_id,
+            expanded_start=expanded_start,
+            expanded_end=expanded_end,
+        )
+
+    context = _load_or_build_vod_feature_context(
+        vod_id,
+        vod_path=scoped_video_path,
+        job_id=job_id,
+        vod_url=str(label.get("vod_url") or ""),
+        chat_target_offsets=_chat_target_offsets_for_labels([label]),
+        cache_dir=cache_dir,
+        chat_cache_dir=_vod_feature_cache_dir(vod_id),
+        source_start_sec=expanded_start,
+        source_end_sec=expanded_end,
+        source_kind="window_scoped_top_viewed",
+    )
+    return scoped_video_path, context
+
+
+def _window_scoped_range_source_signature(label: dict) -> dict[str, object]:
+    clip_ids = sorted(str(item) for item in (label.get("clip_ids") or []) if str(item).strip())
+    return {
+        "vod_url": str(label.get("vod_url") or ""),
+        "clip_ids": clip_ids,
+        "window_start": round(float(label.get("window_start") or 0.0), 3),
+        "window_end": round(float(label.get("window_end") or 0.0), 3),
+    }
+
+
+def _load_or_download_window_scoped_vod_range(
+    vod_id: str,
+    label: dict,
+    scoped_video_path: pathlib.Path,
+    metadata_path: pathlib.Path,
+    *,
+    metadata_payload: dict[str, object],
+    job_id: str,
+    expanded_start: float,
+    expanded_end: float,
+) -> pathlib.Path:
+    if _scoped_source_is_usable(scoped_video_path, metadata_path, metadata_payload):
+        return scoped_video_path
+    vod_url = str(label.get("vod_url") or "").strip()
+    if not vod_url:
+        raise ValueError(f"Cannot build scoped source for VOD {vod_id}: missing vod_url")
+
+    from services import downloader
+
+    scoped_video_path.unlink(missing_ok=True)
+    source_job_id = f"{job_id}:vod_range"
+    logger.info(
+        "training_vod_window_scoped_range_download vod_id=%s job_id=%s vod_url=%s start=%.3f end=%.3f output=%s",
+        vod_id,
+        source_job_id,
+        vod_url,
+        float(expanded_start),
+        float(expanded_end),
+        scoped_video_path,
+    )
+    try:
+        downloaded_path = downloader.download_range(
+            vod_url,
+            source_job_id,
+            start_sec=float(expanded_start),
+            end_sec=float(expanded_end),
+        )
+        scoped_video_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = scoped_video_path.with_suffix(f"{scoped_video_path.suffix}.tmp")
+        if tmp_path.exists():
+            tmp_path.unlink()
+        shutil.move(str(downloaded_path), str(tmp_path))
+        tmp_path.replace(scoped_video_path)
+    finally:
+        shutil.rmtree(pathlib.Path(settings.storage_dir) / source_job_id, ignore_errors=True)
+    _write_json_atomic(metadata_path, metadata_payload)
+    return scoped_video_path
 
 
 def _slice_transcript_for_window(
@@ -1062,6 +1321,29 @@ def build_dataset(labels: list[dict], profile: str, work_dir: pathlib.Path) -> l
                     )
                     continue
 
+                if _should_use_window_scoped_label_contexts(vod_rows):
+                    label_rows = _build_rows_for_vod_labels(
+                        vod_id,
+                        vod_rows,
+                        vod_path=None,
+                        vod_dir=vod_dir,
+                        job_id=job_id,
+                        profile=profile,
+                        context_index=context_index,
+                    )
+                    rows.extend(label_rows)
+                    vod_checkpoint_rows.extend(label_rows)
+                    if vod_checkpoint_rows and _can_write_vod_checkpoint(vod_id):
+                        _write_vod_checkpoint(work_dir, profile, vod_id, vod_rows, vod_checkpoint_rows)
+                    prefetch_future, prefetched_vod_id, prefetched_job_id = _schedule_prefetch(
+                        executor,
+                        vod_items,
+                        position + 1,
+                        profile=profile,
+                        work_dir=work_dir,
+                    )
+                    continue
+
                 if prefetch_future is not None and prefetched_vod_id == vod_id:
                     try:
                         vod_path = prefetch_future.result()
@@ -1117,7 +1399,7 @@ def _build_dataset_parallel(
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=resolved_workers) as executor, \
          concurrent.futures.ThreadPoolExecutor(max_workers=resolved_workers) as download_executor:
-        download_futures: dict[str, concurrent.futures.Future[pathlib.Path]] = {}
+        download_futures: dict[str, concurrent.futures.Future[pathlib.Path] | None] = {}
         for vod_id, vod_rows in vod_items:
             checkpoint_rows = _load_vod_checkpoint(work_dir, profile, vod_id, vod_rows)
             if checkpoint_rows is not None:
@@ -1126,11 +1408,14 @@ def _build_dataset_parallel(
                 continue
 
             job_id = f"twitch_vod_{vod_id}"
-            download_futures[vod_id] = download_executor.submit(
-                _materialize_vod,
-                str(vod_rows[0]["vod_url"]),
-                job_id,
-            )
+            if _should_use_window_scoped_label_contexts(vod_rows):
+                download_futures[vod_id] = None
+            else:
+                download_futures[vod_id] = download_executor.submit(
+                    _materialize_vod,
+                    str(vod_rows[0]["vod_url"]),
+                    job_id,
+                )
             scheduled_results.append((
                 "future",
                 executor.submit(
@@ -1171,7 +1456,9 @@ def _build_rows_for_vod(
             logger.info("training_vod_checkpoint_hit %s", vod_rows[0]["vod_url"])
             return checkpoint_rows
 
-        if vod_path_future is not None:
+        if _should_use_window_scoped_label_contexts(vod_rows):
+            vod_path = None
+        elif vod_path_future is not None:
             try:
                 vod_path = vod_path_future.result()
                 logger.info("training_vod_parallel_prefetch_ready %s", vod_rows[0]["vod_url"])
@@ -1283,7 +1570,7 @@ def _build_rows_for_vod_labels(
     vod_id: str,
     vod_rows: list[dict],
     *,
-    vod_path: pathlib.Path,
+    vod_path: pathlib.Path | None,
     vod_dir: pathlib.Path,
     job_id: str,
     profile: str,
@@ -1292,6 +1579,18 @@ def _build_rows_for_vod_labels(
     ordered_labels = sorted(vod_rows, key=lambda item: float(item["window_start"]))
     if not ordered_labels:
         return []
+    if _should_use_window_scoped_label_contexts(ordered_labels):
+        return _build_rows_for_window_scoped_vod_labels(
+            vod_id,
+            ordered_labels,
+            vod_path=vod_path,
+            vod_dir=vod_dir,
+            job_id=job_id,
+            profile=profile,
+            context_index=context_index,
+        )
+    if vod_path is None:
+        raise ValueError(f"Cannot build full-VOD rows for {vod_id}: missing vod_path")
     vod_feature_context = _load_or_build_vod_feature_context(
         vod_id,
         vod_path=vod_path,
@@ -1398,6 +1697,71 @@ def _build_rows_for_vod_labels(
         return rows
 
 
+def _build_rows_for_window_scoped_vod_labels(
+    vod_id: str,
+    ordered_labels: list[dict],
+    *,
+    vod_path: pathlib.Path | None,
+    vod_dir: pathlib.Path,
+    job_id: str,
+    profile: str,
+    context_index: dict,
+) -> list[dict]:
+    logger.info(
+        "training_vod_label_phase_start vod_id=%s labels=%s label_workers=%s",
+        vod_id,
+        len(ordered_labels),
+        1,
+    )
+    logger.info(
+        "training_vod_label_window_source vod_id=%s mode=%s labels=%s",
+        vod_id,
+        "window_scoped_top_viewed",
+        len(ordered_labels),
+    )
+    started_at = time.perf_counter()
+    rows: list[dict] = []
+    progress_interval = _label_progress_interval(len(ordered_labels))
+    for index, label in enumerate(ordered_labels, start=1):
+        scoped_job_id = f"{job_id}:window_scoped:{index}"
+        scoped_vod_path, scoped_context = _load_or_build_window_scoped_feature_context(
+            vod_id,
+            label,
+            vod_path=vod_path,
+            job_id=scoped_job_id,
+        )
+        rows.extend(
+            _process_vod_label(
+                vod_id,
+                index,
+                label,
+                vod_path=scoped_vod_path,
+                vod_dir=vod_dir,
+                vod_feature_context=scoped_context,
+                job_id=job_id,
+                profile=profile,
+                context_index=context_index,
+            )
+        )
+        if _should_log_label_progress(index, len(ordered_labels), progress_interval):
+            logger.info(
+                "training_vod_label_progress vod_id=%s completed=%s/%s rows=%s elapsed_sec=%.1f mode=window_scoped",
+                vod_id,
+                index,
+                len(ordered_labels),
+                len(rows),
+                time.perf_counter() - started_at,
+            )
+    logger.info(
+        "training_vod_label_phase_done vod_id=%s completed=%s rows=%s elapsed_sec=%.1f mode=window_scoped",
+        vod_id,
+        len(ordered_labels),
+        len(rows),
+        time.perf_counter() - started_at,
+    )
+    return rows
+
+
 def _label_progress_interval(total_labels: int) -> int:
     if total_labels <= 10:
         return 1
@@ -1444,7 +1808,14 @@ def _process_vod_label(
                 exc,
             )
             return []
-        return _finalize_label_rows(label_rows, label, context_index)
+        finalized_rows = _finalize_label_rows(label_rows, label, context_index)
+        source_kind = str(getattr(vod_feature_context, "source_kind", "") or "")
+        if source_kind:
+            for row in finalized_rows:
+                provenance = dict(row.get("feature_provenance") or {})
+                provenance["vod_feature_source_kind"] = source_kind
+                row["feature_provenance"] = provenance
+        return finalized_rows
     finally:
         shutil.rmtree(clip_dir, ignore_errors=True)
 
@@ -1494,6 +1865,9 @@ def _schedule_prefetch(
     if _load_vod_checkpoint(work_dir, profile, next_vod_id, next_rows) is not None:
         logger.info("training_vod_prefetch_skip checkpoint_hit %s", next_rows[0]["vod_url"])
         return None, None, None
+    if _should_use_window_scoped_label_contexts(next_rows):
+        logger.info("training_vod_prefetch_skip window_scoped_top_viewed %s", next_rows[0]["vod_url"])
+        return None, None, None
 
     next_url = str(next_rows[0]["vod_url"])
     prefetch_job_id = f"twitch_vod_prefetch_{next_vod_id}"
@@ -1519,18 +1893,21 @@ def _build_rows_for_label(
     )
     from services.timeline_types import Candidate
 
-    expanded_start, expanded_end = _expanded_training_window(label)
+    expanded_start, _expanded_end, local_expanded_start, local_expanded_end = _local_context_training_window(
+        label,
+        vod_feature_context,
+    )
     transcript = _slice_transcript_for_window(
         vod_feature_context.transcript,
-        window_start=expanded_start,
-        window_end=expanded_end,
+        window_start=local_expanded_start,
+        window_end=local_expanded_end,
     )
     audio_frames, visual_frames = _load_or_build_window_modalities(
         str(label.get("vod_id") or ""),
         vod_path=vod_path,
         vod_context=vod_feature_context,
-        window_start=expanded_start,
-        window_end=expanded_end,
+        window_start=local_expanded_start,
+        window_end=local_expanded_end,
     )
     if not transcript:
         return []
@@ -2004,6 +2381,17 @@ def _expanded_training_window(label: dict) -> tuple[float, float]:
         tail = min(max(duration * 0.45, 8.0), 22.0)
         return round(max(0.0, start - lead), 2), round(end + tail, 2)
     return round(start, 2), round(end, 2)
+
+
+def _local_context_training_window(
+    label: dict,
+    vod_feature_context: VodFeatureContext,
+) -> tuple[float, float, float, float]:
+    expanded_start, expanded_end = _expanded_training_window(label)
+    context_offset = float(getattr(vod_feature_context, "source_start_sec", 0.0) or 0.0)
+    local_expanded_start = max(float(expanded_start) - context_offset, 0.0)
+    local_expanded_end = max(float(expanded_end) - context_offset, local_expanded_start + 1.0)
+    return expanded_start, expanded_end, local_expanded_start, local_expanded_end
 
 
 def _proxy_candidate(label: dict, expanded_start: float, job_prefix: str):

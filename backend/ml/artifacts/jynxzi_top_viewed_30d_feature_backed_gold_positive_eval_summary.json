@@ -1,0 +1,67 @@
+{
+  "source_dataset": "backend/ml/artifacts/jynxzi_vod_eval_dataset.jsonl",
+  "source_rows_scanned": 556,
+  "scoped_positive_candidates": 47,
+  "new_gold_rows": 47,
+  "skipped_duplicate_rows": 0,
+  "positive_like_by_class": {
+    "positive": 29,
+    "viral_positive": 1,
+    "weak_positive": 17
+  },
+  "candidate_source_distribution": {
+    "audio_burst": 1,
+    "hot_take": 1,
+    "hype_peak": 2,
+    "narrative_reveal": 8,
+    "quote": 22,
+    "reaction": 2,
+    "tension_build": 11
+  },
+  "unique_vods": 24,
+  "gold_holdout_splits": {
+    "holdout": 13,
+    "train": 34
+  },
+  "eval_dataset": {
+    "rows": 47,
+    "positive_rows": 47,
+    "negative_rows": 0,
+    "eval_groups": 24,
+    "dataset_roles": {
+      "gold_eval": 47
+    },
+    "by_label_class": {
+      "gold_positive": 47
+    },
+    "by_supervision_tier": {
+      "gold_eval": 47
+    },
+    "by_platform": {
+      "twitch": 47
+    },
+    "by_variant": {
+      "balanced": 47
+    },
+    "by_source": {
+      "audio_burst": 1,
+      "hot_take": 1,
+      "hype_peak": 2,
+      "narrative_reveal": 8,
+      "quote": 22,
+      "reaction": 2,
+      "tension_build": 11
+    },
+    "by_content_bucket": {
+      "quote_driven": 23,
+      "reaction": 2,
+      "story": 19,
+      "visual_action": 3
+    },
+    "gold_holdout_splits": {
+      "holdout": 13,
+      "train": 34
+    }
+  },
+  "skipped_rows": []
+}

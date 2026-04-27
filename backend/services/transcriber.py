@@ -136,6 +136,10 @@ class RichSegment:
     visual_activity: float = 0.0    # composite visual activity level
     # Chat-replay signal (populated by chat_analyzer.enrich_segments)
     chat_spike_score: float = 0.0   # normalised chat message-rate spike intensity (0–1)
+    chat_message_count: int = 0
+    chat_message_rate: float = 0.0
+    chat_density_score: float = 0.0
+    chat_emote_score: float = 0.0
 
     def to_tuple(self) -> Segment:
         return (self.start, self.end, self.text)
@@ -369,12 +373,25 @@ def _diarize(audio_path: pathlib.Path, segments: list[RichSegment]) -> list[Rich
     except ImportError:
         return segments  # pyannote not installed — skip silently
 
-    pipeline = Pipeline.from_pretrained(
-        "pyannote/speaker-diarization-3.1",
-        use_auth_token=settings.hf_token,
-    )
-
-    diarization = pipeline(str(audio_path))
+    try:
+        pipeline = _load_pyannote_pipeline(Pipeline, settings.hf_token)
+        if pipeline is None:
+            logger.warning(
+                "transcriber_diarization_unavailable audio=%s reason=%s",
+                audio_path,
+                "pipeline_not_loaded",
+            )
+            return segments
+        diarization = pipeline(str(audio_path))
+    except Exception as exc:
+        logger.warning(
+            "transcriber_diarization_unavailable audio=%s reason=%s error_type=%s error=%s",
+            audio_path,
+            _diarization_failure_reason(exc),
+            type(exc).__name__,
+            _compact_exception_message(exc),
+        )
+        return segments
 
     # Build speaker timeline: list of (start, end, speaker_label)
     speaker_timeline: list[tuple[float, float, str]] = [
@@ -402,6 +419,46 @@ def _diarize(audio_path: pathlib.Path, segments: list[RichSegment]) -> list[Rich
             seg.speaker = f"GUEST_{idx}"
 
     return segments
+
+
+def _load_pyannote_pipeline(Pipeline, hf_token: str | None):
+    model_id = "pyannote/speaker-diarization-3.1"
+    token = str(hf_token or "").strip()
+    if not token:
+        return Pipeline.from_pretrained(model_id)
+    try:
+        return Pipeline.from_pretrained(model_id, token=token)
+    except TypeError as exc:
+        message = str(exc)
+        if "token" not in message or "unexpected keyword" not in message:
+            raise
+        return Pipeline.from_pretrained(model_id, use_auth_token=token)
+
+
+def _diarization_failure_reason(exc: Exception) -> str:
+    message = str(exc).lower()
+    exc_name = type(exc).__name__.lower()
+    if (
+        "gatedrepo" in exc_name
+        or "gated repo" in message
+        or "403" in message
+        or "forbidden" in message
+        or "restricted" in message
+        or "authorized list" in message
+    ):
+        return "hf_gated_model_access"
+    if "401" in message or "unauthorized" in message or "authentication" in message:
+        return "hf_auth"
+    if "could not download pipeline" in message or "hf_hub_download" in message:
+        return "pipeline_download"
+    return "pipeline_error"
+
+
+def _compact_exception_message(exc: Exception, limit: int = 300) -> str:
+    message = " ".join(str(exc).split())
+    if len(message) <= limit:
+        return message
+    return message[: limit - 3] + "..."
 
 
 def _dominant_speaker(
@@ -470,6 +527,8 @@ def format_transcript(
                 parts.append(f"[ARC:{seg.arc_score:.1f}]")
             if seg.chat_spike_score > 0:
                 parts.append(f"[CHAT:{seg.chat_spike_score:.2f}]")
+            elif seg.chat_density_score > 0:
+                parts.append(f"[CHAT_DENSITY:{seg.chat_density_score:.2f}]")
             if seg.visual_activity > 0:
                 parts.append(f"[VIS:{seg.visual_activity:.1f}]")
             parts.append(seg.text)
@@ -512,6 +571,10 @@ def format_jsonl(segments: list[RichSegment]) -> str:
             "has_scene_change": seg.has_scene_change,
             "visual_activity": seg.visual_activity,
             "chat_spike_score": seg.chat_spike_score,
+            "chat_message_count": seg.chat_message_count,
+            "chat_message_rate": seg.chat_message_rate,
+            "chat_density_score": seg.chat_density_score,
+            "chat_emote_score": seg.chat_emote_score,
         }))
     return "\n".join(lines)
 

@@ -1,0 +1,48 @@
+{
+  "queue_rows": 3,
+  "feature_rows": 3,
+  "labeled_rows": 3,
+  "skipped_unlabeled_rows": 0,
+  "positive_grade_threshold": 2,
+  "grade_distribution": {
+    "0": 0,
+    "1": 0,
+    "2": 0,
+    "3": 3
+  },
+  "eval_dataset": {
+    "rows": 3,
+    "positive_rows": 3,
+    "negative_rows": 0,
+    "eval_groups": 2,
+    "dataset_roles": {
+      "gold_eval": 3
+    },
+    "by_label_class": {
+      "gold_positive": 3
+    },
+    "by_supervision_tier": {
+      "gold_eval": 3
+    },
+    "by_platform": {
+      "twitch": 3
+    },
+    "by_variant": {
+      "balanced": 3
+    },
+    "by_source": {
+      "boundary_perturbation": 1,
+      "narrative_reveal": 1,
+      "reaction": 1
+    },
+    "by_content_bucket": {
+      "general": 1,
+      "reaction": 1,
+      "story": 1
+    },
+    "gold_holdout_splits": {
+      "holdout": 1,
+      "train": 2
+    }
+  }
+}

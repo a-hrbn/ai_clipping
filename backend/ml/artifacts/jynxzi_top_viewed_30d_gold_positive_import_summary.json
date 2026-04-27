@@ -1,0 +1,51 @@
+{
+  "source_labels": 12766,
+  "positive_like_labels": 51,
+  "positive_like_by_class": {
+    "positive": 33,
+    "viral_positive": 1,
+    "weak_positive": 17
+  },
+  "feature_rows_scanned": 648,
+  "matched_current_feature_rows": 4,
+  "already_gold_eval_rows": 1,
+  "new_importable_gold_rows": 3,
+  "needs_feature_build_rows": 47,
+  "queue_csv": "backend/ml/artifacts/jynxzi_top_viewed_30d_gold_positive_queue.csv",
+  "features_jsonl": "backend/ml/artifacts/jynxzi_top_viewed_30d_gold_positive_queue.features.jsonl",
+  "positive_labels_jsonl": "backend/ml/artifacts/jynxzi_top_viewed_30d_gold_positive_labels.jsonl",
+  "needs_features_jsonl": "backend/ml/artifacts/jynxzi_top_viewed_30d_gold_positive_needs_features.jsonl",
+  "already_gold_sample": [
+    {
+      "vod_id": "2750220507",
+      "window_start": 3663.0,
+      "window_end": 3685.0,
+      "label_class": "positive",
+      "label_score": 0.8,
+      "quality_bucket": "good",
+      "view_bucket": "good",
+      "clip_ids": [
+        "ObliviousConcernedQuailSSSsss-I3bMlRcB1_kOm8wW"
+      ],
+      "view_count": 9880,
+      "cluster_created_at": "2026-04-17T14:10:48Z",
+      "broadcaster": "jynxzi",
+      "platform_source": "twitch_clip",
+      "label_source": "twitch_clip_api",
+      "vod_url": "https://www.twitch.tv/videos/2750220507",
+      "vod_duration_seconds": 9932,
+      "created_at": "2026-04-17T14:10:48Z",
+      "manual_gold_review": true,
+      "intended_gold_grade": 3,
+      "manual_gold_review_notes": "User reviewed top-viewed Twitch clips from the last 30 days and confirmed they are suitable short-form positives.",
+      "feature_match_status": "already_gold_eval",
+      "matched_queue_id": "c5e0537b-1ac7-4813-8d07-55233a37fc57:peak:10:366397",
+      "matched_candidate_id": "peak:10:366397",
+      "best_feature_match_score": 1.0,
+      "best_feature_overlap_sec": 17.36
+    }
+  ],
+  "new_queue_grade_distribution": {
+    "3": 3
+  }
+}

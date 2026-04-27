@@ -1,15 +1,16 @@
 {
   "candidate_sources": {
-    "narrative_reveal": 2
+    "narrative_reveal": 1,
+    "quote": 1
   },
   "dataset_sources": {
     "gold_eval_hard_negative_train": 2
   },
   "diagnosis_csv": "/app/backend/ml/artifacts/jynxzi_ranker_holdout_diagnosis.csv",
-  "diagnosis_rows": 12,
+  "diagnosis_rows": 22,
   "exported_rows": 2,
   "gold_rows": "/app/backend/ml/artifacts/jynxzi_gold_eval_rows.jsonl",
-  "gold_rows_read": 172,
+  "gold_rows_read": 222,
   "leakage_note": "These rows are promoted into training. Do not treat the same candidates as untouched holdout when evaluating the next artifact.",
   "max_rows": 100,
   "min_forced_score": 0.0,
