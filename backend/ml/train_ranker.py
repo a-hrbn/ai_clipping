@@ -55,6 +55,14 @@ _SPARSE_TRAINING_FEATURE_NAMES: frozenset[str] = frozenset({
     "chat_shock_score",
     "chat_delta",
 })
+_CONFOUND_TRAINING_FEATURE_NAMES: frozenset[str] = frozenset({
+    # Current Jynxzi eval analysis showed this penalty receiving a positive
+    # model weight. Keep serving-time heuristic semantics, but keep it out of
+    # supervised ranker fitting until the label set is large enough to
+    # disambiguate slow starts from long/high-density clips.
+    "slow_open_penalty",
+})
+_TWITCH_CLIP_PROXY_SUPERVISION_MULTIPLIER = 0.5
 _SPLIT_RANDOM_SEED = int(settings.ranker_hpo_seed)
 _MIN_GROUP_NDCG_AT_5_P25 = 0.45
 _MIN_GROUP_NDCG_AT_5_MIN = 0.2
@@ -332,10 +340,13 @@ def train_from_rows(
             "selected_model": selected_model["name"],
             "selection_metric": "composite_validation_score",
             "label_schema_version": 3,
-            "feature_schema_version": 3,
+            "feature_schema_version": 4,
             "feature_names": feature_names,
             "excluded_feature_names": sorted(
-                OFFLINE_ONLY_FEATURE_NAMES | _SPARSE_TRAINING_FEATURE_NAMES | {_HEURISTIC_FEATURE_NAME}
+                OFFLINE_ONLY_FEATURE_NAMES
+                | _SPARSE_TRAINING_FEATURE_NAMES
+                | _CONFOUND_TRAINING_FEATURE_NAMES
+                | {_HEURISTIC_FEATURE_NAME}
             ),
             "semantic_score_config": semantic_service.semantic_score_config(),
             "weights": selected_model.get("weights", {}),
@@ -373,6 +384,7 @@ def train_from_rows(
                 candidate["name"]: candidate["metrics"]
                 for candidate in model_candidates
             },
+            "model_selection": _model_selection_report(model_candidates, selected_model, len(rows)),
             "bucketed_validation": _bucketed_validation(
                 selected_model["artifact_model_type"],
                 validation_rows,
@@ -559,6 +571,7 @@ def _numeric_feature_names(feature_row: dict) -> list[str]:
         {"candidate_id", "source", _HEURISTIC_FEATURE_NAME}
         | OFFLINE_ONLY_FEATURE_NAMES
         | _SPARSE_TRAINING_FEATURE_NAMES
+        | _CONFOUND_TRAINING_FEATURE_NAMES
     )
     names: list[str] = []
     for key, value in feature_row.items():
@@ -1428,6 +1441,52 @@ def _select_model(candidates: list[dict], training_row_count: int) -> dict:
     return max(pool, key=sort_key)
 
 
+def _model_selection_report(candidates: list[dict], selected_model: dict, training_row_count: int) -> dict[str, object]:
+    rows: list[dict[str, object]] = []
+    for candidate in candidates:
+        metrics = dict(candidate.get("metrics") or {})
+        promoted = _candidate_is_promoted(candidate, training_row_count)
+        meets_minimums = _model_meets_minimums(metrics)
+        rows.append(
+            {
+                "name": str(candidate.get("name") or ""),
+                "artifact_model_type": str(candidate.get("artifact_model_type") or ""),
+                "promoted": promoted,
+                "meets_minimums": meets_minimums,
+                "selection_score": round(_selection_score(metrics), 6),
+                "ranking_metric": str(metrics.get("ranking_metric") or "ndcg_at_5"),
+                "ranking_metric_value": float(metrics.get("ranking_metric_value", metrics.get("ndcg_at_5", 0.0)) or 0.0),
+                "ranking_metric_min": float(metrics.get("ranking_metric_min", 0.0) or 0.0),
+                "ranking_metric_p25": float(metrics.get("ranking_metric_p25", 0.0) or 0.0),
+                "precision_at_5": float(metrics.get("precision_at_5", 0.0) or 0.0),
+                "f1": float(metrics.get("f1", 0.0) or 0.0),
+                "accuracy": float(metrics.get("accuracy", 0.0) or 0.0),
+                "blocked_reason": _model_selection_blocked_reason(candidate, training_row_count),
+            }
+        )
+    return {
+        "training_row_count": int(training_row_count),
+        "metric": "composite_validation_score",
+        "selected_model": str(selected_model.get("name") or ""),
+        "promotion_min_rows": {
+            "gradient_boosting": _GRADIENT_BOOSTING_PROMOTION_MIN_ROWS,
+            "lightgbm_ranker": _LIGHTGBM_PROMOTION_MIN_ROWS,
+        },
+        "candidates": rows,
+    }
+
+
+def _model_selection_blocked_reason(candidate: dict, training_row_count: int) -> str:
+    artifact_model_type = str(candidate.get("artifact_model_type") or "").strip().lower()
+    if artifact_model_type == "lightgbm_ranker" and training_row_count < _LIGHTGBM_PROMOTION_MIN_ROWS:
+        return f"requires_at_least_{_LIGHTGBM_PROMOTION_MIN_ROWS}_training_rows"
+    if artifact_model_type == "gradient_boosting" and training_row_count < _GRADIENT_BOOSTING_PROMOTION_MIN_ROWS:
+        return f"requires_at_least_{_GRADIENT_BOOSTING_PROMOTION_MIN_ROWS}_training_rows"
+    if not _model_meets_minimums(dict(candidate.get("metrics") or {})):
+        return "failed_minimum_validation_gates"
+    return ""
+
+
 def _candidate_is_promoted(candidate: dict, training_row_count: int) -> bool:
     artifact_model_type = str(candidate.get("artifact_model_type") or "").strip().lower()
     if artifact_model_type == "lightgbm_ranker":
@@ -1718,7 +1777,7 @@ def _sample_weight(row: dict) -> float:
     supervision_multiplier = {
         "outcome_feedback": 1.35,
         "manual_annotation": 1.5,
-        "twitch_clip_proxy": 1.15,
+        "twitch_clip_proxy": _TWITCH_CLIP_PROXY_SUPERVISION_MULTIPLIER,
         "short_form_discovered": 1.0,
         "pipeline_feedback": 0.85,
         "synthetic": 0.6,

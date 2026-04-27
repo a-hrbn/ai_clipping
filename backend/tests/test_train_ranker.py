@@ -550,6 +550,32 @@ class TrainRankerTests(unittest.TestCase):
         )
         self.assertEqual(selected["name"], "logistic_regression")
 
+    def test_numeric_feature_names_excludes_known_confound_features(self) -> None:
+        names = train_ranker._numeric_feature_names(
+            {
+                "signal": 1.0,
+                "slow_open_penalty": 0.8,
+                "candidate_id": "c1",
+            }
+        )
+
+        self.assertEqual(names, ["signal"])
+
+    def test_sample_weight_downweights_twitch_clip_proxy_rows(self) -> None:
+        twitch_proxy = {
+            "supervision_tier": "twitch_clip_proxy",
+            "label_class": "hard_negative",
+            "sample_weight": 1.8,
+        }
+        manual = {
+            "supervision_tier": "manual_annotation",
+            "label_class": "hard_negative",
+            "sample_weight": 1.8,
+        }
+
+        self.assertAlmostEqual(train_ranker._sample_weight(twitch_proxy), 0.9)
+        self.assertGreater(train_ranker._sample_weight(manual), train_ranker._sample_weight(twitch_proxy))
+
     def test_select_model_allows_lightgbm_after_phase_a_gate(self) -> None:
         selected = train_ranker._select_model(
             [
@@ -588,8 +614,11 @@ class TrainRankerTests(unittest.TestCase):
             artifact = json.loads((artifact_dir / "gaming_ranker.json").read_text(encoding="utf-8"))
             artifact_health = json.loads((artifact_dir / "gaming_artifact_health.json").read_text(encoding="utf-8"))
             self.assertEqual(artifact["version"], 4)
+            self.assertEqual(artifact["feature_schema_version"], 4)
             self.assertIn("semantic_score_config", artifact)
             self.assertIn("top_feature_importances", artifact)
+            self.assertIn("slow_open_penalty", artifact["excluded_feature_names"])
+            self.assertIn("model_selection", artifact)
             self.assertEqual(artifact_health["selected_model"], artifact["selected_model"])
             self.assertEqual(artifact_health["semantic_score_config"], artifact["semantic_score_config"])
             self.assertIn("gates", artifact_health)

@@ -1,0 +1,10 @@
+feature,correlation
+hook_strength,-0.966895
+hook_delay_sec,0.468036
+setup_depth_score,-0.415562
+profile_fit_score,-0.330403
+payoff_score,-0.290196
+duration,0.239543
+context_dependency_score,0.18767
+chat_activity_coverage,0.117334
+chapter_local_density,0.023361

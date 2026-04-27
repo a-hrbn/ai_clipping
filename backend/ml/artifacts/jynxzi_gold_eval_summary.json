@@ -2,15 +2,15 @@
   "rows": 222,
   "eval_dataset": {
     "rows": 222,
-    "positive_rows": 76,
-    "negative_rows": 146,
+    "positive_rows": 77,
+    "negative_rows": 145,
     "eval_groups": 54,
     "dataset_roles": {
       "gold_eval": 222
     },
     "by_label_class": {
-      "gold_negative": 146,
-      "gold_positive": 76
+      "gold_negative": 145,
+      "gold_positive": 77
     },
     "by_supervision_tier": {
       "gold_eval": 222

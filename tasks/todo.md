@@ -1,5 +1,169 @@
 # Task Plan
 
+## 2026-04-27 Plan: ML Model Verbesserungsplan (basierend auf Eval-Analyse)
+
+### Kontext
+Modell: Logistic Regression, 71 Features, 244 Trainingsrows (64 positiv).
+Kernprobleme: kleines Goldlabeled-Dataset, Train-Holdout-Gap, twitch_proxy schadet, slow_open_penalty-Confound.
+
+---
+
+### Priorität 1 — Mehr Gold-Labels (kritischer Engpass)
+
+**Ziel:** Von 48 auf ≥150 gold_eval-Trainingsrows in 4 Wochen.
+
+- [ ] **P1.1 — Batch-Annotierung starten (laufend)**
+  - 5–8 neue VODs pro Woche in `jynxzi_gold_eval_manifest.csv` aufnehmen
+  - `build_gold_eval_queue.py --manifest ... --storage-dir ... --out jynxzi_gold_eval_queue` ausführen
+  - Queue in Google Sheets öffnen, `gold_grade` 0–3 blind annotieren (ohne Modell-Scores)
+  - Importieren via `import_gold_eval_labels.py`
+
+- [x] **P1.2 — Holdout-VODs für Annotierung priorisieren**
+  - Die 35 Holdout-VODs aus `jynxzi_training_workflow_state.json` sind ungenutzte Labelpotenziale
+  - 10 davon in den nächsten Annotierungsbatch aufnehmen (ohne sie aus dem Holdout zu entfernen bis genug Train-Daten)
+
+- [x] **P1.3 — Erfolgsmetrik festlegen**
+  - Retrain wenn gold_eval-Rows ≥ 80 (Zwischenmeilenstein) und ≥ 150 (Hauptmeilenstein)
+  - Erwarteter Effekt: MRR-Holdout sollte von 0.471 auf ≥ 0.55 steigen
+
+---
+
+### Priorität 2 — twitch_label_proxy-Gewichtung reduzieren
+
+**Ziel:** Source-Bucket `twitch_label_proxy` schadet dem Modell (MRR-Delta −0.046). Gewicht senken oder ausschließen.
+
+- [x] **P2.1 — Diagnose vertiefen**
+  - In `train_ranker.py:_sample_weight()` ist `twitch_clip_proxy`-Tier aktuell auf 1.15 gesetzt (leicht übergewichtet)
+  - Mit einem temporären Run testen: Gewicht auf 0.5 senken und MRR auf Holdout vergleichen
+  - Kommando: `ranker_gold_train_weight=2.0, ranker_hard_negative_weight=4.0` beibehalten, nur `twitch_clip_proxy`-Multiplikator anpassen
+
+- [x] **P2.2 — Code-Änderung in `train_ranker.py`**
+  - `"twitch_clip_proxy": 1.15` → `"twitch_clip_proxy": 0.5` in `_sample_weight()` (Zeile ~1721)
+  - Retrain durchführen, gold_holdout MRR und nDCG@5 vergleichen
+  - Wenn MRR auf Holdout steigt: Wert dauerhaft übernehmen
+
+- [ ] **P2.3 — Alternativ: Proxy-Tier aus Training ausschließen**
+  - Falls Gewichtsreduktion nicht ausreicht: `--no-proxy-tier`-Flag zu `train_vod_ranker.py` hinzufügen
+  - Nur sinnvoll wenn gold_eval-Rows ≥ 80 (sonst zu wenig Daten)
+
+---
+
+### Priorität 3 — slow_open_penalty Confound aufklären
+
+**Ziel:** Feature hat Gewicht +1.14 — das bedeutet "mehr slow_open = besser", was semantisch falsch ist.
+
+- [x] **P3.1 — Korrelationsanalyse**
+  - Feature-Korrelation zwischen `slow_open_penalty` und `chapter_local_density`, `duration`, `payoff_score` berechnen
+  - In Python: `pd.DataFrame([r["features"] for r in training_rows]).corr()[["slow_open_penalty"]]`
+  - Vermutung: `slow_open_penalty` korreliert positiv mit `chapter_local_density` (dichte Chapters = mehr slow-open-erkannte Clips)
+
+- [x] **P3.2 — Entscheidung treffen**
+  - Option A: Feature zu `excluded_feature_names` verschieben (konservativ, einfach)
+  - Option B: Feature-Semantik im Feature Builder invertieren (wenn Bedeutung klar)
+  - Option C: Feature umbenennen und Polarität dokumentieren
+  - Empfehlung: erst Korrelation messen, dann entscheiden
+
+- [x] **P3.3 — Retrain mit angepasstem Feature-Set**
+  - Wenn Feature ausgeschlossen: erwarten dass `profile_fit_score` und `setup_depth_score` mehr Gewicht aufnehmen
+
+---
+
+### Priorität 4 — Hard Negatives systematisch ausbauen
+
+**Ziel:** Aktuell nur 6 Hard-Negatives aus Holdout. Ziel: 20–30 pro Trainingslauf.
+
+- [x] **P4.1 — Rollout Review Queue nutzen**
+  - `jynxzi_rollout_review_queue.csv` (63 Rows, 26 VODs) manuell reviewen
+  - False Positives identifizieren (Modell sagt gut, aber tatsächlich schlecht)
+  - Diese als Hard Negatives in den nächsten Trainingslauf einbringen
+
+- [x] **P4.2 — Pipeline für strukturiertes FP-Feedback**
+  - Nach jedem Trainingslauf: `diagnose_ranker_holdout.py` ausführen
+  - Alle False Positives (max 100) via `export_ranker_hard_negatives.py` exportieren
+  - Direkt in `jynxzi_ranker_hard_negative_train_rows.jsonl` mergen
+
+- [ ] **P4.3 — Hard-Negative-Gewicht evaluieren**
+  - Aktuell: `ranker_hard_negative_weight=4.0` (label_class=hard_negative hat base_weight 1.8, dann x4 = 7.2 effektiv)
+  - Testen ob 2.0 oder 3.0 besser ist wenn mehr Hard Negatives vorhanden
+
+---
+
+### Priorität 5 — Gradient Boosting als Alternative evaluieren (nach P1)
+
+**Voraussetzung:** ≥ 150 gold_eval-Trainingsrows.
+
+- [x] **P5.1 — Model-Selection-Metrik verstehen**
+  - In `train_ranker.py`: `composite_validation_score` identifizieren und verstehen warum LR über GB gewählt wurde
+  - GB hat auf Validation MRR 0.885 vs LR 0.846 — warum wurde LR bevorzugt?
+
+- [ ] **P5.2 — Expliziter GB-Vergleich**
+  - Wenn genug Daten: beide Modelle auf separaten Seeds evaluieren und Holdout-MRR vergleichen
+  - GB hat potenzielle Overfitting-Risiken bei kleinem Datensatz — daher erst bei >150 positiv
+
+---
+
+### Erfolgsmetriken (Zielzustand nach 4 Wochen)
+
+| Metrik | Aktuell | Ziel |
+|---|---|---|
+| Gold-Holdout MRR | 0.471 | ≥ 0.55 |
+| Gold-Holdout nDCG@5 | 0.475 | ≥ 0.55 |
+| MRR_p25 (volle Eval) | 0.0 | > 0.0 |
+| gold_eval Training-Rows | 48 | ≥ 150 |
+| Hard Negatives | 6 | ≥ 25 |
+
+---
+
+### Umsetzung 2026-04-27
+
+- P1.1 bleibt als laufender manueller Annotierungsprozess offen; die technischen Vorarbeiten sind erledigt, aber blindes Human-Rating und Re-Import kann ich nicht automatisch korrekt ausführen.
+- P1.2 ist umgesetzt über `backend/ml/artifacts/jynxzi_gold_holdout_annotation_manifest.csv` mit 10 priorisierten Holdout-VODs.
+- P1.3 ist als Zielmetrik im Plan fixiert und in den erzeugten Eval-Artefakten prüfbar: Gold-Holdout MRR, nDCG@5, `mrr_p25`, Gold-Train-Rows und Hard-Negative-Anzahl.
+- P2.1/P2.2 sind umgesetzt: `twitch_clip_proxy`-Supervision wird in `train_ranker._sample_weight()` von 1.15 auf 0.5 reduziert.
+- P2.3 bleibt bewusst offen: Proxy-Tier komplett auszuschließen ist erst sinnvoll, wenn mindestens 80 Gold-Rows im Training stehen; aktuell sind es 48.
+- P3.1 ist umgesetzt über `backend/ml/analyze_ranker_feature_confounds.py` und `backend/ml/artifacts/jynxzi_ranker_feature_confounds.json`.
+- P3.2/P3.3 sind umgesetzt: `slow_open_penalty` wird konservativ aus dem supervised Ranker-Feature-Set ausgeschlossen; das aktuelle Ranker-Artefakt wurde neu trainiert.
+- P4.1 ist operationalisiert über `backend/ml/artifacts/jynxzi_rollout_review_queue.csv` mit 63 manuellen Review-Kandidaten, `review_required=true`, `auto_publish_allowed=false`.
+- P4.2 ist umgesetzt über `backend/ml/refresh_ranker_hard_negative_artifacts.py`, das Holdout-Diagnose und Hard-Negative-Export in einem Schritt erneuert.
+- P4.3 bleibt offen, weil aktuell weiterhin nur 6 exportierte Hard Negatives vorliegen und alle aus Holdout stammen; die Training-Pipeline lässt Holdout-origin Rows wegen Leakage-Schutz nicht ins Training.
+- P5.1 ist umgesetzt über `artifact.model_selection`: GB/LightGBM werden unter 400 Trainingsrows nicht promotet, auch wenn LightGBM auf Validation besser ist.
+- P5.2 bleibt offen, weil die Voraussetzung `>=150` Gold-Train-Rows nicht erfüllt ist.
+
+### Aktueller Ergebnisstand
+
+- Re-train ohne neue VOD-Downloads abgeschlossen: `jynxzi_ranker.json` ist Logistic Regression, `feature_schema_version=4`, `serving_threshold=5.52`.
+- `slow_open_penalty` ist in `excluded_feature_names`; Confound-Report bestätigt Positiv-Mittelwert `0.719625` vs Negativ-Mittelwert `0.654`.
+- Gold full eval: accuracy `0.779`, precision `0.649`, recall `0.792`, F1 `0.713`, MRR `0.645`, nDCG@5 `0.647`.
+- Gold holdout: accuracy `0.783`, precision `0.667`, recall `0.762`, F1 `0.711`, MRR `0.471`, nDCG@5 `0.475`.
+- Proxy eval: accuracy `0.877`, precision `0.774`, recall `0.75`, F1 `0.762`, MRR `0.81`, nDCG@5 `0.785`.
+- Hard-negative export bleibt bei 6 Rows, alle `hard_negative_original_split=holdout`; diese werden vom Training weiterhin ausgeschlossen, um Evaluation nicht zu verfälschen.
+
+
+
+## 2026-04-27 Plan: Conservative Rollout Review Queue
+
+- [x] Read the existing queue/scoring flow and Graphify backend overview.
+- [x] Add a manual-review rollout queue that never auto-publishes candidates.
+- [x] Exclude existing gold rows and gold-holdout VODs from rollout review candidates.
+- [x] Add focused tests for holdout exclusion, per-VOD top-k selection, and guardrail metadata.
+- [x] Generate the current Jynxzi rollout review artifacts.
+- [x] Run verification and rebuild backend Graphify after backend code edits.
+- [x] Document the result and remaining rollout constraints.
+
+### Review Notes
+
+- Added `backend/ml/build_rollout_review_queue.py` as a separate conservative rollout queue, so active gold-eval sampling keeps its existing semantics.
+- The queue scores candidates with the current trained ranker, excludes exact existing gold candidates/windows, and excludes any VOD that appears in the gold holdout split.
+- Guardrails are explicit in CSV, sidecar, and summary: `review_required=true` and `auto_publish_allowed=false`.
+- Generated current Jynxzi rollout review artifacts with `top_k_per_vod=10`, `max_total=200`, and `min_gap_sec=20`.
+- Current queue output has `63` rows across `26` VODs; no queue row overlaps a gold-holdout VOD, and the maximum per-VOD count is `10`.
+- The current scoring dataset already excludes holdout VODs, so `excluded_gold_holdout_vod_rows=0`; the artifact still records all `35` holdout VOD IDs and enforces the exclusion if they appear later.
+- Verification passed: syntax compile for the new script/test.
+- Verification passed: `backend/tests/test_build_rollout_review_queue.py` and `backend/tests/test_build_active_gold_eval_queue.py`.
+- Verification passed: `git diff --check`.
+- Rebuilt backend Graphify with the uv tool interpreter: `2142` nodes, `5558` edges, `46` communities.
+- The generated rollout review artifacts are currently ignored by `.gitignore` like other new artifact names; they exist locally under `backend/ml/artifacts/`.
+
 ## 2026-04-26 Plan: Clip-First Top-Viewed Scoped Training
 
 - [x] Trace the current top-viewed scoped path and full-VOD materialization boundary.
@@ -4479,3 +4643,45 @@ Phase 0-2 zuerst, danach **1 Woche reale Nutzung** bevor Phase 3 angefasst wird.
 - `git diff --stat` shows 22 tracked files: backend holdout-exclusion code/tests, Graphify output, latest Jynxzi ML artifacts, and task notes.
 - `git diff --check` passed after normalizing the generated holdout-diagnosis CSV line endings.
 - Staged tracked changes with `git add -u`; no untracked files were present in `git status`.
+
+## 2026-04-27 Plan: Apply Reviewed Holdout Labels
+
+- [x] Locate the reviewed holdout false positives in the current diagnosis artifacts.
+- [x] Promote the one accepted `2712128863` holdout row to `gold_grade=2`.
+- [x] Mark the remaining reviewed holdout false positives as confirmed negatives.
+- [x] Recompute gold-eval/diagnosis artifacts without rebuilding the Docker image.
+- [x] Verify no holdout VODs entered training and document the result.
+
+### Review Notes
+
+- User review: all false-positive holdouts are real false positives except the `2712128863` clip, which should become `gold_grade=2`.
+- Current holdout diagnosis had 7 false positives; promoted only `twitch_vod_2712128863:twitch_vod_2712128863_14:narrative_reveal:0:0`.
+- Marked the other 6 false-positive rows with `gold_reviewed_at=2026-04-27` and `gold_review_tags=["false_positive_review", "confirmed_negative"]`.
+- Rebuilt `jynxzi_gold_eval_dataset.jsonl` and `jynxzi_gold_eval.json` from `jynxzi_gold_eval_rows.jsonl`; gold eval now has 77 positives and 145 negatives.
+- Recomputed holdout diagnosis and hard-negative export; false positives are now 6, true positives 11, false negatives 1, true negatives 12.
+- Hard-negative export now contains 6 rows instead of 7; the promoted `2712128863` row is no longer exported as a hard negative.
+- Holdout trained metrics after relabel: accuracy `0.783`, precision `0.654`, recall `0.810`, F1 `0.723`, MRR `0.471`, NDCG@5 `0.475`.
+- Verified training remains isolated: 244 training rows, 29 training VODs, 35 holdout VODs, and 0 train/holdout VOD overlap.
+- Docker image was intentionally not rebuilt per user request.
+
+## 2026-04-27 Plan: Analyze New Jynxzi Training Run
+
+- [x] Confirm whether a new training container is still running or finished.
+- [x] Inspect latest run summary, workflow state, model health, and artifact timestamps.
+- [x] Compare dataset composition against the previous post-holdout-fix run.
+- [x] Audit holdout isolation and chat-feature coverage.
+- [x] Summarize model quality, remaining issues, and next action.
+
+### Review Notes
+
+- Initial `docker ps -a` showed no active or stopped containers visible.
+- Latest tracked artifacts were written at `2026-04-27 23:17`.
+- New run completed successfully: `local_train_summary.json` has `training_return_code=0` for `jynxzi`, `2026-03-15` through `2026-03-28`.
+- Artifact health is clean: no warnings, selected model `logistic_regression`, serving threshold `3.636`, low leakage risk.
+- Training dataset remained 244 rows over 29 VODs: 64 positives, 180 negatives; sources are 118 Twitch proxy, 78 boundary near-miss, 48 gold train.
+- Holdout isolation remains intact: 35 holdout VODs and 0 train/holdout VOD overlap; no `gold_holdout_split=holdout` rows in training.
+- Chat features are present on 140/244 training rows; `chat_activity_coverage`, `chat_density_mean`, and `chat_message_rate_peak` are nonzero on 138 rows.
+- Gold eval after the user relabel has 222 rows: 77 positives and 145 negatives.
+- Gold holdout now has 60 rows with trained F1 `0.723`, precision `0.654`, recall `0.810`, MRR `0.471`, NDCG@5 `0.475`.
+- Holdout diagnosis now has 6 false positives, 11 true positives, 1 false negative, and 12 true negatives.
+- Hard-negative export contains 6 confirmed false-positive rows for a future training run; they were not part of this training dataset.

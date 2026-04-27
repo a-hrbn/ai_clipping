@@ -14,7 +14,11 @@ BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-if importlib.util.find_spec("whisper") is None:
+try:
+    _WHISPER_SPEC = importlib.util.find_spec("whisper")
+except ValueError:
+    _WHISPER_SPEC = None
+if _WHISPER_SPEC is None:
     sys.modules.setdefault("whisper", types.SimpleNamespace(load_model=lambda *_args, **_kwargs: None))
 
 from ml import train_ranker
@@ -514,7 +518,7 @@ def _write_csv(path: pathlib.Path, rows: list[dict]) -> None:
         "rationale",
     ]
     with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
 

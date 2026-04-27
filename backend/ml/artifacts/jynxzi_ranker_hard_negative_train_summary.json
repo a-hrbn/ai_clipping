@@ -1,25 +1,24 @@
 {
   "candidate_sources": {
     "boundary_perturbation": 1,
-    "narrative_reveal": 1,
     "peak": 3,
     "quote": 2
   },
   "dataset_sources": {
-    "gold_eval_hard_negative_train": 7
+    "gold_eval_hard_negative_train": 6
   },
-  "diagnosis_csv": "/app/backend/ml/artifacts/jynxzi_ranker_holdout_diagnosis.csv",
+  "diagnosis_csv": "backend/ml/artifacts/jynxzi_ranker_holdout_diagnosis.csv",
   "diagnosis_rows": 30,
-  "exported_rows": 7,
-  "gold_rows": "/app/backend/ml/artifacts/jynxzi_gold_eval_rows.jsonl",
+  "exported_rows": 6,
+  "gold_rows": "backend/ml/artifacts/jynxzi_gold_eval_rows.jsonl",
   "gold_rows_read": 222,
   "leakage_note": "These rows are promoted into training. Do not treat the same candidates as untouched holdout when evaluating the next artifact.",
   "max_rows": 100,
   "min_forced_score": 0.0,
   "missing_source_rows": 0,
   "original_gold_splits": {
-    "holdout": 7
+    "holdout": 6
   },
   "profile": "jynxzi",
-  "selected_false_positive_rows": 7
+  "selected_false_positive_rows": 6
 }

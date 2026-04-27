@@ -20,6 +20,9 @@ backend/__pycache__/
 backend/tests/__pycache__/
 backend/ml/artifacts/*
 !backend/ml/artifacts/*gold_eval*
+!backend/ml/artifacts/*gold_holdout_annotation_manifest*
+!backend/ml/artifacts/*ranker_feature_confounds*
+!backend/ml/artifacts/*rollout_review_queue*
 
 backend/tmp/*
 !backend/tmp/storage/

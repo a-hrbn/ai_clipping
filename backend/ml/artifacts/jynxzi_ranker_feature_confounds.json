@@ -1,0 +1,61 @@
+{
+  "dataset": "backend/ml/artifacts/jynxzi_vod_training_rows.jsonl",
+  "rows": 244,
+  "feature": "slow_open_penalty",
+  "label_summary": {
+    "0": {
+      "rows": 180,
+      "mean": 0.654,
+      "median": 0.8,
+      "p25": 0.615,
+      "p75": 0.8
+    },
+    "1": {
+      "rows": 64,
+      "mean": 0.719625,
+      "median": 0.8,
+      "p25": 0.728,
+      "p75": 0.8
+    }
+  },
+  "correlations": [
+    {
+      "feature": "hook_strength",
+      "correlation": -0.966895
+    },
+    {
+      "feature": "hook_delay_sec",
+      "correlation": 0.468036
+    },
+    {
+      "feature": "setup_depth_score",
+      "correlation": -0.415562
+    },
+    {
+      "feature": "profile_fit_score",
+      "correlation": -0.330403
+    },
+    {
+      "feature": "payoff_score",
+      "correlation": -0.290196
+    },
+    {
+      "feature": "duration",
+      "correlation": 0.239543
+    },
+    {
+      "feature": "context_dependency_score",
+      "correlation": 0.18767
+    },
+    {
+      "feature": "chat_activity_coverage",
+      "correlation": 0.117334
+    },
+    {
+      "feature": "chapter_local_density",
+      "correlation": 0.023361
+    }
+  ],
+  "recommendation": "exclude_from_supervised_ranker_training",
+  "reason": "penalty_feature_is_not_lower_for_positive_rows"
+}
