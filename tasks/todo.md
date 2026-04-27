@@ -4442,3 +4442,40 @@ Phase 0-2 zuerst, danach **1 Woche reale Nutzung** bevor Phase 3 angefasst wird.
 - Staged tracked backend code, tests, Graphify output, task notes, and updated tracked ML artifacts.
 - New ignored run artifacts are intentionally force-added, excluding the Twitch cache directories.
 - `git diff --check` only reported CRLF/trailing whitespace in generated `jynxzi_ranker_holdout_diagnosis.csv`; no code whitespace issues were found.
+
+## 2026-04-27 Plan: Prevent Holdout Leakage In Training Dataset
+
+- [x] Inspect where VOD proxy rows, gold train rows, and hard negatives are merged.
+- [x] Add a central holdout VOD/window exclusion policy for training rows.
+- [x] Fail or summarize when holdout overlap is detected, so evaluation cannot be silently polluted.
+- [x] Add regression tests for VOD-level and window-overlap filtering.
+- [x] Run focused tests, compile checks, Graphify rebuild, and document result.
+
+### Review Notes
+
+- Added `build_composite_dataset_with_report()` in `backend/ml/train_vod_ranker.py`; `main()` now prints `holdout_training_exclusion` inside the dataset summary.
+- The policy derives holdout VODs from `gold_holdout_split=holdout` rows and filters training labels before `build_twitch_training_dataset.build_dataset()`, preventing expensive feature builds for holdout VODs.
+- The same policy is also applied after VOD row build, after gold-train preparation, after hard-negative preparation, and once more after final merge.
+- Promoted hard negatives with `hard_negative_original_split=holdout` are excluded from training by default.
+- Current artifact impact audit: `35` holdout VODs, `60` holdout rows; next build would filter `5636` Twitch label rows, `114` same-VOD gold-train rows, and `2` promoted holdout hard negatives.
+- Verification passed: `backend/.venv/bin/python -m pytest backend/tests/test_train_vod_ranker.py -q` -> `21 passed`.
+- Verification passed: `backend/.venv/bin/python -m pytest backend/tests/test_train_vod_ranker.py backend/tests/test_train_ranker.py -q` -> `55 passed`.
+- Verification passed: `backend/.venv/bin/python -m py_compile backend/ml/train_vod_ranker.py backend/tests/test_train_vod_ranker.py`.
+- Verification passed: scoped `git diff --check`.
+- Rebuilt backend Graphify: `2113` nodes, `5456` edges, `51` communities.
+- Rebuilt local Docker train image `ai-clipping-train-local:latest` and verified the image contains the holdout exclusion code.
+
+## 2026-04-27 Plan: Push Holdout Fix And Latest Artifacts
+
+- [x] Confirm branch and current working tree state.
+- [x] Review changed tracked files before staging.
+- [x] Stage all current code changes, Graphify output, task notes, and tracked ML artifacts.
+- [x] Commit the changes on `main`.
+- [x] Push `main` to origin and verify clean status.
+
+### Review Notes
+
+- Branch is `main`; current HEAD before this push is `bac99d1`.
+- `git diff --stat` shows 22 tracked files: backend holdout-exclusion code/tests, Graphify output, latest Jynxzi ML artifacts, and task notes.
+- `git diff --check` passed after normalizing the generated holdout-diagnosis CSV line endings.
+- Staged tracked changes with `git add -u`; no untracked files were present in `git status`.

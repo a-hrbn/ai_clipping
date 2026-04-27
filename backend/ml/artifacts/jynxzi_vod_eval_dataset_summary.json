@@ -1,60 +1,56 @@
 {
-  "rows": 601,
-  "positive_rows": 142,
-  "negative_rows": 459,
-  "eval_groups": 64,
+  "rows": 244,
+  "positive_rows": 64,
+  "negative_rows": 180,
+  "eval_groups": 29,
   "dataset_roles": {
-    "gold_eval": 175,
-    "pipeline_negative_eval": 340,
-    "pipeline_positive_eval": 86
+    "gold_eval": 48,
+    "pipeline_negative_eval": 156,
+    "pipeline_positive_eval": 40
   },
   "by_label_class": {
-    "background_negative": 14,
-    "boundary_near_miss_negative": 170,
-    "gold_hard_negative": 13,
-    "gold_negative": 106,
-    "gold_positive": 56,
-    "hard_negative": 156,
-    "positive": 58,
-    "viral_positive": 3,
-    "weak_positive": 25
+    "background_negative": 13,
+    "boundary_near_miss_negative": 78,
+    "gold_negative": 24,
+    "gold_positive": 24,
+    "hard_negative": 65,
+    "positive": 27,
+    "viral_positive": 2,
+    "weak_positive": 11
   },
   "by_supervision_tier": {
-    "boundary_near_miss": 170,
-    "gold_eval": 175,
-    "twitch_clip_proxy": 256
+    "boundary_near_miss": 78,
+    "gold_eval": 48,
+    "twitch_clip_proxy": 118
   },
   "by_platform": {
-    "general": 426,
-    "twitch": 175
+    "general": 196,
+    "twitch": 48
   },
   "by_variant": {
-    "balanced": 601
+    "balanced": 244
   },
   "by_source": {
-    "audio_burst": 3,
-    "boundary_perturbation": 194,
-    "chat_sync": 1,
-    "controversy": 7,
-    "hype_peak": 5,
-    "narrative_reveal": 28,
-    "peak": 55,
-    "quote": 62,
-    "reaction": 3,
+    "audio_burst": 1,
+    "boundary_perturbation": 83,
+    "controversy": 2,
+    "hype_peak": 4,
+    "narrative_reveal": 11,
+    "peak": 14,
+    "quote": 31,
+    "reaction": 1,
     "story_payoff": 3,
-    "tension_build": 47,
-    "twitch_label_proxy": 192,
-    "visual_reveal": 1
+    "tension_build": 14,
+    "twitch_label_proxy": 80
   },
   "by_content_bucket": {
-    "general": 441,
-    "quote_driven": 69,
-    "reaction": 4,
-    "story": 78,
-    "visual_action": 9
+    "general": 177,
+    "quote_driven": 33,
+    "reaction": 1,
+    "story": 28,
+    "visual_action": 5
   },
   "gold_holdout_splits": {
-    "holdout": 13,
-    "train": 162
+    "train": 48
   }
 }

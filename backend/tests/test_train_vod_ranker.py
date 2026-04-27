@@ -31,7 +31,10 @@ class TrainVodRankerTests(unittest.TestCase):
             dataset_out = Path(tmp) / "dataset.jsonl"
             artifact_dir = Path(tmp) / "artifacts"
 
-            with patch("ml.train_vod_ranker.build_composite_dataset", return_value=dataset_rows) as build_mock, \
+            with patch(
+                "ml.train_vod_ranker.build_composite_dataset_with_report",
+                return_value=(dataset_rows, {"enabled": False, "filtered_rows": 0}),
+            ) as build_mock, \
                  patch("ml.train_vod_ranker._train_models_for_dataset", return_value=0) as train_mock, \
                  patch(
                      "sys.argv",
@@ -198,7 +201,7 @@ class TrainVodRankerTests(unittest.TestCase):
                 "queue_id": "q-3",
                 "candidate_id": "cand-3",
                 "job_id": "job-1",
-                "vod_id": "vod-1",
+                "vod_id": "vod-2",
                 "label": 1,
                 "supervision_tier": "gold_eval",
                 "label_source": "gold_eval",
@@ -223,6 +226,152 @@ class TrainVodRankerTests(unittest.TestCase):
         self.assertEqual(rows_by_queue["q-1"]["features"]["hook_strength"], 0.9)
         self.assertEqual(rows_by_queue["q-2"]["dataset_source"], "twitch_vod_primary")
         self.assertNotIn("q-3", rows_by_queue)
+
+    def test_build_composite_dataset_excludes_gold_holdout_vods_from_all_training_sources(self) -> None:
+        captured_labels = []
+        labels = [
+            {
+                "vod_id": "vod-train",
+                "vod_url": "https://www.twitch.tv/videos/111",
+                "label_class": "positive",
+            },
+            {
+                "vod_id": "vod-holdout",
+                "vod_url": "https://www.twitch.tv/videos/222",
+                "label_class": "positive",
+            },
+        ]
+        gold_rows = [
+            {
+                "queue_id": "gold-holdout",
+                "candidate_id": "holdout-cand",
+                "vod_id": "vod-holdout",
+                "label": 1,
+                "gold_holdout_split": "holdout",
+                "window_start": 10.0,
+                "window_end": 25.0,
+                "features": {"hook_strength": 1.0},
+            },
+            {
+                "queue_id": "gold-train-same-vod",
+                "candidate_id": "train-on-holdout-vod",
+                "vod_id": "vod-holdout",
+                "label": 1,
+                "gold_holdout_split": "train",
+                "window_start": 40.0,
+                "window_end": 55.0,
+                "features": {"hook_strength": 0.9},
+            },
+            {
+                "queue_id": "gold-train-clean",
+                "candidate_id": "train-clean",
+                "vod_id": "vod-train",
+                "label": 1,
+                "gold_holdout_split": "train",
+                "features": {"hook_strength": 0.8},
+            },
+        ]
+
+        def _fake_build_dataset(input_labels, _profile, _work_dir):
+            captured_labels.extend(input_labels)
+            return [
+                {
+                    "queue_id": "vod-clean",
+                    "candidate_id": "vod-clean",
+                    "vod_id": "vod-train",
+                    "label": 1,
+                    "dataset_source": "twitch_vod_primary",
+                    "features": {},
+                },
+                {
+                    "queue_id": "vod-leak",
+                    "candidate_id": "vod-leak",
+                    "vod_id": "vod-holdout",
+                    "label": 1,
+                    "dataset_source": "twitch_vod_primary",
+                    "features": {},
+                },
+            ]
+
+        with patch("ml.train_vod_ranker.build_twitch_training_dataset.build_dataset", side_effect=_fake_build_dataset):
+            rows, report = train_vod_ranker.build_composite_dataset_with_report(
+                labels=labels,
+                profile="jynxzi",
+                work_dir=Path("/tmp/ignored"),
+                gold_train_rows=gold_rows,
+                gold_train_weight=2.0,
+            )
+
+        self.assertEqual([row["vod_id"] for row in captured_labels], ["vod-train"])
+        rows_by_queue = {row["queue_id"]: row for row in rows}
+        self.assertIn("vod-clean", rows_by_queue)
+        self.assertIn("gold-train-clean", rows_by_queue)
+        self.assertNotIn("vod-leak", rows_by_queue)
+        self.assertNotIn("gold-train-same-vod", rows_by_queue)
+        self.assertNotIn("gold-holdout", rows_by_queue)
+        self.assertTrue(report["enabled"])
+        self.assertEqual(report["holdout_vod_count"], 1)
+        self.assertGreaterEqual(report["filtered_by_stage"]["twitch_label_input"], 1)
+        self.assertGreaterEqual(report["filtered_by_reason"]["holdout_vod_id"], 1)
+
+    def test_build_composite_dataset_excludes_promoted_holdout_hard_negatives(self) -> None:
+        hard_negative_rows = [
+            {
+                "queue_id": "hn-holdout",
+                "candidate_id": "hn-holdout",
+                "vod_id": "vod-a",
+                "label": 0,
+                "hard_negative_original_split": "holdout",
+                "features": {"hook_strength": 0.2},
+            },
+            {
+                "queue_id": "hn-train",
+                "candidate_id": "hn-train",
+                "vod_id": "vod-b",
+                "label": 0,
+                "hard_negative_original_split": "train",
+                "features": {"hook_strength": 0.1},
+            },
+        ]
+        with patch("ml.train_vod_ranker.build_twitch_training_dataset.build_dataset", return_value=[]):
+            rows, report = train_vod_ranker.build_composite_dataset_with_report(
+                labels=[],
+                profile="jynxzi",
+                work_dir=Path("/tmp/ignored"),
+                hard_negative_rows=hard_negative_rows,
+            )
+
+        rows_by_queue = {row["queue_id"]: row for row in rows}
+        self.assertNotIn("hn-holdout", rows_by_queue)
+        self.assertIn("hn-train", rows_by_queue)
+        self.assertEqual(report["filtered_by_reason"]["promoted_holdout_hard_negative"], 1)
+
+    def test_holdout_training_exclusion_detects_window_overlap_when_vod_is_not_globally_blocked(self) -> None:
+        policy = {
+            "enabled": True,
+            "holdout_vod_ids": [],
+            "holdout_source_keys": [],
+            "holdout_windows_by_vod": {"vod-a": [(10.0, 20.0)]},
+        }
+        overlapping = {
+            "vod_id": "vod-a",
+            "window_start": 18.0,
+            "window_end": 22.0,
+        }
+        non_overlapping = {
+            "vod_id": "vod-a",
+            "window_start": 25.0,
+            "window_end": 35.0,
+        }
+
+        self.assertEqual(
+            train_vod_ranker._holdout_training_exclusion_reason(overlapping, policy),
+            "holdout_window_overlap",
+        )
+        self.assertEqual(
+            train_vod_ranker._holdout_training_exclusion_reason(non_overlapping, policy),
+            "",
+        )
 
     def test_build_composite_dataset_merges_weighted_hard_negatives(self) -> None:
         vod_rows = [
@@ -551,8 +700,8 @@ class TrainVodRankerWorkflowStateTests(unittest.TestCase):
             paths = self._setup_common(tmp, write_artifact=False, write_dataset=False)
 
             with patch(
-                "ml.train_vod_ranker.build_composite_dataset",
-                return_value=[{"candidate_id": "c1", "label": 1, "features": {}}],
+                "ml.train_vod_ranker.build_composite_dataset_with_report",
+                return_value=([{"candidate_id": "c1", "label": 1, "features": {}}], {"enabled": False}),
             ), \
                  patch("ml.train_vod_ranker._train_models_for_dataset", return_value=0) as train_mock, \
                  patch("sys.argv", self._argv(paths, json.dumps(current_state))):
@@ -572,8 +721,8 @@ class TrainVodRankerWorkflowStateTests(unittest.TestCase):
             paths = self._setup_common(tmp, write_artifact=False, write_dataset=False)
 
             with patch(
-                "ml.train_vod_ranker.build_composite_dataset",
-                return_value=[{"candidate_id": "c1", "label": 1, "features": {}}],
+                "ml.train_vod_ranker.build_composite_dataset_with_report",
+                return_value=([{"candidate_id": "c1", "label": 1, "features": {}}], {"enabled": False}),
             ), \
                  patch("ml.train_vod_ranker._train_models_for_dataset", return_value=2), \
                  patch("sys.argv", self._argv(paths, json.dumps(current_state))):

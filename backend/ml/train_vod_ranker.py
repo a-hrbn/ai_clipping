@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import re
 import sys
 from collections import defaultdict
 
@@ -23,6 +24,8 @@ _TARGET_NEGATIVE_ROWS_PER_POSITIVE_MAX = 8
 _MAX_CANDIDATE_SOURCE_SHARE = 0.40
 _SHORT_FORM_MODES = {"off", "supplemental"}
 _DEFAULT_HARD_NEGATIVE_WEIGHT = 4.0
+_TWITCH_VOD_ID_PATTERN = re.compile(r"(?:twitch\.tv/videos/|/videos/)(\d+)")
+_MAX_HOLDOUT_EXCLUSION_SAMPLES = 20
 
 
 def _load_workflow_state(raw: str | None) -> dict[str, object] | None:
@@ -189,7 +192,7 @@ def main() -> int:
             )
             return 0
 
-    rows = build_composite_dataset(
+    rows, holdout_exclusion = build_composite_dataset_with_report(
         labels,
         profile=args.profile,
         work_dir=pathlib.Path(args.work_dir),
@@ -202,7 +205,9 @@ def main() -> int:
         hard_negative_weight=args.hard_negative_weight,
     )
     _write_jsonl(dataset_out, rows)
-    print(json.dumps(dataset_summary(rows), ensure_ascii=True))
+    summary = dataset_summary(rows)
+    summary["holdout_training_exclusion"] = holdout_exclusion
+    print(json.dumps(summary, ensure_ascii=True))
     code = _train_models_for_dataset(
         dataset_out,
         args.profile,
@@ -225,21 +230,207 @@ def build_composite_dataset(
     hard_negative_rows: list[dict] | None = None,
     hard_negative_weight: float = _DEFAULT_HARD_NEGATIVE_WEIGHT,
 ) -> list[dict]:
-    vod_rows = build_twitch_training_dataset.build_dataset(labels, profile, work_dir)
+    rows, _report = build_composite_dataset_with_report(
+        labels,
+        profile=profile,
+        work_dir=work_dir,
+        supplemental_rows=supplemental_rows,
+        supplemental_weight=supplemental_weight,
+        short_form_mode=short_form_mode,
+        gold_train_rows=gold_train_rows,
+        gold_train_weight=gold_train_weight,
+        hard_negative_rows=hard_negative_rows,
+        hard_negative_weight=hard_negative_weight,
+    )
+    return rows
+
+
+def build_composite_dataset_with_report(
+    labels: list[dict],
+    profile: str,
+    work_dir: pathlib.Path,
+    supplemental_rows: list[dict] | None = None,
+    supplemental_weight: float = 0.35,
+    short_form_mode: str = "off",
+    gold_train_rows: list[dict] | None = None,
+    gold_train_weight: float = 2.0,
+    hard_negative_rows: list[dict] | None = None,
+    hard_negative_weight: float = _DEFAULT_HARD_NEGATIVE_WEIGHT,
+) -> tuple[list[dict], dict[str, object]]:
+    holdout_policy = _build_holdout_training_exclusion_policy(gold_train_rows or [])
+    exclusion_report = _new_holdout_exclusion_report(holdout_policy)
+    training_labels = _filter_holdout_training_rows(
+        labels,
+        holdout_policy,
+        stage="twitch_label_input",
+        report=exclusion_report,
+    )
+    vod_rows = build_twitch_training_dataset.build_dataset(training_labels, profile, work_dir)
+    vod_rows = _filter_holdout_training_rows(
+        vod_rows,
+        holdout_policy,
+        stage="twitch_vod_rows",
+        report=exclusion_report,
+    )
     merged = list(vod_rows)
     if _normalize_short_form_mode(short_form_mode) != "off" and supplemental_rows:
-        merged.extend(_prepare_short_form_rows(supplemental_rows, profile, supplemental_weight))
+        prepared_short_form = _filter_holdout_training_rows(
+            _prepare_short_form_rows(supplemental_rows, profile, supplemental_weight),
+            holdout_policy,
+            stage="short_form_rows",
+            report=exclusion_report,
+        )
+        merged.extend(prepared_short_form)
     if gold_train_rows:
         merged = _merge_gold_train_rows(
             merged,
-            _prepare_gold_train_rows(gold_train_rows, profile, gold_train_weight),
+            _filter_holdout_training_rows(
+                _prepare_gold_train_rows(gold_train_rows, profile, gold_train_weight),
+                holdout_policy,
+                stage="gold_train_rows",
+                report=exclusion_report,
+            ),
         )
     if hard_negative_rows:
         merged = _merge_gold_train_rows(
             merged,
-            _prepare_hard_negative_rows(hard_negative_rows, profile, hard_negative_weight),
+            _filter_holdout_training_rows(
+                _prepare_hard_negative_rows(hard_negative_rows, profile, hard_negative_weight),
+                holdout_policy,
+                stage="hard_negative_rows",
+                report=exclusion_report,
+            ),
         )
-    return merged
+    merged = _filter_holdout_training_rows(
+        merged,
+        holdout_policy,
+        stage="final_merged_rows",
+        report=exclusion_report,
+    )
+    return merged, _finalize_holdout_exclusion_report(exclusion_report)
+
+
+def _build_holdout_training_exclusion_policy(gold_rows: list[dict]) -> dict[str, object]:
+    holdout_vod_ids: set[str] = set()
+    holdout_source_keys: set[str] = set()
+    holdout_windows_by_vod: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    holdout_rows = 0
+    for row in gold_rows:
+        if str(row.get(GOLD_HOLDOUT_SPLIT_FIELD) or "").strip().lower() != "holdout":
+            continue
+        holdout_rows += 1
+        vod_id = _row_vod_id(row)
+        source_key = _row_source_key(row)
+        if vod_id:
+            holdout_vod_ids.add(vod_id)
+            window = _row_window(row)
+            if window is not None:
+                holdout_windows_by_vod[vod_id].append(window)
+        elif source_key:
+            holdout_source_keys.add(source_key)
+
+    return {
+        "enabled": bool(holdout_vod_ids or holdout_source_keys),
+        "holdout_rows": holdout_rows,
+        "holdout_vod_ids": sorted(holdout_vod_ids),
+        "holdout_source_keys": sorted(holdout_source_keys),
+        "holdout_windows_by_vod": {
+            vod_id: sorted(windows)
+            for vod_id, windows in sorted(holdout_windows_by_vod.items())
+        },
+    }
+
+
+def _new_holdout_exclusion_report(policy: dict[str, object]) -> dict[str, object]:
+    return {
+        "enabled": bool(policy.get("enabled")),
+        "strict_vod_level": True,
+        "holdout_rows": int(policy.get("holdout_rows") or 0),
+        "holdout_vod_count": len(policy.get("holdout_vod_ids") or []),
+        "holdout_source_count": len(policy.get("holdout_source_keys") or []),
+        "filtered_rows": 0,
+        "filtered_by_stage": defaultdict(int),
+        "filtered_by_reason": defaultdict(int),
+        "sample_filtered_rows": [],
+    }
+
+
+def _filter_holdout_training_rows(
+    rows: list[dict],
+    policy: dict[str, object],
+    *,
+    stage: str,
+    report: dict[str, object],
+) -> list[dict]:
+    if not rows:
+        return list(rows)
+
+    kept: list[dict] = []
+    for row in rows:
+        reason = _holdout_training_exclusion_reason(row, policy)
+        if reason:
+            _record_holdout_exclusion(report, row, stage=stage, reason=reason)
+            continue
+        kept.append(row)
+    return kept
+
+
+def _holdout_training_exclusion_reason(row: dict, policy: dict[str, object]) -> str:
+    split = str(row.get(GOLD_HOLDOUT_SPLIT_FIELD) or "").strip().lower()
+    if split == "holdout":
+        return "gold_holdout_row"
+    if str(row.get("hard_negative_original_split") or "").strip().lower() == "holdout":
+        return "promoted_holdout_hard_negative"
+
+    holdout_vod_ids = set(str(item) for item in (policy.get("holdout_vod_ids") or []))
+    vod_id = _row_vod_id(row)
+    if vod_id and vod_id in holdout_vod_ids:
+        return "holdout_vod_id"
+
+    holdout_source_keys = set(str(item) for item in (policy.get("holdout_source_keys") or []))
+    source_key = _row_source_key(row)
+    if source_key and source_key in holdout_source_keys:
+        return "holdout_source_url"
+
+    # This catches rows where a VOD id was recoverable but future policies relax
+    # strict VOD-level blocking; keep it here so overlap rules remain centralized.
+    window = _row_window(row)
+    if vod_id and window is not None:
+        for holdout_window in (policy.get("holdout_windows_by_vod") or {}).get(vod_id, []):
+            if _windows_overlap(window, holdout_window):
+                return "holdout_window_overlap"
+    return ""
+
+
+def _record_holdout_exclusion(report: dict[str, object], row: dict, *, stage: str, reason: str) -> None:
+    report["filtered_rows"] = int(report.get("filtered_rows") or 0) + 1
+    report["filtered_by_stage"][stage] += 1
+    report["filtered_by_reason"][reason] += 1
+    samples = report["sample_filtered_rows"]
+    if len(samples) >= _MAX_HOLDOUT_EXCLUSION_SAMPLES:
+        return
+    samples.append(
+        {
+            "stage": stage,
+            "reason": reason,
+            "vod_id": _row_vod_id(row),
+            "queue_id": str(row.get("queue_id") or ""),
+            "candidate_id": str(row.get("candidate_id") or ""),
+            "dataset_source": str(row.get("dataset_source") or ""),
+            "label_class": str(row.get("label_class") or ""),
+            "window_start": _nullable_float(row.get("window_start")),
+            "window_end": _nullable_float(row.get("window_end")),
+            GOLD_HOLDOUT_SPLIT_FIELD: str(row.get(GOLD_HOLDOUT_SPLIT_FIELD) or ""),
+        }
+    )
+
+
+def _finalize_holdout_exclusion_report(report: dict[str, object]) -> dict[str, object]:
+    finalized = dict(report)
+    finalized["filtered_by_stage"] = dict(sorted(report["filtered_by_stage"].items()))
+    finalized["filtered_by_reason"] = dict(sorted(report["filtered_by_reason"].items()))
+    finalized["sample_filtered_rows"] = list(report["sample_filtered_rows"])
+    return finalized
 
 
 def dataset_summary(rows: list[dict]) -> dict:
@@ -678,6 +869,50 @@ def _training_row_key(row: dict) -> tuple[str, ...] | None:
     return None
 
 
+def _row_vod_id(row: dict) -> str:
+    explicit = str(row.get("vod_id") or "").strip()
+    if explicit:
+        return explicit
+    for key in ("source_url", "review_url", "url"):
+        match = _TWITCH_VOD_ID_PATTERN.search(str(row.get(key) or ""))
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _row_source_key(row: dict) -> str:
+    for key in ("source_url", "review_url", "url"):
+        value = str(row.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _row_window(row: dict) -> tuple[float, float] | None:
+    start = _nullable_float(row.get("window_start"))
+    end = _nullable_float(row.get("window_end"))
+    if start is None:
+        start = _nullable_float(row.get("final_start"))
+    if end is None:
+        end = _nullable_float(row.get("final_end"))
+    if start is None or end is None:
+        return None
+    if end < start:
+        start, end = end, start
+    return start, end
+
+
+def _windows_overlap(left: tuple[float, float], right: tuple[float, float]) -> bool:
+    overlap = max(0.0, min(left[1], right[1]) - max(left[0], right[0]))
+    if overlap <= 0.0:
+        return False
+    if overlap >= 5.0:
+        return True
+    left_duration = max(left[1] - left[0], 1e-9)
+    right_duration = max(right[1] - right[0], 1e-9)
+    return overlap / min(left_duration, right_duration) >= 0.30
+
+
 def _stable_time_value(value) -> str:
     try:
         return f"{float(value or 0.0):.3f}"
@@ -744,6 +979,15 @@ def _as_float(value) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _nullable_float(value) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 if __name__ == "__main__":
