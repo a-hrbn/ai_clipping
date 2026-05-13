@@ -221,6 +221,11 @@ def enrich_segments(segments, frames: list[AudioFeatureFrame]):
         max_rms      = max(f.rms_db for f in seg_frames)
         max_pitch    = max((f.pitch_hz for f in seg_frames), default=0.0)
         max_onset    = max((f.onset_rate for f in seg_frames), default=0.0)
+        voiced_frames = [
+            f for f in seg_frames
+            if not f.is_silence and (f.pitch_hz > 0.0 or f.onset_rate > 0.0)
+        ]
+        pitch_values = [f.pitch_hz for f in voiced_frames if f.pitch_hz > 0.0]
 
         # Mean RMS over active (non-silent) frames — used for arc contrast scoring.
         # Stays at 0.0 (sentinel) if the whole segment is silent.
@@ -235,7 +240,10 @@ def enrich_segments(segments, frames: list[AudioFeatureFrame]):
         seg.max_rms_db     = round(max_rms, 1)
         seg.mean_rms_db    = round(mean_rms, 1)
         seg.max_pitch_hz   = round(max_pitch, 1)
+        seg.pitch_std_hz   = round(float(np.std(pitch_values)) if len(pitch_values) >= 2 else 0.0, 1)
         seg.max_onset_rate = round(max_onset, 1)
+        seg.voice_activity_score = round(len(voiced_frames) / max(len(seg_frames), 1), 3)
+        seg.rms_burst_score = round(float(np.clip((max_rms - energy_threshold) / 12.0 + 0.5, 0.0, 1.0)), 3)
 
         # Audio laughter
         if max_laughter >= 0.6:

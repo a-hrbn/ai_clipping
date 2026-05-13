@@ -90,7 +90,8 @@ class HpoRankerTests(unittest.TestCase):
             payload = json.loads((artifact_dir / "gaming_ranker_hpo.json").read_text(encoding="utf-8"))
 
         self.assertEqual(payload["best_params"]["num_leaves"], 31)
-        self.assertEqual(payload["best_value"], 0.82)
+        self.assertEqual(payload["selection_metric"], "composite_validation_score")
+        self.assertEqual(payload["best_value"], 0.813)
         self.assertEqual(payload["seed"], 13)
         self.assertEqual(payload["trials"], 2)
 

@@ -16,6 +16,21 @@ class TwitchClipLabelsTests(unittest.TestCase):
         self.assertEqual(collect_twitch_clip_labels._classify_clip_views(5_000)[1], "positive")
         self.assertEqual(collect_twitch_clip_labels._classify_clip_views(20_000)[1], "viral_positive")
 
+    def test_classify_clip_views_uses_vod_relative_ratio_and_creator_density(self) -> None:
+        bucket, label_class, score = collect_twitch_clip_labels._classify_clip_views(
+            180,
+            view_ratio=0.5,
+            unique_creators=0,
+        )
+        self.assertEqual(bucket, "good")
+        self.assertEqual(label_class, "positive")
+        self.assertEqual(score, 0.8)
+
+        self.assertEqual(
+            collect_twitch_clip_labels._classify_clip_views(180, view_ratio=0.06, unique_creators=5)[1],
+            "positive",
+        )
+
     def test_build_label_rows_propagates_vod_duration_seconds(self) -> None:
         vods = [{"id": "1", "duration_seconds": 3600}]
         clips = [
@@ -34,6 +49,72 @@ class TwitchClipLabelsTests(unittest.TestCase):
 
         self.assertTrue(rows)
         self.assertTrue(all(row["vod_duration_seconds"] == 3600 for row in rows))
+
+    def test_collection_input_summary_reports_missing_video_ids(self) -> None:
+        clips = [
+            {
+                "id": "clip-a",
+                "video_id": "",
+                "vod_offset": 120.0,
+                "duration": 24.0,
+                "view_count": 15_000,
+            },
+            {
+                "id": "clip-b",
+                "video_id": "",
+                "vod_offset": 180.0,
+                "duration": 20.0,
+                "view_count": 900,
+            },
+        ]
+
+        summary = collect_twitch_clip_labels._collection_input_summary(
+            broadcaster="jynxzi",
+            date_from="2025-09-29",
+            date_to="2025-09-29",
+            vods=[],
+            clips=clips,
+            labels=[],
+        )
+
+        self.assertEqual(summary["diagnosis"], "clips_seen_but_no_vods")
+        self.assertEqual(summary["clips_seen"], 2)
+        self.assertEqual(summary["clips_without_video_id"], 2)
+        self.assertEqual(summary["clips_with_video_id"], 0)
+        self.assertEqual(summary["vods_seen"], 0)
+        self.assertEqual(summary["labels_built"], 0)
+
+    def test_collection_input_summary_reports_labels_built(self) -> None:
+        vods = [{"id": "1", "duration_seconds": 3600}]
+        clips = [
+            {
+                "id": "clip-a",
+                "video_id": "1",
+                "vod_offset": 120.0,
+                "duration": 24.0,
+                "view_count": 15_000,
+                "created_at": "2025-01-01T00:00:00Z",
+                "url": "https://clips.twitch.tv/A",
+            }
+        ]
+        labels = collect_twitch_clip_labels.build_label_rows("jynxzi", vods, clips)
+
+        summary = collect_twitch_clip_labels._collection_input_summary(
+            broadcaster="jynxzi",
+            date_from="2026-01-01",
+            date_to="2026-01-01",
+            vods=vods,
+            clips=clips,
+            labels=labels,
+        )
+
+        self.assertEqual(summary["diagnosis"], "ok")
+        self.assertEqual(summary["vods_seen"], 1)
+        self.assertEqual(summary["clips_seen"], 1)
+        self.assertEqual(summary["clips_with_video_id"], 1)
+        self.assertEqual(summary["clips_with_matching_vod"], 1)
+        self.assertGreater(summary["labels_built"], 0)
+        self.assertGreater(summary["positive_labels_built"], 0)
 
     def test_merge_clip_regions_merges_overlaps(self) -> None:
         clips = [
@@ -55,6 +136,38 @@ class TwitchClipLabelsTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["label_class"], "viral_positive")
         self.assertEqual(sorted(rows[0]["clip_ids"]), ["a", "b"])
+
+    def test_build_label_rows_adds_proxy_calibration_metadata(self) -> None:
+        vods = [{"id": "1", "duration_seconds": 1200}]
+        clips = [
+            {
+                "id": "clip-a",
+                "video_id": "1",
+                "vod_offset": 100.0,
+                "duration": 30.0,
+                "view_count": 500,
+                "creator_id": "creator-a",
+                "created_at": "2025-01-01T00:00:00Z",
+                "url": "https://clips.twitch.tv/A",
+            },
+            {
+                "id": "clip-b",
+                "video_id": "1",
+                "vod_offset": 112.0,
+                "duration": 22.0,
+                "view_count": 100,
+                "creator_id": "creator-b",
+                "created_at": "2025-01-01T00:01:00Z",
+                "url": "https://clips.twitch.tv/B",
+            },
+        ]
+
+        rows = collect_twitch_clip_labels.build_label_rows("jynxzi", vods, clips)
+        positive = next(row for row in rows if row.get("clip_ids"))
+
+        self.assertEqual(positive["proxy_calibration_version"], "vod_ratio_creator_v1")
+        self.assertGreater(float(positive["view_ratio"]), 0.0)
+        self.assertEqual(positive["unique_creators_in_window"], 2)
 
     def test_merge_clip_regions_does_not_chain_through_padded_gap(self) -> None:
         rows = collect_twitch_clip_labels._merge_clip_regions(
@@ -438,6 +551,37 @@ class TwitchClipLabelsTests(unittest.TestCase):
             loaded = collect_twitch_clip_labels._read_progress_file(path)
 
         self.assertEqual(loaded, payload)
+
+    def test_validated_covered_ranges_do_not_trust_stale_progress_without_labels(self) -> None:
+        covered = [
+            (
+                collect_twitch_clip_labels._parse_cli_date("2026-01-01"),
+                collect_twitch_clip_labels._parse_cli_date("2026-05-05"),
+            )
+        ]
+        existing_rows = [
+            {
+                "broadcaster": "jynxzi",
+                "vod_id": "2761754957",
+                "created_at": "2026-05-01T19:28:29Z",
+            }
+        ]
+
+        validated = collect_twitch_clip_labels._validated_covered_date_ranges(
+            covered,
+            existing_rows,
+            "jynxzi",
+        )
+
+        self.assertEqual(
+            validated,
+            [
+                (
+                    collect_twitch_clip_labels._parse_cli_date("2026-05-01"),
+                    collect_twitch_clip_labels._parse_cli_date("2026-05-01"),
+                )
+            ],
+        )
 
 
 if __name__ == "__main__":

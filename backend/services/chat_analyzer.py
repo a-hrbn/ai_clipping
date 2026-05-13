@@ -193,6 +193,10 @@ class ChatFrame:
     msgs: int = 0                               # total message count
     emote_weight: float = 0.0                   # weighted emote contribution
     categories: dict[str, int] = field(default_factory=dict)
+    ema_fast: float = 0.0
+    ema_slow: float = 0.0
+    rate_derivative: float = 0.0
+    ema_crossing_score: float = 0.0
 
 
 @dataclass
@@ -641,6 +645,21 @@ def download_chat(
         messages, partial, fetch_metadata = _fetch_twitch_rechat(vod_id, job_id, target_offsets=target_offsets)
     except _TwitchRechatUnavailable as exc:
         reason = str(exc) or "missing_rechat"
+        _write_fetch_metadata(
+            out_dir,
+            {
+                "mode": "target_offsets" if normalized_offsets else "crawl",
+                "target_offsets": normalized_offsets,
+                "attempted_offsets": [],
+                "covered_target_offsets": [],
+                "missing_target_offsets": normalized_offsets,
+                "partial": True,
+                "pages": 0,
+                "messages": 0,
+                "unavailable": True,
+                "reason": reason,
+            },
+        )
         logger.info(
             "twitch_chat_download_unavailable job_id=%s vod_id=%s reason=%s",
             job_id,
@@ -669,8 +688,7 @@ def download_chat(
 
     chat_path = out_dir / "chat.twitch_rechat.json"
     chat_path.write_text(json.dumps(messages, ensure_ascii=True), encoding="utf-8")
-    metadata_path = out_dir / "chat.twitch_rechat.fetch_metadata.json"
-    metadata_path.write_text(json.dumps(fetch_metadata, ensure_ascii=True, sort_keys=True), encoding="utf-8")
+    _write_fetch_metadata(out_dir, fetch_metadata)
     first_t = float(messages[0].get("t", 0.0))
     last_t = float(messages[-1].get("t", 0.0))
     logger.info(
@@ -684,6 +702,11 @@ def download_chat(
         partial,
     )
     return chat_path
+
+
+def _write_fetch_metadata(out_dir: pathlib.Path, payload: dict[str, Any]) -> None:
+    metadata_path = out_dir / "chat.twitch_rechat.fetch_metadata.json"
+    metadata_path.write_text(json.dumps(payload, ensure_ascii=True, sort_keys=True), encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -732,7 +755,12 @@ def load_messages(path: pathlib.Path) -> list[dict]:
                 body = str(msg.get("text", ""))
                 raw_emotes = msg.get("emotes", [])
                 emotes = [str(emote) for emote in raw_emotes] if isinstance(raw_emotes, list) else []
-                messages.append({"t": t, "text": body, "emotes": emotes})
+                row = {"t": t, "text": body, "emotes": emotes}
+                if msg.get("id"):
+                    row["id"] = str(msg.get("id"))
+                if msg.get("user"):
+                    row["user"] = str(msg.get("user"))
+                messages.append(row)
                 continue
             try:
                 t = float(msg.get("content_offset_seconds", 0))
@@ -743,7 +771,13 @@ def load_messages(path: pathlib.Path) -> list[dict]:
                 continue
             body = _comment_text(m)
             emotes = _comment_emotes(m)
-            messages.append({"t": t, "text": body, "emotes": emotes})
+            row = {"t": t, "text": body, "emotes": emotes}
+            if msg.get("_id") or msg.get("id"):
+                row["id"] = str(msg.get("_id") or msg.get("id"))
+            commenter = msg.get("commenter") if isinstance(msg.get("commenter"), dict) else {}
+            if commenter.get("display_name") or commenter.get("name"):
+                row["user"] = str(commenter.get("display_name") or commenter.get("name"))
+            messages.append(row)
         return messages
 
     return []
@@ -806,15 +840,15 @@ def build_frames(messages: list[dict]) -> list[ChatFrame]:
     Identical messages within a 1-second window are deduplicated to suppress
     bot spam (e.g. 50 identical "!lurk" lines that would inflate spike scores).
     """
-    # Dedup: drop messages whose exact text appeared in the same second
-    seen: dict[int, set[str]] = {}
+    # Dedup bot replays without collapsing real multi-user emote floods.
+    seen: set[tuple[str, ...]] = set()
     deduped: list[dict] = []
     for msg in messages:
         t_int = int(msg["t"])
-        text = msg.get("text", "")
-        if text and text in seen.get(t_int, set()):
+        key = _chat_dedupe_key(msg, t_int)
+        if key in seen:
             continue
-        seen.setdefault(t_int, set()).add(text)
+        seen.add(key)
         deduped.append(msg)
 
     frames: dict[int, ChatFrame] = {}
@@ -828,7 +862,50 @@ def build_frames(messages: list[dict]) -> list[ChatFrame]:
         f.emote_weight += w
         f.categories[cat] = f.categories.get(cat, 0) + 1
 
-    return sorted(frames.values(), key=lambda f: f.t)
+    sorted_frames = sorted(frames.values(), key=lambda f: f.t)
+    _annotate_chat_ema(sorted_frames)
+    return sorted_frames
+
+
+def _annotate_chat_ema(frames: list[ChatFrame], *, fast_sec: int = 5, slow_sec: int = 30) -> None:
+    if not frames:
+        return
+    frame_map = {int(frame.t): frame for frame in frames}
+    alpha_fast = 2.0 / (max(int(fast_sec), 1) + 1.0)
+    alpha_slow = 2.0 / (max(int(slow_sec), fast_sec + 1) + 1.0)
+    fast = 0.0
+    slow = 0.0
+    prev_fast = 0.0
+    prev_slow = 0.0
+    for second in range(int(frames[0].t), int(frames[-1].t) + 1):
+        frame = frame_map.get(second)
+        rate = float(frame.msgs if frame else 0)
+        prev_fast, prev_slow = fast, slow
+        fast = alpha_fast * rate + (1.0 - alpha_fast) * fast
+        slow = alpha_slow * rate + (1.0 - alpha_slow) * slow
+        if frame is None:
+            continue
+        derivative = max(0.0, fast - prev_fast)
+        crossing_margin = max(0.0, fast - slow)
+        crossing_started = fast > slow and prev_fast <= prev_slow
+        frame.ema_fast = round(fast, 3)
+        frame.ema_slow = round(slow, 3)
+        frame.rate_derivative = round(derivative, 3)
+        frame.ema_crossing_score = round(
+            min(crossing_margin / max(slow, 1.0) + (0.25 if crossing_started else 0.0), 1.0),
+            3,
+        )
+
+
+def _chat_dedupe_key(msg: dict, t_int: int) -> tuple[str, ...]:
+    message_id = str(msg.get("id") or "").strip()
+    if message_id:
+        return ("id", message_id)
+    text = str(msg.get("text") or "")
+    user = str(msg.get("user") or "").strip()
+    if user:
+        return ("user_text", str(t_int), user, text)
+    return ("legacy_text", str(t_int), text)
 
 
 # ---------------------------------------------------------------------------
@@ -1010,6 +1087,15 @@ def _attach_chat_activity(segment: RichSegment, frame_map: dict[int, ChatFrame])
     segment.chat_message_rate = round(message_rate, 3)
     segment.chat_density_score = round(max(density_score, emote_score * 0.75), 3)
     segment.chat_emote_score = round(emote_score, 3)
+    segment.chat_ema_rate = round(max((frame.ema_fast for frame in frames), default=0.0), 3)
+    segment.chat_rate_derivative = round(max((frame.rate_derivative for frame in frames), default=0.0), 3)
+    segment.chat_ema_crossing_score = round(max((frame.ema_crossing_score for frame in frames), default=0.0), 3)
+
+    category_weights = _activity_category_scores(frames)
+    segment.chat_hype_score = round(category_weights["hype"] * segment.chat_density_score, 3)
+    segment.chat_laugh_score = round(category_weights["laugh"] * segment.chat_density_score, 3)
+    segment.chat_shock_score = round(category_weights["shock"] * segment.chat_density_score, 3)
+    segment.chat_sadge_score = round(category_weights["sadge"] * segment.chat_density_score, 3)
 
     dominant_cat = _dominant_activity_category(frames)
     if dominant_cat != "neutral" and max(segment.chat_density_score, segment.chat_emote_score) > 0.05:
@@ -1035,3 +1121,16 @@ def _dominant_activity_category(frames: list[ChatFrame]) -> str:
         return "neutral"
     best = max(categories, key=lambda key: categories[key])
     return best if categories[best] > 0 else "neutral"
+
+
+def _activity_category_scores(frames: list[ChatFrame]) -> dict[str, float]:
+    categories = {"hype": 0.0, "laugh": 0.0, "shock": 0.0, "sadge": 0.0}
+    total = 0.0
+    for frame in frames:
+        for category in categories:
+            count = float(frame.categories.get(category, 0) or 0.0)
+            categories[category] += count
+            total += count
+    if total <= 0.0:
+        return categories
+    return {category: min(value / total, 1.0) for category, value in categories.items()}

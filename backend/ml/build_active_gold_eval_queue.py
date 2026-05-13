@@ -14,6 +14,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from ml import build_gold_eval_queue
+from services import content_buckets
 from services.ranker import Ranker
 from services.timeline_types import CandidateFeatures
 
@@ -46,8 +47,8 @@ def main() -> int:
         default=str(BACKEND_ROOT / "ml" / "artifacts" / "jynxzi_active_gold_eval_queue"),
         help="Output path prefix; writes {out}.csv, {out}.features.jsonl, and {out}.summary.json.",
     )
-    parser.add_argument("--target-size", type=int, default=120)
-    parser.add_argument("--per-vod-limit", type=int, default=12)
+    parser.add_argument("--target-size", type=int, default=50)
+    parser.add_argument("--per-vod-limit", type=int, default=5)
     parser.add_argument("--near-threshold-window", type=float, default=1.25)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
@@ -130,6 +131,7 @@ def _score_rows(
     baseline = Ranker(artifact_dir=artifact_dir, enable_trained_model=False)
     trained = Ranker(artifact_dir=artifact_dir, enable_trained_model=True)
     features = [CandidateFeatures.from_dict({"candidate_id": str(row.get("candidate_id") or "unknown"), **dict(row.get("features") or {})}) for row in rows]
+    bucket_counts = Counter(content_buckets.bucket_from_feature(feature) for feature in features)
     baseline_scores = dict(baseline.score(features, profile))
     trained_details = {str(item["candidate_id"]): item for item in trained.score_details(features, profile)}
     inspection = trained.inspect_artifact(profile)
@@ -137,7 +139,8 @@ def _score_rows(
     threshold = _safe_float((artifact or {}).get("serving_threshold"), 0.0)
 
     scored: list[dict[str, object]] = []
-    for row in rows:
+    for index, row in enumerate(rows):
+        feature = features[index]
         candidate_id = str(row.get("candidate_id") or "")
         detail = trained_details.get(candidate_id, {})
         trained_score = _safe_float(detail.get("score"), 0.0)
@@ -152,12 +155,14 @@ def _score_rows(
             threshold=threshold,
             near_threshold_window=near_threshold_window,
         )
+        content_bucket = content_buckets.bucket_from_feature(feature)
         priority = _priority_score(
             bucket=bucket,
             label=label,
             trained_score=trained_score,
             heuristic_score=heuristic_score,
             threshold=threshold,
+            train_bucket_rows=bucket_counts[content_bucket],
         )
         scored.append(
             {
@@ -171,6 +176,7 @@ def _score_rows(
                 "model_positive": model_positive,
                 "heuristic_positive": heuristic_positive,
                 "priority_score": priority,
+                "content_bucket": content_bucket,
             }
         )
     return scored
@@ -199,20 +205,21 @@ def _active_bucket(
     return "diverse_context"
 
 
-def _priority_score(bucket: str, label: int, trained_score: float, heuristic_score: float, threshold: float) -> float:
-    distance = abs(trained_score - threshold)
-    disagreement = abs(trained_score - heuristic_score)
-    if bucket == "false_negative_proxy":
-        return 100.0 - distance + float(label)
-    if bucket == "false_positive_proxy":
-        return 90.0 + trained_score
-    if bucket == "near_threshold":
-        return 80.0 - distance
-    if bucket == "proxy_positive_review":
-        return 75.0 + trained_score
-    if bucket == "model_heuristic_disagreement":
-        return 70.0 + disagreement
-    return 10.0 + min(max(trained_score, -20.0), 20.0)
+def _priority_score(
+    *,
+    bucket: str,
+    label: int,
+    trained_score: float,
+    heuristic_score: float,
+    threshold: float,
+    train_bucket_rows: int,
+) -> float:
+    del bucket, label
+    denominator = max(abs(threshold), 1.0)
+    uncertainty = max(0.0, 1.0 - abs(trained_score - threshold) / denominator)
+    disagreement = 1.0 if (trained_score >= threshold) != (heuristic_score >= 0.0) else 0.0
+    bucket_undersampled = 1.0 if int(train_bucket_rows) < 50 else 0.0
+    return 0.5 * uncertainty + 0.3 * disagreement + 0.2 * bucket_undersampled
 
 
 def _select_active_rows(
@@ -234,6 +241,7 @@ def _select_active_rows(
     selected: list[dict[str, object]] = []
     selected_keys: set[str] = set()
     vod_counts: Counter[str] = Counter()
+    random_reserve = max(1, int(round(target_size * 0.20)))
 
     def add_item(item: dict[str, object]) -> bool:
         row = item["row"]
@@ -246,8 +254,15 @@ def _select_active_rows(
         vod_counts[vod_id] += 1
         return True
 
+    random_fill = [item for item in shuffled if str(item["active_bucket"]) == "diverse_context"]
+    for item in random_fill:
+        if len(selected) >= random_reserve:
+            break
+        add_item(item)
+
+    quota_target = max(target_size - random_reserve, 1)
     for bucket, weight in _DEFAULT_BUCKET_WEIGHTS.items():
-        quota = max(1, int(round(target_size * weight)))
+        quota = max(1, int(round(quota_target * weight)))
         added = 0
         for item in by_bucket.get(bucket, []):
             if len(selected) >= target_size or added >= quota:
@@ -285,6 +300,7 @@ def _queue_row(item: dict[str, object]) -> dict[str, object]:
         "proxy_label": int(row.get("label", 0) or 0),
         "proxy_label_class": str(row.get("label_class") or ""),
         "candidate_source": str(row.get("candidate_source") or (row.get("features") or {}).get("source") or ""),
+        "content_bucket": str(item.get("content_bucket") or ""),
         "trained_score": round(float(item["trained_score"]), 3),
         "heuristic_score": round(float(item["heuristic_score"]), 3),
         "serving_threshold": round(float(item["serving_threshold"]), 3),
@@ -303,7 +319,7 @@ def _feature_row(item: dict[str, object]) -> dict[str, object]:
     row = item["row"]
     start = _safe_float(row.get("window_start", row.get("final_start")), 0.0)
     end = _safe_float(row.get("window_end", row.get("final_end")), start)
-    return {
+    feature_row = {
         "queue_id": _queue_id(row),
         "job_id": str(row.get("job_id") or ""),
         "candidate_id": str(row.get("candidate_id") or ""),
@@ -317,12 +333,14 @@ def _feature_row(item: dict[str, object]) -> dict[str, object]:
         "trained_rank_score": float(item["trained_score"]),
         "active_bucket": str(item["active_bucket"]),
         "active_reason": str(item["active_reason"]),
+        "content_bucket": str(item.get("content_bucket") or ""),
         "serving_threshold": float(item["serving_threshold"]),
         "score_margin": float(item["score_margin"]),
         "proxy_label": int(row.get("label", 0) or 0),
         "proxy_label_class": str(row.get("label_class") or ""),
         "features": dict(row.get("features") or {}),
     }
+    return feature_row
 
 
 def _active_reason(bucket: str, label: int, model_positive: bool, heuristic_positive: bool) -> str:

@@ -23,6 +23,18 @@ DEFAULT_COMPARE_FEATURES = [
     "hook_strength",
     "chat_activity_coverage",
 ]
+DEFAULT_PENALTY_FEATURES = ["slow_open_penalty", "weak_resolution_penalty", "context_dependency_score"]
+DEFAULT_SCORE_FEATURE_SUFFIXES = ("_score", "_strength", "_coverage", "_peak", "_mean", "_density")
+DEFAULT_NON_TRAINING_FEATURES = frozenset({"candidate_id", "source", "heuristic_score"})
+
+
+def _default_excluded_training_features() -> frozenset[str]:
+    try:
+        from ml import train_ranker
+
+        return DEFAULT_NON_TRAINING_FEATURES | train_ranker.excluded_training_feature_names()
+    except Exception:
+        return DEFAULT_NON_TRAINING_FEATURES
 
 
 def main() -> int:
@@ -42,9 +54,14 @@ def main() -> int:
         default=str(BACKEND_ROOT / "ml" / "artifacts" / "jynxzi_ranker_feature_confounds.json"),
     )
     parser.add_argument(
+        "--audit-json-out",
+        default=str(BACKEND_ROOT / "ml" / "artifacts" / "jynxzi_feature_correlation_audit.json"),
+    )
+    parser.add_argument(
         "--csv-out",
         default=str(BACKEND_ROOT / "ml" / "artifacts" / "jynxzi_ranker_feature_confounds.csv"),
     )
+    parser.add_argument("--fail-threshold", type=float, default=0.85)
     args = parser.parse_args()
 
     report = analyze_confounds(
@@ -52,10 +69,15 @@ def main() -> int:
         feature=args.feature,
         compare_features=[part.strip() for part in args.compare_features.split(",") if part.strip()],
     )
+    audit = analyze_feature_correlation_audit(
+        dataset_path=pathlib.Path(args.dataset),
+        fail_threshold=float(args.fail_threshold),
+    )
     _write_json(pathlib.Path(args.json_out), report)
+    _write_json(pathlib.Path(args.audit_json_out), audit)
     _write_csv(pathlib.Path(args.csv_out), list(report["correlations"]))
     print(json.dumps(report, ensure_ascii=True))
-    return 0
+    return 1 if audit.get("failed") else 0
 
 
 def analyze_confounds(*, dataset_path: pathlib.Path, feature: str, compare_features: list[str]) -> dict[str, object]:
@@ -88,6 +110,68 @@ def analyze_confounds(*, dataset_path: pathlib.Path, feature: str, compare_featu
         "recommendation": recommendation,
         "reason": reason,
     }
+
+
+def analyze_feature_correlation_audit(
+    *,
+    dataset_path: pathlib.Path,
+    fail_threshold: float = 0.85,
+    excluded_feature_names: set[str] | frozenset[str] | None = None,
+) -> dict[str, object]:
+    excluded_feature_names = (
+        _default_excluded_training_features()
+        if excluded_feature_names is None
+        else frozenset(str(name) for name in excluded_feature_names)
+    )
+    rows = _read_jsonl(dataset_path)
+    feature_names = sorted({
+        str(name)
+        for row in rows
+        for name, value in (row.get("features") or {}).items()
+        if name not in excluded_feature_names and isinstance(value, (int, float, bool))
+    })
+    feature_values = {name: [_feature_value(row, name) for row in rows] for name in feature_names}
+    correlations: list[dict[str, object]] = []
+    for index, left in enumerate(feature_names):
+        for right in feature_names[index + 1:]:
+            pearson = _pearson(feature_values[left], feature_values[right])
+            spearman = _spearman(feature_values[left], feature_values[right])
+            max_abs = max(abs(pearson), abs(spearman))
+            if max_abs <= 0:
+                continue
+            correlations.append(
+                {
+                    "left": left,
+                    "right": right,
+                    "pearson": round(pearson, 6),
+                    "spearman": round(spearman, 6),
+                    "max_abs_correlation": round(max_abs, 6),
+                    "penalty_score_pair": _is_penalty_score_pair(left, right),
+                }
+            )
+    correlations.sort(key=lambda item: (float(item["max_abs_correlation"]), str(item["left"]), str(item["right"])), reverse=True)
+    failing = [
+        item for item in correlations
+        if bool(item["penalty_score_pair"]) and float(item["max_abs_correlation"]) > float(fail_threshold)
+    ]
+    return {
+        "dataset": str(dataset_path),
+        "rows": len(rows),
+        "features": len(feature_names),
+        "excluded_features": sorted(excluded_feature_names),
+        "fail_threshold": float(fail_threshold),
+        "failed": bool(failing),
+        "failing_penalty_score_pairs": failing[:20],
+        "top_correlations": correlations[:20],
+    }
+
+
+def _is_penalty_score_pair(left: str, right: str) -> bool:
+    left_is_penalty = left in DEFAULT_PENALTY_FEATURES or left.endswith("_penalty")
+    right_is_penalty = right in DEFAULT_PENALTY_FEATURES or right.endswith("_penalty")
+    left_is_score = left.endswith(DEFAULT_SCORE_FEATURE_SUFFIXES)
+    right_is_score = right.endswith(DEFAULT_SCORE_FEATURE_SUFFIXES)
+    return (left_is_penalty and right_is_score) or (right_is_penalty and left_is_score)
 
 
 def _label_summary(rows: list[dict], feature: str) -> dict[str, dict[str, float]]:
@@ -127,6 +211,27 @@ def _pearson(left: list[float], right: list[float]) -> float:
     if left_var <= 0 or right_var <= 0:
         return 0.0
     return numerator / math.sqrt(left_var * right_var)
+
+
+def _spearman(left: list[float], right: list[float]) -> float:
+    if not left or len(left) != len(right):
+        return 0.0
+    return _pearson(_ranks(left), _ranks(right))
+
+
+def _ranks(values: list[float]) -> list[float]:
+    indexed = sorted(enumerate(values), key=lambda item: item[1])
+    ranks = [0.0 for _ in values]
+    index = 0
+    while index < len(indexed):
+        end = index + 1
+        while end < len(indexed) and indexed[end][1] == indexed[index][1]:
+            end += 1
+        rank = (index + end - 1) / 2.0 + 1.0
+        for original_index, _ in indexed[index:end]:
+            ranks[original_index] = rank
+        index = end
+    return ranks
 
 
 def _percentile(values: list[float], q: float) -> float:

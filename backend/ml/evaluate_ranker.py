@@ -26,33 +26,53 @@ def main() -> int:
     parser.add_argument("--report-out", default="")
     args = parser.parse_args()
 
-    dataset_path = pathlib.Path(args.dataset)
+    report = evaluate_dataset(
+        dataset_path=pathlib.Path(args.dataset),
+        profile=args.profile,
+        artifact_dir=pathlib.Path(args.artifact_dir),
+        top_groups=args.top_groups,
+    )
+    payload = json.dumps(report, ensure_ascii=True)
+    if args.report_out:
+        report_path = pathlib.Path(args.report_out)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(payload, encoding="utf-8")
+    print(payload)
+    return 0
+
+
+def evaluate_dataset(
+    *,
+    dataset_path: pathlib.Path,
+    profile: str,
+    artifact_dir: pathlib.Path,
+    top_groups: int = 5,
+) -> dict[str, object]:
     rows = _read_jsonl(dataset_path)
     if not rows:
-        report = _empty_report(args.profile)
-        payload = json.dumps(report, ensure_ascii=True)
-        if args.report_out:
-            report_path = pathlib.Path(args.report_out)
-            report_path.parent.mkdir(parents=True, exist_ok=True)
-            report_path.write_text(payload, encoding="utf-8")
-        print(payload)
-        return 0
+        return _empty_report(profile)
 
-    baseline_ranker = Ranker(artifact_dir=pathlib.Path(args.artifact_dir), enable_trained_model=False)
-    trained_ranker = Ranker(artifact_dir=pathlib.Path(args.artifact_dir), enable_trained_model=True)
-    artifact_inspection = trained_ranker.inspect_artifact(args.profile)
+    baseline_ranker = Ranker(artifact_dir=artifact_dir, enable_trained_model=False)
+    trained_ranker = Ranker(artifact_dir=artifact_dir, enable_trained_model=True)
+    artifact_inspection = trained_ranker.inspect_artifact(profile)
     raw_artifact = artifact_inspection.get("artifact") if isinstance(artifact_inspection.get("artifact"), dict) else None
     artifact = raw_artifact if artifact_inspection.get("status") == "usable" else None
     features = [CandidateFeatures.from_dict(row["features"]) for row in rows]
-    baseline_scores = {candidate_id: score for candidate_id, score in baseline_ranker.score(features, args.profile)}
-    trained_scores = {candidate_id: score for candidate_id, score in trained_ranker.score(features, args.profile)}
+    baseline_scores = {candidate_id: score for candidate_id, score in baseline_ranker.score(features, profile)}
+    trained_scores = {candidate_id: score for candidate_id, score in trained_ranker.score(features, profile)}
+    forced_scores = _forced_artifact_scores(rows, profile, raw_artifact, artifact_dir=artifact_dir)
 
     split = train_ranker._split_rows(rows)
     groups = train_ranker._ranking_group_labels(rows, split.get("unit", ""))
     labels = train_ranker.np.array([int(row["label"]) for row in rows], dtype=int)
-    baseline_score_array = train_ranker.np.array([float(baseline_scores.get(row["candidate_id"], 0.0)) for row in rows], dtype=float)
-    trained_score_array = train_ranker.np.array([float(trained_scores.get(row["candidate_id"], 0.0)) for row in rows], dtype=float)
+    baseline_score_array = train_ranker.np.array([float(baseline_scores.get(_score_lookup_key(row), 0.0)) for row in rows], dtype=float)
+    trained_score_array = train_ranker.np.array([float(trained_scores.get(_score_lookup_key(row), 0.0)) for row in rows], dtype=float)
+    forced_score_array = train_ranker.np.array(
+        [float(forced_scores.get(_score_lookup_key(row), 0.0)) for row in rows],
+        dtype=float,
+    )
     trained_threshold = train_ranker._artifact_serving_threshold(artifact)
+    forced_threshold = train_ranker._artifact_serving_threshold(raw_artifact)
     baseline_metrics = train_ranker._evaluate_scores(labels, baseline_score_array, score_kind="margin", groups=groups)
     trained_metrics = train_ranker._evaluate_scores(
         labels,
@@ -61,12 +81,32 @@ def main() -> int:
         groups=groups,
         threshold=trained_threshold,
     )
+    forced_metrics = (
+        train_ranker._evaluate_scores(
+            labels,
+            forced_score_array,
+            score_kind="margin",
+            groups=groups,
+            threshold=forced_threshold,
+        )
+        if forced_scores
+        else None
+    )
+    metric_report = {
+        "baseline_heuristic": baseline_metrics,
+        "trained_runtime": trained_metrics,
+        "delta": _metric_delta(trained_metrics, baseline_metrics),
+    }
+    if forced_metrics is not None:
+        metric_report["trained_forced_artifact"] = forced_metrics
+        metric_report["forced_artifact_delta"] = _metric_delta(forced_metrics, baseline_metrics)
+    runtime_fallback_reason = "" if artifact is not None else str(artifact_inspection.get("reason") or "artifact_not_usable")
     report = {
         "artifact": {
             "available": artifact is not None,
             "status": artifact_inspection.get("status", "missing"),
             "reason": artifact_inspection.get("reason", "artifact_file_missing"),
-            "requested_profile": artifact_inspection.get("requested_profile", args.profile),
+            "requested_profile": artifact_inspection.get("requested_profile", profile),
             "resolved_profile": artifact_inspection.get("resolved_profile", ""),
             "source": artifact_inspection.get("source", ""),
             "selected_model": raw_artifact.get("selected_model") if raw_artifact else "",
@@ -76,12 +116,17 @@ def main() -> int:
             "training_stats": raw_artifact.get("training_stats", {}) if raw_artifact else {},
             "validation": raw_artifact.get("validation", {}) if raw_artifact else {},
         },
-        "metrics": {
-            "baseline_heuristic": baseline_metrics,
-            "trained_runtime": trained_metrics,
-            "delta": _metric_delta(trained_metrics, baseline_metrics),
-        },
+        "metrics": metric_report,
         "trained_runtime_uses_artifact": artifact is not None,
+        "trained_forced_artifact_available": forced_metrics is not None,
+        "runtime_fallback_reason": runtime_fallback_reason,
+        "delta_interpretation": (
+            "trained_runtime_matches_baseline_because_artifact_was_rejected; inspect trained_forced_artifact for raw model behavior"
+            if artifact is None and forced_metrics is not None
+            else "trained_runtime_uses_artifact"
+            if artifact is not None
+            else "trained_artifact_unavailable"
+        ),
         "rows": len(rows),
         "positive_rows": sum(1 for row in rows if int(row["label"]) == 1),
         "negative_rows": sum(1 for row in rows if int(row["label"]) == 0),
@@ -90,20 +135,46 @@ def main() -> int:
         "leakage_risk": split.get("leakage_risk", "unknown"),
         "by_label_class": _bucket_metrics(rows, baseline_scores, trained_scores, "label_class", trained_threshold),
         "by_supervision_tier": _bucket_metrics(rows, baseline_scores, trained_scores, "supervision_tier", trained_threshold),
+        "by_auto_outcome_negative_tier": _bucket_metrics(
+            rows,
+            baseline_scores,
+            trained_scores,
+            "auto_outcome_negative_tier",
+            trained_threshold,
+        ),
         "by_platform": _bucket_metrics(rows, baseline_scores, trained_scores, _bucket_key(rows, "platform_bucket", "publish_platform"), trained_threshold),
         "by_gold_holdout_split": _bucket_metrics(rows, baseline_scores, trained_scores, "gold_holdout_split", trained_threshold),
         "by_content_bucket": _bucket_metrics(rows, baseline_scores, trained_scores, "content_bucket", trained_threshold),
         "by_source_bucket": _bucket_metrics(rows, baseline_scores, trained_scores, _bucket_key(rows, "source_bucket", "candidate_source"), trained_threshold),
         "by_variant": _bucket_metrics(rows, baseline_scores, trained_scores, _bucket_key(rows, "variant_bucket", "final_variant_key"), trained_threshold),
-        "top_groups": _group_metrics(rows, baseline_scores, trained_scores, split.get("unit", ""), args.top_groups, trained_threshold),
+        "top_groups": _group_metrics(rows, baseline_scores, trained_scores, split.get("unit", ""), top_groups, trained_threshold),
     }
-    payload = json.dumps(report, ensure_ascii=True)
-    if args.report_out:
-        report_path = pathlib.Path(args.report_out)
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text(payload, encoding="utf-8")
-    print(payload)
-    return 0
+    return report
+
+
+def _forced_artifact_scores(
+    rows: list[dict],
+    profile: str,
+    artifact: dict | None,
+    *,
+    artifact_dir: pathlib.Path,
+) -> dict[str, float]:
+    if not isinstance(artifact, dict):
+        return {}
+    ranker = Ranker(artifact_dir=artifact_dir, enable_trained_model=False)
+    features = [CandidateFeatures.from_dict(row["features"]) for row in rows]
+    heuristic = ranker._heuristic_scores(features, profile)
+    for feature, (heuristic_score, _rationale) in zip(features, heuristic):
+        feature.heuristic_score = float(heuristic_score)
+    trained_scores = ranker._trained_scores(features, artifact)
+    blend = ranker._safe_blend(artifact)
+    return {
+        feature.candidate_id: round(
+            ranker._clamp_score(float(heuristic_score) * (1.0 - blend) + float(trained_score) * blend),
+            3,
+        )
+        for feature, (heuristic_score, _rationale), trained_score in zip(features, heuristic, trained_scores)
+    }
 
 
 def _read_jsonl(path: pathlib.Path) -> list[dict]:
@@ -137,6 +208,7 @@ def _empty_report(profile: str) -> dict[str, object]:
         },
         "metrics": {},
         "trained_runtime_uses_artifact": False,
+        "trained_forced_artifact_available": False,
         "rows": 0,
         "positive_rows": 0,
         "negative_rows": 0,
@@ -145,6 +217,7 @@ def _empty_report(profile: str) -> dict[str, object]:
         "leakage_risk": "unknown",
         "by_label_class": {},
         "by_supervision_tier": {},
+        "by_auto_outcome_negative_tier": {},
         "by_platform": {},
         "by_gold_holdout_split": {},
         "by_content_bucket": {},
@@ -172,8 +245,8 @@ def _bucket_metrics(
     for value in values:
         subset = [row for row in rows if str(row.get(key) or "").strip() == value]
         labels = train_ranker.np.array([int(row["label"]) for row in subset], dtype=int)
-        subset_baseline = train_ranker.np.array([float(baseline_scores.get(row["candidate_id"], 0.0)) for row in subset], dtype=float)
-        subset_trained = train_ranker.np.array([float(trained_scores.get(row["candidate_id"], 0.0)) for row in subset], dtype=float)
+        subset_baseline = train_ranker.np.array([float(baseline_scores.get(_score_lookup_key(row), 0.0)) for row in subset], dtype=float)
+        subset_trained = train_ranker.np.array([float(trained_scores.get(_score_lookup_key(row), 0.0)) for row in subset], dtype=float)
         groups = train_ranker._ranking_group_labels(subset, key if key in {"creator_id", "vod_id", "source_url"} else "")
         baseline_metrics = train_ranker._evaluate_scores(labels, subset_baseline, score_kind="margin", groups=groups)
         trained_metrics = train_ranker._evaluate_scores(
@@ -209,8 +282,8 @@ def _group_metrics(
     summaries: list[dict] = []
     for group, subset in grouped.items():
         labels = train_ranker.np.array([int(row["label"]) for row in subset], dtype=int)
-        subset_baseline = train_ranker.np.array([float(baseline_scores.get(row["candidate_id"], 0.0)) for row in subset], dtype=float)
-        subset_trained = train_ranker.np.array([float(trained_scores.get(row["candidate_id"], 0.0)) for row in subset], dtype=float)
+        subset_baseline = train_ranker.np.array([float(baseline_scores.get(_score_lookup_key(row), 0.0)) for row in subset], dtype=float)
+        subset_trained = train_ranker.np.array([float(trained_scores.get(_score_lookup_key(row), 0.0)) for row in subset], dtype=float)
         groups = train_ranker._ranking_group_labels(subset, unit)
         baseline_metrics = train_ranker._evaluate_scores(labels, subset_baseline, score_kind="margin", groups=groups)
         trained_metrics = train_ranker._evaluate_scores(
@@ -235,6 +308,8 @@ def _group_metrics(
 
 def _metric_delta(current: dict, baseline: dict) -> dict[str, float]:
     tracked = (
+        "classification_threshold",
+        "selected_rate",
         "accuracy",
         "precision",
         "recall",
@@ -250,6 +325,15 @@ def _metric_delta(current: dict, baseline: dict) -> dict[str, float]:
     for key in tracked:
         delta[key] = round(float(current.get(key, 0.0)) - float(baseline.get(key, 0.0)), 3)
     return delta
+
+
+def _score_lookup_key(row: dict) -> str:
+    features = row.get("features")
+    if isinstance(features, dict):
+        feature_candidate_id = str(features.get("candidate_id") or "").strip()
+        if feature_candidate_id:
+            return feature_candidate_id
+    return str(row.get("candidate_id") or "").strip()
 
 
 if __name__ == "__main__":

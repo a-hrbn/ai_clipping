@@ -19,11 +19,15 @@ class _FakeSentenceTransformer:
 class SemanticCandidatesTests(unittest.TestCase):
     def setUp(self) -> None:
         self._previous_model = semantic_candidates._model
+        self._previous_unavailable_reasons = set(semantic_candidates._model_unavailable_logged_reasons)
         semantic_candidates._model = None
+        semantic_candidates._model_unavailable_logged_reasons.clear()
         _FakeSentenceTransformer.calls.clear()
 
     def tearDown(self) -> None:
         semantic_candidates._model = self._previous_model
+        semantic_candidates._model_unavailable_logged_reasons.clear()
+        semantic_candidates._model_unavailable_logged_reasons.update(self._previous_unavailable_reasons)
         _FakeSentenceTransformer.calls.clear()
 
     def test_get_model_prefers_offline_load_when_local_cache_exists(self) -> None:
@@ -43,10 +47,10 @@ class SemanticCandidatesTests(unittest.TestCase):
         self.assertIsInstance(model, _FakeSentenceTransformer)
         _args, kwargs = _FakeSentenceTransformer.calls[-1]
         self.assertTrue(kwargs["local_files_only"])
-        self.assertNotIn("cache_folder", kwargs)
+        self.assertEqual(kwargs["cache_folder"], str(semantic_candidates._sentence_transformer_cache_folder()))
         self.assertEqual(kwargs["device"], "cuda")
 
-    def test_get_model_allows_network_when_local_cache_missing(self) -> None:
+    def test_get_model_fails_open_when_local_cache_missing(self) -> None:
         module = types.ModuleType("sentence_transformers")
         module.SentenceTransformer = _FakeSentenceTransformer
 
@@ -58,13 +62,26 @@ class SemanticCandidatesTests(unittest.TestCase):
                 "_materialize_local_sentence_transformer_model",
                 return_value=None,
             ):
-                model = semantic_candidates._get_model()
+                with self.assertLogs(semantic_candidates.logger, level="WARNING") as logs:
+                    model = semantic_candidates._get_model()
 
-        self.assertIsInstance(model, _FakeSentenceTransformer)
-        _args, kwargs = _FakeSentenceTransformer.calls[-1]
-        self.assertEqual(kwargs["cache_folder"], str(semantic_candidates._sentence_transformer_cache_folder()))
-        self.assertFalse(kwargs["local_files_only"])
-        self.assertEqual(kwargs["device"], "cpu")
+        self.assertIsNone(model)
+        self.assertEqual(_FakeSentenceTransformer.calls, [])
+        self.assertIn("semantic_candidates_model_unavailable", "\n".join(logs.output))
+
+    def test_get_model_logs_missing_local_snapshot_once(self) -> None:
+        with patch.object(
+            semantic_candidates,
+            "_materialize_local_sentence_transformer_model",
+            return_value=None,
+        ):
+            with self.assertLogs(semantic_candidates.logger, level="DEBUG") as logs:
+                self.assertIsNone(semantic_candidates._get_model())
+                self.assertIsNone(semantic_candidates._get_model())
+
+        log_text = "\n".join(logs.output)
+        self.assertEqual(log_text.count("semantic_candidates_model_unavailable model="), 1)
+        self.assertIn("semantic_candidates_model_unavailable_suppressed", log_text)
 
     def test_materializes_local_sentence_transformer_model_from_split_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

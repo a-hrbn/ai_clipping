@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import concurrent.futures
+import pathlib
+import statistics
 import re
 
-from services import chapter_segmenter, clip_similarity, clip_strategy, profile_config, semantic_service, trend_prior, vod_memory
+from config import settings
+from services import boundary_refiner, chapter_segmenter, clip_similarity, clip_strategy, coherence_scorer, game_event_features, hook_rewrite, profile_config, semantic_service, trend_prior, vision_language_features, vod_memory
+from services.game_events import GameEvent
 from services.timeline_types import Candidate, CandidateFeatures, Chapter
 from services.transcriber import RichSegment
 
 _TOKEN_RE = re.compile(r"[a-zA-Z0-9']+")
-FEATURE_BUILD_VERSION = 8
+FEATURE_BUILD_VERSION = 12
 _LLM_SEMANTIC_MAX_WORKERS = 4
 
 
@@ -21,6 +25,8 @@ def build_features(
     llm_provider: str | None = None,
     chapters: list[Chapter] | None = None,
     strategy: dict | None = None,
+    game_events: list[GameEvent] | None = None,
+    video_path: pathlib.Path | None = None,
 ) -> list[CandidateFeatures]:
     resolved_chapters = chapters if chapters is not None else chapter_segmenter.segment_chapters(segments)
     chapter_contexts = _prepare_chapter_contexts(candidates, segments, resolved_chapters)
@@ -41,6 +47,8 @@ def build_features(
         llm_provider=llm_provider,
     )
     normalized_strategy = clip_strategy.normalize_strategy(strategy)
+    vision_scores = vision_language_features.score_candidates(video_path, candidates)
+    boundary_variant_scores = _boundary_variant_scores(candidates, segments, profile)
     return [
         _build_candidate_features(
             candidate,
@@ -54,6 +62,9 @@ def build_features(
             strategy=normalized_strategy,
             window=candidate_windows.get(candidate.id),
             semantic_scores=semantic_scores.get(candidate.id),
+            game_events=game_events or [],
+            vision_scores=vision_scores.get(candidate.id),
+            boundary_scores=boundary_variant_scores.get(candidate.id),
         )
         for candidate in candidates
     ]
@@ -61,6 +72,33 @@ def build_features(
 
 def _candidate_window(candidate: Candidate, segments: list[RichSegment]) -> list[RichSegment]:
     return [seg for seg in segments if seg.end > candidate.start and seg.start < candidate.end]
+
+
+def _boundary_variant_scores(
+    candidates: list[Candidate],
+    segments: list[RichSegment],
+    profile: str,
+) -> dict[str, dict[str, float]]:
+    if not bool(getattr(settings, "enable_boundary_refinement_v2", False)):
+        return {}
+    if not candidates or not segments:
+        return {}
+    scores: dict[str, dict[str, float]] = {}
+    for candidate in candidates:
+        try:
+            pairs = boundary_refiner.build_boundary_pairs(candidate, segments, profile=profile)
+        except Exception:
+            continue
+        if not pairs:
+            continue
+        best = max(float(pair.pair_score) for pair in pairs)
+        baseline = max(0.0, min(1.0, float(candidate.score_hint) / 10.0))
+        scores[candidate.id] = {
+            "boundary_variant_score": max(0.0, min(best, 1.0)),
+            "boundary_variant_margin_score": max(0.0, min(best - baseline, 1.0)),
+            "boundary_variant_count": float(len(pairs)),
+        }
+    return scores
 
 
 def _semantic_scores_for_candidates(
@@ -132,6 +170,9 @@ def _build_candidate_features(
     strategy: dict | None = None,
     window: list[RichSegment] | None = None,
     semantic_scores: dict[str, float] | None = None,
+    game_events: list[GameEvent] | None = None,
+    vision_scores: dict[str, float] | None = None,
+    boundary_scores: dict[str, float] | None = None,
 ) -> CandidateFeatures:
     chapter_context = chapter_context or _empty_chapter_context()
     memory_context = memory_context or _empty_memory_context()
@@ -161,6 +202,9 @@ def _build_candidate_features(
             chat_laugh_score=0.0,
             chat_shock_score=0.0,
             chat_sadge_score=0.0,
+            chat_velocity_score=0.0,
+            chat_rate_derivative_score=0.0,
+            chat_ema_crossing_score=0.0,
             motion_peak=0.0,
             face_reaction_peak=0.0,
             speaker_turns=0,
@@ -216,12 +260,32 @@ def _build_candidate_features(
             outcome_prior_score=0.0,
             visual_hook_score=0.0,
             audio_pop_score=0.0,
+            streamer_shout_score=0.0,
+            voice_energy_burst_score=0.0,
+            pitch_variation_score=0.0,
+            f0_sigma_score=0.0,
+            vad_voice_ratio=0.0,
+            shout_onset_score=0.0,
             event_surprise_score=0.0,
             nonverbal_payoff_score=0.0,
             goal_relevance_score=0.0,
             platform_relevance_score=0.0,
             projected_hook_score=0.0,
             projected_retention_score=0.0,
+            vl_prompt_max_score=0.0,
+            vl_clutch_score=0.0,
+            vl_comedy_score=0.0,
+            vl_reaction_face_score=0.0,
+            vl_scoreboard_score=0.0,
+            judge_score=0.0,
+            judge_confidence=0.0,
+            judge_scroll_stop_power=0.0,
+            judge_standalone_clarity=0.0,
+            judge_payoff_strength=0.0,
+            judge_narrative_completeness=0.0,
+            judge_platform_fit_shortform=0.0,
+            has_judge_score=False,
+            judge_llm_used=False,
             has_llm_semantics=False,
             has_chat_features=False,
             has_vector_similarity=False,
@@ -263,10 +327,11 @@ def _build_candidate_features(
     quoteability_score = sem["quoteability"]
     surprise_score = sem["surprise"]
     contradiction_score = sem["contradiction"]
-    standalone_score = sem["standalone"]
+    coherence = coherence_scorer.score_window(window)
+    standalone_score = max(float(sem["standalone"]), float(coherence["coherence_score"]))
     semantic_density = sem["density"]
     payoff_clarity_score = sem.get("payoff_clarity", 0.0)
-    semantic_context_dependency = sem.get("context_dependency", 0.0)
+    semantic_context_dependency = max(float(sem.get("context_dependency", 0.0)), float(coherence["context_dependency_score"]))
     pre_window = [seg for seg in window if seg.end <= candidate.anchor_time]
     post_window = [seg for seg in window if seg.start >= candidate.anchor_time]
     pre_hook_hype = sum(seg.hype_score for seg in pre_window) / len(pre_window) if pre_window else 0.0
@@ -274,6 +339,16 @@ def _build_candidate_features(
     hype_delta = max_hype - pre_hook_hype
     visual_hook_score = _visual_hook_score(window, candidate.anchor_time)
     audio_pop_score = _audio_pop_score(window, candidate.anchor_time)
+    shout_scores = _streamer_shout_scores(window, candidate.anchor_time)
+    game_scores = game_event_features.features_for_window(game_events or [], start=candidate.start, end=candidate.end)
+    hook_scores = _hook_reranker_scores(window)
+    vl_scores = {**vision_language_features.empty_scores(), **(vision_scores or {})}
+    boundary_set_scores = {
+        "boundary_variant_score": 0.0,
+        "boundary_variant_margin_score": 0.0,
+        "boundary_variant_count": 0.0,
+        **(boundary_scores or {}),
+    }
     event_surprise_score = _event_surprise_score(window)
     nonverbal_payoff_score = _nonverbal_payoff_score(window, candidate.anchor_time)
     local_peak_density = (
@@ -284,18 +359,18 @@ def _build_candidate_features(
     hook_llm = sem.get("hook_strength", hook_heuristic)
     hook_strength = round(0.4 * hook_heuristic + 0.6 * hook_llm, 3)
     slow_open_penalty = _slow_open_penalty(first_segment, hook_delay, hook_strength, window)
-    context_dependency_score = _context_dependency_score(
+    context_dependency_score = max(float(coherence["context_dependency_score"]), _context_dependency_score(
         window,
         hook_delay,
         standalone_score,
         semantic_context_dependency,
-    )
-    weak_resolution_penalty = _weak_resolution_penalty(
+    ))
+    weak_resolution_penalty = max(float(coherence["weak_resolution_penalty"]), _weak_resolution_penalty(
         window,
         payoff_score,
         payoff_clarity_score,
         post_hook_hype,
-    )
+    ))
     profile_fit_score = _profile_fit_score(
         candidate.source,
         chat_peak,
@@ -348,6 +423,15 @@ def _build_candidate_features(
             "similarity_margin",
             "neighbor_quality_score",
         )
+    ) or any(
+        abs(float(vl_scores.get(name, 0.0) or 0.0)) > 1e-9
+        for name in (
+            "vl_prompt_max_score",
+            "vl_clutch_score",
+            "vl_comedy_score",
+            "vl_reaction_face_score",
+            "vl_scoreboard_score",
+        )
     )
 
     return CandidateFeatures.create(
@@ -373,6 +457,9 @@ def _build_candidate_features(
         chat_laugh_score=round(chat_stats["laugh"], 3),
         chat_shock_score=round(chat_stats["shock"], 3),
         chat_sadge_score=round(chat_stats["sadge"], 3),
+        chat_velocity_score=round(chat_stats["velocity"], 3),
+        chat_rate_derivative_score=round(chat_stats["rate_derivative"], 3),
+        chat_ema_crossing_score=round(chat_stats["ema_crossing"], 3),
         motion_peak=round(motion_peak, 3),
         face_reaction_peak=round(face_reaction_peak, 3),
         speaker_turns=speaker_turns,
@@ -428,12 +515,42 @@ def _build_candidate_features(
         outcome_prior_score=float(trend_scores.get("outcome_prior_score", 0.0)),
         visual_hook_score=round(visual_hook_score, 3),
         audio_pop_score=round(audio_pop_score, 3),
+        streamer_shout_score=round(shout_scores["shout"], 3),
+        voice_energy_burst_score=round(shout_scores["voice_energy"], 3),
+        pitch_variation_score=round(shout_scores["pitch_variation"], 3),
+        f0_sigma_score=round(shout_scores["f0_sigma"], 3),
+        vad_voice_ratio=round(shout_scores["vad_voice_ratio"], 3),
+        shout_onset_score=round(shout_scores["onset"], 3),
         event_surprise_score=round(event_surprise_score, 3),
         nonverbal_payoff_score=round(nonverbal_payoff_score, 3),
         goal_relevance_score=round(goal_relevance_score, 3),
         platform_relevance_score=round(platform_relevance_score, 3),
         projected_hook_score=round(projected_hook_score, 3),
         projected_retention_score=round(projected_retention_score, 3),
+        vl_prompt_max_score=round(float(vl_scores.get("vl_prompt_max_score", 0.0) or 0.0), 3),
+        vl_clutch_score=round(float(vl_scores.get("vl_clutch_score", 0.0) or 0.0), 3),
+        vl_comedy_score=round(float(vl_scores.get("vl_comedy_score", 0.0) or 0.0), 3),
+        vl_reaction_face_score=round(float(vl_scores.get("vl_reaction_face_score", 0.0) or 0.0), 3),
+        vl_scoreboard_score=round(float(vl_scores.get("vl_scoreboard_score", 0.0) or 0.0), 3),
+        game_event_score=round(float(game_scores.get("game_event_score", 0.0) or 0.0), 3),
+        kill_density_in_window=round(float(game_scores.get("kill_density_in_window", 0.0) or 0.0), 4),
+        is_clutch_window=bool(game_scores.get("is_clutch_window", False)),
+        is_match_endpoint=bool(game_scores.get("is_match_endpoint", False)),
+        boundary_variant_score=round(float(boundary_set_scores.get("boundary_variant_score", 0.0) or 0.0), 3),
+        boundary_variant_margin_score=round(float(boundary_set_scores.get("boundary_variant_margin_score", 0.0) or 0.0), 3),
+        boundary_variant_count=round(float(boundary_set_scores.get("boundary_variant_count", 0.0) or 0.0), 3),
+        hook_rewrite_score=round(hook_scores["hook_rewrite_score"], 3),
+        hook_curiosity_gap_score=round(hook_scores["hook_curiosity_gap_score"], 3),
+        has_hook_rewrite=bool(hook_scores["has_hook_rewrite"]),
+        judge_score=0.0,
+        judge_confidence=0.0,
+        judge_scroll_stop_power=0.0,
+        judge_standalone_clarity=0.0,
+        judge_payoff_strength=0.0,
+        judge_narrative_completeness=0.0,
+        judge_platform_fit_shortform=0.0,
+        has_judge_score=False,
+        judge_llm_used=False,
         has_llm_semantics=bool(sem.get("llm_used", False)),
         has_chat_features=has_chat_features,
         has_vector_similarity=has_vector_similarity,
@@ -463,6 +580,9 @@ def _chat_window_stats(window: list[RichSegment], candidate: Candidate) -> dict[
             "laugh": 0.0,
             "shock": 0.0,
             "sadge": 0.0,
+            "velocity": 0.0,
+            "rate_derivative": 0.0,
+            "ema_crossing": 0.0,
         }
 
     early_end = min(candidate.end, candidate.start + 5.0)
@@ -507,6 +627,9 @@ def _chat_window_stats(window: list[RichSegment], candidate: Candidate) -> dict[
         "laugh": _chat_category_peak(window, "laugh"),
         "shock": _chat_category_peak(window, "shock"),
         "sadge": _chat_category_peak(window, "sadge"),
+        "velocity": _chat_velocity_score(message_rates, scores),
+        "rate_derivative": _chat_derivative_score(window, message_rates),
+        "ema_crossing": _chat_ema_crossing_score(window, scores),
     }
 
 
@@ -517,6 +640,16 @@ def _chat_activity_score(segment: RichSegment) -> float:
 
 
 def _chat_category_peak(window: list[RichSegment], category: str) -> float:
+    attr_name = f"chat_{category}_score"
+    numeric_peak = max(
+        (
+            max(0.0, float(getattr(seg, attr_name, 0.0) or 0.0))
+            for seg in window
+        ),
+        default=0.0,
+    )
+    if numeric_peak > 0.0:
+        return min(numeric_peak, 1.0)
     tag = f"chat_{category}"
     return max(
         (
@@ -525,6 +658,65 @@ def _chat_category_peak(window: list[RichSegment], category: str) -> float:
             if tag in (getattr(seg, "emotions", []) or [])
         ),
         default=0.0,
+    )
+
+
+def _chat_velocity_score(message_rates: list[float], activity_scores: list[float]) -> float:
+    if len(message_rates) < 2:
+        return 0.0
+    rate_delta = max(
+        (
+            max(0.0, right - left)
+            for left, right in zip(message_rates, message_rates[1:], strict=False)
+        ),
+        default=0.0,
+    )
+    activity_delta = max(
+        (
+            max(0.0, right - left)
+            for left, right in zip(activity_scores, activity_scores[1:], strict=False)
+        ),
+        default=0.0,
+    )
+    return _clamp01(max(rate_delta / 8.0, activity_delta))
+
+
+def _chat_derivative_score(window: list[RichSegment], message_rates: list[float]) -> float:
+    segment_derivative = max(
+        (
+            max(0.0, float(getattr(seg, "chat_rate_derivative", 0.0) or 0.0))
+            for seg in window
+        ),
+        default=0.0,
+    )
+    raw_rate_delta = max(
+        (
+            max(0.0, right - left)
+            for left, right in zip(message_rates, message_rates[1:], strict=False)
+        ),
+        default=0.0,
+    )
+    return _clamp01(max(segment_derivative / 4.0, raw_rate_delta / 8.0))
+
+
+def _chat_ema_crossing_score(window: list[RichSegment], activity_scores: list[float]) -> float:
+    crossing = max(
+        (
+            max(0.0, float(getattr(seg, "chat_ema_crossing_score", 0.0) or 0.0))
+            for seg in window
+        ),
+        default=0.0,
+    )
+    if crossing > 0.0:
+        return _clamp01(crossing)
+    return _clamp01(
+        max(
+            (
+                max(0.0, right - left)
+                for left, right in zip(activity_scores, activity_scores[1:], strict=False)
+            ),
+            default=0.0,
+        )
     )
 
 
@@ -575,6 +767,126 @@ def _audio_pop_score(window: list[RichSegment], anchor_time: float) -> float:
         if seg.hype_score >= 4.0:
             score += 0.12
     return _clamp01(score)
+
+
+def _streamer_shout_scores(window: list[RichSegment], anchor_time: float) -> dict[str, float]:
+    early = [seg for seg in window if seg.end <= anchor_time + 2.0] or window[:2]
+    empty = {
+        "shout": 0.0,
+        "voice_energy": 0.0,
+        "pitch_variation": 0.0,
+        "f0_sigma": 0.0,
+        "vad_voice_ratio": 0.0,
+        "onset": 0.0,
+    }
+    if not early:
+        return empty
+
+    known_speaker_segments = [
+        seg for seg in early
+        if str(getattr(seg, "speaker", "")).strip().upper() not in {"", "UNKNOWN"}
+    ]
+    streamer_segments = [
+        seg for seg in known_speaker_segments
+        if str(getattr(seg, "speaker", "")).strip().upper() == "STREAMER"
+    ]
+    if known_speaker_segments and not streamer_segments:
+        return empty
+    speaker_segments = streamer_segments or early
+    voiced = [
+        seg for seg in speaker_segments
+        if str(getattr(seg, "text", "") or "").strip()
+        and float(getattr(seg, "max_rms_db", 0.0) or 0.0) < 0.0
+        and (
+            float(getattr(seg, "max_pitch_hz", 0.0) or 0.0) > 0.0
+            or float(getattr(seg, "max_onset_rate", 0.0) or 0.0) > 0.0
+        )
+    ]
+    if not voiced:
+        return empty
+
+    rms_values = [float(getattr(seg, "max_rms_db", 0.0) or 0.0) for seg in voiced]
+    rms_burst_values = [float(getattr(seg, "rms_burst_score", 0.0) or 0.0) for seg in voiced]
+    pitch_values = [
+        float(getattr(seg, "max_pitch_hz", 0.0) or 0.0)
+        for seg in voiced
+        if float(getattr(seg, "max_pitch_hz", 0.0) or 0.0) > 0.0
+    ]
+    pitch_std_values = [
+        float(getattr(seg, "pitch_std_hz", 0.0) or 0.0)
+        for seg in voiced
+        if float(getattr(seg, "pitch_std_hz", 0.0) or 0.0) > 0.0
+    ]
+    onset_values = [float(getattr(seg, "max_onset_rate", 0.0) or 0.0) for seg in voiced]
+    voice_ratios = [float(getattr(seg, "voice_activity_score", 0.0) or 0.0) for seg in speaker_segments]
+
+    peak_rms = max(rms_values, default=-60.0)
+    local_rms_baseline = statistics.median(rms_values) if rms_values else -60.0
+    relative_rms_burst = _clamp01((peak_rms - local_rms_baseline) / 8.0)
+    absolute_voice_energy = _clamp01((peak_rms + 34.0) / 22.0)
+    voice_energy = max(absolute_voice_energy, relative_rms_burst, max(rms_burst_values, default=0.0))
+    onset_score = _clamp01(max(onset_values, default=0.0) / 8.0)
+    f0_sigma_score = _clamp01(max(pitch_std_values, default=0.0) / 180.0)
+    vad_voice_ratio = _clamp01(statistics.fmean(voice_ratios) if voice_ratios else len(voiced) / max(len(speaker_segments), 1))
+    if len(pitch_values) >= 2:
+        pitch_std = statistics.pstdev(pitch_values)
+        pitch_mean = max(statistics.fmean(pitch_values), 1.0)
+        pitch_variation = max(_clamp01((pitch_std / pitch_mean) * 4.0), f0_sigma_score)
+    elif pitch_values:
+        pitch_variation = max(_clamp01(max(pitch_values) / 650.0), f0_sigma_score)
+    else:
+        pitch_variation = f0_sigma_score
+
+    tag_bonus = 0.0
+    if any("energy_burst" in (getattr(seg, "emotions", []) or []) for seg in voiced):
+        tag_bonus += 0.15
+    if any("pitch_spike" in (getattr(seg, "emotions", []) or []) for seg in voiced):
+        tag_bonus += 0.15
+    shout = _clamp01(
+        0.38 * voice_energy
+        + 0.28 * pitch_variation
+        + 0.16 * f0_sigma_score
+        + 0.12 * onset_score
+        + 0.06 * vad_voice_ratio
+        + tag_bonus
+    )
+    return {
+        "shout": shout,
+        "voice_energy": voice_energy,
+        "pitch_variation": pitch_variation,
+        "f0_sigma": f0_sigma_score,
+        "vad_voice_ratio": vad_voice_ratio,
+        "onset": onset_score,
+    }
+
+
+def _hook_reranker_scores(window: list[RichSegment]) -> dict[str, float | bool]:
+    if not bool(getattr(settings, "enable_hook_subclassifier", False)) or not window:
+        return {
+            "hook_rewrite_score": 0.0,
+            "hook_curiosity_gap_score": 0.0,
+            "has_hook_rewrite": False,
+        }
+    opening_text = " ".join(seg.text.strip() for seg in window[:2] if seg.text.strip())
+    if not opening_text:
+        return {
+            "hook_rewrite_score": 0.0,
+            "hook_curiosity_gap_score": 0.0,
+            "has_hook_rewrite": False,
+        }
+    try:
+        payload = hook_rewrite.score_hook(opening_text)
+    except Exception:
+        return {
+            "hook_rewrite_score": 0.0,
+            "hook_curiosity_gap_score": 0.0,
+            "has_hook_rewrite": False,
+        }
+    return {
+        "hook_rewrite_score": _clamp01(float(payload.get("score", 0.0) or 0.0) / 10.0),
+        "hook_curiosity_gap_score": _clamp01(float(payload.get("gap", 0.0) or 0.0) / 10.0),
+        "has_hook_rewrite": True,
+    }
 
 
 def _event_surprise_score(window: list[RichSegment]) -> float:

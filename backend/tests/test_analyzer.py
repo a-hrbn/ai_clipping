@@ -8,7 +8,7 @@ sys.modules.setdefault("ollama", types.SimpleNamespace(Client=object))
 sys.modules.setdefault("whisper", types.SimpleNamespace(load_model=lambda *_args, **_kwargs: None))
 
 from services import analyzer
-from services.timeline_types import Candidate, CandidateFeatures, JudgeResult, RankedCandidate
+from services.timeline_types import BoundaryPair, Candidate, CandidateFeatures, JudgeResult, RankedCandidate
 from services.transcriber import RichSegment
 
 
@@ -117,6 +117,46 @@ class AnalyzerValidationTests(unittest.TestCase):
         self.assertEqual(moments[0]["start_time"], 2.0)
         self.assertEqual(moments[0]["end_time"], 10.0)
         self.assertIn("closure", moments[0]["reason"])
+
+    def test_boundary_variant_set_reranks_by_best_pair_score(self) -> None:
+        segments = [RichSegment(start=0.0, end=10.0, text="No way!", speaker="STREAMER", hype_score=5.0)]
+        low = RankedCandidate(
+            candidate=Candidate(id="low", start=0.0, end=10.0, source="reaction", anchor_time=5.0),
+            features=None,
+            rank_score=6.0,
+            rationale=[],
+        )
+        high = RankedCandidate(
+            candidate=Candidate(id="high", start=20.0, end=30.0, source="reaction", anchor_time=25.0),
+            features=None,
+            rank_score=5.5,
+            rationale=[],
+        )
+
+        def fake_refine(ranked, _segments, profile="general"):
+            pair_score = 0.1 if ranked.candidate.id == "low" else 0.9
+            pair = BoundaryPair(
+                id=f"pair-{ranked.candidate.id}",
+                candidate_id=ranked.candidate.id,
+                start_boundary_id="s",
+                end_boundary_id="e",
+                start_time=ranked.candidate.start,
+                end_time=ranked.candidate.end,
+                duration=10.0,
+                pair_score=pair_score,
+                start_score=pair_score,
+                end_score=pair_score,
+                hook_score=pair_score,
+                payoff_score=pair_score,
+                narrative_score=pair_score,
+            )
+            return pair, [pair]
+
+        with patch.object(analyzer.boundary_refiner, "refine_candidate_boundaries", side_effect=fake_refine):
+            reranked = analyzer._rerank_by_boundary_variant_set([low, high], segments, "general", limit=2)
+
+        self.assertEqual(reranked[0].candidate.id, "high")
+        self.assertIn("boundary_variant_set_max", reranked[0].rationale)
 
     def test_refine_candidates_v2_pair_rerank_does_not_call_legacy_timestamp_llm(self) -> None:
         segments = [

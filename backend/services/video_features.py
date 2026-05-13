@@ -49,6 +49,13 @@ logger = logging.getLogger(__name__)
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _configure_opencv_capture_env() -> None:
     # OpenCV/FFmpeg may otherwise try implicit hardware decode paths that fail
     # on AV1 sources in environments without supported video decode hardware.
@@ -68,6 +75,7 @@ _DEEPFACE_MODEL_READY = False
 _DEEPFACE_WARMUP_ATTEMPTED = False
 _DEEPFACE_INIT_LOCK = threading.Lock()
 _FFMPEG_FRAME_DECODE_CODECS = {"av1", "h264", "avc1", "hevc", "h265", "mpeg4"}
+_FACE_DETECTION_DISABLED = _env_flag("AI_CLIPPING_DISABLE_FACE_DETECTION")
 
 # ---------------------------------------------------------------------------
 # Optional dependency guards
@@ -88,49 +96,63 @@ _MP_IMAGE = None
 _MP_IMAGE_FORMAT = None
 
 
-try:
-    import mediapipe as mp
-    if hasattr(mp, "solutions"):
-        _MP_FACE_DETECTION = mp.solutions.face_detection.FaceDetection(
-            model_selection=0, min_detection_confidence=0.5
-        )
-        _MEDIAPIPE_STATUS = "solutions_face_detection"
-        _MEDIAPIPE_DETAIL = "model_selection=0"
-    else:
-        from mediapipe.tasks.python.core.base_options import BaseOptions
-        from mediapipe.tasks.python.vision import FaceDetector, FaceDetectorOptions
-
-        _MP_IMAGE = mp.Image
-        _MP_IMAGE_FORMAT = mp.ImageFormat
-        _MODEL_PATH = pathlib.Path(__file__).resolve().parents[1] / "face_detection_short_range.tflite"
-        if _MODEL_PATH.exists():
-            _MP_TASKS_FACE_DETECTOR = FaceDetector.create_from_options(
-                FaceDetectorOptions(
-                    base_options=BaseOptions(
-                        model_asset_path=str(_MODEL_PATH),
-                        delegate=BaseOptions.Delegate.CPU,
-                    ),
-                    min_detection_confidence=0.5,
-                )
+if _FACE_DETECTION_DISABLED:
+    _MEDIAPIPE_STATUS = "disabled"
+    _MEDIAPIPE_DETAIL = "AI_CLIPPING_DISABLE_FACE_DETECTION=1"
+else:
+    try:
+        import mediapipe as mp
+        if hasattr(mp, "solutions"):
+            _MP_FACE_DETECTION = mp.solutions.face_detection.FaceDetection(
+                model_selection=0, min_detection_confidence=0.5
             )
-            _MEDIAPIPE_STATUS = "tasks_face_detector"
-            _MEDIAPIPE_DETAIL = f"model_asset_path={_MODEL_PATH.name}"
+            _MEDIAPIPE_STATUS = "solutions_face_detection"
+            _MEDIAPIPE_DETAIL = "model_selection=0"
         else:
-            raise FileNotFoundError(f"MediaPipe face model missing: {_MODEL_PATH}")
-except Exception as e:
-    _MEDIAPIPE_DETAIL = str(e)
+            from mediapipe.tasks.python.core.base_options import BaseOptions
+            from mediapipe.tasks.python.vision import FaceDetector, FaceDetectorOptions
+
+            _MP_IMAGE = mp.Image
+            _MP_IMAGE_FORMAT = mp.ImageFormat
+            _MODEL_PATH = pathlib.Path(__file__).resolve().parents[1] / "face_detection_short_range.tflite"
+            if _MODEL_PATH.exists():
+                _MP_TASKS_FACE_DETECTOR = FaceDetector.create_from_options(
+                    FaceDetectorOptions(
+                        base_options=BaseOptions(
+                            model_asset_path=str(_MODEL_PATH),
+                            delegate=BaseOptions.Delegate.CPU,
+                        ),
+                        min_detection_confidence=0.5,
+                    )
+                )
+                _MEDIAPIPE_STATUS = "tasks_face_detector"
+                _MEDIAPIPE_DETAIL = f"model_asset_path={_MODEL_PATH.name}"
+            else:
+                raise FileNotFoundError(f"MediaPipe face model missing: {_MODEL_PATH}")
+    except Exception as e:
+        _MEDIAPIPE_DETAIL = str(e)
 
 _MTCNN_DETECTOR = None
-try:
-    from mtcnn import MTCNN
-    _MTCNN_DETECTOR = MTCNN()
-    _MTCNN_STATUS = "available"
-    _MTCNN_DETAIL = "mtcnn"
-except Exception as e:
-    _MTCNN_DETAIL = str(e)
+if _FACE_DETECTION_DISABLED:
+    _MTCNN_STATUS = "disabled"
+    _MTCNN_DETAIL = "AI_CLIPPING_DISABLE_FACE_DETECTION=1"
+else:
+    try:
+        from mtcnn import MTCNN
+        _MTCNN_DETECTOR = MTCNN()
+        _MTCNN_STATUS = "available"
+        _MTCNN_DETAIL = "mtcnn"
+    except Exception as e:
+        _MTCNN_DETAIL = str(e)
 
 _FACE_CASCADE: "cv2.CascadeClassifier | None" = None
-if _MP_FACE_DETECTION is None and _MP_TASKS_FACE_DETECTOR is None and _MTCNN_DETECTOR is None and _CV2_AVAILABLE:
+if (
+    not _FACE_DETECTION_DISABLED
+    and _MP_FACE_DETECTION is None
+    and _MP_TASKS_FACE_DETECTOR is None
+    and _MTCNN_DETECTOR is None
+    and _CV2_AVAILABLE
+):
     try:
         _cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
         _FACE_CASCADE = cv2.CascadeClassifier(_cascade_path)
@@ -140,14 +162,19 @@ if _MP_FACE_DETECTION is None and _MP_TASKS_FACE_DETECTOR is None and _MTCNN_DET
     except Exception as e:
         print(f"[video_features] WARNING: face cascade init failed: {e}", file=sys.stderr)
 
-try:
-    from deepface import DeepFace
-    _DEEPFACE_AVAILABLE = True
-    _DEEPFACE_STATUS = "available"
-    _DEEPFACE_DETAIL = "detector_backend=opencv"
-except Exception:
+if _FACE_DETECTION_DISABLED:
     _DEEPFACE_AVAILABLE = False
-    _DEEPFACE_DETAIL = "not installed or failed to load"
+    _DEEPFACE_STATUS = "disabled"
+    _DEEPFACE_DETAIL = "AI_CLIPPING_DISABLE_FACE_DETECTION=1"
+else:
+    try:
+        from deepface import DeepFace
+        _DEEPFACE_AVAILABLE = True
+        _DEEPFACE_STATUS = "available"
+        _DEEPFACE_DETAIL = "detector_backend=opencv"
+    except Exception:
+        _DEEPFACE_AVAILABLE = False
+        _DEEPFACE_DETAIL = "not installed or failed to load"
 
 
 def _deepface_reaction_prob(result: object) -> float | None:

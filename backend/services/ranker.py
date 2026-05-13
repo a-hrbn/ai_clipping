@@ -11,7 +11,7 @@ except ModuleNotFoundError:  # pragma: no cover - optional when only heuristic/l
     joblib = None
 
 from config import settings
-from services import clip_strategy, profile_config, semantic_service
+from services import clip_strategy, content_buckets, profile_config, semantic_service
 from services.timeline_types import CandidateFeatures
 
 
@@ -19,23 +19,27 @@ _DEFAULT_ARTIFACT_DIR = pathlib.Path(__file__).resolve().parents[1] / "ml" / "ar
 _MIN_TRAINING_ROWS = 50
 _MIN_POSITIVE_ROWS = 15
 _MIN_NEGATIVE_ROWS = 15
-_MIN_VALIDATION_ACCURACY = 0.60
+_MIN_VALIDATION_ACCURACY_FLOOR = 0.55
 _MIN_VALIDATION_NDCG_AT_5 = 0.70
 _MIN_VALIDATION_PRECISION_AT_5 = 0.60
 _MIN_VALIDATION_PRIMARY_RANKING_METRIC = 0.60
+_MIN_FILTER_PRECISION = 0.50
+_MIN_FILTER_RECALL = 0.65
+_MIN_FILTER_F1 = 0.55
+_MAX_FILTER_SELECTED_RATE = 0.75
 _MAX_NORMALIZED_ABS = 4.0
 _MAX_ML_ABS_SCORE = 12.0
 _MIN_BLEND = 0.0
 _MAX_BLEND = 0.65
+_STANDALONE_HARD_FILTER_MAX_SCORE = 3.0
+_STANDALONE_HARD_FILTER_MIN_STANDALONE = 0.25
+_STANDALONE_HARD_FILTER_CONTEXT_DEPENDENCY = 0.75
 OFFLINE_ONLY_FEATURE_NAMES = {
     "vod_progress",
     "boundary_left_context_sec",
     "boundary_right_context_sec",
     "neighbor_positive_density",
     "clip_overlap_count",
-    "has_llm_semantics",
-    "has_chat_features",
-    "has_vector_similarity",
     "feature_build_version",
 }
 logger = logging.getLogger(__name__)
@@ -74,7 +78,9 @@ class Ranker:
         artifact = self._load_artifact(profile)
         if artifact is None:
             return [
-                {
+                self._apply_serving_reranker_stages(
+                    feature,
+                    {
                     "candidate_id": feature.candidate_id,
                     "score": score,
                     "heuristic_score": score,
@@ -82,7 +88,8 @@ class Ranker:
                     "blend": 0.0,
                     "trained_model_used": False,
                     "rationale": list(rationale),
-                }
+                    },
+                )
                 for feature, (score, rationale) in zip(features, heuristic)
             ]
 
@@ -92,26 +99,96 @@ class Ranker:
             feature.heuristic_score = float(heur_score)
         trained_scores = self._trained_scores(features, artifact)
         blend = self._safe_blend(artifact)
-        serving_threshold = self._safe_serving_threshold(artifact)
+        score_mode = str(artifact.get("score_mode") or "absolute").strip().lower()
         merged: list[dict[str, object]] = []
         for feature, (heur_score, rationale), trained_score in zip(features, heuristic, trained_scores):
-            score = round(self._clamp_score(heur_score * (1.0 - blend) + trained_score * blend), 3)
+            bucket = content_buckets.bucket_from_feature(feature)
+            bucket_model = self._bucket_model(artifact, bucket)
+            serving_threshold = self._safe_serving_threshold(artifact, bucket=bucket)
+            if bucket_model == "fallback_heuristic":
+                raw_score = float(heur_score)
+                effective_blend = 0.0
+                trained_used = False
+            elif score_mode == "pairwise_median":
+                raw_score = float(trained_score)
+                effective_blend = 0.0
+                trained_used = True
+            else:
+                raw_score = float(heur_score) * (1.0 - blend) + float(trained_score) * blend
+                effective_blend = blend
+                trained_used = True
+            score = round(self._clamp_score(raw_score), 3)
             enriched = list(rationale)
-            enriched.append("ml_ranked")
+            enriched.append("heuristic_bucket_fallback" if bucket_model == "fallback_heuristic" else "ml_ranked")
             merged.append(
-                {
+                self._apply_serving_reranker_stages(
+                    feature,
+                    {
                     "candidate_id": feature.candidate_id,
                     "score": score,
+                    "content_bucket": bucket,
+                    "bucket_model": bucket_model,
                     "heuristic_score": round(float(heur_score), 3),
                     "trained_score": round(float(trained_score), 3),
-                    "blend": round(float(blend), 3),
+                    "blend": round(float(effective_blend), 3),
                     "serving_threshold": round(float(serving_threshold), 6),
                     "passes_serving_threshold": score >= serving_threshold,
-                    "trained_model_used": True,
+                    "trained_model_used": trained_used,
                     "rationale": enriched,
-                }
+                    },
+                )
             )
         return merged
+
+    def _apply_hook_reranker_stage(
+        self,
+        feature: CandidateFeatures,
+        item: dict[str, object],
+    ) -> dict[str, object]:
+        if not feature.has_hook_rewrite:
+            return item
+        hook_score = max(float(feature.hook_rewrite_score), float(feature.hook_curiosity_gap_score))
+        score = float(item["score"])
+        rationale = list(item.get("rationale") or [])
+        if hook_score >= 0.75:
+            score += 0.65
+            rationale.append("hook_reranker_boost")
+        elif hook_score <= 0.25 and feature.hook_delay_sec > 2.0:
+            score -= 0.75
+            rationale.append("hook_reranker_penalty")
+        item["score"] = round(self._clamp_score(score), 3)
+        item["hook_reranker_score"] = round(hook_score, 3)
+        item["rationale"] = rationale
+        return item
+
+    def _apply_boundary_variant_set_stage(
+        self,
+        feature: CandidateFeatures,
+        item: dict[str, object],
+    ) -> dict[str, object]:
+        variant_score = max(0.0, min(float(feature.boundary_variant_score), 1.0))
+        if variant_score <= 0.0:
+            return item
+        margin_score = max(0.0, min(float(feature.boundary_variant_margin_score), 1.0))
+        count = max(0.0, float(feature.boundary_variant_count))
+        set_depth_bonus = min(count / 24.0, 1.0) * 0.15
+        score_delta = variant_score * 0.55 + margin_score * 0.35 + set_depth_bonus
+        score = float(item["score"]) + score_delta
+        rationale = list(item.get("rationale") or [])
+        rationale.append("boundary_variant_set_max")
+        item["score"] = round(self._clamp_score(score), 3)
+        item["boundary_variant_set_score"] = round(variant_score, 3)
+        item["boundary_variant_set_margin"] = round(margin_score, 3)
+        item["rationale"] = rationale
+        return item
+
+    def _apply_serving_reranker_stages(
+        self,
+        feature: CandidateFeatures,
+        item: dict[str, object],
+    ) -> dict[str, object]:
+        item = self._apply_boundary_variant_set_stage(feature, item)
+        return self._apply_hook_reranker_stage(feature, item)
 
     def _heuristic_scores(
         self,
@@ -129,10 +206,19 @@ class Ranker:
             visual_reaction = max(feature.motion_peak, feature.face_reaction_peak) * 10.0
             visual_hook_score = feature.visual_hook_score * 10.0
             audio_pop_score = feature.audio_pop_score * 10.0
+            streamer_shout = feature.streamer_shout_score * 10.0
             event_surprise_score = feature.event_surprise_score * 10.0
             nonverbal_payoff = feature.nonverbal_payoff_score * 10.0
+            game_event = feature.game_event_score * 10.0
+            hook_rerank = max(feature.hook_rewrite_score, feature.hook_curiosity_gap_score) * 10.0
+            vision_language = feature.vl_prompt_max_score * 10.0
             dialogue_dynamism = min(feature.speaker_turns * 2.0, 10.0)
             chat_alignment = feature.chat_peak * 10.0
+            chat_velocity = max(
+                feature.chat_velocity_score,
+                feature.chat_rate_derivative_score,
+                feature.chat_ema_crossing_score,
+            ) * 10.0
             chapter_coherence = feature.chapter_coherence_score * 10.0
             topic_shift = feature.topic_shift_strength * 10.0
             chapter_density = feature.chapter_local_density * 10.0
@@ -154,7 +240,6 @@ class Ranker:
             payoff_clarity = feature.payoff_clarity_score * 10.0
             profile_fit = feature.profile_fit_score * 10.0
             context_efficiency = feature.context_efficiency * 10.0
-            slow_open_penalty = feature.slow_open_penalty * 10.0
             context_dependency_penalty = feature.context_dependency_score * 10.0
             weak_resolution_penalty = feature.weak_resolution_penalty * 10.0
 
@@ -165,6 +250,7 @@ class Ranker:
                 + hw["hype"]             * feature.max_hype
                 + hw["arc"]              * feature.arc_score
                 + hw["chat"]             * chat_alignment * profile_weights["chat_weight"]
+                + chat_velocity * 0.05 * profile_weights["chat_weight"]
                 + hw["visual"]           * visual_reaction * profile_weights["visual_weight"] * platform_bias.get("visual", 1.0)
                 + hw["dialogue"]         * dialogue_dynamism * profile_weights["dialogue_weight"]
                 + hw["semantic"]         * semantic_score * profile_weights.get("semantic_weight", 1.0)
@@ -178,8 +264,12 @@ class Ranker:
                 + hw.get("trend_prior", 0.0) * trend_prior
                 + visual_hook_score * 0.05
                 + audio_pop_score * 0.05
+                + streamer_shout * 0.05
                 + event_surprise_score * 0.05
                 + nonverbal_payoff * 0.05
+                + game_event * 0.04
+                + hook_rerank * 0.04
+                + vision_language * 0.04
                 + dynamic_trend * 0.04
                 + outcome_prior * 0.05
                 + goal_relevance * 0.06
@@ -187,11 +277,17 @@ class Ranker:
                 + projected_hook * 0.05
                 + projected_retention * 0.06
                 + hw.get("overlap_penalty", 0.0) * overlap_risk
-                + hw.get("slow_open_penalty", 0.0) * slow_open_penalty
                 + hw.get("context_dependency_penalty", 0.0) * context_dependency_penalty
                 + hw.get("weak_resolution_penalty", 0.0) * weak_resolution_penalty
                 + hw["context_cost"]     * (feature.context_cost * 10.0)
             )
+
+            standalone_hard_filtered = (
+                feature.standalone_score < _STANDALONE_HARD_FILTER_MIN_STANDALONE
+                and feature.context_dependency_score >= _STANDALONE_HARD_FILTER_CONTEXT_DEPENDENCY
+            )
+            if standalone_hard_filtered:
+                rank_score = min(rank_score, _STANDALONE_HARD_FILTER_MAX_SCORE)
 
             rationale: list[str] = []
             if hook_score >= 7.0:
@@ -200,6 +296,8 @@ class Ranker:
                 rationale.append("clear_payoff")
             if feature.chat_peak >= 0.5:
                 rationale.append("chat_confirmed")
+            if max(feature.chat_rate_derivative_score, feature.chat_ema_crossing_score) >= 0.5:
+                rationale.append("chat_velocity_spike")
             if visual_reaction >= 4.0:
                 rationale.append("visual_reaction")
             if feature.question_open:
@@ -232,14 +330,22 @@ class Ranker:
                 rationale.append("projected_strong_open")
             if feature.projected_retention_score >= 0.55:
                 rationale.append("projected_retention")
+            if feature.streamer_shout_score >= 0.55:
+                rationale.append("streamer_shout")
+            if feature.game_event_score >= 0.5:
+                rationale.append("game_event")
+            if feature.vl_prompt_max_score >= 0.5:
+                rationale.append("vision_language_match")
+            if feature.has_hook_rewrite and max(feature.hook_rewrite_score, feature.hook_curiosity_gap_score) >= 0.55:
+                rationale.append("hook_reranked")
             if feature.clip_overlap_count >= 2.0:
                 rationale.append("overlap_risk")
-            if feature.slow_open_penalty >= 0.45:
-                rationale.append("slow_open_risk")
             if feature.context_dependency_score >= 0.5:
                 rationale.append("context_dependent")
             if feature.weak_resolution_penalty >= 0.5:
                 rationale.append("weak_resolution_risk")
+            if standalone_hard_filtered:
+                rationale.append("standalone_hard_filter")
 
             scored.append((round(rank_score, 3), rationale))
         return scored
@@ -363,6 +469,8 @@ class Ranker:
         feature_names: list[str] = artifact.get("feature_names", [])
         scales: dict[str, dict[str, float]] = artifact.get("scales", {})
         model_type = str(artifact.get("model_type") or "linear").strip().lower()
+        if model_type == "pairwise_logistic" or str(artifact.get("score_mode") or "") == "pairwise_median":
+            return self._pairwise_median_scores(features, artifact, feature_names, scales)
         if model_type in {"gradient_boosting", "lightgbm_ranker"}:
             return self._joblib_model_scores(features, artifact, feature_names, scales, model_type)
         weights: dict[str, float] = artifact.get("weights", {})
@@ -373,14 +481,43 @@ class Ranker:
             for name in feature_names:
                 if name in OFFLINE_ONLY_FEATURE_NAMES:
                     continue
-                raw_value = getattr(feature, name, 0.0)
-                value = float(raw_value)
+                bucket = content_buckets.bucket_from_feature(feature)
+                value = content_buckets.feature_value(name, feature, bucket)
                 scale = scales.get(name, {"mean": 0.0, "std": 1.0})
                 std = float(scale.get("std", 1.0)) or 1.0
                 normalized = (value - float(scale.get("mean", 0.0))) / std
                 normalized = max(-_MAX_NORMALIZED_ABS, min(_MAX_NORMALIZED_ABS, normalized))
                 score += normalized * float(weights.get(name, 0.0))
             scores.append(self._normalize_trained_score(score, model_type))
+        return scores
+
+    def _pairwise_median_scores(
+        self,
+        features: list[CandidateFeatures],
+        artifact: dict,
+        feature_names: list[str],
+        scales: dict[str, dict[str, float]],
+    ) -> list[float]:
+        if not features:
+            return []
+        rows: list[list[float]] = []
+        for feature in features:
+            bucket = content_buckets.bucket_from_feature(feature)
+            rows.append([
+                self._normalized_feature_value(feature, name, scales, bucket)
+                for name in feature_names
+            ])
+        columns = list(zip(*rows, strict=False)) if rows else []
+        medians = [sorted(column)[len(column) // 2] if column else 0.0 for column in columns]
+        weights: dict[str, float] = artifact.get("weights", {})
+        intercept = float(artifact.get("intercept", 0.0))
+        scores: list[float] = []
+        for row in rows:
+            raw = intercept + sum(
+                (value - median) * float(weights.get(name, 0.0))
+                for value, median, name in zip(row, medians, feature_names, strict=False)
+            )
+            scores.append(self._normalize_trained_score(raw, "logistic"))
         return scores
 
     def _joblib_model_scores(
@@ -420,12 +557,8 @@ class Ranker:
             for name in feature_names:
                 if name in OFFLINE_ONLY_FEATURE_NAMES:
                     continue
-                raw_value = getattr(feature, name, 0.0)
-                value = float(raw_value)
-                scale = scales.get(name, {"mean": 0.0, "std": 1.0})
-                std = float(scale.get("std", 1.0)) or 1.0
-                normalized = (value - float(scale.get("mean", 0.0))) / std
-                row.append(max(-_MAX_NORMALIZED_ABS, min(_MAX_NORMALIZED_ABS, normalized)))
+                bucket = content_buckets.bucket_from_feature(feature)
+                row.append(self._normalized_feature_value(feature, name, scales, bucket))
             matrix.append(row)
         if model_type == "gradient_boosting":
             probabilities = model.predict_proba(matrix)[:, 1]
@@ -442,6 +575,13 @@ class Ranker:
         if int(artifact.get("version", 0)) >= 4:
             if artifact.get("semantic_score_config") != semantic_service.semantic_score_config():
                 return False, "semantic_score_config_mismatch"
+            valid_for = artifact.get("valid_for")
+            if isinstance(valid_for, list) and valid_for:
+                normalized_valid_for = {str(item).strip().lower() for item in valid_for if str(item).strip()}
+                if profile.strip().lower() not in normalized_valid_for:
+                    return False, "profile_not_in_artifact_valid_for"
+        if str(artifact.get("selected_model") or "").strip().lower() == "fallback_heuristic":
+            return False, "fallback_heuristic_selected"
         feature_names = [str(name) for name in artifact.get("feature_names") or []]
         offline_names = sorted({name for name in feature_names if name in OFFLINE_ONLY_FEATURE_NAMES})
         if offline_names:
@@ -487,13 +627,12 @@ class Ranker:
             return False, "positive_rows_below_minimum"
         if int(training_stats.get("negative_rows", 0)) < _MIN_NEGATIVE_ROWS:
             return False, "negative_rows_below_minimum"
-        validation_ok, validation_reason = self._validation_passes(validation)
+        validation_ok, validation_reason = self._validation_passes(validation, artifact)
         if not validation_ok:
             return False, validation_reason
         return True, "usable"
 
-    def _validation_passes(self, validation: dict) -> tuple[bool, str]:
-        accuracy = float(validation.get("accuracy", 0.0))
+    def _validation_passes(self, validation: dict, artifact: dict | None = None) -> tuple[bool, str]:
         ndcg = float(validation.get("ndcg_at_5", 0.0))
         ranking_metric_value = float(validation.get("ranking_metric_value", ndcg))
         precision_at_5 = float(validation.get("precision_at_5", 0.0))
@@ -516,17 +655,77 @@ class Ranker:
             or precision_at_5 >= _MIN_VALIDATION_PRECISION_AT_5
             or legacy_precision >= 0.70
         )
-        if accuracy < _MIN_VALIDATION_ACCURACY:
-            return False, "validation_accuracy_below_minimum"
+        filter_ok, filter_reason = self._filter_gate_passes(artifact)
+        if filter_ok is False:
+            return False, filter_reason
         if not ranking_ok:
             return False, "validation_ranking_metrics_below_minimum"
         return True, "usable"
+
+    def _filter_gate_passes(self, artifact: dict | None) -> tuple[bool | None, str]:
+        if not isinstance(artifact, dict):
+            return None, "filter_gate_missing"
+
+        gate = artifact.get("filter_gate")
+        if isinstance(gate, dict) and gate:
+            if isinstance(gate.get("bucket_gates"), dict) and bool(gate.get("passed")):
+                return True, "usable"
+            metrics = gate
+        else:
+            calibration = artifact.get("serving_threshold_calibration")
+            if not isinstance(calibration, dict):
+                return None, "filter_gate_missing"
+            metrics = calibration.get("metrics")
+            if not isinstance(metrics, dict):
+                return None, "filter_gate_missing"
+
+        try:
+            precision = float(metrics.get("precision", 0.0))
+            recall = float(metrics.get("recall", 0.0))
+            f1 = float(metrics.get("f1", 0.0))
+            selected_rate = self._filter_selected_rate(metrics)
+        except (TypeError, ValueError):
+            return False, "validation_filter_gate_invalid"
+
+        if precision < _MIN_FILTER_PRECISION:
+            return False, "validation_filter_precision_below_minimum"
+        if recall < _MIN_FILTER_RECALL:
+            return False, "validation_filter_recall_below_minimum"
+        if f1 < _MIN_FILTER_F1:
+            return False, "validation_filter_f1_below_minimum"
+        if selected_rate > _MAX_FILTER_SELECTED_RATE:
+            return False, "validation_filter_selected_rate_above_maximum"
+        return True, "usable"
+
+    def _filter_selected_rate(self, metrics: dict) -> float:
+        if "selected_rate" in metrics:
+            return float(metrics.get("selected_rate", 0.0))
+        selected_count = int(
+            metrics.get(
+                "selected_count",
+                int(metrics.get("true_positive", 0) or 0) + int(metrics.get("false_positive", 0) or 0),
+            )
+            or 0
+        )
+        rows = int(metrics.get("rows") or 0)
+        if rows <= 0:
+            return 0.0
+        return float(selected_count / rows)
 
     def _safe_blend(self, artifact: dict) -> float:
         requested = float(artifact.get("blend", _MAX_BLEND))
         return max(_MIN_BLEND, min(_MAX_BLEND, requested))
 
-    def _safe_serving_threshold(self, artifact: dict) -> float:
+    def _safe_serving_threshold(self, artifact: dict, *, bucket: str | None = None) -> float:
+        if bucket:
+            gate = artifact.get("filter_gate")
+            if isinstance(gate, dict):
+                per_bucket = gate.get("serving_threshold_per_bucket")
+                if isinstance(per_bucket, dict) and bucket in per_bucket:
+                    try:
+                        return self._clamp_score(float(per_bucket[bucket]))
+                    except (TypeError, ValueError):
+                        pass
         try:
             requested = float(artifact.get("serving_threshold", 0.0))
         except (TypeError, ValueError):
@@ -549,6 +748,27 @@ class Ranker:
 
     def _clamp_score(self, score: float) -> float:
         return max(-20.0, min(20.0, score))
+
+    def _bucket_model(self, artifact: dict, bucket: str) -> str:
+        gate = artifact.get("filter_gate")
+        if isinstance(gate, dict):
+            mapping = gate.get("selected_model_per_bucket")
+            if isinstance(mapping, dict):
+                return str(mapping.get(bucket) or "trained")
+        return "trained"
+
+    def _normalized_feature_value(
+        self,
+        feature: CandidateFeatures,
+        name: str,
+        scales: dict[str, dict[str, float]],
+        bucket: str,
+    ) -> float:
+        value = content_buckets.feature_value(name, feature, bucket)
+        scale = scales.get(name, {"mean": 0.0, "std": 1.0})
+        std = float(scale.get("std", 1.0)) or 1.0
+        normalized = (value - float(scale.get("mean", 0.0))) / std
+        return max(-_MAX_NORMALIZED_ABS, min(_MAX_NORMALIZED_ABS, normalized))
 
 
 def score_candidates(

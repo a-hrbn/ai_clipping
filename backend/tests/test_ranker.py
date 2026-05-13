@@ -17,6 +17,7 @@ except ModuleNotFoundError:  # pragma: no cover - optional ML deps in test env
     GradientBoostingClassifier = None
 
 import ml as ml_package
+from services import semantic_service
 from services import ranker as ranker_module, selector
 from services.ranker import Ranker
 from services.timeline_types import Candidate, CandidateFeatures
@@ -42,6 +43,100 @@ class RankerTests(unittest.TestCase):
         score = Ranker(enable_trained_model=False)._heuristic_scores([feature], profile="general")[0][0]
 
         self.assertAlmostEqual(score, 0.8, places=3)
+
+    def test_ranker_does_not_apply_slow_open_penalty_in_serving_heuristic(self) -> None:
+        ranker = Ranker(enable_trained_model=False)
+        base = CandidateFeatures(candidate_id="base", payoff_score=5.0, source="reaction")
+        slow = CandidateFeatures(
+            candidate_id="slow",
+            payoff_score=5.0,
+            slow_open_penalty=1.0,
+            source="reaction",
+        )
+
+        base_score, _base_rationale = ranker._heuristic_scores([base], profile="general")[0]
+        slow_score, slow_rationale = ranker._heuristic_scores([slow], profile="general")[0]
+
+        self.assertEqual(slow_score, base_score)
+        self.assertNotIn("slow_open_risk", slow_rationale)
+
+    def test_ranker_caps_mid_thought_context_dependent_clips(self) -> None:
+        feature = CandidateFeatures(
+            candidate_id="mid-thought",
+            hook_strength=0.9,
+            max_hype=9.0,
+            arc_score=8.0,
+            chat_peak=0.8,
+            motion_peak=0.8,
+            face_reaction_peak=0.8,
+            payoff_score=8.0,
+            quoteability_score=0.8,
+            surprise_score=0.8,
+            standalone_score=0.1,
+            semantic_density=0.8,
+            context_dependency_score=0.85,
+            source="reaction",
+        )
+
+        score, rationale = Ranker(enable_trained_model=False)._heuristic_scores([feature], profile="gaming")[0]
+
+        self.assertLessEqual(score, 3.0)
+        self.assertIn("standalone_hard_filter", rationale)
+
+    def test_ranker_applies_hook_reranker_stage_after_scoring(self) -> None:
+        feature = CandidateFeatures(
+            candidate_id="hook",
+            hook_strength=0.4,
+            payoff_score=3.0,
+            max_hype=3.0,
+            standalone_score=0.6,
+            has_hook_rewrite=True,
+            hook_rewrite_score=0.85,
+            hook_curiosity_gap_score=0.7,
+            source="reaction",
+        )
+
+        detail = Ranker(enable_trained_model=False).score_details([feature], profile="general")[0]
+
+        self.assertGreater(detail["score"], detail["heuristic_score"])
+        self.assertIn("hook_reranker_boost", detail["rationale"])
+
+    def test_ranker_applies_boundary_variant_set_stage_after_scoring(self) -> None:
+        feature = CandidateFeatures(
+            candidate_id="boundary",
+            hook_strength=0.4,
+            payoff_score=3.0,
+            max_hype=3.0,
+            standalone_score=0.6,
+            boundary_variant_score=0.9,
+            boundary_variant_margin_score=0.4,
+            boundary_variant_count=12,
+            source="reaction",
+        )
+
+        detail = Ranker(enable_trained_model=False).score_details([feature], profile="general")[0]
+
+        self.assertGreater(detail["score"], detail["heuristic_score"])
+        self.assertEqual(detail["boundary_variant_set_score"], 0.9)
+        self.assertIn("boundary_variant_set_max", detail["rationale"])
+
+    def test_ranker_rewards_chat_velocity_and_vision_language(self) -> None:
+        feature = CandidateFeatures(
+            candidate_id="vl-chat",
+            hook_strength=0.4,
+            payoff_score=3.0,
+            max_hype=3.0,
+            standalone_score=0.6,
+            chat_ema_crossing_score=0.8,
+            chat_rate_derivative_score=0.7,
+            vl_prompt_max_score=0.75,
+            source="reaction",
+        )
+
+        _score, rationale = Ranker(enable_trained_model=False)._heuristic_scores([feature], profile="general")[0]
+
+        self.assertIn("chat_velocity_spike", rationale)
+        self.assertIn("vision_language_match", rationale)
 
     def test_selector_prefers_stronger_candidate(self) -> None:
         candidates = [
@@ -232,6 +327,64 @@ class RankerTests(unittest.TestCase):
         self.assertEqual(details[0]["serving_threshold"], 2.0)
         self.assertTrue(details[0]["passes_serving_threshold"])
 
+    def test_score_details_uses_bucket_threshold_and_fallback(self) -> None:
+        reaction = CandidateFeatures(candidate_id="reaction", hook_strength=1.0, source="reaction")
+        general = CandidateFeatures(candidate_id="general", hook_strength=1.0, source="unknown")
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_dir = Path(tmp)
+            (artifact_dir / "gaming_ranker.json").write_text(
+                json.dumps(
+                    {
+                        "version": 3,
+                        "profile": "gaming",
+                        "model_type": "linear",
+                        "feature_names": ["hook_strength", "content_bucket__reaction"],
+                        "weights": {"hook_strength": 3.0, "content_bucket__reaction": 2.0},
+                        "scales": {
+                            "hook_strength": {"mean": 0.0, "std": 1.0},
+                            "content_bucket__reaction": {"mean": 0.0, "std": 1.0},
+                        },
+                        "training_stats": {
+                            "rows": 100,
+                            "positive_rows": 40,
+                            "negative_rows": 60,
+                            "train_rows": 80,
+                            "validation_rows": 20,
+                        },
+                        "validation": {
+                            "accuracy": 0.75,
+                            "precision_at_5": 0.8,
+                            "ndcg_at_5": 0.8,
+                            "ranking_groups": 2,
+                            "ranking_metric_min": 0.5,
+                            "ranking_metric_p25": 0.6,
+                        },
+                        "filter_gate": {
+                            "passed": True,
+                            "bucket_gates": {"reaction": {"passed": True}, "general": {"passed": False}},
+                            "serving_threshold_per_bucket": {"reaction": 1.25, "general": 9.0},
+                            "selected_model_per_bucket": {"reaction": "trained", "general": "fallback_heuristic"},
+                        },
+                        "intercept": 0.0,
+                        "blend": 0.65,
+                        "serving_threshold": 0.0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            details = Ranker(artifact_dir=artifact_dir, enable_trained_model=True).score_details(
+                [reaction, general],
+                profile="gaming",
+            )
+
+        by_id = {item["candidate_id"]: item for item in details}
+        self.assertEqual(by_id["reaction"]["content_bucket"], "reaction")
+        self.assertEqual(by_id["reaction"]["bucket_model"], "trained")
+        self.assertEqual(by_id["reaction"]["serving_threshold"], 1.25)
+        self.assertTrue(by_id["reaction"]["trained_model_used"])
+        self.assertEqual(by_id["general"]["bucket_model"], "fallback_heuristic")
+        self.assertFalse(by_id["general"]["trained_model_used"])
+
     def test_inspect_artifact_reports_rejected_reason(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             artifact_dir = Path(tmp)
@@ -266,6 +419,136 @@ class RankerTests(unittest.TestCase):
 
         self.assertEqual(inspection["status"], "rejected")
         self.assertEqual(inspection["reason"], "validation_ranking_groups_below_minimum")
+
+    def test_inspect_artifact_accepts_filter_gate_despite_low_accuracy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_dir = Path(tmp)
+            (artifact_dir / "gaming_ranker.json").write_text(
+                json.dumps(
+                    {
+                        "version": 3,
+                        "profile": "gaming",
+                        "feature_names": ["quoteability_score"],
+                        "weights": {"quoteability_score": 5.0},
+                        "scales": {"quoteability_score": {"mean": 0.0, "std": 1.0}},
+                        "training_stats": {
+                            "rows": 100,
+                            "positive_rows": 40,
+                            "negative_rows": 60,
+                            "train_rows": 80,
+                            "validation_rows": 20,
+                        },
+                        "validation": {
+                            "accuracy": 0.42,
+                            "precision_at_5": 0.7,
+                            "ndcg_at_5": 0.8,
+                            "ranking_groups": 2,
+                            "ndcg_at_5_min": 0.5,
+                            "ndcg_at_5_p25": 0.6,
+                        },
+                        "filter_gate": {
+                            "precision": 0.52,
+                            "recall": 0.75,
+                            "f1": 0.61,
+                            "selected_rate": 0.7,
+                        },
+                        "intercept": 0.0,
+                        "blend": 1.0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            inspection = Ranker(artifact_dir=artifact_dir, enable_trained_model=True).inspect_artifact("gaming")
+
+        self.assertEqual(inspection["status"], "usable")
+
+    def test_inspect_artifact_rejects_weak_filter_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_dir = Path(tmp)
+            (artifact_dir / "gaming_ranker.json").write_text(
+                json.dumps(
+                    {
+                        "version": 3,
+                        "profile": "gaming",
+                        "feature_names": ["quoteability_score"],
+                        "weights": {"quoteability_score": 5.0},
+                        "scales": {"quoteability_score": {"mean": 0.0, "std": 1.0}},
+                        "training_stats": {
+                            "rows": 100,
+                            "positive_rows": 40,
+                            "negative_rows": 60,
+                            "train_rows": 80,
+                            "validation_rows": 20,
+                        },
+                        "validation": {
+                            "accuracy": 0.58,
+                            "precision_at_5": 0.7,
+                            "ndcg_at_5": 0.8,
+                            "ranking_groups": 2,
+                            "ndcg_at_5_min": 0.5,
+                            "ndcg_at_5_p25": 0.6,
+                        },
+                        "filter_gate": {
+                            "precision": 0.49,
+                            "recall": 0.75,
+                            "f1": 0.61,
+                            "selected_rate": 0.7,
+                        },
+                        "intercept": 0.0,
+                        "blend": 1.0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            inspection = Ranker(artifact_dir=artifact_dir, enable_trained_model=True).inspect_artifact("gaming")
+
+        self.assertEqual(inspection["status"], "rejected")
+        self.assertEqual(inspection["reason"], "validation_filter_precision_below_minimum")
+
+    def test_inspect_artifact_rejects_fallback_heuristic_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_dir = Path(tmp)
+            (artifact_dir / "gaming_ranker.json").write_text(
+                json.dumps(
+                    {
+                        "version": 4,
+                        "profile": "gaming",
+                        "selected_model": "fallback_heuristic",
+                        "semantic_score_config": semantic_service.semantic_score_config(),
+                        "feature_names": ["quoteability_score"],
+                        "weights": {"quoteability_score": 5.0},
+                        "scales": {"quoteability_score": {"mean": 0.0, "std": 1.0}},
+                        "training_stats": {
+                            "rows": 100,
+                            "positive_rows": 40,
+                            "negative_rows": 60,
+                            "train_rows": 80,
+                            "validation_rows": 20,
+                        },
+                        "validation": {
+                            "accuracy": 0.58,
+                            "precision_at_5": 0.7,
+                            "ndcg_at_5": 0.8,
+                            "ranking_groups": 2,
+                            "ndcg_at_5_min": 0.5,
+                            "ndcg_at_5_p25": 0.6,
+                        },
+                        "filter_gate": {
+                            "precision": 0.7,
+                            "recall": 0.75,
+                            "f1": 0.72,
+                            "selected_rate": 0.4,
+                        },
+                        "intercept": 0.0,
+                        "blend": 1.0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            inspection = Ranker(artifact_dir=artifact_dir, enable_trained_model=True).inspect_artifact("gaming")
+
+        self.assertEqual(inspection["status"], "rejected")
+        self.assertEqual(inspection["reason"], "fallback_heuristic_selected")
 
     def test_inspect_artifact_rejects_offline_only_features(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

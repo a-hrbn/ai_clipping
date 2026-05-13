@@ -83,7 +83,7 @@ def run_hpo(
         "artifact_family": "ranker_hpo",
         "profile": profile,
         "model_type": "lightgbm_ranker",
-        "selection_metric": "validation_ndcg_at_5",
+        "selection_metric": "composite_validation_score",
         "best_value": round(float(study.best_value), 3),
         "best_params": best_params,
         "best_metrics": best_candidate["metrics"],
@@ -165,7 +165,7 @@ def _objective(context: dict[str, object], seed: int):
         )
         if candidate is None:
             return 0.0
-        return float(candidate["metrics"].get("ndcg_at_5", 0.0))
+        return float(train_ranker._selection_score(candidate["metrics"]))
 
     return inner
 

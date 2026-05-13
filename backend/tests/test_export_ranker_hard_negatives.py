@@ -118,6 +118,109 @@ class ExportRankerHardNegativesTests(unittest.TestCase):
         self.assertEqual(row["sample_weight"], 1.0)
         self.assertEqual(row["features"]["hook_strength"], 0.2)
 
+    def test_merges_existing_hard_negatives_and_deduplicates_current_export(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            diagnosis_csv = root / "diagnosis.csv"
+            gold_rows_path = root / "gold_rows.jsonl"
+            existing_rows_path = root / "existing.jsonl"
+            fieldnames = [
+                "queue_id",
+                "job_id",
+                "candidate_id",
+                "vod_id",
+                "label",
+                "error_type",
+                "forced_score",
+                "heuristic_score",
+                "trained_score",
+                "group",
+                "rank",
+                "review_url",
+            ]
+            with diagnosis_csv.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "queue_id": "q-old",
+                        "job_id": "job-1",
+                        "candidate_id": "cand-old",
+                        "vod_id": "vod-1",
+                        "label": "0",
+                        "error_type": "false_positive",
+                        "forced_score": "11.0",
+                    }
+                )
+                writer.writerow(
+                    {
+                        "queue_id": "q-new",
+                        "job_id": "job-1",
+                        "candidate_id": "cand-new",
+                        "vod_id": "vod-1",
+                        "label": "0",
+                        "error_type": "false_positive",
+                        "forced_score": "10.0",
+                    }
+                )
+            existing_rows = [
+                {
+                    "queue_id": "q-old",
+                    "job_id": "job-1",
+                    "candidate_id": "cand-old",
+                    "vod_id": "vod-1",
+                    "label": 0,
+                    "dataset_source": "gold_eval_hard_negative_train",
+                    "label_class": "gold_hard_negative",
+                    "features": {"hook_strength": 0.1},
+                }
+            ]
+            gold_rows = [
+                {
+                    "queue_id": "q-old",
+                    "job_id": "job-1",
+                    "candidate_id": "cand-old",
+                    "vod_id": "vod-1",
+                    "label": 0,
+                    "gold_holdout_split": "holdout",
+                    "features": {"hook_strength": 0.1},
+                },
+                {
+                    "queue_id": "q-new",
+                    "job_id": "job-1",
+                    "candidate_id": "cand-new",
+                    "vod_id": "vod-1",
+                    "label": 0,
+                    "gold_holdout_split": "holdout",
+                    "features": {"hook_strength": 0.2},
+                },
+            ]
+            existing_rows_path.write_text(
+                "\n".join(json.dumps(row) for row in existing_rows),
+                encoding="utf-8",
+            )
+            gold_rows_path.write_text(
+                "\n".join(json.dumps(row) for row in gold_rows),
+                encoding="utf-8",
+            )
+
+            payload = export_ranker_hard_negatives.export_hard_negatives(
+                diagnosis_csv=diagnosis_csv,
+                gold_rows_path=gold_rows_path,
+                existing_rows_path=existing_rows_path,
+                profile="jynxzi",
+                min_forced_score=0.0,
+                max_rows=10,
+            )
+
+        self.assertEqual(payload["summary"]["existing_rows_read"], 1)
+        self.assertEqual(payload["summary"]["carried_forward_rows"], 1)
+        self.assertEqual(payload["summary"]["selected_false_positive_rows"], 2)
+        self.assertEqual(payload["summary"]["duplicate_selected_rows"], 1)
+        self.assertEqual(payload["summary"]["new_rows"], 1)
+        self.assertEqual(payload["summary"]["exported_rows"], 2)
+        self.assertEqual([row["queue_id"] for row in payload["rows"]], ["q-old", "q-new"])
+
 
 if __name__ == "__main__":
     unittest.main()

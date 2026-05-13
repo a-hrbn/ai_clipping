@@ -1,5 +1,1174 @@
 # Task Plan
 
+## 2026-05-13 Plan: Reuse Existing Repost Media During Freshness Rebuild
+
+- [x] Document why the IboClips freshness rebuild is rematerializing many Shorts.
+- [x] Reuse existing repost `video_path` rows by canonical source/video identity
+  before attempting `yt-dlp` media materialization.
+- [x] Add regression coverage for `/shorts/<id>` vs `watch?v=<id>` reuse.
+- [x] Run focused verification and rebuild Graphify.
+
+### Review Notes
+
+- The live run is downloading many Shorts because the curated-channel freshness
+  rebuild rewrites the repost manifest from fresh discovery rows. Those rows do
+  not naturally carry the previous `video_path`, and the short-form media cache
+  is keyed by exact URL, so `https://youtube.com/shorts/<id>` and
+  `https://youtube.com/watch?v=<id>` can miss the same already downloaded MP4.
+- Freshness rebuilds now pass previous manifest rows into repost
+  materialization and reuse existing media paths by canonical repost identity.
+  For YouTube rows, that identity is the normalized video id, so Shorts URLs
+  and watch URLs for the same clip share the cached media.
+- Reused rows skip `_ensure_short_form_media_cached`, so the next run should
+  download only genuinely missing selected Shorts rather than re-downloading
+  already materialized equivalents.
+- Verification passed: `py_compile`; focused
+  `test_prepare_cross_platform_fingerprint_rows.py` -> `47 passed`; scoped
+  `git diff --check`. Graphify rebuilt successfully with the local Graphify
+  interpreter: `3080` nodes, `8211` edges, `82` communities.
+
+## 2026-05-13 Plan: Refresh IboClips Shorts Before Each Run
+
+- [x] Trace the current repost manifest reuse logic and the short-form metadata cache.
+- [x] Add a pre-run freshness check so curated YouTube channel sources rebuild
+  the repost manifest when new Shorts appear.
+- [x] Preserve existing metadata/media cache reuse while fetching only missing
+  metadata/downloads needed for the current VOD date window.
+- [x] Add focused regression coverage and run verification.
+- [x] Rebuild Graphify and document the result.
+
+### Review Notes
+
+- Curated YouTube Shorts channel sources such as
+  `https://www.youtube.com/@Iboclipss/shorts` now trigger a repost-manifest
+  freshness rebuild before matching, even when the previous manifest already
+  meets `min_reposts`.
+- The rebuild goes through the existing discovery path, so flat channel rows
+  are checked again, missing per-Short metadata is cached, date-window filtering
+  is reapplied, and only selected Shorts whose media is missing are downloaded.
+- Existing short media and metadata remain cache hits; this does not delete or
+  redownload the 355 already materialized Shorts.
+- If no effective inputs change, the transcript match signature remains
+  unchanged and the existing match result can still be reused after the
+  manifest refresh.
+- Verification passed: `py_compile`; focused
+  `test_prepare_cross_platform_fingerprint_rows.py` -> `46 passed`; scoped
+  `git diff --check`. Required system `python3 ... graphify.watch...` still
+  fails because this interpreter lacks `graphify`; rebuilding with the local
+  Graphify interpreter succeeded with `3076` nodes, `8196` edges, and `88`
+  communities.
+
+## 2026-05-13 Plan: Lower Transcript Match Threshold To 0.50
+
+- [x] Change the local Jynxzi training default from `0.60` to `0.50`.
+- [x] Keep workflow-state reporting and env templates aligned with the new default.
+- [x] Run focused verification and rebuild Graphify after backend changes.
+
+### Review Notes
+
+- `CROSS_PLATFORM_FINGERPRINT_MIN_CONFIDENCE` now defaults to `0.50` in the
+  Jynxzi VOD training script and in workflow-state reporting.
+- `backend/.env` and `backend/.env.example` are aligned to `0.50`, so the
+  Docker local-train wrapper will not keep injecting the old `0.60` value.
+- The next run's transcript match input signature will change because the
+  threshold is part of the signature, so transcript matching should recompute
+  once and then be reusable again on unchanged later runs.
+- Verification passed: `py_compile`, `bash -n`, focused unittest suite
+  `test_training_workflow_state` + `test_train_jynxzi_vod_script` ->
+  `12 passed`, and scoped `git diff --check`.
+- Graphify rebuilt successfully with `3073` nodes, `8183` edges, and
+  `86` communities.
+
+## 2026-05-13 Plan: Reuse Cross-Platform Transcript Matching
+
+- [x] Inspect the current prepare-stage transcript matching inputs, outputs, and summaries.
+- [x] Add a deterministic input signature so transcript matching can be reused when inputs/config have not changed.
+- [x] Persist and validate the signature in the prepare summary before invoking matching again.
+- [x] Add regression coverage and run focused verification.
+- [x] Rebuild Graphify and document the result.
+
+### Review Notes
+
+- Transcript-mode prepare now computes `match_input_signature` from VOD rows,
+  repost rows, media path state, verification mode, threshold, cache versions,
+  profile-filter version, and VOD cache root.
+- If the current signature matches the previous prepare summary and both output
+  and diagnostics still exist, the run reuses the prior match result. It writes
+  `reused_match_result=true` and `reuse_reason=match_input_signature_unchanged`
+  without calling `build_full_vod_transcript_caches()` or
+  `match_reposts_to_vods_with_diagnostics()`.
+- The reused result preserves the previous status, including
+  `insufficient_*`, so `--fail-on-insufficient` still behaves honestly while
+  avoiding duplicate Whisper/transcript matching work.
+- The old pre-manifest output reuse is now limited to audio-fingerprint mode;
+  transcript mode checks manifests/signature before deciding reuse.
+- Verification passed: `py_compile`; focused
+  `test_prepare_cross_platform_fingerprint_rows.py` -> `45 passed`; scoped
+  `git diff --check`. Required system `python3 ... graphify.watch...` still
+  fails because that interpreter lacks `graphify`; rebuilding with the local
+  Graphify interpreter succeeded with `3073` nodes, `8183` edges, and `86`
+  communities.
+
+
+## 2026-05-13 Plan: Remove User-Labeled Rows From Jynxzi Training
+
+- [x] Disable frontend/manual/gold label export in the normal VOD training flow.
+- [x] Empty generated gold-eval and hard-negative artifacts before training/eval so stale self-labeled rows cannot be reused.
+- [x] Stop using active gold-eval queue rows as auto-negative candidates.
+- [x] Add script regression coverage and run focused verification.
+
+### Review Notes
+
+- User-labeled rows are now disabled by default with
+  `VOD_RANKER_USE_USER_LABELS=0`. Gold train and hard-negative train merges
+  require explicitly opting back in with `VOD_RANKER_USE_USER_LABELS=1`.
+- The training script resets generated model-facing user-label artifacts before
+  training: gold eval rows/datasets/reports, gold-derived hard negatives,
+  ranker holdout diagnosis outputs, and rollout review queue artifacts.
+- The flow now skips frontend/manual gold export, gold eval, gold-derived
+  hard-negative export/diagnosis, and rollout review queue generation while
+  user labels are disabled.
+- `jynxzi_active_gold_eval_queue.features.jsonl` is no longer passed into
+  auto-outcome negative export, so manually reviewed queue rows cannot affect
+  negative mining.
+- Existing generated model-facing user-label artifacts were reset in-place:
+  gold eval JSONL files, gold-derived hard-negative rows, rollout review queue
+  features, and active gold-eval queue features now have `0` rows; their
+  summaries are marked `status=skipped` with
+  `reason=user_labeled_rows_disabled`.
+- A follow-up content scan over `backend/ml/artifacts` found additional old
+  gold/manual snapshot artifacts (`*_active`, `*_combined`, backup active
+  queues, rollout-reviewed gold rows, and related reports). Those were reset
+  too, and `rg` no longer finds `gold_eval_manual`, `gold_eval_frontend`,
+  `gold_eval_rollout_review`, `gold_positive`, or `gold_negative` in the
+  artifact directory.
+- Verification passed: `py_compile`; `bash -n`; focused unittest suite ->
+  `12 passed`; scoped `git diff --check`. Required system
+  `python3 ... graphify.watch...` still fails because that interpreter lacks
+  `graphify`; rebuilding with the local Graphify interpreter succeeded with
+  `3068` nodes, `8163` edges, and `87` communities.
+
+## 2026-05-12 Plan: Let VOD Audio Downloader Drain Full Queue
+
+- [x] Confirm current lookahead only queues one next VOD and can idle while Whisper transcribes.
+- [x] Queue all missing VOD audio downloads on the single download worker before transcription consumes them.
+- [x] Add focused tests and run verification.
+- [x] Rebuild Graphify and document the result.
+
+### Review Notes
+
+- The previous one-item lookahead submitted only the next VOD audio download,
+  so the single download worker could go idle while Whisper was still
+  transcribing the current VOD.
+- Missing VOD audio downloads are now all submitted to a single-worker executor
+  before transcription starts consuming them. The worker still downloads
+  serially, but it drains the full missing-audio queue independently of Whisper.
+- Pipeline metadata is now `pipeline_mode=download_queue_ahead`; transcribe
+  start logs expose `queued_audio_downloads_remaining`.
+- Regression coverage proves the third VOD audio download occurs before the
+  first VOD transcribe call finishes.
+- Verification passed: `py_compile`; focused prepare tests -> `44 passed`;
+  combined transcript/prepare tests -> `47 passed`; scoped `git diff --check`.
+- Required system `python3 ... graphify.watch...` still fails because that
+  interpreter lacks `graphify`; rebuilding with the local Graphify interpreter
+  succeeded with `3067` nodes, `8161` edges, and `87` communities.
+
+## 2026-05-12 Plan: Pipeline VOD Audio Download With Whisper Transcription
+
+- [x] Confirm current VOD transcript cache builder downloads and transcribes each missing VOD serially.
+- [x] Add one-item audio prefetch so the next VOD downloads while Whisper transcribes the current VOD.
+- [x] Add focused tests and run verification.
+- [x] Rebuild Graphify and document the result.
+
+### Review Notes
+
+- The VOD transcript cache builder now separates missing VODs into cached,
+  skipped, and missing groups before the build.
+- Missing VODs run through a one-item lookahead pipeline:
+  `download_workers=1`, `transcribe_workers=1`,
+  `pipeline_mode=prefetch_next_audio`. While Whisper transcribes the current
+  VOD, the single download worker can prepare the next VOD's `source.m4a`.
+- Whisper remains single-threaded and the next audio prefetch is visible in
+  `full_vod_transcript_cache_vod_transcribe_start` via
+  `next_audio_prefetch_active`.
+- Verification passed: `py_compile`; focused prepare tests -> `44 passed`;
+  combined transcript/prepare tests -> `47 passed`; scoped `git diff --check`.
+- Required system `python3 ... graphify.watch...` still fails because that
+  interpreter lacks `graphify`; rebuilding with the local Graphify interpreter
+  succeeded with `3067` nodes, `8161` edges, and `87` communities.
+
+## 2026-05-12 Plan: Prebuild VOD Transcript Caches Before Transcript Matching
+
+- [x] Confirm why the current transcript run loaded only part of the VOD transcript pool.
+- [x] Add a prepare-stage VOD transcript cache builder for the exact VOD manifest being matched.
+- [x] Add regression coverage and run focused verification.
+- [x] Rebuild Graphify and document the result.
+
+### Review Notes
+
+- The latest transcript run loaded only `20` VOD transcripts and skipped `37`,
+  so transcript matching compared Shorts against less than half of the VOD
+  manifest.
+- `prepare_cross_platform_fingerprint_rows.py` now prebuilds compatible VOD
+  transcript caches for every unique VOD row before transcript matching starts.
+  Existing compatible caches are counted as cache hits; missing caches download
+  full VOD audio, transcribe with diarization disabled, write the normal
+  transcript cache, and then proceed to matching.
+- The next run should emit `full_vod_transcript_cache_build_start`,
+  per-VOD cached/build events, and `full_vod_transcript_cache_build_done`
+  before `cross_platform_transcript_matching_call`.
+- Verification passed: `py_compile`; focused prepare tests -> `43 passed`;
+  combined transcript/prepare tests -> `46 passed`; scoped `git diff --check`.
+- Required system `python3 ... graphify.watch...` still fails because that
+  interpreter lacks `graphify`; rebuilding with the local Graphify interpreter
+  succeeded with `3066` nodes, `8158` edges, and `88` communities.
+
+## 2026-05-12 Plan: Stop Preserving Audio Rows In Transcript Mode
+
+- [x] Confirm why the latest transcript run still outputs old audio-fingerprint rows.
+- [x] Require preserved existing output to be reusable for the active verification mode.
+- [x] Add regression coverage and run focused verification.
+
+### Review Notes
+
+- The latest run matched `31` transcript rows, but `output_rows=73` because
+  `preserved_existing_output=true` kept the prior
+  `cross_platform_audio_fingerprint` artifact after the transcript result missed
+  the `70` row gate.
+- Transcript mode now preserves an existing output only when every preserved row
+  is reusable for the active transcript verification mode. Old audio rows are no
+  longer carried forward into transcript-only training.
+- If transcript matching is insufficient, the output file is still replaced
+  with the current transcript matches so downstream training cannot silently use
+  stale audio-fingerprint positives.
+- Verification passed: `py_compile`; focused
+  `test_prepare_cross_platform_fingerprint_rows.py` -> `41 passed`; scoped
+  `git diff --check`.
+
+## 2026-05-12 Plan: Skip Diarization In Cross-Platform Transcript Matching
+
+- [x] Add an explicit transcriber option to skip speaker diarization for text-only matching.
+- [x] Wire cross-platform Short transcription to use text-only mode.
+- [x] Run focused verification and document results.
+
+### Review Notes
+
+- The pasted run log showed Whisper transcription completing, then optional
+  Pyannote diarization failing because `torchcodec`/`AudioDecoder` is broken in
+  the container.
+- Cross-platform transcript matching does not need speaker labels, so Short
+  transcription now calls `transcriber.transcribe(..., enable_diarization=False)`.
+- Normal transcriber callers keep the existing default
+  `enable_diarization=True`, so VOD feature paths are unchanged.
+- Verification passed: `py_compile`; focused tests
+  `test_match_cross_platform_transcripts.py` + `test_transcriber.py` ->
+  `10 passed`; scoped `git diff --check`.
+
+## 2026-05-12 Plan: Make Transcript Matching Primary Cross-Platform Verification
+
+- [x] Trace current audio-fingerprint prepare path and available transcript caches.
+- [x] Add transcript-based repost-to-VOD matcher and wire the prepare flow to use it as the primary label source.
+- [x] Update downstream source labels/tests so outcome rows no longer present as audio-fingerprint positives.
+- [x] Run focused verification, update Graphify, and document results.
+
+### Review Notes
+
+- Cross-platform verification now defaults to `transcript` via
+  `CROSS_PLATFORM_VERIFICATION_MODE=transcript` in `train_jynxzi_vod.sh` and
+  `--verification-mode transcript` in the prepare CLI.
+- Added `match_cross_platform_transcripts.py`, which loads existing VOD
+  transcript caches, transcribes/caches downloaded Shorts under
+  `_download_cache/short_form_transcripts`, and writes positives as
+  `cross_platform_transcript_match`.
+- Audio fingerprints are still available only as explicit
+  `--verification-mode audio_fingerprint` legacy mode; transcript mode does not
+  fall back to audio matching.
+- Outcome and VOD-ranker dataset prep now preserve transcript label provenance
+  instead of rewriting cross-platform positives to
+  `cross_platform_audio_fingerprint`.
+- Verification passed: `py_compile` for changed ML modules; new transcript
+  matcher tests -> `2 passed`; focused combined tests -> `84 passed`;
+  `bash -n backend/ml/train_jynxzi_vod.sh`; scoped `git diff --check`.
+- Required system `python3 ... graphify.watch...` still fails because this
+  shell's Python has no `graphify` module; rebuilding with the local Graphify
+  interpreter succeeded with `3056` nodes, `8129` edges, and `78` communities.
+
+## 2026-05-11 Plan: Switch Cross-Platform Source To Iboclipss
+
+- [x] Replace the curated YouTube Shorts source with `youtube.com/@Iboclipss`.
+- [x] Remove stale Clips.Delivery-derived short media, metadata, and cross-platform output artifacts so the next run starts clean.
+- [x] Verify source/caches/artifact state and document the cleanup.
+
+### Review Notes
+
+- `backend/ml/cross_platform_sources.csv` now points Jynxzi cross-platform
+  discovery at `https://www.youtube.com/@Iboclipss/shorts` with
+  `curated_repost_source;iboclipss;youtube_shorts`.
+- Removed stale short-form media and metadata caches:
+  `backend/tmp/storage/_download_cache/short_form` and
+  `backend/tmp/storage/_download_cache/short_form_metadata`.
+- Removed stale cross-platform derived artifacts:
+  `jynxzi_cross_platform_reposts.jsonl`,
+  `jynxzi_cross_platform_fingerprint_rows.jsonl`,
+  `jynxzi_cross_platform_fingerprint_summary.json`, and
+  `jynxzi_cross_platform_fingerprint_diagnostics.jsonl`.
+- Kept VOD full-audio fingerprint caches intact because they are independent of
+  the YouTube repost channel and avoid redownloading/re-fingerprinting VODs.
+- Verification: source manifest parses as one Iboclipss row; old short/media
+  cache file count is `0`; stale cross-platform repost/output artifacts are
+  absent.
+
+## 2026-05-10 Plan: Restore Cached Per-Short Metadata Dates
+
+- [x] Re-enable cached per-Short metadata enrichment for date-scoped repost discovery.
+- [x] Keep the existing serial yt-dlp pacing/cooldown behavior for every metadata/download request outcome.
+- [x] Add regression coverage for metadata cache reuse and exact upload-date filtering, then verify and rebuild Graphify.
+
+### Review Notes
+
+- Clips.Delivery channel rows still start from one flat playlist discovery, but
+  rows with no recovered channel-page publish date now fall back to an exact
+  per-Short yt-dlp metadata request.
+- Successful per-Short metadata payloads are cached under
+  `_download_cache/short_form_metadata`, keyed by URL, so later runs reuse the
+  exact upload date/timestamp instead of requesting the same Short again.
+- Cache misses sleep for the configured 5-10s short-form interval after a
+  successful metadata request; metadata errors keep the existing error cooldown.
+  Cache hits do not sleep.
+- Verification passed: targeted metadata-date tests -> `2 passed`; focused
+  auto-train/prepare/downloader tests -> `87 passed`; `py_compile` passed;
+  scoped `git diff --check` passed.
+- The required `python3 -c ... graphify.watch...` command still fails because
+  this shell's `python3` has no `graphify` module; rebuilding with the local
+  Graphify interpreter succeeded with `3019` nodes, `8014` edges, and
+  `78` communities.
+
+## 2026-05-10 Plan: Recover Channel-Scoped Short Dates Without Per-Short Metadata
+
+- [x] Enrich YouTube channel/Shorts flat discovery rows from the channel page's publish-time data.
+- [x] Convert relative publish text to approximate UTC upload dates and keep missing-date rows fail-closed.
+- [x] Add regression coverage, run verification, update lessons, and rebuild Graphify.
+
+### Review Notes
+
+- The failed run discovered `1738` Clips.Delivery candidates but skipped all of
+  them as `missing_publish_date`, because flat YouTube channel extraction
+  returned titles/URLs without dates and per-Short metadata enrichment was
+  intentionally disabled.
+- YouTube channel `/shorts` discovery now performs one channel-page fetch and
+  parses per-video `publishedTimeText` blocks keyed by `videoId`.
+- Relative publish text such as `2 weeks ago` / `3 months ago` is converted into
+  approximate UTC `timestamp` and `upload_date` fields before date-window
+  filtering.
+- Rows still fail closed if no publish text can be recovered; the pipeline does
+  not assume undated Shorts belong to the VOD window.
+- Verification passed: targeted channel-date tests -> `2 passed`; focused
+  auto-train/prepare/downloader tests -> `86 passed`; `py_compile` passed.
+- The required `python3 -c ... graphify.watch...` command still fails because
+  this shell's `python3` has no `graphify` module; rebuilding with the local
+  Graphify interpreter succeeded with `3009` nodes, `7986` edges, and
+  `75` communities.
+
+## 2026-05-10 Plan: Add Post-Attempt Delay For Repost Short Downloads
+
+- [x] Move repost Short download pacing to a `finally` path so every attempted yt-dlp cache fill sleeps after the attempt.
+- [x] Keep cache hits fast; apply the delay only to actual missing-media download attempts.
+- [x] Add regression coverage for successful and failed attempts, run verification, update lessons, and rebuild Graphify.
+
+### Review Notes
+
+- The serial repost Short download loop now emits
+  `cross_platform_repost_download_request_cooldown` and sleeps after every
+  attempted missing-media Short cache fill.
+- Success and failure outcomes both pause before the next Short is attempted.
+  Existing usable media rows remain cache hits and do not add artificial delay.
+- Short-form pacing defaults and env values are now `5..10` seconds:
+  `YTDLP_SHORT_FORM_SLEEP_REQUESTS_SEC=5`,
+  `YTDLP_SHORT_FORM_MIN_SLEEP_INTERVAL_SEC=5`,
+  `YTDLP_SHORT_FORM_MAX_SLEEP_INTERVAL_SEC=10`.
+- Verification passed: targeted success/failure delay tests -> `2 passed`;
+  focused prepare/downloader/auto-train tests -> `84 passed`; `py_compile`
+  passed; scoped `git diff --check` passed; settings resolution prints
+  `5.0 5.0 10.0`.
+- The required `python3 -c ... graphify.watch...` command still fails because
+  this shell's `python3` has no `graphify` module; rebuilding with the local
+  Graphify interpreter succeeded with `3001` nodes, `7965` edges, and
+  `77` communities.
+
+## 2026-05-10 Plan: Avoid Per-Short Metadata Enrichment For Date Filtering
+
+- [x] Require repost candidates to carry publish/upload date from discovery or manifest rows before date-window filtering.
+- [x] Stop per-Short yt-dlp metadata enrichment during repost manifest filtering so age/rate-limited Shorts do not create extra requests.
+- [x] Add regression coverage proving missing-date rows are skipped without metadata lookup, then run focused verification and rebuild Graphify.
+
+### Review Notes
+
+- Repost date-window filtering now uses only `publish_timestamp` /
+  `upload_date` already present on discovered or manifest rows.
+- Rows without a publish/upload date still fail closed as
+  `skipped_missing_publish_date`; they are not recovered with a per-Short
+  yt-dlp metadata request.
+- This keeps the Clips.Delivery source date-scoped to the actual usable VOD
+  window without adding extra YouTube requests during manifest filtering.
+- Verification passed: targeted regression -> `1 passed`; focused
+  auto-train/prepare tests -> `64 passed`; `py_compile` passed; scoped
+  `git diff --check` passed.
+- The required `python3 -c ... graphify.watch...` command still fails because
+  this shell's `python3` has no `graphify` module; rebuilding with the local
+  Graphify interpreter succeeded with `3000` nodes, `7964` edges, and
+  `76` communities.
+
+## 2026-05-10 Plan: Replace One-Hour Short Error Cooldown
+
+- [x] Remove the explicit 3600s short-form error cooldown behavior.
+- [x] Reuse the existing short-form 5-10s style sleep range for all yt-dlp short error cooldowns.
+- [x] Update tests/env/docs, run verification, and rebuild Graphify.
+
+### Review Notes
+
+- Removed `YTDLP_SHORT_FORM_RATE_LIMIT_COOLDOWN_SEC` from `backend/.env`,
+  `.env.example`, and `Settings`; stale env values are ignored because the
+  setting no longer exists.
+- Short-form yt-dlp error cooldowns now sample the same configured short-form
+  range used by normal yt-dlp pacing:
+  `YTDLP_SHORT_FORM_MIN_SLEEP_INTERVAL_SEC=6` to
+  `YTDLP_SHORT_FORM_MAX_SLEEP_INTERVAL_SEC=10`.
+- The final repost download path and the discovery/metadata paths all use this
+  short jittered cooldown.
+- Verification passed: targeted cooldown tests -> `3 passed`; focused
+  auto-train/prepare/downloader tests -> `84 passed`; Python `py_compile`
+  passed; scoped `git diff --check` passed; env resolution prints
+  `6.0 10.0 False`.
+- The required `python3 -c ... graphify.watch...` command still fails because
+  this shell's `python3` has no `graphify` module; rebuilding with the local
+  Graphify interpreter succeeded with `3001` nodes, `7971` edges, and
+  `81` communities.
+
+## 2026-05-10 Plan: Apply Short Cooldown To All yt-dlp Short Errors
+
+- [x] Trace why current YouTube errors bypass the existing materialization cooldown.
+- [x] Add cooldown handling to discovery/metadata yt-dlp exceptions as well as final download exceptions.
+- [x] Add focused tests, update lessons, run verification, and rebuild Graphify.
+
+### Review Notes
+
+- Root cause: some YouTube errors happen before final media cache
+  materialization, during source discovery or per-entry metadata extraction.
+  Those exceptions were swallowed or converted to fallback rows before reaching
+  the cooldown logic in `prepare_cross_platform_fingerprint_rows.py`.
+- Added `short_form_yt_dlp_error_cooldown` handling to yt-dlp source discovery,
+  date-search extraction, and metadata extraction in `auto_train_short_form.py`.
+- The same `YTDLP_SHORT_FORM_RATE_LIMIT_COOLDOWN_SEC` setting is used. Any
+  exception in those yt-dlp paths sleeps before the workflow continues; YouTube
+  rate-limit errors are marked with `rate_limited=True` in the warning log.
+- Verification passed: targeted cooldown tests -> `3 passed`; focused
+  auto-train/prepare/downloader tests -> `84 passed`; Python `py_compile`
+  passed; scoped `git diff --check` passed.
+- The required `python3 -c ... graphify.watch...` command still fails because
+  this shell's `python3` has no `graphify` module; rebuilding with the local
+  Graphify interpreter succeeded with `2997` nodes, `7967` edges, and
+  `75` communities.
+
+## 2026-05-10 Plan: Cool Down And Continue After Any Short Download Error
+
+- [x] Change repost Short download errors from retry-same-URL to cooldown-and-continue.
+- [x] Apply the cooldown to any download exception, while still flagging YouTube rate-limit errors in logs.
+- [x] Update tests/lessons, run verification, and rebuild Graphify.
+
+### Review Notes
+
+- Repost Short download failures now emit
+  `cross_platform_repost_download_failed_cooldown`, sleep for
+  `YTDLP_SHORT_FORM_RATE_LIMIT_COOLDOWN_SEC`, and then continue with the next
+  Short.
+- The same URL is no longer retried after the cooldown. Any exception triggers
+  the cooldown; YouTube rate-limit errors are marked with `rate_limited=true`.
+- The manifest summary now includes `repost_download_error_cooldowns` plus the
+  existing rate-limit-specific cooldown count.
+- Verification passed: focused pytest -> `59 passed`; Python `py_compile`
+  passed; targeted cooldown-and-continue test -> `1 passed`; scoped
+  `git diff --check` passed.
+- The required `python3 -c ... graphify.watch...` command still fails because
+  this shell's `python3` has no `graphify` module; rebuilding with the local
+  Graphify interpreter succeeded with `2989` nodes, `7953` edges, and
+  `73` communities.
+
+## 2026-05-10 Plan: Cool Down After YouTube Rate-Limit Errors
+
+- [x] Detect yt-dlp YouTube "try again later" rate-limit errors during serial repost Short downloads.
+- [x] Sleep for a configured cooldown and retry the same Short once before counting it as failed.
+- [x] Add env wiring/tests/lesson, run verification, and rebuild Graphify.
+
+### Review Notes
+
+- Added `YTDLP_SHORT_FORM_RATE_LIMIT_COOLDOWN_SEC=3600` to the backend env
+  files and `yt_dlp_short_form_rate_limit_cooldown_sec` to settings.
+- During serial repost Short cache fills, YouTube rate-limit errors such as
+  `This content isn't available, try again later` now emit
+  `cross_platform_repost_download_rate_limited`, sleep for the configured
+  cooldown, and retry the same URL once.
+- The manifest summary now includes rate-limit cooldown/retry counters.
+- Verification passed: focused pytest -> `59 passed`; targeted rate-limit test
+  -> `1 passed`; Python `py_compile` passed; scoped `git diff --check` passed;
+  env resolution prints `6.0 6.0 10.0 3600.0`.
+- The required `python3 -c ... graphify.watch...` command still fails because
+  this shell's `python3` has no `graphify` module; rebuilding with the local
+  Graphify interpreter succeeded with `2989` nodes, `7953` edges, and
+  `73` communities.
+
+## 2026-05-10 Plan: Add YouTube yt-dlp Sleep For Shorts
+
+- [x] Add configurable yt-dlp request/data-extraction sleep for short-form media downloads.
+- [x] Apply the sleep only to `short_form` cache fills so Twitch/full-VOD audio paths stay unchanged.
+- [x] Add tests, update lessons, run verification, and rebuild Graphify.
+
+### Review Notes
+
+- Added Short-form-specific yt-dlp sleep settings:
+  `YTDLP_SHORT_FORM_SLEEP_REQUESTS_SEC=6`,
+  `YTDLP_SHORT_FORM_MIN_SLEEP_INTERVAL_SEC=6`, and
+  `YTDLP_SHORT_FORM_MAX_SLEEP_INTERVAL_SEC=10`.
+- The settings map to yt-dlp native options `sleep_interval_requests`,
+  `sleep_interval`, and `max_sleep_interval`.
+- These options are applied only when `ensure_cached_download(...,
+  cache_namespace="short_form")` fills a missing media cache entry. Existing
+  Short cache hits, Twitch VOD downloads, generic downloads, and full-VOD audio
+  metadata extraction are not slowed by this change.
+- Verification passed: focused pytest -> `61 passed`; Python `py_compile`
+  passed; scoped `git diff --check` passed; env resolution prints `6.0`,
+  `6.0`, `10.0`.
+- The required `python3 -c ... graphify.watch...` command still fails because
+  this shell's `python3` has no `graphify` module; rebuilding with the local
+  Graphify interpreter succeeded with `2986` nodes, `7943` edges, and
+  `73` communities.
+
+## 2026-05-10 Plan: Revert Repost Shorts To Serial Download
+
+- [x] Remove the cross-platform repost download worker setting and shell/env wiring.
+- [x] Change repost media materialization back to one-by-one cache downloads.
+- [x] Replace the parallel regression with a serial-order regression, update lessons, run verification, and rebuild Graphify.
+
+### Review Notes
+
+- Removed `CROSS_PLATFORM_REPOST_DOWNLOAD_WORKERS` from `backend/.env`,
+  `backend/.env.example`, `backend/config.py`, and `backend/ml/train_jynxzi_vod.sh`.
+- Repost Short media is now materialized by a simple for-loop in
+  `build_repost_manifest_from_sources`; no `ThreadPoolExecutor` is used for
+  this path.
+- The manifest summary now reports `repost_download_mode: serial` and
+  `repost_download_submitted_rows`.
+- Verification passed: focused pytest -> `59 passed`; Python `py_compile`
+  passed; `bash -n` passed; scoped `git diff --check` passed; no repost-worker
+  config or parallel-test leftovers remain in touched paths.
+- The required `python3 -c ... graphify.watch...` command still fails because
+  this shell's `python3` has no `graphify` module; rebuilding with the local
+  Graphify interpreter succeeded with `2983` nodes, `7937` edges, and
+  `75` communities.
+
+## 2026-05-10 Plan: Batch Download Required YouTube Shorts
+
+- [x] Keep yt-dlp request-delay settings out of the workflow.
+- [x] Download all selected date/profile-valid repost Shorts into the short-form cache as one parallel batch.
+- [x] Add regression tests, update lessons, run verification, and rebuild Graphify.
+
+### Review Notes
+
+- Added `CROSS_PLATFORM_REPOST_DOWNLOAD_WORKERS` / `cross_platform_repost_download_workers`
+  with default `8`.
+- `build_repost_manifest_from_sources` now filters and sorts repost candidates
+  first, then materializes every selected uncached Short in a parallel batch
+  before writing the repost manifest.
+- No yt-dlp sleep/request-delay options were added.
+- Verification passed: focused pytest -> `59 passed`; Python `py_compile`
+  passed; `bash -n` passed; scoped `git diff --check` passed; no sleep-related
+  yt-dlp options present in the touched paths.
+- The required `python3 -c ... graphify.watch...` command still fails because
+  this shell's `python3` has no `graphify` module; rebuilding with the local
+  Graphify interpreter succeeded with `2983` nodes, `7937` edges, and
+  `75` communities.
+
+## 2026-05-10 Plan: Remove yt-dlp Cookie Diagnostics
+
+- [x] Remove cookie-file logging from shared yt-dlp auth helpers.
+- [x] Remove cookie-auth status/success/failure logging from discovery, metadata, download, and full-VOD metadata call sites.
+- [x] Verify cookie support still applies options without emitting cookie-file logs.
+
+### Review Notes
+
+- Removed the cookie-file diagnostic helpers/events from
+  `backend/services/yt_dlp_auth.py`; it now only applies `cookiefile` or
+  `cookiesfrombrowser` options.
+- Removed auth status/success/failure logging from Shorts discovery, Shorts
+  metadata, generic media download, Twitch download, and full-VOD audio
+  metadata extraction.
+- Verification passed: no backend matches for cookie diagnostic fields/events;
+  focused pytest -> `81 passed`; `py_compile` passed; scoped
+  `git diff --check` passed.
+- The required `python3 -c ... graphify.watch...` command still fails because
+  this shell's `python3` has no `graphify` module; rebuilding with the local
+  Graphify interpreter succeeded with `2981` nodes, `7929` edges, and
+  `73` communities.
+
+## 2026-05-10 Plan: Add yt-dlp Cookie Diagnostics
+
+- [x] Superseded by the removal request above.
+
+## 2026-05-10 Plan: Add yt-dlp YouTube Cookie Support
+
+- [x] Add shared yt-dlp auth option handling for cookie files / browser cookies.
+- [x] Apply it to Shorts discovery, Shorts metadata enrichment, Shorts downloads, and full-VOD audio metadata extraction.
+- [x] Add env placeholders, tests, lessons, verification, and Graphify rebuild.
+
+### Review Notes
+
+- Added shared yt-dlp auth option handling in `services/yt_dlp_auth.py`.
+- New settings/env keys:
+  `YTDLP_COOKIEFILE` and `YTDLP_COOKIES_FROM_BROWSER`.
+- Cookiefile auth is applied to generic downloader downloads, Shorts discovery,
+  Shorts metadata enrichment, and full-VOD audio metadata extraction.
+- Cookiefile takes precedence over browser cookies because it works better in
+  Docker/non-interactive training runs.
+- Verification passed: focused pytest -> `81 passed`; `py_compile` passed;
+  scoped `git diff --check` passed.
+- The required `python3 -c ... graphify.watch...` command still fails because
+  this shell's `python3` has no `graphify` module; rebuilding with the local
+  Graphify interpreter succeeded with `2981` nodes, `7929` edges, and
+  `73` communities.
+
+## 2026-05-10 Plan: Use Clips.Delivery As Curated Repost Source
+
+- [x] Replace broad YouTube/TikTok keyword discovery with only `youtube.com/@Clips.Delivery/shorts`.
+- [x] Mark this channel as a trusted curated repost source while preserving the real VOD date-window filter.
+- [x] Bump policy version, add regression tests, update lessons, run verification, and rebuild Graphify.
+
+### Review Notes
+
+- `backend/ml/cross_platform_sources.csv` now contains exactly one configured
+  cross-platform source for Jynxzi:
+  `https://www.youtube.com/@Clips.Delivery/shorts`.
+- The source is tagged `curated_repost_source`, so its clips bypass only the
+  profile-text filter. This means titles/uploader names do not need to contain
+  `jynxzi` or `junko`.
+- The real VOD publish-date window still applies. Curated clips outside that
+  VOD-derived date range are skipped, and clips without publish metadata still
+  fail closed unless metadata can be enriched.
+- `REPOST_PROFILE_FILTER_VERSION` is now `8`, so the next run rebuilds repost
+  manifests and does not reuse older cross-platform rows from the broad
+  keyword/TikTok policy.
+- Verification passed: focused pytest -> `67 passed`; `py_compile` passed;
+  scoped `git diff --check` passed.
+- The required `python3 -c ... graphify.watch...` command still fails because
+  this shell's `python3` has no `graphify` module; rebuilding with the local
+  Graphify interpreter succeeded with `2970` nodes, `7912` edges, and
+  `72` communities.
+
+## 2026-05-10 Plan: Expand Cross-Platform Label Discovery Coverage
+
+- [x] Add broader Jynxzi/Junko YouTube and TikTok source queries for the same VOD date-window policy.
+- [x] Add a TikTok Bing HTML fallback so zero RSS results do not mean zero TikTok candidates.
+- [x] Bump repost policy version, add tests, update lessons, run verification, and rebuild Graphify.
+
+### Review Notes
+
+- Cross-platform source discovery now has `27` source rows instead of the
+  narrow keyword set: broader YouTube searches for `jynxzi shorts`,
+  `jynxzi viral`, `jynxzi twitch`, `jynxzi league of legends`, and
+  `junko clips`, plus matching TikTok keyword searches.
+- `tiktoksearch...` no longer depends only on Bing RSS. If RSS returns no
+  TikTok videos, the discovery code also parses Bing HTML result links and
+  canonicalizes direct TikTok and Bing redirect URLs.
+- `REPOST_PROFILE_FILTER_VERSION` is now `7`, so stale repost manifests from
+  the smaller source/filter policy rebuild on the next run.
+- Existing cross-platform match rows now also carry `profile_filter_version`;
+  stale rows below version `7` are not considered reusable. That prevents the
+  next run from short-circuiting before the broader discovery policy runs.
+- Verification passed: focused pytest -> `66 passed`; `py_compile` passed;
+  scoped `git diff --check` passed.
+- The required `python3 -c ... graphify.watch...` command failed because this
+  shell's `python3` has no `graphify` module; rebuilding with the local
+  Graphify interpreter succeeded with `2968` nodes, `7905` edges, and
+  `72` communities.
+
+## 2026-05-10 Plan: Force Repost Rediscovery After Date-Search Fix
+
+- [x] Confirm the run reused the 7-row repost manifest instead of rediscovering sources.
+- [x] Bump the repost manifest policy version so the next run rebuilds with the `ytsearchdate` handler.
+- [x] Run focused verification and rebuild Graphify.
+
+### Review Notes
+
+- The posted run did not exercise the `ytsearchdate` handler because
+  `repost_manifest_built=false` and the existing 7-row manifest had
+  `profile_filter_version=5`.
+- `REPOST_PROFILE_FILTER_VERSION` is now `6`, so those version-5 rows are stale
+  and the next run should show `repost_manifest_profile_filter_rebuild_required=true`
+  followed by a rebuilt manifest.
+- Verification passed: focused pytest -> `56 passed`; stale-manifest targeted
+  test -> `1 passed`; `py_compile` passed; scoped `git diff --check` passed;
+  Graphify rebuilt successfully with `2957` nodes, `7880` edges, and
+  `69` communities.
+
+## 2026-05-10 Plan: Fix Unsupported `ytsearchdate` Source
+
+- [x] Add an internal `ytsearchdateN:<query>` handler instead of passing that scheme to yt-dlp.
+- [x] Keep the same fresh-source CSV policy, but make it compatible with the installed yt-dlp version.
+- [x] Add focused tests, update lessons, run verification, and rebuild Graphify.
+
+### Review Notes
+
+- The active run showed `Unsupported url scheme: "ytsearchdate500"` because the
+  installed yt-dlp does not support that pseudo-scheme.
+- `auto_train_short_form.py` now intercepts `ytsearchdateN:<query>` before
+  yt-dlp sees it and converts it to a real YouTube results URL with upload-date
+  sort parameter `sp=CAI%253D`.
+- If the date-sorted search page extraction returns no rows, the code falls
+  back to normal `ytsearchN:<query>` instead of failing the source.
+- Verification passed: focused pytest -> `56 passed`; targeted
+  `ytsearchdate` test -> `1 passed`; `py_compile` passed; scoped
+  `git diff --check` passed; Graphify rebuilt successfully with `2957` nodes,
+  `7880` edges, and `69` communities.
+
+## 2026-05-10 Plan: Pick Most-Viewed Reposts Inside Actual VOD Window
+
+- [x] Move cross-platform repost selection to a global post-filter ranking.
+- [x] Rank date-valid/profile-valid reposts by views and viral score before applying `max_reposts`.
+- [x] Add focused tests, update lessons, run verification, and rebuild Graphify.
+
+### Review Notes
+
+- Cross-platform repost manifest building now dedupes all discovered/manual
+  candidates first, then applies explicit profile evidence and the actual VOD
+  date-window filter.
+- Only after those filters does it sort candidates globally by `views`,
+  `viral_score`, and publish time, then apply `max_reposts`.
+- This means an older/out-of-window high-view video can no longer consume a
+  slot, and the selected labels are the most-viewed valid candidates from the
+  concrete usable VOD window.
+- Added manifest summary counters: `eligible_profile_date_rows` and
+  `selected_repost_candidates`.
+- Bumped `REPOST_PROFILE_FILTER_VERSION` to `5`, so the next run rebuilds the
+  repost manifest with this selection policy instead of reusing the previous
+  one.
+- Verification passed: focused pytest -> `55 passed`; targeted most-viewed
+  regression -> `1 passed`; `py_compile` passed; scoped `git diff --check`
+  passed; Graphify rebuilt successfully with `2953` nodes, `7869` edges, and
+  `70` communities.
+
+## 2026-05-10 Plan: Increase Date-Scoped Repost Label Discovery
+
+- [x] Add fresh/date-sorted YouTube sources for the same four Jynxzi keywords.
+- [x] Make TikTok keyword search use multiple search variants and keep RSS fallback rows when metadata extraction fails.
+- [x] Add focused tests, update lessons, run verification, and rebuild Graphify.
+
+### Review Notes
+
+- Added `ytsearchdate500` sources for the existing four requested Jynxzi
+  keywords, so discovery can pull newer/date-sorted YouTube results for the
+  actual VOD window instead of only best-match search results.
+- TikTok keyword search now queries multiple Bing RSS variants per keyword and
+  dedupes URLs across them.
+- TikTok RSS rows are kept as fallback candidates when detailed metadata
+  extraction fails; their title, description, uploader, timestamp, and
+  upload-date are still available for downstream profile/date filtering.
+- Bumped `REPOST_PROFILE_FILTER_VERSION` to `4`, forcing the next run to rebuild
+  the repost manifest with the expanded source policy instead of reusing the
+  small version-3 manifest.
+- Verification passed: focused pytest -> `54 passed`; TikTok-specific tests ->
+  `2 passed`; `py_compile` passed; scoped `git diff --check` passed; Graphify
+  rebuilt successfully with `2951` nodes, `7861` edges, and `72` communities.
+
+## 2026-05-10 Plan: Remove Raw Repost Minimum After Date Scoping
+
+- [x] Confirm the run fails before matching because raw repost count is below the old global minimum.
+- [x] Set the default raw repost minimum to zero and rely on matched-row/VOD gates.
+- [x] Update tests, lessons, run verification, and rebuild Graphify.
+
+### Review Notes
+
+- The new source policy worked but yielded only `10` date-valid reposts.
+  `min_reposts=400` blocked the run before audio matching, so no diagnostics
+  about actual matches could be produced.
+- `CROSS_PLATFORM_MIN_REPOSTS` now defaults to `0` in the shell workflow,
+  Docker env file, env example, and workflow-state defaults.
+- The remaining meaningful gates are still `CROSS_PLATFORM_MIN_MATCHED_ROWS`
+  and `CROSS_PLATFORM_MIN_MATCHED_VODS`; with only `10` reposts the next run
+  may still fail there, but it will fail after real matching instead of before
+  it.
+- Verification passed: focused pytest -> `45 passed`; `py_compile` passed;
+  `bash -n` passed; scoped `git diff --check` passed; Graphify rebuilt
+  successfully with `2944` nodes, `7850` edges, and `72` communities.
+
+## 2026-05-10 Plan: Add TikTok Keyword Repost Sources
+
+- [x] Replace broad/overlapping Jynxzi repost keywords with the requested four-keyword set.
+- [x] Add TikTok keyword-source support and source rows alongside YouTube.
+- [x] Add focused tests, run verification, and rebuild Graphify.
+
+### Review Notes
+
+- `cross_platform_sources.csv` now has exactly the requested keywords for both
+  platforms: `jynxzi`, `jynxzi funny`, `jynxzi rage`, and `jynxzi clips`.
+- Added `tiktoksearchN:<query>` source support. It discovers TikTok video URLs
+  through Bing RSS, then still runs normal metadata extraction/download logic.
+- Search-source strings (`ytsearch...` and `tiktoksearch...`) are not trusted
+  as profile evidence. Rows still need explicit Jynxzi/Junko evidence in
+  title/uploader/channel/description.
+- Bumped `REPOST_PROFILE_FILTER_VERSION` to `2`, so the next run rebuilds the
+  repost manifest with the new source policy instead of reusing the old one.
+- Verification passed: focused pytest -> `51 passed`; `py_compile` passed;
+  scoped `git diff --check` passed; Graphify rebuilt successfully with
+  `2938` nodes, `7827` edges, and `69` communities.
+
+## 2026-05-10 Plan: Scope Reposts To Actual VOD Date Window
+
+- [x] Identify the actual VOD date source and why current inventory rows lost `created_at`.
+- [x] Preserve non-empty VOD API dates when merging cache-backed inventory rows.
+- [x] Filter discovered reposts to the date window of VODs present in the usable VOD manifest.
+- [x] Add tests, update lessons, run verification, and rebuild Graphify.
+
+### Review Notes
+
+- The VOD inventory merge could overwrite non-empty API fields like
+  `created_at` with empty cache metadata. The merge now preserves non-empty
+  `created_at`, `title`, and `vod_duration_seconds`.
+- Repost manifest rebuilds now compute a date window from the actual VOD rows
+  used for matching, joined back to `jynxzi_twitch_vod_inventory.jsonl`.
+- Reposts are kept only when their `publish_timestamp` or `upload_date` falls
+  in that actual VOD window, with a small default margin: `1` day before the
+  earliest usable VOD and `30` days after the latest usable VOD.
+- If flat discovery omits publish/upload date, the builder tries one metadata
+  lookup for that URL before deciding whether to skip it as date-unknown.
+- Bumped `REPOST_PROFILE_FILTER_VERSION` to `3`, so any manifest from the
+  pre-date-window policy is rebuilt on the next run.
+- Verification passed: focused pytest -> `57 passed`; `py_compile` passed;
+  `bash -n` passed; scoped `git diff --check` passed; Graphify rebuilt
+  successfully with `2944` nodes, `7850` edges, and `72` communities.
+
+## 2026-05-10 Plan: Calibrate Repost Minimum After Profile Filter
+
+- [x] Confirm the new run failed because filtered repost rows dropped below the old pre-match minimum.
+- [x] Lower the repost-source minimum to the filtered Jynxzi source pool while keeping match-row and VOD-diversity gates.
+- [x] Update env/workflow-state defaults, tests, lessons, and run verification plus Graphify.
+
+### Review Notes
+
+- The profile filter worked: the run rebuilt with
+  `repost_manifest_build_reason=profile_filter_policy`, removed
+  `152` non-profile search hits, and did not preserve the old false-positive
+  output.
+- The failure was the remaining pre-match source guard:
+  `repost_rows=493 < min_reposts=600`, so matching never started.
+- Lowered `CROSS_PLATFORM_MIN_REPOSTS` to `400` in the shell default,
+  Docker env file, env example, and workflow-state default. The hard quality
+  gates remain `70` matched rows and `20` matched VODs for the strict pass.
+- Verification passed: focused pytest -> `43 passed`; `py_compile` passed;
+  `bash -n` passed; scoped `git diff --check` passed; Graphify rebuilt
+  successfully with `2934` nodes, `7818` edges, and `73` communities.
+
+## 2026-05-08 Plan: Parallelize Full-VOD Audio Fingerprint Builds
+
+- [x] Add a bounded `--full-vod-audio-workers` option to cross-platform fingerprint prep.
+- [x] Run Full-VOD audio cache/download/fingerprint work with two parallel workers by default in Jynxzi training.
+- [x] Keep per-VOD logging and summary counters accurate under parallel execution.
+- [x] Update env/workflow/tests, run focused verification, and rebuild Graphify.
+
+### Review Notes
+
+- `prepare_cross_platform_fingerprint_rows.py` now accepts
+  `--full-vod-audio-workers` and runs per-VOD full-audio cache/download/
+  fingerprint work through a bounded `ThreadPoolExecutor` when workers > 1.
+- Jynxzi training defaults `CROSS_PLATFORM_FULL_VOD_AUDIO_WORKERS=2`, passes it
+  into prepare, exports it into workflow state, and records it in `.env` and
+  `.env.example`.
+- Summary/log payloads include `workers`, while per-VOD success/cache/failure
+  counters are aggregated after worker completion.
+- Verification passed: focused prepare/script/workflow-state tests,
+  `py_compile`, `bash -n`, and scoped `git diff --check`.
+
+## 2026-05-08 Plan: Remove Twitch Clip Labels From Outcome Training Flow
+
+- [x] Map the remaining Twitch-label dependencies in the Jynxzi training script and cross-platform fingerprint prep.
+- [x] Replace Twitch-label VOD seeding with a VOD inventory path built from available non-label artifacts/cache.
+- [x] Remove Twitch clip-label collection/pruning from the Jynxzi training workflow.
+- [x] Update tests, env defaults, lessons, and run focused verification plus Graphify.
+
+### Review Notes
+
+- `train_jynxzi_vod.sh` no longer collects or prunes Twitch clip labels, and
+  there is no `TWITCH_CLIP_LABELS_ENABLED` opt-in switch left in the training
+  workflow or env files.
+- The workflow now builds `jynxzi_twitch_vod_inventory.jsonl` from the Twitch
+  VOD API plus existing `vod_feature_cache` metadata. Full-VOD audio matching
+  receives that inventory through `--full-vod-audio-vod-inventory`.
+- `prepare_cross_platform_fingerprint_rows.py` prefers the VOD inventory over
+  Twitch label rows when selecting full-VOD audio fingerprints. Label rows are
+  only a legacy fallback if no inventory exists.
+- `train_vod_ranker.py` no longer exits just because Twitch label rows are
+  empty; with outcome-only training it can continue from cross-platform rows.
+- Local cache inspection found `67` VOD inventory candidates, so the next run
+  should not be limited to the single stale Twitch-label VOD.
+- Verification passed: focused prepare/script/workflow-state tests, full
+  `test_train_vod_ranker.py`, `py_compile`, `bash -n`, and scoped
+  `git diff --check`.
+
+## 2026-05-08 Plan: Fix Stale Twitch Label Progress Blocking Wider Windows
+
+- [x] Confirm the wider date window is skipped because progress says covered while labels contain only one VOD.
+- [x] Add a guard so stale label progress does not block collection for wider training windows.
+- [x] Keep the fix scoped to Twitch label collection; do not change cross-platform matching behavior.
+- [x] Run focused tests and syntax checks.
+
+### Review Notes
+
+- Current progress claimed `2025-10-01..2025-12-14` and
+  `2026-01-01..2026-05-05` were covered, but the active label file contained
+  only `483` rows from one VOD on `2026-05-01`.
+- `collect_twitch_clip_labels.py` now validates progress ranges against actual
+  existing label dates before honoring `--skip-covered`.
+- With current artifacts, the validated covered range becomes only
+  `2026-05-01..2026-05-01`, so the next wider run will recollect the missing
+  days instead of skipping the whole window.
+- Verification passed: `test_twitch_clip_labels.py` -> `30 passed`;
+  `py_compile` passed; scoped `git diff --check` passed.
+
+## 2026-05-08 Plan: Fix Env Override For Cross-Platform Matching Defaults
+
+- [x] Confirm why the restarted run still used `min_confidence=0.5` and `reuse_existing_output=true`.
+- [x] Update the real Docker env file and example so they no longer override the code defaults with stale values.
+- [x] Verify the effective env-file values and run focused checks.
+- [x] Document the restart expectation.
+
+### Review Notes
+
+- `scripts/train_local_docker.sh` passes `backend/.env` through Docker
+  `--env-file`, and that file still had
+  `CROSS_PLATFORM_FINGERPRINT_MIN_CONFIDENCE=0.50` plus
+  `CROSS_PLATFORM_REUSE_EXISTING_ROWS=1`.
+- Updated both `backend/.env` and `backend/.env.example` to `0.60` and `0`.
+- Verified with `rg` that the active env file, example, and shell defaults now
+  agree.
+- Verification passed: shell syntax check and scoped `git diff --check`.
+
+## 2026-05-08 Plan: Stop Reusing Stale Cross-Platform Rows By Default
+
+- [x] Confirm the failed run reused the old cross-platform artifact instead of rematching at the new threshold.
+- [x] Change the Jynxzi training default so cross-platform rows are rematched unless reuse is explicitly enabled.
+- [x] Keep the state snapshot and tests aligned with the new default.
+- [x] Run focused verification and rebuild Graphify.
+
+### Review Notes
+
+- The run showed `prepare_status=reused_existing_output` and
+  `prepare_preserved_existing_output=true`, so it did not rematch with the new
+  `0.60` threshold.
+- `CROSS_PLATFORM_REUSE_EXISTING_ROWS` now defaults to `0` in the Jynxzi
+  training script. Existing cross-platform rows can still be reused explicitly
+  by setting `CROSS_PLATFORM_REUSE_EXISTING_ROWS=1`.
+- The workflow-state snapshot default and test expectation now match the shell
+  default.
+- Verification passed: focused workflow-state pytest, shell syntax check,
+  `py_compile`, and scoped `git diff --check`.
+
+## 2026-05-08 Plan: Prevent One-VOD Cross-Platform Overmatching
+
+- [ ] Diagnose the one-VOD full-audio match explosion from the run summary.
+- [ ] Raise the cross-platform audio confidence default for full-VOD matching.
+- [ ] Add a seed matched-VOD diversity guard.
+- [ ] Update workflow state/tests and run focused verification.
+
+## 2026-05-08 Plan: Fix Full-VOD Audio Temp Extension
+
+- [x] Diagnose ffmpeg returncode 234 from the new structured logs.
+- [x] Change full-VOD audio temp output path so ffmpeg can infer the muxer.
+- [x] Add regression coverage for the temp-path extension.
+- [x] Run focused tests, syntax checks, and Graphify.
+
+### Review Notes
+
+- The ffmpeg failure was caused by the temporary output path
+  `source.m4a.part`. FFmpeg could not infer the output container from that
+  final `.part` suffix.
+- Full-VOD audio extraction now writes to `source.part.m4a` and then atomically
+  replaces `source.m4a`, preserving the real media extension as the final
+  suffix.
+- Added regression coverage for the temp path.
+- Verification passed: focused pytest -> `42 passed`; `py_compile` passed;
+  `bash -n backend/ml/train_jynxzi_vod.sh` passed; scoped `git diff --check`
+  passed.
+- Graphify rebuilt successfully: `2913` nodes, `7758` edges,
+  `69` communities.
+
+## 2026-05-08 Plan: Diagnose Full-VOD Audio FFmpeg Failure
+
+- [x] Inspect the full-VOD audio download implementation and current error
+  logging.
+- [x] Preserve useful ffmpeg stderr and source-format diagnostics in the
+  failure log.
+- [x] Fix obvious ffmpeg invocation issues if found.
+- [x] Add focused regression coverage and run verification.
+
+### Review Notes
+
+- The run now fails in the intended place: Full-VOD audio extraction for
+  `2761754957`, no MP4 fallback, and immediate blocked training exit.
+- The previous log only showed a truncated `CalledProcessError` command because
+  the ffmpeg command included long HTTP headers. It hid the real stderr.
+- Added structured `FullVodAudioDownloadError` wrapping ffmpeg failures with
+  `ffmpeg_returncode`, `ffmpeg_stderr`, `ffmpeg_stdout`, and selected format
+  metadata.
+- Added `full_vod_audio_download_input_selected` logging so the next run shows
+  selected format id, protocol, codecs, bitrate, height, and media URL prefix.
+- Verification passed: focused pytest -> `41 passed`; `py_compile` passed;
+  `bash -n backend/ml/train_jynxzi_vod.sh` passed; scoped `git diff --check`
+  passed.
+- Graphify rebuilt successfully: `2911` nodes, `7754` edges,
+  `70` communities.
+
+## 2026-05-08 Plan: Stop After Blocked Audio-Only Cross-Platform Prep
+
+- [x] Diagnose the completed 1-day run's blocked full-audio failure.
+- [x] Make blocked cross-platform prep abort the shell workflow immediately.
+- [x] Stop rebuilding repost manifests merely because they are below
+  `max_reposts`.
+- [x] Add regression coverage and run focused verification.
+
+### Review Notes
+
+- The run correctly produced `blocked_full_vod_audio_fingerprints`, but
+  `train_jynxzi_vod.sh` only passed `--fail-on-insufficient`, so the workflow
+  continued and built negative-only outcome datasets before failing later.
+- The training script now passes `--fail-on-blocked`, so blocked audio-only
+  cross-platform prep exits immediately and does not continue into dataset
+  construction.
+- Repost manifests no longer rebuild just because cached rows are below
+  `max_reposts`. `max_reposts` is now only a cap for explicit rebuilds; rebuild
+  still happens when rows are missing, below `min_reposts`, or refresh is
+  requested.
+- Verification passed: focused pytest -> `39 passed`; `py_compile` passed;
+  `bash -n backend/ml/train_jynxzi_vod.sh` passed; scoped `git diff --check`
+  passed.
+- Graphify rebuilt successfully: `2904` nodes, `7736` edges,
+  `68` communities.
+
+## 2026-05-08 Plan: Remove Old MP4 Cross-Platform Caches
+
+- [x] Inspect old MP4 cache categories and current container state.
+- [x] Delete obsolete `coarse_*` scoped-window MP4 cache directories.
+- [x] Delete leftover full-VOD audio temp `.m4a` files if present.
+- [x] Verify freed space and remaining cache state.
+
+### Review Notes
+
+- Removed 203 obsolete `scoped_windows/coarse_*` directories from
+  `backend/tmp/vod_feature_cache`.
+- These files were root-owned from Docker, so normal `rm` failed with
+  permission errors. Deletion succeeded via a one-shot Docker container mounted
+  on the repo.
+- Removed stale cross-platform generated artifacts that were derived from the
+  old MP4-window matches:
+  `jynxzi_cross_platform_vods.jsonl`,
+  `jynxzi_cross_platform_fingerprint_rows.jsonl`,
+  `jynxzi_cross_platform_fingerprint_summary.json`, and
+  `jynxzi_cross_platform_fingerprint_diagnostics.jsonl`.
+- Verified `coarse_*` directories remaining: `0`.
+- Verified leftover `full_vod_audio/source.m4a` files: `0`.
+- `backend/tmp/vod_feature_cache` is now `31G`; filesystem free space is
+  `885G`.
+
+## 2026-05-08 Plan: Enforce Full-VOD Audio In Seed Cross-Platform Pass
+
+- [x] Confirm why the current seed pass still used scoped MP4 windows.
+- [x] Change the training orchestrator so full-VOD audio mode is active for
+  all cross-platform prepare calls, not only the second pass.
+- [x] Add regression coverage for the shell wiring.
+- [x] Run focused verification and document the result.
+
+### Review Notes
+
+- Root cause: `train_jynxzi_vod.sh` only passed
+  `--full-vod-audio-fingerprints` when `refresh_vods=1`, so the seed pass
+  explicitly passed `--no-full-vod-audio-fingerprints` and rebuilt from old
+  scoped MP4 windows.
+- The shell wrapper now passes `--full-vod-audio-fingerprints` whenever
+  `CROSS_PLATFORM_FULL_VOD_AUDIO_FINGERPRINTS=1`, including the seed pass.
+- Added a regression test so the shell script cannot reintroduce the
+  `refresh_vods && full_audio` coupling.
+- Verification passed: focused pytest -> `37 passed`; `py_compile` passed;
+  `bash -n backend/ml/train_jynxzi_vod.sh` passed; scoped `git diff --check`
+  passed.
+- Graphify rebuilt successfully: `2902` nodes, `7731` edges,
+  `67` communities.
+
+## 2026-05-08 Plan: Fail Closed On Failed Full-VOD Audio Fingerprints
+
+- [x] Diagnose the 1-day smoke-test failure path from the provided logs.
+- [x] Stop empty full-audio VOD refreshes from overwriting usable manifests or
+  cross-platform outcome rows.
+- [x] Add regression tests for failed full-audio backfill and empty-input
+  preservation.
+- [x] Run focused tests, syntax checks, Graphify, and document the result.
+
+### Review Notes
+
+- The smoke test selected one VOD for full-audio fingerprinting, failed that
+  one VOD, wrote a refreshed VOD manifest with `0` rows, then overwrote
+  `jynxzi_cross_platform_fingerprint_rows.jsonl` with `0` rows. That removed
+  all positives before training.
+- Full-audio fingerprint builds now report
+  `failed_no_full_vod_audio_fingerprints` when selected VODs exist but no
+  cached/built full-audio fingerprints remain.
+- `prepare_cross_platform_fingerprint_rows` now blocks with
+  `blocked_full_vod_audio_fingerprints` before matching when that happens.
+  Existing VOD manifests and existing cross-platform outcome rows are preserved.
+- Empty-input and below-minimum match results now preserve the last valid
+  output artifact when one exists, instead of writing an empty outcome file.
+- Verification passed: focused pytest -> `36 passed`; `py_compile` passed;
+  `bash -n backend/ml/train_jynxzi_vod.sh` passed; scoped `git diff --check`
+  passed.
+- Graphify rebuilt successfully: `2899` nodes, `7728` edges,
+  `68` communities.
+
+## 2026-05-07 Plan: Coarse Audio Tiling fuer Cross-Platform-Matching
+
+Ziel: Cross-platform Reposts sollen nicht nur dann matchen koennen, wenn sie
+zufaellig in einem Twitch-Top-Clip scoped window liegen. Der Rematch soll
+optional grobe Audio-Tiles ueber ausgewaehlte VODs bauen und in das
+VOD-Manifest aufnehmen.
+
+- [x] Coarse-Tiling Parameter und Cache-Layout im Fingerprint-Prepare
+  einfuehren.
+- [x] Aus selected targeted-backfill VODs und Label-Manifest grobe VOD-Tiles
+  erzeugen.
+- [x] Jynxzi-Trainingsscript so verdrahten, dass der zweite Rematch diese
+  Tiles nutzt.
+- [x] Tests/Syntax/Graphify ausfuehren.
+- [x] Ergebnis dokumentieren.
+
+### Review
+
+- `prepare_cross_platform_fingerprint_rows.py` hat jetzt einen optionalen
+  `--coarse-vod-tiling` Pfad. Er liest die selected targeted-backfill VODs,
+  nimmt das Twitch-Label-Manifest nur zur VOD-/Horizon-Bestimmung und erzeugt
+  grobe `coarse_vod_audio_tile` scoped windows im bestehenden
+  `vod_feature_cache`.
+- Defaults fuer den Trainingsrun: `30s` Tile-Laenge, `600s` Stride,
+  maximal `24` Tiles pro VOD. Damit deckt ein selected VOD grob bis zu vier
+  Stunden ab, ohne den kompletten VOD voll zu analysieren.
+- Der zweite Cross-platform Rematch aktiviert das Tiling nur bei
+  `refresh_vods=1`. Seed-Reuse bleibt billig; der teure breitere Suchraum
+  entsteht erst im strikten Rematch nach targeted backfill.
+- Die groben Tiles landen im normalen VOD-Manifest, weil der Manifest-Builder
+  alle `scoped_windows/*/source.metadata.json` einliest. Der bestehende
+  Audio-Fingerprint-Matcher kann sie dadurch unveraendert vergleichen.
+- Verifikation: `py_compile` erfolgreich; `bash -n train_jynxzi_vod.sh`
+  erfolgreich; fokussierte Tests
+  `test_prepare_cross_platform_fingerprint_rows.py`,
+  `test_training_workflow_state.py`, `test_targeted_backfill.py`,
+  `test_train_vod_ranker.py` -> `60 passed`; scoped `git diff --check`
+  sauber.
+- Graphify-Rebuild erfolgreich:
+  `2876` Nodes, `7638` Edges, `68` Communities.
+
 ## 2026-04-27 Plan: ML Model Verbesserungsplan (basierend auf Eval-Analyse)
 
 ### Kontext
@@ -4607,6 +5776,92 @@ Phase 0-2 zuerst, danach **1 Woche reale Nutzung** bevor Phase 3 angefasst wird.
 - New ignored run artifacts are intentionally force-added, excluding the Twitch cache directories.
 - `git diff --check` only reported CRLF/trailing whitespace in generated `jynxzi_ranker_holdout_diagnosis.csv`; no code whitespace issues were found.
 
+## 2026-05-08 Plan: Replace Full-MP4 Coarse Matching With Full-VOD Audio Fingerprints
+
+- [x] Stop or confirm stopped the currently running MP4 full-coverage training run.
+- [x] Inspect current cross-platform manifest and audio-fingerprint matcher flow.
+- [x] Add cached full-VOD audio fingerprint manifest rows.
+- [x] Make matcher consume VOD `fingerprint_path` rows directly.
+- [x] Switch training defaults from MP4 coarse tiling to full-VOD audio fingerprints.
+- [x] Add regression tests for full-VOD audio fingerprint manifest and matcher input.
+- [x] Run focused tests, syntax checks, Graphify, and disk verification.
+
+### Review Notes
+
+- Replaced full-MP4 coarse matching with full-VOD audio fingerprinting. The
+  refresh path now extracts each selected VOD's full audio stream, writes one
+  `source.fpcalc.json` fingerprint for the entire VOD timeline, and deletes the
+  temporary `.m4a` by default.
+- The cross-platform matcher now consumes VOD rows with `fingerprint_path`
+  directly, so repost fingerprints are compared against the full VOD audio
+  fingerprint instead of only scoped video snippets.
+- `train_jynxzi_vod.sh` now defaults to
+  `CROSS_PLATFORM_FULL_VOD_AUDIO_FINGERPRINTS=1` and
+  `CROSS_PLATFORM_COARSE_VOD_TILING=0`.
+- In full-audio mode, refreshed VOD manifests exclude old scoped MP4 windows,
+  so stale `coarse_*` video tiles do not silently stay in the matching set.
+- Verification passed: focused pytest -> `34 passed`; `py_compile` passed;
+  `bash -n backend/ml/train_jynxzi_vod.sh` passed; scoped `git diff --check`
+  passed.
+- Graphify rebuilt successfully after backend changes.
+- Disk check after implementation: `/dev/sdd` has `832G` available.
+
+## 2026-05-08 Plan: Clean Backend Tmp Storage
+
+- [x] Measure project filesystem, Docker usage, and `backend/tmp` subtrees.
+- [x] Delete regenerable storage job/download dirs and coarse VOD audio tiles.
+- [x] Delete old `extended_window_scoped_group` training-window caches.
+- [x] Delete legacy scoped windows without `source_kind` metadata.
+- [x] Verify remaining free space and retained cache categories.
+
+### Review Notes
+
+- Filesystem before cleanup was full: `/dev/sdd` had `0` available and `backend/tmp` was `938G`.
+- Removed all `coarse_*` VOD feature windows and transient `backend/tmp/storage` job/download-cache directories.
+- Removed old `extended_window_scoped_group` scoped-window caches, which were the main storage consumer.
+- Removed 104 legacy scoped windows with missing/unreadable `source_kind`.
+- Filesystem after cleanup: `/dev/sdd` has `898G` available and `backend/tmp` is down to `27G`.
+- Remaining VOD feature cache is `26G`, mainly `local_source` and `twitch_download_cache` windows plus small per-VOD metadata/media caches.
+
+## 2026-05-08 Plan: Stop Coarse Tiling Deleted Twitch VOD Loops
+
+- [x] Identify why deleted VODs continue through later coarse tiles.
+- [x] Add permanent unavailable-VOD detection and abort remaining tiles for that VOD.
+- [x] Add regression coverage for `Video ... does not exist`.
+- [x] Run focused tests and syntax checks.
+- [x] Rebuild Graphify and summarize current-run impact.
+
+### Review Notes
+
+- Added permanent Twitch-VOD-unavailable detection for coarse tiling errors such as `ERROR: [twitch:vod] 2712736206: Video 2712736206 does not exist`.
+- On the first permanent VOD error, the tiler now logs `coarse_vod_tile_vod_abort` and skips the remaining tiles for that VOD instead of trying tile 100+.
+- The summary now includes `unavailable_vods` so deleted VOD coverage loss is visible in artifacts/logs.
+- Added a regression test proving a 6-tile VOD attempts only one download when Twitch reports the VOD does not exist.
+- Verification passed: `backend/.venv/bin/python -m pytest backend/tests/test_prepare_cross_platform_fingerprint_rows.py -q` -> `16 passed`.
+- Verification passed: `backend/.venv/bin/python -m py_compile backend/ml/prepare_cross_platform_fingerprint_rows.py`.
+- Verification passed: scoped `git diff --check`.
+- Rebuilt backend Graphify: `2880` nodes, `7649` edges, `70` communities.
+
+## 2026-05-07 Plan: Make Cross-Platform VOD Matching Full-Coverage
+
+- [x] Confirm current coarse tiling is sparse and capped.
+- [x] Change second-pass VOD tiling defaults to lueckenlose VOD-horizon coverage.
+- [x] Use real VOD duration when available instead of only the last Twitch-label window.
+- [x] Add tests proving full-duration tiling and workflow defaults.
+- [x] Run focused verification and document operational impact.
+
+### Review Notes
+
+- Cross-platform VOD tiling defaults now use `tile=360s`, `stride=180s`, and `max_tiles=0`, so selected VODs are no longer sparse-sampled or capped at 24 windows.
+- Coarse tiling now prefers `vod_duration_seconds`/duration metadata for the horizon. It falls back to the previous label-window horizon plus padding only when no VOD duration is available.
+- The tiling summary logs `coverage_mode`, `full_duration_vods`, `label_horizon_vods`, `total_tiles`, and `total_covered_sec` so the next run can prove whether it used full-duration coverage.
+- Added a regression test that a 1000s VOD creates six overlapping full-coverage tiles starting at `0, 180, 360, 540, 720, 900` and ending at the real VOD duration.
+- Verification passed: `backend/.venv/bin/python -m pytest backend/tests/test_prepare_cross_platform_fingerprint_rows.py backend/tests/test_training_workflow_state.py -q` -> `22 passed`.
+- Verification passed: `backend/.venv/bin/python -m py_compile backend/ml/prepare_cross_platform_fingerprint_rows.py backend/ml/training_workflow_state.py`.
+- Verification passed: `bash -n backend/ml/train_jynxzi_vod.sh`.
+- Verification passed: scoped `git diff --check`.
+- Rebuilt backend Graphify with the local graphify interpreter: `2878` nodes, `7644` edges, `68` communities.
+
 ## 2026-04-27 Plan: Prevent Holdout Leakage In Training Dataset
 
 - [x] Inspect where VOD proxy rows, gold train rows, and hard negatives are merged.
@@ -4685,3 +5940,91 @@ Phase 0-2 zuerst, danach **1 Woche reale Nutzung** bevor Phase 3 angefasst wird.
 - Gold holdout now has 60 rows with trained F1 `0.723`, precision `0.654`, recall `0.810`, MRR `0.471`, NDCG@5 `0.475`.
 - Holdout diagnosis now has 6 false positives, 11 true positives, 1 false negative, and 12 true negatives.
 - Hard-negative export contains 6 confirmed false-positive rows for a future training run; they were not part of this training dataset.
+
+## 2026-05-08 Plan: Filter Dead Cache-Only VODs From Full-Audio Backfill
+
+- [x] Inspect full-VOD audio selection and current VOD inventory provenance.
+- [x] Prefer Twitch API VOD inventory rows and admit cache-only rows only when a full-audio fingerprint already exists.
+- [x] Add focused tests for cache-only filtering and API-row priority.
+- [x] Run focused verification and rebuild Graphify after backend changes.
+
+### Review Notes
+
+- The active run proved the Twitch-label removal worked, but the VOD inventory
+  admitted old cache-only VODs whose Twitch URLs no longer exist.
+- `train_jynxzi_vod.sh` now preserves `twitch_vod_api` provenance when cache
+  metadata is merged onto the same VOD, so live API VODs do not get downgraded
+  to `vod_feature_cache`.
+- `prepare_cross_platform_fingerprint_rows.py` filters inventory-backed
+  selected VODs before download: API-backed VODs are allowed, cache-only VODs
+  are allowed only if their existing full-VOD audio fingerprint cache is usable.
+- Verification passed: focused prepare/script tests, `py_compile`, `bash -n`,
+  and scoped `git diff --check`.
+
+## 2026-05-10 Plan: Rebuild VOD Manifest After Full-Audio Fingerprints
+
+- [x] Confirm why the matcher used only one stale VOD row after 57 full-audio fingerprints were built.
+- [x] Force a VOD manifest rebuild from full-audio fingerprint cache whenever full-VOD-audio mode succeeds.
+- [x] Add regression coverage for stale one-row manifest replacement.
+- [x] Run focused verification and rebuild Graphify.
+
+### Review Notes
+
+- The failed run built `processed_vods=57` full-audio fingerprints, but
+  preserved a stale `jynxzi_cross_platform_vods.jsonl` with `vod_rows=1`
+  because `refresh_vods=false` and the old manifest was still usable.
+- Full-VOD-audio mode now treats a successful full-audio build as a manifest
+  rebuild reason (`full_vod_audio_fingerprints`) and rewrites the VOD manifest
+  from `full_vod_audio/source.fpcalc.json` cache rows before matching.
+- Verification passed: focused prepare tests, `py_compile`, and scoped
+  `git diff --check`.
+
+## 2026-05-10 Plan: Calibrate Cross-Platform Gates To Available Jynxzi Coverage
+
+- [x] Lower cross-platform matched-row gates from absolute 300/500-style targets to the available Jynxzi outcome coverage.
+- [x] Keep VOD diversity enforced with a non-zero matched-VOD minimum.
+- [x] Align ranker minimum, workflow state defaults, env files, and tests.
+- [x] Run focused verification and rebuild Graphify.
+
+### Review Notes
+
+- Current full-VOD matching found about `74-75` accepted rows over `29` VODs at
+  threshold `0.60`; the old `300/500` row gates exceeded the known available
+  Jynxzi coverage.
+- Training and prepare gates now use `70` matched rows plus `20` matched VODs,
+  keeping a diversity gate without forcing the threshold down to `0.55`.
+- `VOD_RANKER_MIN_CROSS_PLATFORM_TRAIN_ROWS` now defaults to `70`, aligned with
+  the cross-platform prepare gate.
+- Verification passed: focused script/workflow-state tests, `py_compile`,
+  `bash -n`, scoped `git diff --check`, and Graphify rebuild.
+
+## 2026-05-10 Plan: Filter Non-Jynxzi Cross-Platform Reposts
+
+- [x] Inspect repost discovery metadata and confirm why unrelated search hits enter the Jynxzi manifest.
+- [x] Preserve title/uploader/channel metadata from discovery into repost manifest rows.
+- [x] Filter discovered repost candidates unless they have explicit Jynxzi/profile evidence outside the search query.
+- [x] Add tests, update lessons, run focused verification, and rebuild Graphify.
+
+### Review Notes
+
+- Root cause: discovered `ytsearch` results were stamped with
+  `streamer=jynxzi` from the search seed, while the persisted repost rows did
+  not keep title/uploader/channel metadata that could prove the video was
+  actually about Jynxzi.
+- Discovery now carries `title`, `uploader`, `channel`, `channel_id`,
+  `description`, and `discovery_source_url` into repost manifest rows.
+- Search-discovered reposts now pass only when title/uploader/channel/description
+  contains explicit profile evidence. Seed tags and notes are not accepted as
+  proof, so `ytsearch:jynxzi ...` alone cannot admit unrelated clips.
+- Repost manifest rows now include `profile_filter_version`; existing stale
+  manifests without that marker rebuild automatically with reason
+  `profile_filter_policy` on the next run.
+- Current local `jynxzi_cross_platform_reposts.jsonl` samples have no
+  `profile_filter_version`, title, or uploader, so the next run will trigger
+  that stale-manifest rebuild.
+- If the profile-filter rebuild finds too few valid reposts/matches, the old
+  cross-platform output is no longer preserved; the run fails closed instead
+  of training on stale false positives.
+- Verification passed: focused pytest -> `50 passed`; `py_compile` passed;
+  scoped `git diff --check` passed; Graphify rebuilt successfully with
+  `2934` nodes, `7818` edges, and `73` communities.

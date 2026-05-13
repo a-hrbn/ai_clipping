@@ -174,6 +174,9 @@ class CandidateFeatures:
     chat_laugh_score: float = 0.0
     chat_shock_score: float = 0.0
     chat_sadge_score: float = 0.0
+    chat_velocity_score: float = 0.0
+    chat_rate_derivative_score: float = 0.0
+    chat_ema_crossing_score: float = 0.0
     motion_peak: float = 0.0
     face_reaction_peak: float = 0.0
     speaker_turns: int = 0
@@ -228,12 +231,43 @@ class CandidateFeatures:
     outcome_prior_score: float = 0.0
     visual_hook_score: float = 0.0
     audio_pop_score: float = 0.0
+    streamer_shout_score: float = 0.0
+    voice_energy_burst_score: float = 0.0
+    pitch_variation_score: float = 0.0
+    f0_sigma_score: float = 0.0
+    vad_voice_ratio: float = 0.0
+    shout_onset_score: float = 0.0
     event_surprise_score: float = 0.0
     nonverbal_payoff_score: float = 0.0
     goal_relevance_score: float = 0.0
     platform_relevance_score: float = 0.0
     projected_hook_score: float = 0.0
     projected_retention_score: float = 0.0
+    vl_prompt_max_score: float = 0.0
+    vl_clutch_score: float = 0.0
+    vl_comedy_score: float = 0.0
+    vl_reaction_face_score: float = 0.0
+    vl_scoreboard_score: float = 0.0
+    game_event_score: float = 0.0
+    kill_density_in_window: float = 0.0
+    is_clutch_window: bool = False
+    is_match_endpoint: bool = False
+    boundary_variant_score: float = 0.0
+    boundary_variant_margin_score: float = 0.0
+    boundary_variant_count: float = 0.0
+    hook_rewrite_score: float = 0.0
+    hook_curiosity_gap_score: float = 0.0
+    has_hook_rewrite: bool = False
+    pre_roll_hook_score: float = 1.0
+    judge_score: float = 0.0
+    judge_confidence: float = 0.0
+    judge_scroll_stop_power: float = 0.0
+    judge_standalone_clarity: float = 0.0
+    judge_payoff_strength: float = 0.0
+    judge_narrative_completeness: float = 0.0
+    judge_platform_fit_shortform: float = 0.0
+    has_judge_score: bool = False
+    judge_llm_used: bool = False
     has_llm_semantics: bool = False
     has_chat_features: bool = False
     has_vector_similarity: bool = False
@@ -302,6 +336,7 @@ class JudgeResult:
     judge_confidence: float
     provider: str = "heuristic"
     llm_used: bool = False
+    model: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)

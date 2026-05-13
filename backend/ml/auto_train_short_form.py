@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import csv
+import hashlib
 import json
 import logging
 import math
 import pathlib
+import random
+import re
 import socket
 import ssl
 import sys
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
+from html import unescape
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -21,7 +28,9 @@ BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
+from config import settings
 from ml import collect_viral_clips, train_ranker, train_vod_ranker
+from services.yt_dlp_auth import apply_yt_dlp_auth_options
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
 logger = logging.getLogger(__name__)
@@ -29,6 +38,15 @@ logger = logging.getLogger(__name__)
 _MIN_POSITIVE_DURATION = 10
 _MAX_POSITIVE_DURATION = 75
 _MIN_MEDIAN_DENOMINATOR = 1.0
+_SHORT_FORM_METADATA_CACHE_VERSION = 1
+YOUTUBE_RATE_LIMIT_ERROR_MARKERS = (
+    "this content isn't available, try again later",
+    "this content is not available, try again later",
+    "rate-limited by youtube",
+    "rate limited by youtube",
+    "exceeding the rate limit",
+    "add a delay between video requests",
+)
 
 
 def main() -> int:
@@ -410,6 +428,12 @@ def _discover_seed(
             "duration": str(entry["duration"]),
             "publish_timestamp": str(entry["publish_timestamp"]),
             "upload_date": entry["upload_date"],
+            "title": entry["title"],
+            "uploader": entry["uploader"],
+            "channel": entry["channel"],
+            "channel_id": entry["channel_id"],
+            "description": entry["description"],
+            "discovery_source_url": seed["source_url"],
             "notes": (
                 "auto_discovered "
                 f"viral_score={_format_float(entry['viral_score'])} "
@@ -422,6 +446,10 @@ def _discover_seed(
 
 
 def _extract_source_entries(source_url: str, max_candidates: int, proxy: str | None = None) -> list[dict]:
+    if source_url.strip().lower().startswith("ytsearchdate"):
+        return _extract_youtube_date_search_entries(source_url, max_candidates, proxy=proxy)
+    if source_url.strip().lower().startswith("tiktoksearch"):
+        return _extract_tiktok_search_entries_via_bing(source_url, max_candidates, proxy=proxy)
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
@@ -429,12 +457,14 @@ def _extract_source_entries(source_url: str, max_candidates: int, proxy: str | N
         "playlistend": max(max_candidates, 1),
         "skip_download": True,
     }
+    apply_yt_dlp_auth_options(ydl_opts)
     if proxy:
         ydl_opts["proxy"] = proxy
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(source_url, download=False)
     except Exception as exc:
+        _cooldown_after_short_form_yt_dlp_error(exc, stage="source_discovery", url=source_url)
         if _is_platform_unavailable_error(exc, source_url):
             raise _PlatformUnavailableError(str(exc)) from exc
         if "tiktok.com/@" in source_url:
@@ -448,57 +478,603 @@ def _extract_source_entries(source_url: str, max_candidates: int, proxy: str | N
         entries = [entry for entry in info["entries"] if entry]
         if not entries and "tiktok.com/@" in source_url:
             return _extract_tiktok_entries_via_bing(source_url, max_candidates, proxy=proxy)
+        if _is_youtube_channel_shorts_source(source_url):
+            entries = _enrich_youtube_channel_entries_with_publish_dates(entries, source_url, proxy=proxy)
         return entries
     return [info]
+
+
+def _extract_youtube_date_search_entries(source_url: str, max_candidates: int, proxy: str | None = None) -> list[dict]:
+    query = _extract_prefixed_search_query(source_url)
+    if not query:
+        return []
+    search_url = (
+        "https://www.youtube.com/results?"
+        + urllib.parse.urlencode({"search_query": query})
+        + "&sp=CAI%253D"
+    )
+    entries = _extract_youtube_search_page_entries(search_url, max_candidates, proxy=proxy)
+    if entries:
+        return entries
+    return _extract_youtube_search_page_entries(
+        f"ytsearch{max(max_candidates, 1)}:{query}",
+        max_candidates,
+        proxy=proxy,
+    )
+
+
+def _extract_youtube_search_page_entries(search_url: str, max_candidates: int, proxy: str | None = None) -> list[dict]:
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "extract_flat": True,
+        "playlistend": max(max_candidates, 1),
+        "skip_download": True,
+    }
+    apply_yt_dlp_auth_options(ydl_opts)
+    if proxy:
+        ydl_opts["proxy"] = proxy
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(search_url, download=False)
+    except Exception as exc:
+        _cooldown_after_short_form_yt_dlp_error(exc, stage="youtube_date_search", url=search_url)
+        logger.debug("YouTube date-search extraction failed for %s", search_url, exc_info=True)
+        return []
+    if not info:
+        return []
+    if isinstance(info, dict) and info.get("entries"):
+        return [entry for entry in info["entries"] if entry][:max_candidates]
+    return [info]
+
+
+def _is_youtube_channel_shorts_source(source_url: str) -> bool:
+    parsed = urllib.parse.urlparse(str(source_url or ""))
+    host = parsed.netloc.lower()
+    path = parsed.path.strip("/").lower()
+    return "youtube.com" in host and path.endswith("/shorts")
+
+
+def _enrich_youtube_channel_entries_with_publish_dates(
+    entries: list[dict],
+    source_url: str,
+    proxy: str | None = None,
+) -> list[dict]:
+    if not entries:
+        return entries
+    ids_needing_dates = {
+        str(entry.get("id") or "").strip()
+        for entry in entries
+        if str(entry.get("id") or "").strip() and not _coerce_upload_date(entry) and _coerce_publish_timestamp(entry) <= 0
+    }
+    if not ids_needing_dates:
+        return entries
+    try:
+        html_text = _fetch_text(source_url, proxy=proxy)
+    except Exception:
+        logger.debug("YouTube channel publish-date page extraction failed for %s", source_url, exc_info=True)
+        html_text = ""
+
+    publish_dates = _youtube_channel_publish_dates_from_html(html_text)
+    enriched: list[dict] = []
+    html_date_rows = 0
+    metadata_cache_hits = 0
+    metadata_fetches = 0
+    metadata_failures = 0
+    metadata_date_rows = 0
+    for entry in entries:
+        video_id = str(entry.get("id") or "").strip()
+        published_at = publish_dates.get(video_id)
+        if published_at is not None:
+            row = dict(entry)
+            if _coerce_publish_timestamp(row) <= 0:
+                row["timestamp"] = int(published_at.timestamp())
+            if not _coerce_upload_date(row):
+                row["upload_date"] = published_at.strftime("%Y%m%d")
+            html_date_rows += 1
+            enriched.append(row)
+            continue
+
+        metadata_url = _metadata_url_for_entry(entry, source_url)
+        if not metadata_url:
+            enriched.append(entry)
+            continue
+        metadata, cache_status = _extract_single_entry_metadata_with_cache_status(metadata_url, proxy=proxy)
+        if cache_status == "hit":
+            metadata_cache_hits += 1
+        elif cache_status == "fetched":
+            metadata_fetches += 1
+        elif cache_status == "failed":
+            metadata_failures += 1
+        if metadata is None:
+            enriched.append(entry)
+            continue
+        row = _merge_flat_entry_with_metadata(entry, metadata)
+        if _coerce_upload_date(row) or _coerce_publish_timestamp(row) > 0:
+            metadata_date_rows += 1
+        enriched.append(row)
+
+    logger.info(
+        "youtube_channel_short_metadata_enrichment source=%s rows=%s html_date_rows=%s "
+        "metadata_cache_hits=%s metadata_fetches=%s metadata_failures=%s metadata_date_rows=%s",
+        source_url,
+        len(entries),
+        html_date_rows,
+        metadata_cache_hits,
+        metadata_fetches,
+        metadata_failures,
+        metadata_date_rows,
+    )
+    return enriched
+
+
+def _metadata_url_for_entry(entry: dict, source_url: str) -> str:
+    for key in ("webpage_url", "url"):
+        value = str(entry.get(key) or "").strip()
+        if value.startswith(("http://", "https://")):
+            return value
+    video_id = str(entry.get("id") or "").strip()
+    if not video_id:
+        return ""
+    if _is_youtube_channel_shorts_source(source_url):
+        return f"https://www.youtube.com/shorts/{video_id}"
+    return f"https://www.youtube.com/watch?v={video_id}"
+
+
+def _merge_flat_entry_with_metadata(entry: dict, metadata: dict) -> dict:
+    merged = dict(entry)
+    for key, value in metadata.items():
+        if value not in (None, "", [], {}):
+            merged[key] = value
+    if not str(merged.get("webpage_url") or "").strip():
+        merged["webpage_url"] = (
+            str(metadata.get("webpage_url") or "")
+            or str(entry.get("webpage_url") or "")
+            or str(entry.get("url") or "")
+        )
+    return merged
+
+
+def _youtube_channel_publish_dates_from_html(html_text: str, *, now: datetime | None = None) -> dict[str, datetime]:
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    rows: dict[str, datetime] = {}
+    pattern = re.compile(r'"videoId"\s*:\s*"(?P<id>[A-Za-z0-9_-]{6,})"(?P<body>.{0,4000}?)(?="videoId"\s*:|$)', re.DOTALL)
+    for match in pattern.finditer(html_text or ""):
+        video_id = match.group("id")
+        if video_id in rows:
+            continue
+        relative_text = _youtube_published_time_text(match.group("body"))
+        published_at = _parse_youtube_relative_publish_time(relative_text, now=now)
+        if published_at is not None:
+            rows[video_id] = published_at
+    return rows
+
+
+def _youtube_published_time_text(block: str) -> str:
+    for pattern in (
+        r'"publishedTimeText"\s*:\s*\{\s*"simpleText"\s*:\s*"(?P<text>[^"]+)"',
+        r'"publishedTimeText"\s*:\s*\{\s*"runs"\s*:\s*\[\s*\{\s*"text"\s*:\s*"(?P<text>[^"]+)"',
+    ):
+        match = re.search(pattern, block or "")
+        if match:
+            return _unescape_json_text(match.group("text"))
+    return ""
+
+
+def _parse_youtube_relative_publish_time(text: str, *, now: datetime | None = None) -> datetime | None:
+    value = _unescape_json_text(text).strip().lower()
+    if not value:
+        return None
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    if value in {"today", "just now"}:
+        return now
+    match = re.search(r"(\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago", value)
+    if not match:
+        return None
+    amount = int(match.group(1))
+    unit = match.group(2)
+    days_by_unit = {
+        "second": amount / 86400,
+        "minute": amount / 1440,
+        "hour": amount / 24,
+        "day": amount,
+        "week": amount * 7,
+        "month": amount * 30,
+        "year": amount * 365,
+    }
+    return now - timedelta(days=days_by_unit[unit])
+
+
+def _unescape_json_text(text: str) -> str:
+    try:
+        return json.loads(f'"{text}"')
+    except Exception:
+        return text
 
 
 def _extract_tiktok_entries_via_bing(source_url: str, max_candidates: int, proxy: str | None = None) -> list[dict]:
     username = _extract_tiktok_username(source_url)
     query = f"site:tiktok.com/@{username}/video {username}"
-    rss_url = "https://www.bing.com/search?format=rss&q=" + urllib.parse.quote(query)
-    xml_text = _fetch_text(rss_url, proxy=proxy)
-    root = ET.fromstring(xml_text)
+    return _extract_tiktok_bing_query_entries(query, max_candidates, proxy=proxy)
 
-    links: list[str] = []
-    for item in root.findall("./channel/item"):
-        link = (item.findtext("link") or "").strip()
-        if not link or "/video/" not in link or "tiktok.com/@" not in link:
-            continue
-        links.append(link)
 
-    unique_links: list[str] = []
-    seen: set[str] = set()
-    for link in links:
-        if link in seen:
-            continue
-        seen.add(link)
-        unique_links.append(link)
-        if len(unique_links) >= max_candidates:
-            break
-
+def _extract_tiktok_search_entries_via_bing(
+    source_url: str,
+    max_candidates: int,
+    proxy: str | None = None,
+) -> list[dict]:
+    query = _extract_tiktok_search_query(source_url)
+    if not query:
+        return []
     entries: list[dict] = []
-    for link in unique_links:
-        metadata = _extract_single_entry_metadata(link, proxy=proxy)
-        if metadata is not None:
-            entries.append(metadata)
+    seen_links: set[str] = set()
+    for bing_query in _tiktok_keyword_bing_queries(query):
+        entries.extend(
+            _extract_tiktok_bing_query_entries(
+                bing_query,
+                max_candidates - len(entries),
+                proxy=proxy,
+                seen_links=seen_links,
+            )
+        )
+        if len(entries) >= max_candidates:
+            break
     return entries
 
 
+def _tiktok_keyword_bing_queries(query: str) -> list[str]:
+    quoted = f'"{query}"'
+    return [
+        f"site:tiktok.com/@ inurl:/video {quoted}",
+        f"site:tiktok.com/@ {quoted}",
+        f"site:tiktok.com {quoted} TikTok",
+    ]
+
+
+def _extract_tiktok_bing_query_entries(
+    query: str,
+    max_candidates: int,
+    proxy: str | None = None,
+    seen_links: set[str] | None = None,
+) -> list[dict]:
+    if max_candidates <= 0:
+        return []
+    seen_links = seen_links if seen_links is not None else set()
+    candidates = _extract_tiktok_bing_rss_candidates(query, max_candidates, proxy=proxy, seen_links=seen_links)
+    if len(candidates) < max_candidates:
+        candidates.extend(
+            _extract_tiktok_bing_html_candidates(
+                query,
+                max_candidates - len(candidates),
+                proxy=proxy,
+                seen_links=seen_links,
+            )
+        )
+
+    entries: list[dict] = []
+    for link, fallback in candidates:
+        metadata = _extract_single_entry_metadata(link, proxy=proxy)
+        if metadata is not None:
+            entries.append(metadata)
+        else:
+            entries.append(fallback)
+    return entries
+
+
+def _extract_tiktok_bing_rss_candidates(
+    query: str,
+    max_candidates: int,
+    proxy: str | None = None,
+    seen_links: set[str] | None = None,
+) -> list[tuple[str, dict]]:
+    rss_url = "https://www.bing.com/search?format=rss&q=" + urllib.parse.quote(query)
+    try:
+        xml_text = _fetch_text(rss_url, proxy=proxy)
+        root = ET.fromstring(xml_text)
+    except Exception:
+        logger.debug("TikTok Bing RSS extraction failed for %s", query, exc_info=True)
+        return []
+
+    seen_links = seen_links if seen_links is not None else set()
+    candidates: list[tuple[str, dict]] = []
+    for item in root.findall("./channel/item"):
+        link = _canonical_tiktok_video_url(item.findtext("link") or "")
+        if not link or link in seen_links:
+            continue
+        seen_links.add(link)
+        candidates.append((link, _tiktok_rss_fallback_entry(link, item)))
+        if len(candidates) >= max_candidates:
+            break
+    return candidates
+
+
+def _extract_tiktok_bing_html_candidates(
+    query: str,
+    max_candidates: int,
+    proxy: str | None = None,
+    seen_links: set[str] | None = None,
+) -> list[tuple[str, dict]]:
+    if max_candidates <= 0:
+        return []
+    search_url = "https://www.bing.com/search?q=" + urllib.parse.quote(query)
+    try:
+        html_text = _fetch_text(search_url, proxy=proxy)
+    except Exception:
+        logger.debug("TikTok Bing HTML extraction failed for %s", query, exc_info=True)
+        return []
+    seen_links = seen_links if seen_links is not None else set()
+    candidates: list[tuple[str, dict]] = []
+    for link in _extract_tiktok_links_from_html(html_text):
+        if link in seen_links:
+            continue
+        seen_links.add(link)
+        candidates.append((link, _tiktok_html_fallback_entry(link, html_text)))
+        if len(candidates) >= max_candidates:
+            break
+    return candidates
+
+
+def _extract_tiktok_links_from_html(html_text: str) -> list[str]:
+    links: list[str] = []
+    seen: set[str] = set()
+    for raw in re.findall(r"https?://[^\s\"'<>]+", html_text):
+        link = _canonical_tiktok_video_url(raw)
+        if not link or link in seen:
+            continue
+        seen.add(link)
+        links.append(link)
+    return links
+
+
+def _canonical_tiktok_video_url(raw_url: str) -> str:
+    value = unescape(str(raw_url or "")).strip()
+    if not value:
+        return ""
+    parsed = urllib.parse.urlparse(value)
+    if "bing.com" in parsed.netloc and parsed.path.startswith("/ck/a"):
+        query = urllib.parse.parse_qs(parsed.query)
+        for key in ("u", "url"):
+            for encoded in query.get(key, []):
+                decoded = urllib.parse.unquote(encoded)
+                if decoded.startswith("a1"):
+                    try:
+                        payload = decoded[2:]
+                        payload += "=" * (-len(payload) % 4)
+                        decoded = base64.urlsafe_b64decode(payload).decode("utf-8", "ignore")
+                    except Exception:
+                        pass
+                canonical = _canonical_tiktok_video_url(decoded)
+                if canonical:
+                    return canonical
+    if "tiktok.com" not in parsed.netloc.lower() or "/video/" not in parsed.path:
+        return ""
+    return urllib.parse.urlunparse((parsed.scheme or "https", parsed.netloc, parsed.path, "", "", ""))
+
+
+def _extract_tiktok_search_query(source_url: str) -> str:
+    return _extract_prefixed_search_query(source_url)
+
+
+def _extract_prefixed_search_query(source_url: str) -> str:
+    raw = source_url.strip()
+    if ":" not in raw:
+        return ""
+    return raw.split(":", 1)[1].strip()
+
+
+def _tiktok_rss_fallback_entry(link: str, item: ET.Element) -> dict:
+    timestamp, upload_date = _rss_publish_fields(
+        _rss_item_text(item, "pubDate") or _rss_item_text(item, "date")
+    )
+    uploader = _extract_tiktok_username(link)
+    return {
+        "webpage_url": link,
+        "url": link,
+        "duration": 0,
+        "view_count": 0,
+        "like_count": 0,
+        "comment_count": 0,
+        "timestamp": timestamp,
+        "upload_date": upload_date,
+        "title": _rss_item_text(item, "title"),
+        "description": _rss_item_text(item, "description"),
+        "uploader": uploader,
+        "channel": uploader,
+    }
+
+
+def _tiktok_html_fallback_entry(link: str, html_text: str) -> dict:
+    uploader = _extract_tiktok_username(link)
+    title = _extract_html_title_near_url(html_text, link) or f"TikTok video by {uploader}"
+    return {
+        "webpage_url": link,
+        "url": link,
+        "duration": 0,
+        "view_count": 0,
+        "like_count": 0,
+        "comment_count": 0,
+        "timestamp": 0,
+        "upload_date": "",
+        "title": title,
+        "description": title,
+        "uploader": uploader,
+        "channel": uploader,
+    }
+
+
+def _extract_html_title_near_url(html_text: str, link: str) -> str:
+    idx = html_text.find(link)
+    if idx < 0:
+        return ""
+    snippet = html_text[max(0, idx - 500): idx + 500]
+    match = re.search(r"<a\b[^>]*>(.*?)</a>", snippet, flags=re.IGNORECASE | re.DOTALL)
+    if not match:
+        return ""
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", unescape(match.group(1)))).strip()
+
+
+def _rss_item_text(item: ET.Element, local_name: str) -> str:
+    for child in item:
+        if child.tag.rsplit("}", 1)[-1] == local_name:
+            return (child.text or "").strip()
+    return ""
+
+
+def _rss_publish_fields(raw: str) -> tuple[int, str]:
+    value = raw.strip()
+    if not value:
+        return 0, ""
+    try:
+        dt = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return 0, ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    dt = dt.astimezone(timezone.utc)
+    return int(dt.timestamp()), dt.strftime("%Y%m%d")
+
+
 def _extract_single_entry_metadata(url: str, proxy: str | None = None) -> dict | None:
+    metadata, _cache_status = _extract_single_entry_metadata_with_cache_status(url, proxy=proxy)
+    return metadata
+
+
+def _extract_single_entry_metadata_with_cache_status(
+    url: str,
+    proxy: str | None = None,
+) -> tuple[dict | None, str]:
+    cached = _read_short_form_metadata_cache(url)
+    if cached is not None:
+        return cached, "hit"
+
     opts = {"quiet": True, "no_warnings": True, "skip_download": True}
+    apply_yt_dlp_auth_options(opts)
     if proxy:
         opts["proxy"] = proxy
+    outcome = "fetched"
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
-            return ydl.extract_info(url, download=False)
+            metadata = ydl.extract_info(url, download=False)
+        if isinstance(metadata, dict):
+            _write_short_form_metadata_cache(url, metadata)
+            return metadata, outcome
+        return None, "failed"
     except Exception as exc:
+        outcome = "failed"
+        _cooldown_after_short_form_yt_dlp_error(exc, stage="metadata_extraction", url=url)
         if _is_platform_unavailable_error(exc, url):
             raise _PlatformUnavailableError(str(exc)) from exc
         logger.debug("Metadata extraction failed for %s", url, exc_info=True)
+        return None, outcome
+    finally:
+        if outcome == "fetched":
+            cooldown_sec = _short_form_sleep_range_sample()
+            logger.info(
+                "short_form_yt_dlp_metadata_request_cooldown outcome=%s cooldown_sec=%.3f url=%s",
+                outcome,
+                cooldown_sec,
+                url,
+            )
+            if cooldown_sec > 0.0:
+                time.sleep(cooldown_sec)
+
+
+def _short_form_metadata_cache_dir() -> pathlib.Path:
+    return pathlib.Path(settings.storage_dir) / "_download_cache" / "short_form_metadata"
+
+
+def _short_form_metadata_cache_path(url: str) -> pathlib.Path:
+    digest = hashlib.sha256(str(url or "").strip().encode("utf-8")).hexdigest()
+    return _short_form_metadata_cache_dir() / f"{digest}.json"
+
+
+def _read_short_form_metadata_cache(url: str) -> dict | None:
+    path = _short_form_metadata_cache_path(url)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
         return None
+    if not isinstance(payload, dict):
+        return None
+    if int(payload.get("version") or 0) != _SHORT_FORM_METADATA_CACHE_VERSION:
+        return None
+    if str(payload.get("url") or "") != str(url or "").strip():
+        return None
+    metadata = payload.get("metadata")
+    return metadata if isinstance(metadata, dict) else None
+
+
+def _write_short_form_metadata_cache(url: str, metadata: dict) -> None:
+    path = _short_form_metadata_cache_path(url)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(f"{path.suffix}.tmp")
+    payload = {
+        "version": _SHORT_FORM_METADATA_CACHE_VERSION,
+        "url": str(url or "").strip(),
+        "cached_at": datetime.now(timezone.utc).isoformat(),
+        "metadata": metadata,
+    }
+    try:
+        tmp_path.write_text(
+            json.dumps(payload, ensure_ascii=True, sort_keys=True, default=str),
+            encoding="utf-8",
+        )
+        tmp_path.replace(path)
+    except OSError:
+        logger.debug("Failed to write short-form metadata cache for %s", url, exc_info=True)
+
+
+def _cooldown_after_short_form_yt_dlp_error(exc: BaseException, *, stage: str, url: str) -> None:
+    cooldown_sec = _short_form_error_cooldown_sec()
+    rate_limited = _is_youtube_rate_limited_error(exc)
+    logger.warning(
+        "short_form_yt_dlp_error_cooldown stage=%s rate_limited=%s cooldown_sec=%.3f url=%s error=%s",
+        stage,
+        rate_limited,
+        cooldown_sec,
+        url,
+        _short_error(exc, limit=500),
+    )
+    if cooldown_sec > 0.0:
+        time.sleep(cooldown_sec)
+
+
+def _short_form_error_cooldown_sec() -> float:
+    return _short_form_sleep_range_sample()
+
+
+def _short_form_sleep_range_sample() -> float:
+    try:
+        min_sleep = float(getattr(settings, "yt_dlp_short_form_min_sleep_interval_sec", 5.0) or 5.0)
+    except (TypeError, ValueError):
+        min_sleep = 5.0
+    try:
+        max_sleep = float(getattr(settings, "yt_dlp_short_form_max_sleep_interval_sec", 10.0) or 10.0)
+    except (TypeError, ValueError):
+        max_sleep = 10.0
+    min_sleep = max(min_sleep, 0.0)
+    max_sleep = max(max_sleep, min_sleep)
+    if max_sleep <= min_sleep:
+        return min_sleep
+    return random.uniform(min_sleep, max_sleep)
+
+
+def _is_youtube_rate_limited_error(exc: BaseException) -> bool:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return "youtube" in text and any(marker in text for marker in YOUTUBE_RATE_LIMIT_ERROR_MARKERS)
+
+
+def _short_error(exc: BaseException, *, limit: int = 240) -> str:
+    text = f"{type(exc).__name__}: {exc}"
+    return text if len(text) <= limit else f"{text[:limit - 3]}..."
 
 
 def _normalize_entry(item: dict, seed: dict[str, str]) -> dict | None:
+    if _is_live_or_upcoming_entry(item):
+        return None
     url = _extract_entry_url(item, seed["platform"])
     if not url:
         return None
@@ -511,7 +1087,24 @@ def _normalize_entry(item: dict, seed: dict[str, str]) -> dict | None:
         "publish_timestamp": _coerce_publish_timestamp(item),
         "upload_date": _coerce_upload_date(item),
         "title": str(item.get("title") or ""),
+        "uploader": str(item.get("uploader") or item.get("channel") or ""),
+        "channel": str(item.get("channel") or item.get("uploader") or ""),
+        "channel_id": str(item.get("channel_id") or item.get("uploader_id") or ""),
+        "description": str(item.get("description") or ""),
     }
+
+
+def _is_live_or_upcoming_entry(item: dict) -> bool:
+    live_status = str(item.get("live_status") or "").strip().lower()
+    if live_status in {"is_live", "is_upcoming", "post_live"}:
+        return True
+    if bool(item.get("is_live")) or bool(item.get("was_live")):
+        return True
+    duration = int(item.get("duration") or 0)
+    title = str(item.get("title") or "").strip().lower()
+    if duration <= 0 and any(token in title for token in (" live ", "premiere", "upcoming")):
+        return True
+    return False
 
 
 def _extract_entry_url(item: dict, platform: str) -> str:

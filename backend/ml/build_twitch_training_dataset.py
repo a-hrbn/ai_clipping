@@ -18,8 +18,9 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from config import settings
-from ml import collect_viral_clips
-from services import downloader
+from ml import collect_viral_clips, sample_background_negatives
+from services import downloader, game_events as game_event_service
+from services.game_events import GameEvent
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
 logger = logging.getLogger(__name__)
@@ -29,15 +30,55 @@ _SUPPLEMENTAL_CANDIDATE_LIMIT = 2
 _SUPPLEMENTAL_CANDIDATE_WEIGHT = 0.65
 _BOUNDARY_NEAR_MISS_SAMPLE_WEIGHT = 0.45
 _BOUNDARY_NEAR_MISS_LIMIT = 6
+_BACKGROUND_NEGATIVE_WINDOWS_PER_VOD = 12
+_BACKGROUND_NEGATIVE_WINDOW_SEC = 30.0
+_BACKGROUND_NEGATIVE_MAX_OVERLAP = 0.20
+_BACKGROUND_NEGATIVE_QUIET_VERSION = 3
+_BACKGROUND_QUIET_FEATURE_KEYS = (
+    "chat_message_rate_mean",
+    "chat_message_rate_peak",
+    "max_hype",
+    "face_reaction_peak",
+    "laughter_count",
+    "audio_pop_score",
+    "chat_laugh_score",
+)
+_BACKGROUND_ABSOLUTE_QUIET_THRESHOLDS = {
+    "chat_message_rate_mean": 0.35,
+    "chat_message_rate_peak": 1.25,
+    "max_hype": 4.0,
+    "face_reaction_peak": 0.65,
+    "laughter_count": 1.0,
+    "audio_pop_score": 0.75,
+    "chat_laugh_score": 0.55,
+}
+_BACKGROUND_RELATIVE_QUIET_MIN_MATCHES = 5
+_BACKGROUND_RELATIVE_QUIET_FALLBACK_MIN_MATCHES = 3
+_BACKGROUND_MAX_HYPE_P95_FACTOR = 0.60
+_BACKGROUND_FACE_REACTION_HARD_MAX = 0.40
+_PERMANENT_CHAT_MISS_REASONS = {
+    "twitch_graphql_video_missing",
+    "missing_rechat",
+}
+_MAX_BOUNDARY_NEGATIVE_SHARE = 0.20
 _MAX_VOD_NEGATIVE_ROWS_PER_POSITIVE = 8
 _MAX_CANDIDATE_SOURCE_SHARE = 0.40
 _DATASET_BUILD_LLM_PROVIDER = (os.environ.get("TRAINING_DATASET_LLM_PROVIDER") or "none").strip() or "none"
-_VOD_CHECKPOINT_VERSION = 4
+_VOD_CHECKPOINT_VERSION = 6
 _VOD_FEATURE_CACHE_VERSION = 1
-_CHAT_ENRICHMENT_FINGERPRINT_VERSION = 4
-_CHAT_TARGET_NEGATIVE_LABEL_CLASSES = {"hard_negative"}
+_CHAT_ENRICHMENT_FINGERPRINT_VERSION = 5
+_CHAT_TARGET_NEGATIVE_LABEL_CLASSES = {
+    "hard_negative",
+    "background_negative",
+    "auto_outcome_background_negative",
+    "auto_outcome_hard_negative",
+    "boundary_near_miss_negative",
+}
+_CHAT_NEGATIVE_ONLY_TARGET_LIMIT = 16
 _WINDOW_SCOPED_TOP_VIEWED_SOURCE = "top_viewed_twitch_30d"
-_WINDOW_SCOPED_CONTEXT_VERSION = 2
+_WINDOW_SCOPED_TOP_VIEWED_KIND = "window_scoped_top_viewed"
+_WINDOW_SCOPED_EXTENDED_KIND = "extended_window_scoped"
+_WINDOW_SCOPED_CONTEXT_VERSION = 3
 _BOUNDARY_PERTURBATION_SPECS = (
     ("start_late_small", 0.8, 0.0),
     ("start_late_large", 1.8, 0.0),
@@ -50,6 +91,40 @@ _BOUNDARY_PERTURBATION_SPECS = (
 )
 
 
+def _local_game_events_for_source(
+    vod_id: str,
+    *,
+    source_start_sec: float,
+    source_end_sec: float,
+) -> list[GameEvent]:
+    """Load cached game events and rebase them to the local scoped source timeline."""
+    if not vod_id:
+        return []
+    try:
+        cached_events = game_event_service.detect_events(vod_id)
+    except Exception:
+        return []
+    if not cached_events:
+        return []
+    local_events: list[GameEvent] = []
+    for event in cached_events:
+        if event.end < source_start_sec or event.start > source_end_sec:
+            continue
+        local_start = max(0.0, float(event.start) - source_start_sec)
+        local_end = max(local_start, float(event.end) - source_start_sec)
+        local_events.append(
+            GameEvent(
+                vod_id=event.vod_id,
+                start=round(local_start, 3),
+                end=round(local_end, 3),
+                event_type=event.event_type,
+                confidence=event.confidence,
+                source=event.source,
+            )
+        )
+    return local_events
+
+
 @dataclass(frozen=True)
 class VodFeatureContext:
     transcript: list
@@ -59,6 +134,18 @@ class VodFeatureContext:
     source_start_sec: float = 0.0
     source_end_sec: float = 0.0
     source_kind: str = "full_vod"
+
+
+@dataclass(frozen=True)
+class WindowScopedSourcePlan:
+    scoped_kind: str
+    expanded_start: float
+    expanded_end: float
+    cache_dir: pathlib.Path
+    scoped_video_path: pathlib.Path
+    metadata_path: pathlib.Path
+    metadata_payload: dict[str, object]
+    uses_local_vod_source: bool
 
 def _dataset_build_fingerprint(profile: str) -> str:
     # Fingerprint the full dataset build, including cheap postprocessing. This is
@@ -93,9 +180,28 @@ def _raw_vod_rows_fingerprint_payload(profile: str) -> dict[str, object]:
             "enabled": bool(settings.enable_chat_analysis),
             "timeout_sec": int(settings.chat_download_timeout_sec),
         },
-        "window_scoped_top_viewed_context": _WINDOW_SCOPED_CONTEXT_VERSION,
+        "training_vod_max_height": _resolved_training_vod_max_height(),
+        "window_scoped_context": {
+            "version": _WINDOW_SCOPED_CONTEXT_VERSION,
+            "top_viewed_kind": _WINDOW_SCOPED_TOP_VIEWED_KIND,
+            "extended_kind": _WINDOW_SCOPED_EXTENDED_KIND,
+            "extended_enabled": bool(settings.training_vod_extended_window_scoped),
+            "extended_context_sec": _resolved_extended_window_context_sec(),
+            "extended_group_max_sec": _resolved_extended_window_group_max_sec(),
+        },
         "supplemental_candidate_limit": _SUPPLEMENTAL_CANDIDATE_LIMIT,
         "supplemental_candidate_weight": _SUPPLEMENTAL_CANDIDATE_WEIGHT,
+        "background_negatives": {
+            "quiet_version": _BACKGROUND_NEGATIVE_QUIET_VERSION,
+            "windows_per_vod": _BACKGROUND_NEGATIVE_WINDOWS_PER_VOD,
+            "window_sec": _BACKGROUND_NEGATIVE_WINDOW_SEC,
+            "max_overlap": _BACKGROUND_NEGATIVE_MAX_OVERLAP,
+            "relative_quiet_min_matches": _BACKGROUND_RELATIVE_QUIET_MIN_MATCHES,
+            "relative_quiet_fallback_min_matches": _BACKGROUND_RELATIVE_QUIET_FALLBACK_MIN_MATCHES,
+            "max_hype_p95_factor": _BACKGROUND_MAX_HYPE_P95_FACTOR,
+            "face_reaction_hard_max": _BACKGROUND_FACE_REACTION_HARD_MAX,
+            "boundary_max_negative_share": _MAX_BOUNDARY_NEGATIVE_SHARE,
+        },
         "boundary_near_miss_limit": _BOUNDARY_NEAR_MISS_LIMIT,
         "boundary_near_miss_sample_weight": _BOUNDARY_NEAR_MISS_SAMPLE_WEIGHT,
         "boundary_perturbation_specs": list(_BOUNDARY_PERTURBATION_SPECS),
@@ -284,6 +390,17 @@ def _read_chat_fetch_metadata(chat_path: pathlib.Path) -> dict[str, object]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _read_chat_fetch_metadata_dir(path: pathlib.Path) -> dict[str, object]:
+    metadata_path = path / "chat.twitch_rechat.fetch_metadata.json"
+    if not metadata_path.exists():
+        return {}
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def _chat_messages(path: pathlib.Path) -> list[dict]:
     if not path.exists():
         return []
@@ -387,6 +504,17 @@ def _chat_cache_has_complete_coverage(cache_dir: pathlib.Path) -> bool:
     return not _metadata_offsets(metadata, "missing_target_offsets")
 
 
+def _chat_cache_has_permanent_miss(cache_dir: pathlib.Path, requested_offsets: list[int]) -> bool:
+    metadata = _read_chat_cache_metadata(cache_dir)
+    reason = str(metadata.get("reason") or "")
+    if reason not in _PERMANENT_CHAT_MISS_REASONS:
+        return False
+    missing_offsets = set(_metadata_offsets(metadata, "missing_target_offsets"))
+    if requested_offsets:
+        return set(requested_offsets).issubset(missing_offsets)
+    return bool(metadata.get("unavailable") or missing_offsets or not _cached_chat_path(cache_dir))
+
+
 def _chat_cache_metadata_path(cache_dir: pathlib.Path) -> pathlib.Path:
     return cache_dir / "chat" / "chat.metadata.json"
 
@@ -426,6 +554,7 @@ def _write_chat_cache_metadata(
     target_offsets: list[float] | tuple[float, ...] | list[int] | None = None,
     covered_target_offsets: list[float] | tuple[float, ...] | list[int] | None = None,
     missing_target_offsets: list[float] | tuple[float, ...] | list[int] | None = None,
+    reason: str = "",
 ) -> None:
     try:
         stat = chat_path.stat()
@@ -439,15 +568,14 @@ def _write_chat_cache_metadata(
     covered = _normalize_chat_target_offsets(covered_target_offsets)
     missing = _normalize_chat_target_offsets(missing_target_offsets)
     stats = _chat_time_stats(chat_path)
-    _write_json_atomic(
-        _chat_cache_metadata_path(cache_dir),
-        {
+    payload = {
             "version": _VOD_FEATURE_CACHE_VERSION,
             "kind": "vod_chat",
             "vod_id": str(cache_dir.name),
             "vod_url": str(vod_url or ""),
             "job_id": str(job_id),
             "cache_status": str(cache_status),
+            "reason": str(reason or ""),
             "chat_path": str(chat_path),
             "size": size,
             "mtime_ns": mtime_ns,
@@ -460,8 +588,8 @@ def _write_chat_cache_metadata(
             "target_offsets": requested,
             "covered_target_offsets": covered,
             "missing_target_offsets": missing,
-        },
-    )
+    }
+    _write_json_atomic(_chat_cache_metadata_path(cache_dir), payload)
 
 
 def _write_chat_cache_miss_metadata(
@@ -519,6 +647,14 @@ def _load_or_download_chat(
         len(requested_offsets),
     )
     cached_path = _cached_chat_path(cache_dir)
+    if _chat_cache_has_permanent_miss(cache_dir, requested_offsets):
+        logger.info(
+            "training_vod_chat_download_skip vod_id=%s job_id=%s reason=permanent_chat_unavailable target_offsets=%s",
+            vod_id,
+            job_id,
+            len(requested_offsets),
+        )
+        return cached_path
     if cached_path is not None:
         missing_offsets = _missing_chat_target_offsets(cache_dir, requested_offsets)
         if not missing_offsets:
@@ -597,6 +733,8 @@ def _load_or_download_chat(
         target_offsets=download_target_offsets,
     )
     if chat_path is None:
+        fetch_metadata = _read_chat_fetch_metadata_dir(download_dir)
+        unavailable_reason = str(fetch_metadata.get("reason") or "download_returned_none_see_twitch_chat_logs")
         if cached_path is not None:
             covered_offsets = sorted(set(requested_offsets) - set(missing_offsets))
             _write_chat_cache_metadata(
@@ -608,13 +746,15 @@ def _load_or_download_chat(
                 target_offsets=requested_offsets,
                 covered_target_offsets=covered_offsets,
                 missing_target_offsets=missing_offsets,
+                reason=unavailable_reason,
             )
             logger.info(
-                "training_vod_chat_refill_unavailable vod_id=%s job_id=%s vod_url=%s missing_offsets=%s reason=download_returned_none_see_twitch_chat_logs",
+                "training_vod_chat_refill_unavailable vod_id=%s job_id=%s vod_url=%s missing_offsets=%s reason=%s",
                 vod_id,
                 job_id,
                 vod_url,
                 len(missing_offsets),
+                unavailable_reason,
             )
             return cached_path
         _write_chat_cache_miss_metadata(
@@ -622,15 +762,16 @@ def _load_or_download_chat(
             vod_url=vod_url,
             job_id=job_id,
             cache_status="unavailable",
-            reason="download_returned_none_see_twitch_chat_logs",
+            reason=unavailable_reason,
             target_offsets=requested_offsets,
             missing_target_offsets=requested_offsets,
         )
         logger.info(
-            "training_vod_chat_download_unavailable vod_id=%s job_id=%s vod_url=%s reason=download_returned_none_see_twitch_chat_logs",
+            "training_vod_chat_download_unavailable vod_id=%s job_id=%s vod_url=%s reason=%s",
             vod_id,
             job_id,
             vod_url,
+            unavailable_reason,
         )
     else:
         fetch_metadata = _read_chat_fetch_metadata(chat_path)
@@ -982,12 +1123,88 @@ def _should_use_window_scoped_label_contexts(labels: list[dict]) -> bool:
     return bool(labels) and all(_is_window_scoped_top_viewed_label(label) for label in labels)
 
 
+def _can_use_extended_window_scoped_label(label: dict) -> bool:
+    if not settings.training_vod_extended_window_scoped:
+        return False
+    if not bool(label.get("vod_id") and label.get("vod_url")):
+        return False
+    try:
+        start = float(label.get("window_start"))
+        end = float(label.get("window_end"))
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(start) and math.isfinite(end) and end > start
+
+
+def _should_use_extended_window_scoped_label_contexts(labels: list[dict]) -> bool:
+    return bool(labels) and all(_can_use_extended_window_scoped_label(label) for label in labels)
+
+
+def _window_scoped_context_kind_for_labels(labels: list[dict]) -> str | None:
+    if _should_use_window_scoped_label_contexts(labels):
+        return _WINDOW_SCOPED_TOP_VIEWED_KIND
+    if _should_use_extended_window_scoped_label_contexts(labels):
+        return _WINDOW_SCOPED_EXTENDED_KIND
+    return None
+
+
+def _should_use_scoped_label_contexts(labels: list[dict]) -> bool:
+    return _window_scoped_context_kind_for_labels(labels) is not None
+
+
+def _resolved_extended_window_context_sec() -> int:
+    try:
+        return max(int(settings.training_vod_extended_context_sec or 0), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _resolved_training_vod_max_height() -> int:
+    try:
+        return max(int(settings.training_vod_max_height or 0), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _resolved_extended_window_group_max_sec() -> int:
+    try:
+        return max(int(settings.training_vod_extended_group_max_sec or 0), 1)
+    except (TypeError, ValueError):
+        return 900
+
+
+def _should_prefetch_window_scoped_group_sources() -> bool:
+    return bool(settings.training_vod_group_source_prefetch)
+
+
+def _scoped_training_window(label: dict, source_kind: str) -> tuple[float, float]:
+    expanded_start, expanded_end = _expanded_training_window(label)
+    if source_kind != _WINDOW_SCOPED_EXTENDED_KIND:
+        return expanded_start, expanded_end
+    context_sec = float(_resolved_extended_window_context_sec())
+    if context_sec <= 0.0:
+        return expanded_start, expanded_end
+    label_start = float(label.get("window_start") or expanded_start)
+    label_end = float(label.get("window_end") or expanded_end)
+    duration = float(label.get("vod_duration_seconds") or 0.0)
+    scoped_start = max(0.0, min(expanded_start, label_start - context_sec))
+    scoped_end = max(expanded_end, label_end + context_sec)
+    if duration > 0.0:
+        scoped_end = min(scoped_end, duration)
+    return (
+        round(scoped_start, 2),
+        round(max(scoped_end, scoped_start + 1.0), 2),
+    )
+
+
 def _window_scoped_label_cache_dir(
     vod_id: str,
     label: dict,
     *,
     expanded_start: float,
     expanded_end: float,
+    source_kind: str,
+    cache_scope: dict[str, object] | None = None,
 ) -> pathlib.Path:
     clip_ids = sorted(str(item) for item in (label.get("clip_ids") or []) if str(item).strip())
     payload = {
@@ -999,7 +1216,11 @@ def _window_scoped_label_cache_dir(
         "expanded_end": round(float(expanded_end), 2),
         "clip_ids": clip_ids,
         "source": str(label.get("manual_gold_review_source") or ""),
+        "source_kind": str(source_kind),
+        "training_vod_max_height": _resolved_training_vod_max_height(),
     }
+    if cache_scope:
+        payload["cache_scope"] = cache_scope
     digest = hashlib.sha256(
         json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()[:16]
@@ -1040,19 +1261,29 @@ def _scoped_source_is_usable(source_path: pathlib.Path, metadata_path: pathlib.P
     return metadata == payload
 
 
-def _load_or_build_window_scoped_feature_context(
+def _window_scoped_source_plan_is_usable(plan: WindowScopedSourcePlan) -> bool:
+    return _scoped_source_is_usable(plan.scoped_video_path, plan.metadata_path, plan.metadata_payload)
+
+
+def _window_scoped_source_plan(
     vod_id: str,
     label: dict,
     *,
     vod_path: pathlib.Path | None = None,
-    job_id: str,
-) -> tuple[pathlib.Path, VodFeatureContext]:
-    expanded_start, expanded_end = _expanded_training_window(label)
+    source_kind: str = _WINDOW_SCOPED_TOP_VIEWED_KIND,
+    scoped_window: tuple[float, float] | None = None,
+    cache_scope: dict[str, object] | None = None,
+    source_signature: dict[str, object] | None = None,
+) -> WindowScopedSourcePlan:
+    scoped_kind = str(source_kind or _WINDOW_SCOPED_TOP_VIEWED_KIND)
+    expanded_start, expanded_end = scoped_window or _scoped_training_window(label, scoped_kind)
     cache_dir = _window_scoped_label_cache_dir(
         vod_id,
         label,
         expanded_start=expanded_start,
         expanded_end=expanded_end,
+        source_kind=scoped_kind,
+        cache_scope=cache_scope,
     )
     scoped_video_path = cache_dir / "source.mp4"
     metadata_path = _scoped_source_metadata_path(cache_dir)
@@ -1061,49 +1292,111 @@ def _load_or_build_window_scoped_feature_context(
             vod_id,
             expanded_start=expanded_start,
             expanded_end=expanded_end,
-            source_kind="window_scoped_vod_cut_source",
+            source_kind=f"{scoped_kind}:cut_source",
             source_signature=_stable_vod_source_signature(vod_id, vod_path),
         )
-        if not _scoped_source_is_usable(scoped_video_path, metadata_path, metadata_payload):
-            scoped_video_path.unlink(missing_ok=True)
+        uses_local_vod_source = True
+    else:
+        metadata_payload = _scoped_source_metadata(
+            vod_id,
+            expanded_start=expanded_start,
+            expanded_end=expanded_end,
+            source_kind=f"{scoped_kind}:range_source",
+            source_signature=source_signature or _window_scoped_range_source_signature(label),
+        )
+        uses_local_vod_source = False
+    return WindowScopedSourcePlan(
+        scoped_kind=scoped_kind,
+        expanded_start=float(expanded_start),
+        expanded_end=float(expanded_end),
+        cache_dir=cache_dir,
+        scoped_video_path=scoped_video_path,
+        metadata_path=metadata_path,
+        metadata_payload=metadata_payload,
+        uses_local_vod_source=uses_local_vod_source,
+    )
+
+
+def _load_or_build_window_scoped_source(
+    vod_id: str,
+    label: dict,
+    *,
+    vod_path: pathlib.Path | None = None,
+    job_id: str,
+    source_kind: str = _WINDOW_SCOPED_TOP_VIEWED_KIND,
+    scoped_window: tuple[float, float] | None = None,
+    cache_scope: dict[str, object] | None = None,
+    source_signature: dict[str, object] | None = None,
+) -> WindowScopedSourcePlan:
+    plan = _window_scoped_source_plan(
+        vod_id,
+        label,
+        vod_path=vod_path,
+        source_kind=source_kind,
+        scoped_window=scoped_window,
+        cache_scope=cache_scope,
+        source_signature=source_signature,
+    )
+    if plan.uses_local_vod_source:
+        if not _scoped_source_is_usable(plan.scoped_video_path, plan.metadata_path, plan.metadata_payload):
+            plan.scoped_video_path.unlink(missing_ok=True)
             collect_viral_clips.cut_video_window(
                 vod_path,
-                scoped_video_path,
-                expanded_start,
-                expanded_end,
+                plan.scoped_video_path,
+                plan.expanded_start,
+                plan.expanded_end,
             )
-            _write_json_atomic(metadata_path, metadata_payload)
+            _write_json_atomic(plan.metadata_path, plan.metadata_payload)
     else:
         _load_or_download_window_scoped_vod_range(
             vod_id,
             label,
-            scoped_video_path,
-            metadata_path,
-            metadata_payload=_scoped_source_metadata(
-                vod_id,
-                expanded_start=expanded_start,
-                expanded_end=expanded_end,
-                source_kind="window_scoped_vod_range_source",
-                source_signature=_window_scoped_range_source_signature(label),
-            ),
+            plan.scoped_video_path,
+            plan.metadata_path,
+            metadata_payload=plan.metadata_payload,
             job_id=job_id,
-            expanded_start=expanded_start,
-            expanded_end=expanded_end,
+            expanded_start=plan.expanded_start,
+            expanded_end=plan.expanded_end,
         )
+    return plan
+
+
+def _load_or_build_window_scoped_feature_context(
+    vod_id: str,
+    label: dict,
+    *,
+    vod_path: pathlib.Path | None = None,
+    job_id: str,
+    source_kind: str = _WINDOW_SCOPED_TOP_VIEWED_KIND,
+    scoped_window: tuple[float, float] | None = None,
+    context_labels: list[dict] | None = None,
+    cache_scope: dict[str, object] | None = None,
+    source_signature: dict[str, object] | None = None,
+) -> tuple[pathlib.Path, VodFeatureContext]:
+    source_plan = _load_or_build_window_scoped_source(
+        vod_id,
+        label,
+        vod_path=vod_path,
+        job_id=job_id,
+        source_kind=source_kind,
+        scoped_window=scoped_window,
+        cache_scope=cache_scope,
+        source_signature=source_signature,
+    )
 
     context = _load_or_build_vod_feature_context(
         vod_id,
-        vod_path=scoped_video_path,
+        vod_path=source_plan.scoped_video_path,
         job_id=job_id,
         vod_url=str(label.get("vod_url") or ""),
-        chat_target_offsets=_chat_target_offsets_for_labels([label]),
-        cache_dir=cache_dir,
+        chat_target_offsets=_chat_target_offsets_for_labels(context_labels or [label]),
+        cache_dir=source_plan.cache_dir,
         chat_cache_dir=_vod_feature_cache_dir(vod_id),
-        source_start_sec=expanded_start,
-        source_end_sec=expanded_end,
-        source_kind="window_scoped_top_viewed",
+        source_start_sec=source_plan.expanded_start,
+        source_end_sec=source_plan.expanded_end,
+        source_kind=source_plan.scoped_kind,
     )
-    return scoped_video_path, context
+    return source_plan.scoped_video_path, context
 
 
 def _window_scoped_range_source_signature(label: dict) -> dict[str, object]:
@@ -1113,6 +1406,28 @@ def _window_scoped_range_source_signature(label: dict) -> dict[str, object]:
         "clip_ids": clip_ids,
         "window_start": round(float(label.get("window_start") or 0.0), 3),
         "window_end": round(float(label.get("window_end") or 0.0), 3),
+    }
+
+
+def _extended_window_group_signature(group_labels: list[dict]) -> dict[str, object]:
+    windows = [
+        {
+            "window_start": round(float(label.get("window_start") or 0.0), 3),
+            "window_end": round(float(label.get("window_end") or 0.0), 3),
+            "label_class": str(label.get("label_class") or ""),
+            "clip_ids": sorted(str(item) for item in (label.get("clip_ids") or []) if str(item).strip()),
+        }
+        for label in group_labels
+    ]
+    digest = hashlib.sha256(
+        json.dumps(windows, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:16]
+    first = group_labels[0] if group_labels else {}
+    return {
+        "kind": "extended_window_scoped_group",
+        "vod_url": str(first.get("vod_url") or ""),
+        "label_count": len(group_labels),
+        "windows_digest": digest,
     }
 
 
@@ -1321,7 +1636,7 @@ def build_dataset(labels: list[dict], profile: str, work_dir: pathlib.Path) -> l
                     )
                     continue
 
-                if _should_use_window_scoped_label_contexts(vod_rows):
+                if _should_use_scoped_label_contexts(vod_rows):
                     label_rows = _build_rows_for_vod_labels(
                         vod_id,
                         vod_rows,
@@ -1333,7 +1648,7 @@ def build_dataset(labels: list[dict], profile: str, work_dir: pathlib.Path) -> l
                     )
                     rows.extend(label_rows)
                     vod_checkpoint_rows.extend(label_rows)
-                    if vod_checkpoint_rows and _can_write_vod_checkpoint(vod_id):
+                    if vod_checkpoint_rows and _can_write_vod_checkpoint(vod_id, vod_checkpoint_rows):
                         _write_vod_checkpoint(work_dir, profile, vod_id, vod_rows, vod_checkpoint_rows)
                     prefetch_future, prefetched_vod_id, prefetched_job_id = _schedule_prefetch(
                         executor,
@@ -1376,7 +1691,7 @@ def build_dataset(labels: list[dict], profile: str, work_dir: pathlib.Path) -> l
                 )
                 rows.extend(label_rows)
                 vod_checkpoint_rows.extend(label_rows)
-                if vod_checkpoint_rows and _can_write_vod_checkpoint(vod_id):
+                if vod_checkpoint_rows and _can_write_vod_checkpoint(vod_id, vod_checkpoint_rows):
                     _write_vod_checkpoint(work_dir, profile, vod_id, vod_rows, vod_checkpoint_rows)
             finally:
                 shutil.rmtree(vod_dir, ignore_errors=True)
@@ -1408,7 +1723,7 @@ def _build_dataset_parallel(
                 continue
 
             job_id = f"twitch_vod_{vod_id}"
-            if _should_use_window_scoped_label_contexts(vod_rows):
+            if _should_use_scoped_label_contexts(vod_rows):
                 download_futures[vod_id] = None
             else:
                 download_futures[vod_id] = download_executor.submit(
@@ -1456,7 +1771,7 @@ def _build_rows_for_vod(
             logger.info("training_vod_checkpoint_hit %s", vod_rows[0]["vod_url"])
             return checkpoint_rows
 
-        if _should_use_window_scoped_label_contexts(vod_rows):
+        if _should_use_scoped_label_contexts(vod_rows):
             vod_path = None
         elif vod_path_future is not None:
             try:
@@ -1480,7 +1795,7 @@ def _build_rows_for_vod(
             )
         )
 
-        if vod_checkpoint_rows and _can_write_vod_checkpoint(vod_id):
+        if vod_checkpoint_rows and _can_write_vod_checkpoint(vod_id, vod_checkpoint_rows):
             _write_vod_checkpoint(work_dir, profile, vod_id, vod_rows, vod_checkpoint_rows)
         return vod_checkpoint_rows
     finally:
@@ -1499,6 +1814,8 @@ def _chat_target_offsets_for_labels(labels: list[dict]) -> list[float]:
             len(target_labels),
             skipped,
         )
+    if not target_labels:
+        return []
     for label in target_labels:
         start, end = _expanded_training_window(label)
         padded_start = max(float(start) - 5.0, 0.0)
@@ -1509,7 +1826,49 @@ def _chat_target_offsets_for_labels(labels: list[dict]) -> list[float]:
             offsets.add(current)
             current += 10
         offsets.add(final)
+    for window in _background_windows_for_labels(labels):
+        current = int(max(window.start - 5.0, 0.0))
+        final = int(max(window.end + 5.0, current))
+        while current <= final:
+            offsets.add(current)
+            current += 10
+        offsets.add(final)
     return [float(offset) for offset in sorted(offsets)]
+
+
+def _background_windows_for_labels(labels: list[dict]) -> list[sample_background_negatives.BackgroundWindow]:
+    if not labels:
+        return []
+    vod_id = str(labels[0].get("vod_id") or "")
+    duration = _vod_duration_seconds(labels)
+    blocked = [_label_window(label) for label in labels if _label_window(label) is not None]
+    return sample_background_negatives.sample_background_windows(
+        vod_id,
+        duration_seconds=duration,
+        blocked_windows=blocked,
+        count=_BACKGROUND_NEGATIVE_WINDOWS_PER_VOD,
+        window_seconds=_BACKGROUND_NEGATIVE_WINDOW_SEC,
+        max_overlap_ratio=_BACKGROUND_NEGATIVE_MAX_OVERLAP,
+    )
+
+
+def _vod_duration_seconds(labels: list[dict]) -> float:
+    values = [
+        float(label.get("vod_duration_seconds") or 0.0)
+        for label in labels
+        if float(label.get("vod_duration_seconds") or 0.0) > 0
+    ]
+    if values:
+        return max(values)
+    return max((float(label.get("window_end") or 0.0) for label in labels), default=0.0)
+
+
+def _label_window(label: dict) -> tuple[float, float] | None:
+    start = float(label.get("window_start") or 0.0)
+    end = float(label.get("window_end") or start)
+    if end <= start:
+        return None
+    return start, end
 
 
 def _chat_target_labels_for_offsets(labels: list[dict]) -> list[dict]:
@@ -1524,7 +1883,14 @@ def _chat_target_labels_for_offsets(labels: list[dict]) -> list[dict]:
         if str(label.get("label_class") or "") in _CHAT_TARGET_NEGATIVE_LABEL_CLASSES
     ]
     if not positives:
-        return []
+        return sorted(
+            _rank_chat_target_negative_labels(negative_candidates, [])[:_CHAT_NEGATIVE_ONLY_TARGET_LIMIT],
+            key=lambda label: (
+                float(label.get("window_start") or 0.0),
+                float(label.get("window_end") or 0.0),
+                str(label.get("label_class") or ""),
+            ),
+        )
 
     negative_limit = len(positives) * _MAX_VOD_NEGATIVE_ROWS_PER_POSITIVE
     selected_negatives = _rank_chat_target_negative_labels(
@@ -1579,7 +1945,8 @@ def _build_rows_for_vod_labels(
     ordered_labels = sorted(vod_rows, key=lambda item: float(item["window_start"]))
     if not ordered_labels:
         return []
-    if _should_use_window_scoped_label_contexts(ordered_labels):
+    source_kind = _window_scoped_context_kind_for_labels(ordered_labels)
+    if source_kind is not None:
         return _build_rows_for_window_scoped_vod_labels(
             vod_id,
             ordered_labels,
@@ -1588,6 +1955,7 @@ def _build_rows_for_vod_labels(
             job_id=job_id,
             profile=profile,
             context_index=context_index,
+            source_kind=source_kind,
         )
     if vod_path is None:
         raise ValueError(f"Cannot build full-VOD rows for {vod_id}: missing vod_path")
@@ -1647,6 +2015,18 @@ def _build_rows_for_vod_labels(
             len(rows),
             time.perf_counter() - started_at,
         )
+        background_rows = _build_background_negative_rows_for_vod(
+            vod_id,
+            ordered_labels,
+            rows,
+            vod_path=vod_path,
+            vod_dir=vod_dir,
+            vod_feature_context=vod_feature_context,
+            job_id=job_id,
+            profile=profile,
+            context_index=context_index,
+        )
+        rows.extend(background_rows)
         return rows
 
     progress_interval = _label_progress_interval(total_labels)
@@ -1694,6 +2074,18 @@ def _build_rows_for_vod_labels(
             len(rows),
             time.perf_counter() - started_at,
         )
+        background_rows = _build_background_negative_rows_for_vod(
+            vod_id,
+            ordered_labels,
+            rows,
+            vod_path=vod_path,
+            vod_dir=vod_dir,
+            vod_feature_context=vod_feature_context,
+            job_id=job_id,
+            profile=profile,
+            context_index=context_index,
+        )
+        rows.extend(background_rows)
         return rows
 
 
@@ -1706,7 +2098,19 @@ def _build_rows_for_window_scoped_vod_labels(
     job_id: str,
     profile: str,
     context_index: dict,
+    source_kind: str = _WINDOW_SCOPED_TOP_VIEWED_KIND,
 ) -> list[dict]:
+    if source_kind == _WINDOW_SCOPED_EXTENDED_KIND:
+        return _build_rows_for_extended_window_scoped_vod_labels(
+            vod_id,
+            ordered_labels,
+            vod_path=vod_path,
+            vod_dir=vod_dir,
+            job_id=job_id,
+            profile=profile,
+            context_index=context_index,
+        )
+
     logger.info(
         "training_vod_label_phase_start vod_id=%s labels=%s label_workers=%s",
         vod_id,
@@ -1716,7 +2120,7 @@ def _build_rows_for_window_scoped_vod_labels(
     logger.info(
         "training_vod_label_window_source vod_id=%s mode=%s labels=%s",
         vod_id,
-        "window_scoped_top_viewed",
+        source_kind,
         len(ordered_labels),
     )
     started_at = time.perf_counter()
@@ -1724,12 +2128,32 @@ def _build_rows_for_window_scoped_vod_labels(
     progress_interval = _label_progress_interval(len(ordered_labels))
     for index, label in enumerate(ordered_labels, start=1):
         scoped_job_id = f"{job_id}:window_scoped:{index}"
-        scoped_vod_path, scoped_context = _load_or_build_window_scoped_feature_context(
-            vod_id,
-            label,
-            vod_path=vod_path,
-            job_id=scoped_job_id,
-        )
+        try:
+            scoped_vod_path, scoped_context = _load_or_build_window_scoped_feature_context(
+                vod_id,
+                label,
+                vod_path=vod_path,
+                job_id=scoped_job_id,
+                source_kind=source_kind,
+            )
+        except Exception as exc:
+            logger.warning(
+                "training_vod_window_scoped_label_skip vod_id=%s index=%s/%s job_id=%s reason=%s",
+                vod_id,
+                index,
+                len(ordered_labels),
+                scoped_job_id,
+                _compact_exception_message(exc),
+            )
+            if _is_unavailable_vod_download_error(exc):
+                logger.warning(
+                    "training_vod_window_scoped_vod_unavailable vod_id=%s skipped_remaining=%s reason=%s",
+                    vod_id,
+                    len(ordered_labels) - index + 1,
+                    _compact_exception_message(exc),
+                )
+                break
+            continue
         rows.extend(
             _process_vod_label(
                 vod_id,
@@ -1760,6 +2184,360 @@ def _build_rows_for_window_scoped_vod_labels(
         time.perf_counter() - started_at,
     )
     return rows
+
+
+def _build_rows_for_extended_window_scoped_vod_labels(
+    vod_id: str,
+    ordered_labels: list[dict],
+    *,
+    vod_path: pathlib.Path | None,
+    vod_dir: pathlib.Path,
+    job_id: str,
+    profile: str,
+    context_index: dict,
+) -> list[dict]:
+    groups = _extended_window_scoped_label_groups(ordered_labels)
+    logger.info(
+        "training_vod_label_phase_start vod_id=%s labels=%s label_workers=%s",
+        vod_id,
+        len(ordered_labels),
+        1,
+    )
+    logger.info(
+        "training_vod_label_window_source vod_id=%s mode=%s labels=%s groups=%s group_max_sec=%s",
+        vod_id,
+        _WINDOW_SCOPED_EXTENDED_KIND,
+        len(ordered_labels),
+        len(groups),
+        _resolved_extended_window_group_max_sec(),
+    )
+    started_at = time.perf_counter()
+    rows: list[dict] = []
+    completed = 0
+    total_labels = len(ordered_labels)
+    progress_interval = _label_progress_interval(total_labels)
+    checkpoint_work_dir = vod_dir.parent
+    group_args = [
+        _extended_window_scoped_group_context_args(group_index, group)
+        for group_index, group in enumerate(groups, start=1)
+    ]
+    prefetch_enabled = _should_prefetch_window_scoped_group_sources() and len(group_args) > 1
+    prefetch_futures: dict[int, concurrent.futures.Future] = {}
+    background_rows_added = 0
+
+    def _schedule_source_prefetch(
+        executor: concurrent.futures.Executor,
+        next_group_index: int,
+    ) -> None:
+        if next_group_index > len(group_args) or next_group_index in prefetch_futures:
+            return
+        args = group_args[next_group_index - 1]
+        if _load_extended_window_group_checkpoint(
+            checkpoint_work_dir,
+            profile,
+            vod_id,
+            next_group_index,
+            args["group_labels"],
+            scoped_window=args["scoped_window"],
+            cache_scope=args["cache_scope"],
+            source_signature=args["source_signature"],
+        ) is not None:
+            logger.info(
+                "training_vod_window_scoped_group_prefetch_skip vod_id=%s group=%s/%s reason=group_checkpoint",
+                vod_id,
+                next_group_index,
+                len(group_args),
+            )
+            return
+        source_plan = _window_scoped_source_plan(
+            vod_id,
+            args["representative_label"],
+            vod_path=vod_path,
+            source_kind=_WINDOW_SCOPED_EXTENDED_KIND,
+            scoped_window=args["scoped_window"],
+            cache_scope=args["cache_scope"],
+            source_signature=args["source_signature"],
+        )
+        if _window_scoped_source_plan_is_usable(source_plan):
+            logger.info(
+                "training_vod_window_scoped_group_prefetch_skip vod_id=%s group=%s/%s reason=cached",
+                vod_id,
+                next_group_index,
+                len(group_args),
+            )
+            return
+        logger.info(
+            "training_vod_window_scoped_group_prefetch_start vod_id=%s group=%s/%s labels=%s start=%.3f end=%.3f",
+            vod_id,
+            next_group_index,
+            len(group_args),
+            len(args["group_labels"]),
+            args["scoped_window"][0],
+            args["scoped_window"][1],
+        )
+        prefetch_futures[next_group_index] = executor.submit(
+            _load_or_build_window_scoped_source,
+            vod_id,
+            args["representative_label"],
+            vod_path=vod_path,
+            job_id=f"{job_id}:window_scoped_group:{next_group_index}:source_prefetch",
+            source_kind=_WINDOW_SCOPED_EXTENDED_KIND,
+            scoped_window=args["scoped_window"],
+            cache_scope=args["cache_scope"],
+            source_signature=args["source_signature"],
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as source_prefetch_executor:
+        for group_index, group in enumerate(groups, start=1):
+            args = group_args[group_index - 1]
+            group_labels = args["group_labels"]
+            representative_label = args["representative_label"]
+            scoped_job_id = f"{job_id}:window_scoped_group:{group_index}"
+            scoped_window = args["scoped_window"]
+            cache_scope = args["cache_scope"]
+            source_signature = args["source_signature"]
+            logger.info(
+                "training_vod_window_scoped_group_start vod_id=%s group=%s/%s labels=%s start=%.3f end=%.3f",
+                vod_id,
+                group_index,
+                len(groups),
+                len(group_labels),
+                scoped_window[0],
+                scoped_window[1],
+            )
+            prefetch_future = prefetch_futures.pop(group_index, None)
+            checkpoint_rows = _load_extended_window_group_checkpoint(
+                checkpoint_work_dir,
+                profile,
+                vod_id,
+                group_index,
+                group_labels,
+                scoped_window=scoped_window,
+                cache_scope=cache_scope,
+                source_signature=source_signature,
+            )
+            if checkpoint_rows is not None:
+                if prefetch_future is not None:
+                    prefetch_future.cancel()
+                rows.extend(checkpoint_rows)
+                background_rows_added += sum(
+                    1
+                    for row in checkpoint_rows
+                    if str(row.get("supervision_tier") or "") == "background_negative"
+                )
+                completed += len(group_labels)
+                logger.info(
+                    "training_vod_window_scoped_group_checkpoint_hit vod_id=%s group=%s/%s labels=%s rows=%s",
+                    vod_id,
+                    group_index,
+                    len(groups),
+                    len(group_labels),
+                    len(checkpoint_rows),
+                )
+                if _should_log_label_progress(completed, total_labels, progress_interval):
+                    logger.info(
+                        "training_vod_label_progress vod_id=%s completed=%s/%s rows=%s elapsed_sec=%.1f mode=window_scoped groups=%s",
+                        vod_id,
+                        completed,
+                        total_labels,
+                        len(rows),
+                        time.perf_counter() - started_at,
+                        len(groups),
+                    )
+                continue
+
+            try:
+                if prefetch_future is not None:
+                    try:
+                        prefetch_future.result()
+                        logger.info(
+                            "training_vod_window_scoped_group_prefetch_ready vod_id=%s group=%s/%s",
+                            vod_id,
+                            group_index,
+                            len(groups),
+                        )
+                    except Exception as prefetch_exc:
+                        logger.warning(
+                            "training_vod_window_scoped_group_prefetch_failed vod_id=%s group=%s/%s reason=%s",
+                            vod_id,
+                            group_index,
+                            len(groups),
+                            _compact_exception_message(prefetch_exc),
+                        )
+                elif prefetch_enabled:
+                    _load_or_build_window_scoped_source(
+                        vod_id,
+                        representative_label,
+                        vod_path=vod_path,
+                        job_id=f"{scoped_job_id}:source",
+                        source_kind=_WINDOW_SCOPED_EXTENDED_KIND,
+                        scoped_window=scoped_window,
+                        cache_scope=cache_scope,
+                        source_signature=source_signature,
+                    )
+                if prefetch_enabled:
+                    _schedule_source_prefetch(source_prefetch_executor, group_index + 1)
+                scoped_vod_path, scoped_context = _load_or_build_window_scoped_feature_context(
+                    vod_id,
+                    representative_label,
+                    vod_path=vod_path,
+                    job_id=scoped_job_id,
+                    source_kind=_WINDOW_SCOPED_EXTENDED_KIND,
+                    scoped_window=scoped_window,
+                    context_labels=group_labels,
+                    cache_scope=cache_scope,
+                    source_signature=source_signature,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "training_vod_window_scoped_group_skip vod_id=%s group=%s/%s job_id=%s reason=%s",
+                    vod_id,
+                    group_index,
+                    len(groups),
+                    scoped_job_id,
+                    _compact_exception_message(exc),
+                )
+                if _is_unavailable_vod_download_error(exc):
+                    logger.warning(
+                        "training_vod_window_scoped_vod_unavailable vod_id=%s skipped_remaining_groups=%s reason=%s",
+                        vod_id,
+                        len(groups) - group_index + 1,
+                        _compact_exception_message(exc),
+                    )
+                    break
+                completed += len(group_labels)
+                continue
+
+            group_rows: list[dict] = []
+            for index, label in group["items"]:
+                label_rows = _process_vod_label(
+                    vod_id,
+                    index,
+                    label,
+                    vod_path=scoped_vod_path,
+                    vod_dir=vod_dir,
+                    vod_feature_context=scoped_context,
+                    job_id=job_id,
+                    profile=profile,
+                    context_index=context_index,
+                )
+                group_rows.extend(label_rows)
+                rows.extend(label_rows)
+                completed += 1
+                if _should_log_label_progress(completed, total_labels, progress_interval):
+                    logger.info(
+                        "training_vod_label_progress vod_id=%s completed=%s/%s rows=%s elapsed_sec=%.1f mode=window_scoped groups=%s",
+                        vod_id,
+                        completed,
+                        total_labels,
+                        len(rows),
+                        time.perf_counter() - started_at,
+                        len(groups),
+                    )
+            if group_rows:
+                remaining_background_rows = max(_BACKGROUND_NEGATIVE_WINDOWS_PER_VOD - background_rows_added, 0)
+                if remaining_background_rows > 0:
+                    background_rows = _build_background_negative_rows_for_vod(
+                        vod_id,
+                        group_labels,
+                        group_rows,
+                        vod_path=scoped_vod_path,
+                        vod_dir=vod_dir,
+                        vod_feature_context=scoped_context,
+                        job_id=scoped_job_id,
+                        profile=profile,
+                        context_index=context_index,
+                        count=remaining_background_rows,
+                    )
+                    if background_rows:
+                        background_rows_added += len(background_rows)
+                        group_rows.extend(background_rows)
+                        rows.extend(background_rows)
+            if group_rows and _can_write_vod_checkpoint(vod_id, group_rows):
+                _write_extended_window_group_checkpoint(
+                    checkpoint_work_dir,
+                    profile,
+                    vod_id,
+                    group_index,
+                    group_labels,
+                    group_rows,
+                    scoped_window=scoped_window,
+                    cache_scope=cache_scope,
+                    source_signature=source_signature,
+                )
+
+    logger.info(
+        "training_vod_label_phase_done vod_id=%s completed=%s rows=%s elapsed_sec=%.1f mode=window_scoped groups=%s",
+        vod_id,
+        total_labels,
+        len(rows),
+        time.perf_counter() - started_at,
+        len(groups),
+    )
+    return rows
+
+
+def _extended_window_scoped_group_context_args(group_index: int, group: dict[str, object]) -> dict[str, object]:
+    group_labels = [label for _index, label in group["items"]]
+    scoped_window = (float(group["expanded_start"]), float(group["expanded_end"]))
+    source_signature = _extended_window_group_signature(group_labels)
+    cache_scope = {
+        "kind": "extended_window_group",
+        "group_index": group_index,
+        "label_count": len(group_labels),
+        "group_start": round(scoped_window[0], 3),
+        "group_end": round(scoped_window[1], 3),
+        "windows_digest": source_signature["windows_digest"],
+    }
+    return {
+        "group_labels": group_labels,
+        "representative_label": group_labels[0],
+        "scoped_window": scoped_window,
+        "cache_scope": cache_scope,
+        "source_signature": source_signature,
+    }
+
+
+def _extended_window_scoped_label_groups(ordered_labels: list[dict]) -> list[dict[str, object]]:
+    groups: list[dict[str, object]] = []
+    max_group_sec = float(_resolved_extended_window_group_max_sec())
+    for index, label in enumerate(ordered_labels, start=1):
+        start, end = _scoped_training_window(label, _WINDOW_SCOPED_EXTENDED_KIND)
+        if not groups:
+            groups.append({"expanded_start": start, "expanded_end": end, "items": [(index, label)]})
+            continue
+        current = groups[-1]
+        current_start = float(current["expanded_start"])
+        current_end = float(current["expanded_end"])
+        merged_start = min(current_start, start)
+        merged_end = max(current_end, end)
+        if start <= current_end and (merged_end - merged_start) <= max_group_sec:
+            current["expanded_start"] = merged_start
+            current["expanded_end"] = merged_end
+            current["items"].append((index, label))
+            continue
+        groups.append({"expanded_start": start, "expanded_end": end, "items": [(index, label)]})
+    return groups
+
+
+def _is_unavailable_vod_download_error(exc: Exception) -> bool:
+    message = _compact_exception_message(exc).lower()
+    return (
+        "video" in message
+        and (
+            "does not exist" in message
+            or "is unavailable" in message
+            or "not available" in message
+            or "has been deleted" in message
+        )
+    )
+
+
+def _compact_exception_message(exc: Exception, limit: int = 500) -> str:
+    message = str(exc).replace("\n", " ").strip() or exc.__class__.__name__
+    if len(message) <= limit:
+        return message
+    return message[: limit - 3] + "..."
 
 
 def _label_progress_interval(total_labels: int) -> int:
@@ -1820,6 +2598,441 @@ def _process_vod_label(
         shutil.rmtree(clip_dir, ignore_errors=True)
 
 
+def _build_background_negative_rows_for_vod(
+    vod_id: str,
+    ordered_labels: list[dict],
+    existing_rows: list[dict],
+    *,
+    vod_path: pathlib.Path,
+    vod_dir: pathlib.Path,
+    vod_feature_context: VodFeatureContext,
+    job_id: str,
+    profile: str,
+    context_index: dict,
+    count: int = _BACKGROUND_NEGATIVE_WINDOWS_PER_VOD,
+) -> list[dict]:
+    source_kind = str(getattr(vod_feature_context, "source_kind", "full_vod") or "full_vod")
+    if source_kind not in {"full_vod", _WINDOW_SCOPED_EXTENDED_KIND}:
+        return []
+    source_offset = float(getattr(vod_feature_context, "source_start_sec", 0.0) or 0.0)
+    source_duration = _background_sampling_duration_seconds(ordered_labels, vod_feature_context)
+    if source_duration <= 0.0 or count <= 0:
+        return []
+    blocked_windows = [
+        window
+        for window in (_label_window(label) for label in ordered_labels)
+        if window is not None
+    ]
+    blocked_windows.extend(
+        window
+        for window in (_row_window_tuple(row) for row in existing_rows)
+        if window is not None
+    )
+    local_blocked_windows = [
+        window
+        for window in (_local_background_window(window, source_offset, source_duration) for window in blocked_windows)
+        if window is not None
+    ]
+    candidate_windows = sample_background_negatives.sample_background_windows(
+        vod_id,
+        duration_seconds=source_duration,
+        blocked_windows=local_blocked_windows,
+        count=count,
+        window_seconds=_BACKGROUND_NEGATIVE_WINDOW_SEC,
+        max_overlap_ratio=_BACKGROUND_NEGATIVE_MAX_OVERLAP,
+    )
+    if not candidate_windows:
+        logger.info(
+            "training_vod_background_negative_diagnostics vod_id=%s source_kind=%s candidate_windows=0 quiet_filter_rejected=0 feature_build_failed=0 rows=0",
+            vod_id,
+            source_kind,
+        )
+        return []
+
+    from services import audio_features, feature_builder, scorer, video_features
+    from services.timeline_types import Candidate
+
+    rows: list[dict] = []
+    clip_dir = vod_dir / "background_negatives"
+    clip_dir.mkdir(parents=True, exist_ok=True)
+    base_label = dict(ordered_labels[0])
+    quiet_thresholds = _compute_vod_quiet_thresholds(existing_rows)
+    local_game_events = _local_game_events_for_source(
+        vod_id,
+        source_start_sec=source_offset,
+        source_end_sec=source_offset + source_duration,
+    )
+    quiet_filter_rejected_count = 0
+    quiet_fallback_candidates: list[tuple[tuple[int, float, float], dict[str, float], Candidate, object]] = []
+    feature_build_failed_count = 0
+    empty_transcript_count = 0
+    for index, window in enumerate(candidate_windows, start=1):
+        transcript = _slice_transcript_for_window(
+            vod_feature_context.transcript,
+            window_start=window.start,
+            window_end=window.end,
+        )
+        if not transcript:
+            empty_transcript_count += 1
+            continue
+        try:
+            audio_frames, visual_frames = _load_or_build_window_modalities(
+                vod_id,
+                vod_path=vod_path,
+                vod_context=vod_feature_context,
+                window_start=window.start,
+                window_end=window.end,
+            )
+        except Exception as exc:
+            logger.warning(
+                "training_vod_background_negative_skip vod_id=%s index=%s reason=%s",
+                vod_id,
+                index,
+                _compact_exception_message(exc),
+            )
+            feature_build_failed_count += 1
+            continue
+        transcript = audio_features.enrich_segments(transcript, audio_frames)
+        transcript = video_features.enrich_segments(transcript, visual_frames)
+        transcript = scorer.score_segments(transcript)
+        candidate = Candidate(
+            id=f"{job_id}:background_negative:{index}:{int(window.start * 100)}",
+            start=0.0,
+            end=round(window.end - window.start, 2),
+            source="background_negative",
+            anchor_time=round((window.end - window.start) / 2.0, 2),
+            score_hint=0.0,
+            tags=["background_negative"],
+        )
+        feature_rows = feature_builder.build_features(
+            [candidate],
+            transcript,
+            profile,
+            llm_candidate_ids=set(),
+            llm_provider="none",
+            game_events=local_game_events,
+            video_path=vod_path,
+        )
+        if not feature_rows:
+            feature_build_failed_count += 1
+            continue
+        features = feature_rows[0]
+        quiet_assessment = _background_quiet_assessment(features, quiet_thresholds)
+        if not quiet_assessment["accepted"]:
+            quiet_filter_rejected_count += 1
+            fallback_score = _background_quiet_fallback_score(features, quiet_thresholds, quiet_assessment)
+            if fallback_score is not None:
+                quiet_fallback_candidates.append(
+                    (
+                        fallback_score,
+                        {
+                            "start": round(source_offset + window.start, 2),
+                            "end": round(source_offset + window.end, 2),
+                        },
+                        candidate,
+                        features,
+                    )
+                )
+            logger.debug(
+                "training_vod_background_negative_quiet_rejected vod_id=%s index=%s source_kind=%s values=%s thresholds=%s",
+                vod_id,
+                index,
+                source_kind,
+                _background_quiet_feature_values(features),
+                quiet_thresholds,
+            )
+            continue
+        absolute_start = round(source_offset + window.start, 2)
+        absolute_end = round(source_offset + window.end, 2)
+        rows.append(
+            _background_negative_training_row(
+                base_label,
+                candidate,
+                features,
+                absolute_start=absolute_start,
+                absolute_end=absolute_end,
+                context_index=context_index,
+                negative_source="random_mid_vod_background",
+                supervision_reason_suffix=":background_sampler",
+                sample_weight_scale=1.0,
+            )
+        )
+    fallback_rows_added = 0
+    if not rows and quiet_fallback_candidates:
+        quiet_fallback_candidates.sort(key=lambda item: item[0])
+        for _score, window, candidate, features in quiet_fallback_candidates[: max(1, min(2, count))]:
+            rows.append(
+                _background_negative_training_row(
+                    base_label,
+                    candidate,
+                    features,
+                    absolute_start=float(window["start"]),
+                    absolute_end=float(window["end"]),
+                    context_index=context_index,
+                    negative_source="relative_quiet_fallback",
+                    supervision_reason_suffix=":background_sampler:relative_quiet_fallback",
+                    sample_weight_scale=0.6,
+                )
+            )
+            fallback_rows_added += 1
+        logger.info(
+            "training_vod_background_negative_relative_fallback vod_id=%s source_kind=%s candidates=%s rows=%s",
+            vod_id,
+            source_kind,
+            len(quiet_fallback_candidates),
+            fallback_rows_added,
+        )
+    logger.info(
+        "training_vod_background_negative_diagnostics vod_id=%s source_kind=%s candidate_windows=%s quiet_filter_rejected=%s feature_build_failed=%s empty_transcript=%s fallback_rows=%s rows=%s thresholds=%s",
+        vod_id,
+        source_kind,
+        len(candidate_windows),
+        quiet_filter_rejected_count,
+        feature_build_failed_count,
+        empty_transcript_count,
+        fallback_rows_added,
+        len(rows),
+        quiet_thresholds,
+    )
+    if rows:
+        logger.info(
+            "training_vod_background_negatives_added vod_id=%s source_kind=%s candidates=%s rows=%s",
+            vod_id,
+            source_kind,
+            len(candidate_windows),
+            len(rows),
+        )
+    return rows
+
+
+def _background_negative_training_row(
+    base_label: dict,
+    candidate,
+    features,
+    *,
+    absolute_start: float,
+    absolute_end: float,
+    context_index: dict,
+    negative_source: str,
+    supervision_reason_suffix: str,
+    sample_weight_scale: float,
+) -> dict:
+    from services.timeline_types import Candidate
+
+    label = dict(base_label)
+    label.update(
+        {
+            "window_start": float(absolute_start),
+            "window_end": float(absolute_end),
+            "label_class": "background_negative",
+            "label_score": 0.0,
+            "negative_source": negative_source,
+            "label_source": "background_negative_sampler",
+            "clip_ids": [],
+        }
+    )
+    absolute_candidate = Candidate(
+        id=candidate.id,
+        start=absolute_start,
+        end=absolute_end,
+        source=candidate.source,
+        anchor_time=round((absolute_start + absolute_end) / 2.0, 2),
+        score_hint=0.0,
+        tags=list(candidate.tags),
+    )
+    row = _training_row_from_label(
+        label,
+        absolute_candidate,
+        features,
+        sample_weight_scale=sample_weight_scale,
+        dataset_source="twitch_vod_background_negative",
+        supervision_reason_suffix=supervision_reason_suffix,
+        window_origin="random_mid_vod_background",
+        label_class_override="background_negative",
+        label_value_override=0,
+        supervision_tier="background_negative",
+        rejected_reason_override="background_negative",
+    )
+    _apply_vod_context_features(row, label, context_index)
+    row["feature_provenance"] = collect_viral_clips._feature_provenance(
+        row["features"],
+        has_vod_context=True,
+    )
+    return row
+
+
+def _background_sampling_duration_seconds(labels: list[dict], vod_feature_context: VodFeatureContext) -> float:
+    source_start = float(getattr(vod_feature_context, "source_start_sec", 0.0) or 0.0)
+    source_end = float(getattr(vod_feature_context, "source_end_sec", 0.0) or 0.0)
+    if source_end > source_start:
+        return max(source_end - source_start, 0.0)
+    return _vod_duration_seconds(labels)
+
+
+def _local_background_window(
+    window: tuple[float, float],
+    source_offset: float,
+    source_duration: float,
+) -> tuple[float, float] | None:
+    start, end = window
+    local_start = max(float(start) - source_offset, 0.0)
+    local_end = min(float(end) - source_offset, source_duration)
+    if local_end <= local_start:
+        return None
+    return (round(local_start, 2), round(local_end, 2))
+
+
+def _compute_vod_quiet_thresholds(rows: list[dict]) -> dict[str, float | str]:
+    thresholds: dict[str, float | str] = {}
+    for key in _BACKGROUND_QUIET_FEATURE_KEYS:
+        values = sorted(
+            _background_row_feature_value(row, key)
+            for row in rows
+            if _background_row_feature_value(row, key) is not None
+        )
+        if values:
+            thresholds[key] = values[min(len(values) - 1, len(values) // 4)]
+    max_hype_values = sorted(
+        value
+        for row in rows
+        if (value := _background_row_feature_value(row, "max_hype")) is not None
+    )
+    if max_hype_values:
+        thresholds["max_hype_p95"] = max_hype_values[min(len(max_hype_values) - 1, int(math.floor((len(max_hype_values) - 1) * 0.95)))]
+    thresholds["mode"] = "relative" if any(key in thresholds for key in _BACKGROUND_QUIET_FEATURE_KEYS) else "absolute"
+    return thresholds
+
+
+def _background_row_feature_value(row: dict, key: str) -> float | None:
+    features = row.get("features")
+    if not isinstance(features, dict) or key not in features:
+        return None
+    try:
+        value = float(features.get(key) or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value):
+        return None
+    return value
+
+
+def _background_quiet_feature_values(features) -> dict[str, float]:
+    return {key: _feature_attr_float(features, key) for key in _BACKGROUND_QUIET_FEATURE_KEYS}
+
+
+def _feature_attr_float(features, key: str) -> float:
+    if isinstance(features, dict):
+        raw = features.get(key, 0.0)
+    else:
+        raw = getattr(features, key, 0.0)
+    try:
+        value = float(raw or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return value if math.isfinite(value) else 0.0
+
+
+def _background_features_are_quiet(features, thresholds: dict[str, float | str] | None = None) -> bool:
+    return bool(_background_quiet_assessment(features, thresholds)["accepted"])
+
+
+def _background_quiet_assessment(features, thresholds: dict[str, float | str] | None = None) -> dict[str, object]:
+    thresholds = thresholds or {}
+    if str(thresholds.get("mode") or "absolute") != "relative":
+        accepted = all(
+            _feature_attr_float(features, key) <= float(limit)
+            for key, limit in _BACKGROUND_ABSOLUTE_QUIET_THRESHOLDS.items()
+        )
+        return {
+            "accepted": accepted,
+            "matches": len(_BACKGROUND_ABSOLUTE_QUIET_THRESHOLDS) if accepted else 0,
+            "comparable": len(_BACKGROUND_ABSOLUTE_QUIET_THRESHOLDS),
+            "hard_reject": not accepted,
+        }
+
+    matches = 0
+    comparable = 0
+    for key in _BACKGROUND_QUIET_FEATURE_KEYS:
+        limit = thresholds.get(key)
+        if not isinstance(limit, (int, float)):
+            continue
+        comparable += 1
+        if _feature_attr_float(features, key) <= float(limit):
+            matches += 1
+    max_hype = _feature_attr_float(features, "max_hype")
+    p95 = thresholds.get("max_hype_p95")
+    hard_reasons: list[str] = []
+    if isinstance(p95, (int, float)) and p95 > 0.0 and max_hype > float(p95) * _BACKGROUND_MAX_HYPE_P95_FACTOR:
+        hard_reasons.append("max_hype")
+    if _feature_attr_float(features, "face_reaction_peak") > _BACKGROUND_FACE_REACTION_HARD_MAX:
+        hard_reasons.append("face_reaction")
+    if comparable < _BACKGROUND_RELATIVE_QUIET_MIN_MATCHES:
+        accepted = all(
+            _feature_attr_float(features, key) <= float(limit)
+            for key, limit in _BACKGROUND_ABSOLUTE_QUIET_THRESHOLDS.items()
+        )
+        return {
+            "accepted": accepted,
+            "matches": matches,
+            "comparable": comparable,
+            "hard_reject": not accepted,
+            "hard_reasons": hard_reasons,
+        }
+    if hard_reasons:
+        return {
+            "accepted": False,
+            "matches": matches,
+            "comparable": comparable,
+            "hard_reject": True,
+            "hard_reasons": hard_reasons,
+        }
+    return {
+        "accepted": matches >= _BACKGROUND_RELATIVE_QUIET_MIN_MATCHES,
+        "matches": matches,
+        "comparable": comparable,
+        "hard_reject": False,
+        "hard_reasons": [],
+    }
+
+
+def _background_quiet_fallback_score(
+    features,
+    thresholds: dict[str, float | str] | None,
+    assessment: dict[str, object],
+) -> tuple[int, float, float] | None:
+    if str((thresholds or {}).get("mode") or "absolute") != "relative":
+        return None
+    matches = int(assessment.get("matches") or 0)
+    comparable = int(assessment.get("comparable") or 0)
+    if comparable <= 0 or matches < _BACKGROUND_RELATIVE_QUIET_FALLBACK_MIN_MATCHES:
+        return None
+    p95 = (thresholds or {}).get("max_hype_p95")
+    if isinstance(p95, (int, float)) and p95 > 0.0:
+        if _feature_attr_float(features, "max_hype") > float(p95):
+            return None
+    face_limit = max(_BACKGROUND_FACE_REACTION_HARD_MAX, float(_BACKGROUND_ABSOLUTE_QUIET_THRESHOLDS["face_reaction_peak"]))
+    if _feature_attr_float(features, "face_reaction_peak") > face_limit:
+        return None
+    overflow = 0.0
+    for key in _BACKGROUND_QUIET_FEATURE_KEYS:
+        limit = (thresholds or {}).get(key)
+        if not isinstance(limit, (int, float)) or float(limit) <= 0.0:
+            continue
+        value = _feature_attr_float(features, key)
+        if value > float(limit):
+            overflow += (value - float(limit)) / max(float(limit), 1e-6)
+    max_hype = _feature_attr_float(features, "max_hype")
+    return (-matches, overflow, max_hype)
+
+
+def _row_window_tuple(row: dict) -> tuple[float, float] | None:
+    start = float(row.get("window_start") or row.get("proxy_window_start") or 0.0)
+    end = float(row.get("window_end") or row.get("proxy_window_end") or start)
+    if end <= start:
+        return None
+    return start, end
+
+
 def _finalize_label_rows(label_rows: list[dict], label: dict, context_index: dict) -> list[dict]:
     rows: list[dict] = []
     for row in label_rows:
@@ -1857,6 +3070,9 @@ def _schedule_prefetch(
     profile: str,
     work_dir: pathlib.Path,
 ) -> tuple[concurrent.futures.Future[pathlib.Path] | None, str | None, str | None]:
+    if not settings.training_vod_prefetch:
+        logger.info("training_vod_prefetch_skip disabled")
+        return None, None, None
     if next_index >= len(vod_items):
         logger.info("training_vod_prefetch_skip end_of_queue")
         return None, None, None
@@ -1865,8 +3081,9 @@ def _schedule_prefetch(
     if _load_vod_checkpoint(work_dir, profile, next_vod_id, next_rows) is not None:
         logger.info("training_vod_prefetch_skip checkpoint_hit %s", next_rows[0]["vod_url"])
         return None, None, None
-    if _should_use_window_scoped_label_contexts(next_rows):
-        logger.info("training_vod_prefetch_skip window_scoped_top_viewed %s", next_rows[0]["vod_url"])
+    source_kind = _window_scoped_context_kind_for_labels(next_rows)
+    if source_kind is not None:
+        logger.info("training_vod_prefetch_skip %s %s", source_kind, next_rows[0]["vod_url"])
         return None, None, None
 
     next_url = str(next_rows[0]["vod_url"])
@@ -1893,9 +3110,14 @@ def _build_rows_for_label(
     )
     from services.timeline_types import Candidate
 
-    expanded_start, _expanded_end, local_expanded_start, local_expanded_end = _local_context_training_window(
+    expanded_start, expanded_end, local_expanded_start, local_expanded_end = _local_context_training_window(
         label,
         vod_feature_context,
+    )
+    local_game_events = _local_game_events_for_source(
+        str(label.get("vod_id") or ""),
+        source_start_sec=expanded_start,
+        source_end_sec=expanded_end,
     )
     transcript = _slice_transcript_for_window(
         vod_feature_context.transcript,
@@ -1937,6 +3159,8 @@ def _build_rows_for_label(
         profile,
         llm_candidate_ids={candidates[0].id},
         llm_provider=_DATASET_BUILD_LLM_PROVIDER,
+        game_events=local_game_events,
+        video_path=vod_path,
     )
     if not feature_rows:
         return []
@@ -1944,6 +3168,9 @@ def _build_rows_for_label(
     rows: list[dict] = []
     primary_feature_rows = feature_rows[: len(candidates)]
     boundary_feature_rows = feature_rows[len(candidates):]
+    primary_dataset_source = str(label.get("training_dataset_source") or "twitch_vod_primary")
+    primary_supervision_tier = str(label.get("training_supervision_tier") or "twitch_clip_proxy")
+    primary_supervision_reason = str(label.get("training_supervision_reason") or "")
     for idx, (candidate, features) in enumerate(zip(candidates, primary_feature_rows)):
         absolute_candidate = _absolute_candidate(candidate, expanded_start)
         rows.append(
@@ -1952,9 +3179,10 @@ def _build_rows_for_label(
                 absolute_candidate,
                 features,
                 sample_weight_scale=1.0 if idx == 0 else _SUPPLEMENTAL_CANDIDATE_WEIGHT,
-                dataset_source="twitch_vod_primary" if idx == 0 else "twitch_vod_candidate_supplemental",
-                supervision_reason_suffix="" if idx == 0 else ":candidate_generator",
+                dataset_source=primary_dataset_source if idx == 0 else "twitch_vod_candidate_supplemental",
+                supervision_reason_suffix=primary_supervision_reason if idx == 0 else ":candidate_generator",
                 window_origin="proxy_label_refined" if idx == 0 else "candidate_generator_overlap",
+                supervision_tier=primary_supervision_tier if idx == 0 else "twitch_clip_proxy",
                 reference_window=(absolute_candidate.start, absolute_candidate.end) if idx == 0 else None,
             )
         )
@@ -2056,9 +3284,17 @@ def _vod_checkpoint_path(work_dir: pathlib.Path, vod_id: str) -> pathlib.Path:
     return _checkpoint_dir(work_dir) / f"{vod_id}.json"
 
 
+def _extended_window_group_checkpoint_path(
+    work_dir: pathlib.Path,
+    vod_id: str,
+    group_index: int,
+) -> pathlib.Path:
+    return _checkpoint_dir(work_dir) / "extended_window_groups" / str(vod_id) / f"group_{group_index:04d}.json"
+
+
 def _vod_checkpoint_signature(vod_rows: list[dict]) -> str:
     normalized = json.dumps(
-        sorted(vod_rows, key=lambda row: (float(row.get("window_start") or 0.0), float(row.get("window_end") or 0.0), str(row.get("label_class") or ""))),
+        _checkpoint_label_signature_payload(vod_rows),
         ensure_ascii=True,
         sort_keys=True,
         separators=(",", ":"),
@@ -2066,16 +3302,154 @@ def _vod_checkpoint_signature(vod_rows: list[dict]) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
-def _can_write_vod_checkpoint(vod_id: str) -> bool:
+def _extended_window_group_checkpoint_signature(
+    group_labels: list[dict],
+    *,
+    scoped_window: tuple[float, float],
+    cache_scope: dict[str, object],
+    source_signature: dict[str, object],
+) -> str:
+    payload = {
+        "kind": _WINDOW_SCOPED_EXTENDED_KIND,
+        "labels": _checkpoint_label_signature_payload(group_labels),
+        "scoped_window": [round(float(scoped_window[0]), 3), round(float(scoped_window[1]), 3)],
+        "cache_scope": cache_scope,
+        "source_signature": source_signature,
+    }
+    normalized = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _legacy_vod_checkpoint_label_signatures(vod_rows: list[dict]) -> set[str]:
+    # Older checkpoints hashed the full label dict. Keep accepting those
+    # checkpoints after non-feature review metadata is added to mixed VODs.
+    normalized = json.dumps(
+        sorted(
+            (
+                _checkpoint_label_legacy_payload(
+                    row,
+                    include_top_viewed_source=_should_use_window_scoped_label_contexts(vod_rows),
+                )
+                for row in vod_rows
+            ),
+            key=lambda row: (
+                float(row.get("window_start") or 0.0),
+                float(row.get("window_end") or 0.0),
+                str(row.get("label_class") or ""),
+            ),
+        ),
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return {hashlib.sha256(normalized.encode("utf-8")).hexdigest()}
+
+
+def _checkpoint_label_signature_payload(vod_rows: list[dict]) -> list[dict[str, object]]:
+    include_top_viewed_source = _should_use_window_scoped_label_contexts(vod_rows)
+    return sorted(
+        (
+            _checkpoint_label_payload(row, include_top_viewed_source=include_top_viewed_source)
+            for row in vod_rows
+        ),
+        key=lambda row: (
+            float(row.get("window_start") or 0.0),
+            float(row.get("window_end") or 0.0),
+            str(row.get("label_class") or ""),
+            str(row.get("clip_ids") or ""),
+        ),
+    )
+
+
+def _checkpoint_label_payload(row: dict, *, include_top_viewed_source: bool) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "broadcaster": str(row.get("broadcaster") or ""),
+        "vod_id": str(row.get("vod_id") or ""),
+        "vod_url": str(row.get("vod_url") or ""),
+        "window_start": round(float(row.get("window_start") or 0.0), 3),
+        "window_end": round(float(row.get("window_end") or 0.0), 3),
+        "label_class": str(row.get("label_class") or ""),
+        "label_score": round(float(row.get("label_score") or 0.0), 6),
+        "label_source": str(row.get("label_source") or ""),
+        "platform_source": str(row.get("platform_source") or ""),
+        "negative_source": str(row.get("negative_source") or ""),
+        "quality_bucket": str(row.get("quality_bucket") or ""),
+        "view_count": int(row.get("view_count") or 0),
+        "clip_ids": sorted(str(item) for item in (row.get("clip_ids") or []) if str(item).strip()),
+    }
+    if include_top_viewed_source:
+        payload["manual_gold_review_source"] = str(row.get("manual_gold_review_source") or "")
+    return payload
+
+
+def _checkpoint_label_legacy_payload(row: dict, *, include_top_viewed_source: bool) -> dict:
+    ignored_metadata_fields = {
+        "gold_candidate_status",
+        "intended_gold_grade",
+        "manual_gold_review",
+        "manual_gold_review_notes",
+    }
+    if not include_top_viewed_source:
+        ignored_metadata_fields.add("manual_gold_review_source")
+    return {
+        key: value
+        for key, value in row.items()
+        if key not in ignored_metadata_fields
+    }
+
+
+def _can_write_vod_checkpoint(vod_id: str, rows: list[dict] | None = None) -> bool:
     if not settings.enable_chat_analysis:
         return True
-    cache_dir = _vod_feature_cache_dir(vod_id)
+    try:
+        cache_dir = _vod_feature_cache_dir(vod_id)
+    except OSError as exc:
+        logger.info(
+            "training_vod_checkpoint_allow vod_id=%s reason=cache_dir_unavailable error=%s",
+            vod_id,
+            exc,
+        )
+        return True
     if _chat_cache_has_complete_coverage(cache_dir):
+        return True
+    if _rows_have_chat_features(rows or []):
+        logger.info(
+            "training_vod_checkpoint_allow vod_id=%s reason=scoped_chat_features_present",
+            vod_id,
+        )
         return True
     logger.info(
         "training_vod_checkpoint_skip vod_id=%s reason=chat_enabled_without_complete_chat_cache",
         vod_id,
     )
+    return False
+
+
+def _rows_have_chat_features(rows: list[dict]) -> bool:
+    for row in rows:
+        provenance = row.get("feature_provenance")
+        if isinstance(provenance, dict) and bool(provenance.get("has_chat_features")):
+            return True
+        features = row.get("features")
+        if isinstance(features, dict):
+            if bool(features.get("has_chat_features")):
+                return True
+            for key in (
+                "chat_message_rate_mean",
+                "chat_message_rate_peak",
+                "chat_hype_score",
+                "chat_laugh_score",
+                "chat_shock_score",
+                "chat_sadge_score",
+                "chat_velocity_score",
+                "chat_rate_derivative_score",
+                "chat_ema_crossing_score",
+            ):
+                try:
+                    if abs(float(features.get(key) or 0.0)) > 1e-9:
+                        return True
+                except (TypeError, ValueError):
+                    continue
     return False
 
 
@@ -2106,7 +3480,55 @@ def _load_vod_checkpoint(
         legacy_fingerprint = str(payload.get("dataset_build_fingerprint") or "")
         if legacy_fingerprint not in _legacy_vod_checkpoint_fingerprints(profile):
             return None
-    if str(payload.get("label_signature") or "") != _vod_checkpoint_signature(vod_rows):
+    label_signature = str(payload.get("label_signature") or "")
+    if (
+        label_signature != _vod_checkpoint_signature(vod_rows)
+        and label_signature not in _legacy_vod_checkpoint_label_signatures(vod_rows)
+    ):
+        return None
+    rows = payload.get("rows")
+    if not isinstance(rows, list):
+        return None
+    return rows
+
+
+def _load_extended_window_group_checkpoint(
+    work_dir: pathlib.Path,
+    profile: str,
+    vod_id: str,
+    group_index: int,
+    group_labels: list[dict],
+    *,
+    scoped_window: tuple[float, float],
+    cache_scope: dict[str, object],
+    source_signature: dict[str, object],
+) -> list[dict] | None:
+    path = _extended_window_group_checkpoint_path(work_dir, vod_id, group_index)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if int(payload.get("version") or 0) != _VOD_CHECKPOINT_VERSION:
+        return None
+    if str(payload.get("profile") or "") != profile:
+        return None
+    if str(payload.get("vod_id") or "") != vod_id:
+        return None
+    if int(payload.get("group_index") or 0) != int(group_index):
+        return None
+    if str(payload.get("checkpoint_kind") or "") != "extended_window_group_rows":
+        return None
+    if str(payload.get("raw_vod_rows_fingerprint") or "") != _raw_vod_rows_fingerprint(profile):
+        return None
+    expected_signature = _extended_window_group_checkpoint_signature(
+        group_labels,
+        scoped_window=scoped_window,
+        cache_scope=cache_scope,
+        source_signature=source_signature,
+    )
+    if str(payload.get("group_signature") or "") != expected_signature:
         return None
     rows = payload.get("rows")
     if not isinstance(rows, list):
@@ -2131,6 +3553,41 @@ def _write_vod_checkpoint(
         "raw_vod_rows_fingerprint": _raw_vod_rows_fingerprint(profile),
         "dataset_build_fingerprint": _dataset_build_fingerprint(profile),
         "label_signature": _vod_checkpoint_signature(vod_rows),
+        "rows": rows,
+    }
+    serialized = json.dumps(payload, ensure_ascii=True)
+    path.write_text(serialized, encoding="utf-8")
+
+
+def _write_extended_window_group_checkpoint(
+    work_dir: pathlib.Path,
+    profile: str,
+    vod_id: str,
+    group_index: int,
+    group_labels: list[dict],
+    rows: list[dict],
+    *,
+    scoped_window: tuple[float, float],
+    cache_scope: dict[str, object],
+    source_signature: dict[str, object],
+) -> None:
+    path = _extended_window_group_checkpoint_path(work_dir, vod_id, group_index)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": _VOD_CHECKPOINT_VERSION,
+        "profile": profile,
+        "vod_id": vod_id,
+        "group_index": int(group_index),
+        "checkpoint_kind": "extended_window_group_rows",
+        "raw_vod_rows_fingerprint": _raw_vod_rows_fingerprint(profile),
+        "group_signature": _extended_window_group_checkpoint_signature(
+            group_labels,
+            scoped_window=scoped_window,
+            cache_scope=cache_scope,
+            source_signature=source_signature,
+        ),
+        "scoped_window": [round(float(scoped_window[0]), 3), round(float(scoped_window[1]), 3)],
+        "label_count": len(group_labels),
         "rows": rows,
     }
     serialized = json.dumps(payload, ensure_ascii=True)
@@ -2389,6 +3846,16 @@ def _local_context_training_window(
 ) -> tuple[float, float, float, float]:
     expanded_start, expanded_end = _expanded_training_window(label)
     context_offset = float(getattr(vod_feature_context, "source_start_sec", 0.0) or 0.0)
+    source_kind = str(getattr(vod_feature_context, "source_kind", "") or "")
+    if source_kind == _WINDOW_SCOPED_EXTENDED_KIND:
+        source_end = float(getattr(vod_feature_context, "source_end_sec", 0.0) or 0.0)
+        if source_end > context_offset:
+            return (
+                round(context_offset, 2),
+                round(source_end, 2),
+                0.0,
+                round(max(source_end - context_offset, 1.0), 2),
+            )
     local_expanded_start = max(float(expanded_start) - context_offset, 0.0)
     local_expanded_end = max(float(expanded_end) - context_offset, local_expanded_start + 1.0)
     return expanded_start, expanded_end, local_expanded_start, local_expanded_end
@@ -2625,7 +4092,12 @@ def _training_row_from_label(
         "platform_source": str(label.get("platform_source", "twitch_clip")),
         "label_class": label_class,
         "label_score": float(label.get("label_score", 0.0) or 0.0),
-        "sample_weight": round(sample_weight_for_label(label_class) * sample_weight_scale, 3),
+        "sample_weight": round(
+            sample_weight_for_label(label_class)
+            * sample_weight_scale
+            * _label_sample_weight_multiplier(label),
+            3,
+        ),
         "supervision_tier": supervision_tier,
         "supervision_reason": f"{base_reason}{supervision_reason_suffix}",
         "ordinal_label": collect_viral_clips._ordinal_label(label_class, label_value),
@@ -2655,7 +4127,20 @@ def _training_row_from_label(
         row["boundary_abs_total_error_sec"] = round(abs(start_error) + abs(end_error), 2)
     if perturbation_kind:
         row["boundary_perturbation_kind"] = perturbation_kind
+    if bool(label.get("targeted_feature_backfill")):
+        row["targeted_feature_backfill"] = True
+        row["targeted_feature_backfill_source"] = str(
+            label.get("targeted_feature_backfill_source") or "targeted_backfill"
+        )
     return row
+
+
+def _label_sample_weight_multiplier(label: dict) -> float:
+    try:
+        value = float(label.get("training_sample_weight_multiplier", 1.0) or 1.0)
+    except (TypeError, ValueError):
+        return 1.0
+    return max(value, 0.0) if math.isfinite(value) else 1.0
 
 
 def _dedupe_ranker_rows(rows: list[dict]) -> list[dict]:
@@ -2753,7 +4238,10 @@ def _select_vod_negative_rows(
     primary_rows = [row for row in negative_rows if not _is_boundary_near_miss_row(row)]
     selected: list[dict] = []
     if boundary_rows and primary_rows and limit >= 2:
-        boundary_quota = min(len(boundary_rows), max(1, min(limit // 4, limit // 2)))
+        boundary_quota = min(
+            len(boundary_rows),
+            max(1, int(math.floor(limit * _MAX_BOUNDARY_NEGATIVE_SHARE))),
+        )
         primary_quota = max(limit - boundary_quota, 0)
         selected.extend(_rank_vod_negative_rows(primary_rows, positive_rows)[:primary_quota])
         selected.extend(_rank_vod_negative_rows(boundary_rows, positive_rows)[:boundary_quota])

@@ -8,6 +8,7 @@ sys.modules.setdefault("whisper", types.SimpleNamespace(load_model=lambda *_args
 sys.modules.setdefault("ollama", types.SimpleNamespace(Client=lambda *_args, **_kwargs: None))
 
 from services import feature_builder
+from services.game_events import GameEvent
 from services.timeline_types import Candidate, Chapter
 from services.transcriber import RichSegment
 
@@ -75,7 +76,7 @@ class FeatureBuilderTests(unittest.TestCase):
         self.assertGreater(features.audio_pop_score, 0.0)
         self.assertGreater(features.projected_hook_score, 0.0)
         self.assertGreater(features.projected_retention_score, 0.0)
-        self.assertEqual(features.feature_build_version, 8)
+        self.assertEqual(features.feature_build_version, 12)
         self.assertTrue(features.has_chat_features)
         self.assertEqual(features.chat_peak, 0.6)
         self.assertGreater(features.chat_mean, 0.0)
@@ -116,6 +117,57 @@ class FeatureBuilderTests(unittest.TestCase):
         self.assertGreater(features.chat_activity_coverage, 0.0)
         self.assertEqual(features.chat_message_rate_peak, 4.0)
         self.assertGreater(features.chat_density_mean, 0.0)
+
+    def test_build_features_uses_numeric_chat_category_and_velocity(self) -> None:
+        candidate = Candidate(id="x", start=0.0, end=10.0, source="reaction", anchor_time=4.0)
+        segments = [
+            RichSegment(
+                start=0.0,
+                end=3.0,
+                text="setup",
+                speaker="STREAMER",
+                hype_score=2.0,
+                chat_message_rate=1.0,
+                chat_density_score=0.15,
+                chat_laugh_score=0.2,
+            ),
+            RichSegment(
+                start=3.0,
+                end=6.0,
+                text="payoff",
+                speaker="STREAMER",
+                hype_score=5.0,
+                chat_message_rate=9.0,
+                chat_density_score=0.7,
+                chat_laugh_score=0.7,
+            ),
+        ]
+
+        features = feature_builder.build_features([candidate], segments)[0]
+
+        self.assertEqual(features.chat_laugh_score, 0.7)
+        self.assertGreater(features.chat_velocity_score, 0.9)
+
+    def test_build_features_uses_chat_ema_crossing_and_derivative(self) -> None:
+        candidate = Candidate(id="x", start=0.0, end=8.0, source="reaction", anchor_time=3.0)
+        segments = [
+            RichSegment(start=0.0, end=2.0, text="setup", speaker="STREAMER", hype_score=2.0, chat_message_rate=1.0),
+            RichSegment(
+                start=2.0,
+                end=5.0,
+                text="chat explodes",
+                speaker="STREAMER",
+                hype_score=5.0,
+                chat_message_rate=11.0,
+                chat_rate_derivative=5.5,
+                chat_ema_crossing_score=0.8,
+            ),
+        ]
+
+        features = feature_builder.build_features([candidate], segments)[0]
+
+        self.assertGreater(features.chat_rate_derivative_score, 0.9)
+        self.assertEqual(features.chat_ema_crossing_score, 0.8)
 
     def test_build_features_includes_similarity_features(self) -> None:
         candidate = Candidate(id="x", start=0.0, end=10.0, source="reaction", anchor_time=2.5)
@@ -333,6 +385,129 @@ class FeatureBuilderTests(unittest.TestCase):
         self.assertGreater(features.memory_dependency_score, 0.0)
         self.assertGreater(features.retrieved_memory_span_count, 0.0)
         self.assertGreater(features.required_setup_lead_sec, 0.0)
+
+    def test_build_features_adds_voice_gated_streamer_shout_scores(self) -> None:
+        candidate = Candidate(id="shout", start=0.0, end=8.0, source="reaction", anchor_time=3.0)
+        segments = [
+            RichSegment(
+                start=0.0,
+                end=2.0,
+                text="WHAT WAS THAT",
+                emotions=["energy_burst", "pitch_spike"],
+                speaker="STREAMER",
+                hype_score=5.0,
+                max_rms_db=-9.0,
+                max_pitch_hz=620.0,
+                pitch_std_hz=180.0,
+                max_onset_rate=7.0,
+                voice_activity_score=0.9,
+                rms_burst_score=0.8,
+            ),
+            RichSegment(start=2.0, end=5.0, text="that was insane", speaker="STREAMER", hype_score=4.0),
+        ]
+
+        features = feature_builder.build_features([candidate], segments)[0]
+
+        self.assertGreater(features.streamer_shout_score, 0.6)
+        self.assertGreater(features.voice_energy_burst_score, 0.0)
+        self.assertGreater(features.pitch_variation_score, 0.0)
+        self.assertGreater(features.f0_sigma_score, 0.0)
+        self.assertGreater(features.vad_voice_ratio, 0.0)
+        self.assertGreater(features.shout_onset_score, 0.0)
+
+    def test_build_features_suppresses_known_guest_only_shout(self) -> None:
+        candidate = Candidate(id="guest", start=0.0, end=8.0, source="reaction", anchor_time=3.0)
+        segments = [
+            RichSegment(
+                start=0.0,
+                end=2.0,
+                text="I am yelling",
+                emotions=["energy_burst", "pitch_spike"],
+                speaker="GUEST_1",
+                hype_score=5.0,
+                max_rms_db=-8.0,
+                max_pitch_hz=620.0,
+                max_onset_rate=7.0,
+            ),
+        ]
+
+        features = feature_builder.build_features([candidate], segments)[0]
+
+        self.assertEqual(features.streamer_shout_score, 0.0)
+
+    def test_build_features_falls_back_to_unknown_voice_for_shout(self) -> None:
+        candidate = Candidate(id="unknown", start=0.0, end=8.0, source="reaction", anchor_time=3.0)
+        segments = [
+            RichSegment(
+                start=0.0,
+                end=2.0,
+                text="NO WAY",
+                emotions=["energy_burst"],
+                speaker="UNKNOWN",
+                hype_score=5.0,
+                max_rms_db=-10.0,
+                max_pitch_hz=500.0,
+                max_onset_rate=7.0,
+            ),
+        ]
+
+        features = feature_builder.build_features([candidate], segments)[0]
+
+        self.assertGreater(features.streamer_shout_score, 0.0)
+
+    def test_build_features_adds_game_event_features(self) -> None:
+        candidate = Candidate(id="game", start=10.0, end=20.0, source="reaction", anchor_time=12.0)
+        segments = [
+            RichSegment(start=10.0, end=15.0, text="clutch up", speaker="STREAMER", hype_score=4.0),
+            RichSegment(start=15.0, end=20.0, text="he got it", speaker="STREAMER", hype_score=5.0),
+        ]
+        events = [
+            GameEvent(vod_id="123", start=11.0, end=12.0, event_type="kill", confidence=0.9),
+            GameEvent(vod_id="123", start=13.0, end=14.0, event_type="clutch", confidence=0.8),
+        ]
+
+        features = feature_builder.build_features([candidate], segments, game_events=events)[0]
+
+        self.assertEqual(features.game_event_score, 0.9)
+        self.assertGreater(features.kill_density_in_window, 0.0)
+        self.assertTrue(features.is_clutch_window)
+
+    def test_build_features_adds_vision_language_scores_when_available(self) -> None:
+        candidate = Candidate(id="vl", start=0.0, end=8.0, source="reaction", anchor_time=3.0)
+        segments = [
+            RichSegment(start=0.0, end=2.0, text="watch this clutch", speaker="STREAMER", hype_score=4.0),
+            RichSegment(start=2.0, end=5.0, text="no way", speaker="STREAMER", hype_score=5.0),
+        ]
+
+        with patch.object(feature_builder.vision_language_features, "score_candidates", return_value={
+            "vl": {
+                "vl_prompt_max_score": 0.9,
+                "vl_clutch_score": 0.9,
+                "vl_comedy_score": 0.1,
+                "vl_reaction_face_score": 0.4,
+                "vl_scoreboard_score": 0.7,
+            }
+        }):
+            features = feature_builder.build_features([candidate], segments, video_path=__file__)[0]
+
+        self.assertEqual(features.vl_prompt_max_score, 0.9)
+        self.assertEqual(features.vl_clutch_score, 0.9)
+        self.assertTrue(features.has_vector_similarity)
+
+    def test_build_features_adds_local_hook_reranker_scores_when_enabled(self) -> None:
+        candidate = Candidate(id="hook", start=0.0, end=8.0, source="reaction", anchor_time=3.0)
+        segments = [
+            RichSegment(start=0.0, end=2.0, text="Wait what is this?", speaker="STREAMER", hype_score=3.0),
+            RichSegment(start=2.0, end=5.0, text="No way that happened", speaker="STREAMER", hype_score=5.0),
+        ]
+
+        with patch.object(feature_builder.settings, "enable_hook_subclassifier", True), \
+             patch.object(feature_builder.hook_rewrite, "score_hook", return_value={"score": 8.0, "gap": 7.0}):
+            features = feature_builder.build_features([candidate], segments)[0]
+
+        self.assertTrue(features.has_hook_rewrite)
+        self.assertEqual(features.hook_rewrite_score, 0.8)
+        self.assertEqual(features.hook_curiosity_gap_score, 0.7)
 
 
 if __name__ == "__main__":

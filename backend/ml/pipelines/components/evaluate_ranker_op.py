@@ -51,7 +51,15 @@ def run(
         from ml import evaluate_pipeline, train_ranker
 
         rows = train_ranker._read_jsonl(proxy_eval_path)
-        io.write_json(str(pipeline_report_path), evaluate_pipeline.evaluate_pipeline_rows(rows, profile=profile))
+        io.write_json(
+            str(pipeline_report_path),
+            evaluate_pipeline.evaluate_pipeline_rows(
+                rows,
+                profile=profile,
+                artifact_dir=artifact_dir,
+                evaluation_mode="trained_product",
+            ),
+        )
 
         io.copy_file(proxy_report_path, proxy_eval_report_uri)
         io.copy_file(gold_report_path, gold_eval_report_uri)

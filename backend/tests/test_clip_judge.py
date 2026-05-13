@@ -1,4 +1,6 @@
+import json
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -15,6 +17,16 @@ from services.transcriber import RichSegment
 
 
 class ClipJudgeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        patches = [
+            patch.object(clip_judge.settings, "anthropic_api_key", None),
+            patch.object(clip_judge.settings, "clip_judge_fail_fast", False),
+            patch.object(clip_judge.settings, "judge_provider_fallback_enabled", True),
+        ]
+        for patcher in patches:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def test_heuristic_judge_scores_strong_candidate_higher(self) -> None:
         strong = RankedCandidate(
             candidate=Candidate(id="strong", start=0.0, end=18.0, source="reaction", anchor_time=3.0),
@@ -93,6 +105,114 @@ class ClipJudgeTests(unittest.TestCase):
         self.assertIn("judge_reranked", judged.rationale)
         self.assertIsNone(untouched.judge_result)
 
+    def test_llm_first_mode_uses_judge_score_as_primary_rank(self) -> None:
+        high_rank_low_judge = RankedCandidate(
+            candidate=Candidate(id="old-top", start=0.0, end=18.0, source="reaction", anchor_time=3.0),
+            features=CandidateFeatures(candidate_id="old-top", hook_strength=0.6, payoff_score=4.0, source="reaction"),
+            rank_score=9.0,
+            rationale=["ml_ranked"],
+        )
+        low_rank_high_judge = RankedCandidate(
+            candidate=Candidate(id="llm-top", start=20.0, end=38.0, source="quote", anchor_time=23.0),
+            features=CandidateFeatures(candidate_id="llm-top", hook_strength=0.6, payoff_score=4.0, source="quote"),
+            rank_score=3.0,
+            rationale=["ml_ranked"],
+        )
+        results = {
+            "old-top": clip_judge.JudgeResult(
+                judge_score=4.0,
+                scroll_stop_power=0.4,
+                standalone_clarity=0.4,
+                payoff_strength=0.4,
+                narrative_completeness=0.4,
+                platform_fit_shortform=0.4,
+                judge_reason="Weak as short form.",
+                judge_confidence=0.8,
+                provider="gemini",
+                llm_used=True,
+            ),
+            "llm-top": clip_judge.JudgeResult(
+                judge_score=8.5,
+                scroll_stop_power=0.9,
+                standalone_clarity=0.8,
+                payoff_strength=0.9,
+                narrative_completeness=0.8,
+                platform_fit_shortform=0.85,
+                judge_reason="Strong as short form.",
+                judge_confidence=0.8,
+                provider="gemini",
+                llm_used=True,
+            ),
+        }
+
+        def fake_judge(ranked, *_args, **_kwargs):
+            return results[ranked.candidate.id]
+
+        with patch.object(clip_judge.settings, "judge_llm_first", True), \
+             patch("services.clip_judge.judge_candidate", side_effect=fake_judge):
+            reranked = clip_judge.rerank_candidates(
+                [high_rank_low_judge, low_rank_high_judge],
+                [RichSegment(start=0.0, end=2.0, text="hook")],
+                shortlist_top_k=2,
+            )
+
+        self.assertEqual(reranked[0].candidate.id, "llm-top")
+        self.assertIn("judge_primary_ranked", reranked[0].rationale)
+        self.assertTrue(reranked[0].features.has_judge_score)
+        self.assertEqual(reranked[0].features.judge_score, 8.5)
+        self.assertTrue(reranked[0].features.judge_llm_used)
+
+    def test_llm_first_mode_falls_back_to_blend_for_low_confidence_judge(self) -> None:
+        ranked = RankedCandidate(
+            candidate=Candidate(id="a", start=0.0, end=18.0, source="reaction", anchor_time=3.0),
+            features=CandidateFeatures(candidate_id="a", hook_strength=0.6, payoff_score=4.0, source="reaction"),
+            rank_score=9.0,
+        )
+        judge_result = clip_judge.JudgeResult(
+            judge_score=2.0,
+            scroll_stop_power=0.2,
+            standalone_clarity=0.2,
+            payoff_strength=0.2,
+            narrative_completeness=0.2,
+            platform_fit_shortform=0.2,
+            judge_reason="Uncertain.",
+            judge_confidence=0.1,
+            provider="gemini",
+            llm_used=True,
+        )
+
+        with patch.object(clip_judge.settings, "judge_llm_first", True), \
+             patch.object(clip_judge.settings, "judge_llm_first_min_confidence", 0.35), \
+             patch("services.clip_judge.judge_candidate", return_value=judge_result):
+            reranked = clip_judge.rerank_candidates(
+                [ranked],
+                [RichSegment(start=0.0, end=2.0, text="hook")],
+                shortlist_top_k=1,
+            )
+
+        self.assertNotEqual(reranked[0].rank_score, 2.0)
+        self.assertIn("judge_low_confidence_blended", reranked[0].rationale)
+
+    def test_recall_filter_skips_dead_candidates_before_judge(self) -> None:
+        dead = RankedCandidate(
+            candidate=Candidate(id="dead", start=0.0, end=18.0, source="background", anchor_time=3.0),
+            features=CandidateFeatures(candidate_id="dead", source="background"),
+            rank_score=-1.0,
+        )
+
+        with patch.object(clip_judge.settings, "judge_recall_filter_enabled", True), \
+             patch.object(clip_judge.settings, "judge_recall_filter_min_score", 0.0), \
+             patch("services.clip_judge.judge_candidate") as judge_mock:
+            reranked = clip_judge.rerank_candidates(
+                [dead],
+                [RichSegment(start=0.0, end=2.0, text="")],
+                shortlist_top_k=1,
+            )
+
+        self.assertFalse(judge_mock.called)
+        self.assertIsNone(reranked[0].judge_result)
+        self.assertIn("judge_recall_filtered", reranked[0].rationale)
+
     def test_llm_result_is_used_when_available(self) -> None:
         ranked = RankedCandidate(
             candidate=Candidate(id="a", start=0.0, end=15.0, source="reaction", anchor_time=3.0),
@@ -118,6 +238,301 @@ class ClipJudgeTests(unittest.TestCase):
 
         self.assertTrue(result.llm_used)
         self.assertEqual(result.provider, "gemini")
+
+    def test_ollama_judge_requests_json_format(self) -> None:
+        captured = {}
+
+        class FakeClient:
+            def __init__(self, *, host: str) -> None:
+                captured["host"] = host
+
+            def chat(self, **kwargs):
+                captured.update(kwargs)
+                return {
+                    "message": {
+                        "content": (
+                            '{"scroll_stop_power":0.8,"standalone_clarity":0.7,'
+                            '"payoff_strength":0.75,"narrative_completeness":0.65,'
+                            '"platform_fit_shortform":0.8,"judge_reason":"Works.",'
+                            '"judge_confidence":0.74}'
+                        )
+                    }
+                }
+
+        with patch.object(clip_judge.ollama, "Client", FakeClient), \
+             patch.object(clip_judge.settings, "ollama_host", "http://ollama.local"), \
+             patch.object(clip_judge.settings, "ollama_model", "local-model"):
+            result = clip_judge._call_ollama("judge this")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(captured["host"], "http://ollama.local")
+        self.assertEqual(captured["model"], "local-model")
+        self.assertEqual(captured["format"], "json")
+        self.assertEqual(captured["options"], {"temperature": 0.0})
+
+    def test_auto_provider_fallback_to_ollama_is_logged(self) -> None:
+        keyframes = [
+            SampledKeyframe(candidate_id="a", label="anchor", time_sec=3.0, path=str(Path("/tmp/frame.jpg")))
+        ]
+        ollama_result = clip_judge.JudgeResult(
+            judge_score=7.8,
+            scroll_stop_power=0.8,
+            standalone_clarity=0.7,
+            payoff_strength=0.8,
+            narrative_completeness=0.7,
+            platform_fit_shortform=0.8,
+            judge_reason="Local fallback works.",
+            judge_confidence=0.7,
+            provider="ollama",
+            llm_used=True,
+        )
+
+        with patch.object(clip_judge.settings, "anthropic_api_key", None), \
+             patch.object(clip_judge.settings, "gemini_api_key", "test-key"), \
+             patch.object(clip_judge.settings, "groq_api_key", "test-key"), \
+             patch.object(clip_judge.settings, "enable_multimodal_clip_judge", True), \
+             patch.object(clip_judge.settings, "judge_provider_fallback_enabled", True), \
+             patch("services.clip_judge._call_gemini_multimodal_from_optional_keyframes", return_value=None), \
+             patch("services.clip_judge._call_gemini_text", return_value=None), \
+             patch("services.clip_judge._call_groq_text", return_value=None), \
+             patch("services.clip_judge._call_ollama_text", return_value=ollama_result), \
+             self.assertLogs("services.clip_judge", level="INFO") as captured:
+            result = clip_judge._call_text_judge_prompt("judge this", provider=None, keyframes=keyframes)
+
+        events = [json.loads(record.getMessage()) for record in captured.records]
+        event_names = [event["event"] for event in events]
+        self.assertEqual(result.provider, "ollama")
+        self.assertIn("clip_judge_provider_failed", event_names)
+        self.assertIn("clip_judge_provider_fallback", event_names)
+        self.assertIn("clip_judge_provider_selected", event_names)
+        self.assertEqual(events[-1]["provider"], "ollama")
+        self.assertEqual(events[-1]["fallback_from"], ["gemini_multimodal", "gemini", "groq"])
+
+    def test_auto_provider_does_not_fallback_when_disabled(self) -> None:
+        with patch.object(clip_judge.settings, "anthropic_api_key", "test-key"), \
+             patch.object(clip_judge.settings, "gemini_api_key", "test-key"), \
+             patch.object(clip_judge.settings, "judge_provider_fallback_enabled", False), \
+             patch.object(clip_judge.settings, "clip_judge_fail_fast", False), \
+             patch("services.clip_judge._call_anthropic_text", return_value=None) as anthropic_mock, \
+             patch("services.clip_judge._call_gemini_text") as gemini_mock, \
+             self.assertLogs("services.clip_judge", level="INFO") as captured:
+            result = clip_judge._call_text_judge_prompt("judge this", provider=None, keyframes=None)
+
+        events = [json.loads(record.getMessage()) for record in captured.records]
+        event_names = [event["event"] for event in events]
+        self.assertIsNone(result)
+        self.assertTrue(anthropic_mock.called)
+        self.assertFalse(gemini_mock.called)
+        self.assertIn("clip_judge_provider_failed", event_names)
+        self.assertNotIn("clip_judge_provider_fallback", event_names)
+        self.assertIn("clip_judge_all_providers_failed", event_names)
+
+    def test_fail_fast_raises_when_llm_provider_fails(self) -> None:
+        with patch.object(clip_judge.settings, "anthropic_api_key", "test-key"), \
+             patch.object(clip_judge.settings, "judge_provider_fallback_enabled", False), \
+             patch.object(clip_judge.settings, "clip_judge_fail_fast", True), \
+             patch("services.clip_judge._call_anthropic_text", return_value=None), \
+             self.assertLogs("services.clip_judge", level="INFO") as captured:
+            with self.assertRaises(clip_judge.ClipJudgeError):
+                clip_judge._call_text_judge_prompt("judge this", provider=None, keyframes=None)
+
+        events = [json.loads(record.getMessage()) for record in captured.records]
+        self.assertEqual(events[-1]["event"], "clip_judge_all_providers_failed")
+        self.assertTrue(events[-1]["fail_fast"])
+
+    def test_rerank_candidates_logs_summary(self) -> None:
+        ranked = [
+            RankedCandidate(
+                candidate=Candidate(id="a", start=0.0, end=15.0, source="reaction", anchor_time=3.0),
+                features=CandidateFeatures(candidate_id="a", hook_strength=0.8, payoff_score=7.0, standalone_score=0.7),
+                rank_score=6.0,
+            )
+        ]
+        segments = [RichSegment(start=0.0, end=2.0, text="hook", hype_score=3.0)]
+        judge_result = clip_judge.JudgeResult(
+            judge_score=8.0,
+            scroll_stop_power=0.8,
+            standalone_clarity=0.8,
+            payoff_strength=0.8,
+            narrative_completeness=0.8,
+            platform_fit_shortform=0.8,
+            judge_reason="Strong.",
+            judge_confidence=0.8,
+            provider="anthropic",
+            llm_used=True,
+        )
+
+        with patch("services.clip_judge.judge_candidate", return_value=judge_result), \
+             patch("services.clip_judge._append_judge_snapshot"), \
+             self.assertLogs("services.clip_judge", level="INFO") as captured:
+            clip_judge.rerank_candidates(ranked, segments, shortlist_top_k=1)
+
+        events = [json.loads(record.getMessage()) for record in captured.records]
+        self.assertEqual(events[0]["event"], "clip_judge_rerank_start")
+        self.assertEqual(events[-1]["event"], "clip_judge_rerank_done")
+        self.assertEqual(events[-1]["counters"]["judge_attempted"], 1)
+        self.assertEqual(events[-1]["counters"]["llm_used"], 1)
+        self.assertEqual(events[-1]["provider_counts"]["anthropic"], 1)
+
+    def test_auto_provider_prefers_anthropic_when_configured(self) -> None:
+        anthropic_result = clip_judge.JudgeResult(
+            judge_score=8.0,
+            scroll_stop_power=0.8,
+            standalone_clarity=0.8,
+            payoff_strength=0.8,
+            narrative_completeness=0.8,
+            platform_fit_shortform=0.8,
+            judge_reason="Claude selected this.",
+            judge_confidence=0.75,
+            provider="anthropic",
+            llm_used=True,
+            model="claude-haiku-4-5-20251001",
+        )
+
+        with patch.object(clip_judge.settings, "anthropic_api_key", "test-key"), \
+             patch.object(clip_judge.settings, "gemini_api_key", "test-key"), \
+             patch("services.clip_judge._call_anthropic_text", return_value=anthropic_result) as anthropic_mock, \
+             patch("services.clip_judge._call_gemini_text") as gemini_mock:
+            result = clip_judge._call_text_judge_prompt("judge this", provider=None, keyframes=None)
+
+        self.assertEqual(result.provider, "anthropic")
+        self.assertTrue(anthropic_mock.called)
+        self.assertFalse(gemini_mock.called)
+
+    def test_anthropic_judge_uses_prompt_cache_control(self) -> None:
+        captured = {}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps(
+                    {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": (
+                                    '{"scroll_stop_power":0.8,"standalone_clarity":0.7,'
+                                    '"payoff_strength":0.75,"narrative_completeness":0.65,'
+                                    '"platform_fit_shortform":0.8,"judge_reason":"Works.",'
+                                    '"judge_confidence":0.74}'
+                                ),
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 120,
+                            "output_tokens": 40,
+                            "cache_creation_input_tokens": 80,
+                            "cache_read_input_tokens": 20,
+                        },
+                    }
+                ).encode("utf-8")
+
+        def fake_urlopen(request, timeout):
+            captured["url"] = request.full_url
+            captured["headers"] = dict(request.header_items())
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            captured["timeout"] = timeout
+            return FakeResponse()
+
+        prompt = clip_judge._JUDGE_PROMPT.format(
+            profile="jynxzi",
+            rank_score="6.000",
+            source="reaction",
+            duration="18.00",
+            feature_summary="hook_strength=0.9",
+            context_summary="Limited prior context.",
+            transcript="[0.0s] no way",
+        )
+
+        with patch.object(clip_judge.settings, "anthropic_api_key", "test-key"), \
+             patch.object(clip_judge.settings, "anthropic_model_bulk", "claude-haiku-4-5-20251001"), \
+             patch.object(clip_judge.settings, "anthropic_prompt_caching", True), \
+             patch.object(clip_judge.settings, "clip_judge_timeout_sec", 12.0), \
+             patch("services.clip_judge.urllib.request.urlopen", side_effect=fake_urlopen), \
+             self.assertLogs("services.clip_judge", level="INFO") as logs:
+            result = clip_judge._call_anthropic_text(prompt)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.provider, "anthropic")
+        self.assertEqual(result.model, "claude-haiku-4-5-20251001")
+        self.assertEqual(captured["url"], "https://api.anthropic.com/v1/messages")
+        self.assertEqual(captured["timeout"], 12.0)
+        self.assertEqual(captured["payload"]["model"], "claude-haiku-4-5-20251001")
+        self.assertEqual(
+            captured["payload"]["system"][0]["cache_control"],
+            {"type": "ephemeral"},
+        )
+        self.assertIn("Profile: jynxzi", captured["payload"]["messages"][0]["content"][0]["text"])
+        usage_events = [
+            json.loads(record.getMessage())
+            for record in logs.records
+            if json.loads(record.getMessage()).get("event") == "clip_judge_provider_usage"
+        ]
+        self.assertEqual(usage_events[0]["cache_read_input_tokens"], 20)
+        self.assertEqual(usage_events[0]["cache_creation_input_tokens"], 80)
+
+    def test_anthropic_multimodal_uses_topk_model_and_image_blocks(self) -> None:
+        captured = {}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps(
+                    {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": (
+                                    '{"scroll_stop_power":0.9,"standalone_clarity":0.8,'
+                                    '"payoff_strength":0.85,"narrative_completeness":0.75,'
+                                    '"platform_fit_shortform":0.9,"judge_reason":"Visual works.",'
+                                    '"judge_confidence":0.8}'
+                                ),
+                            }
+                        ]
+                    }
+                ).encode("utf-8")
+
+        def fake_urlopen(request, timeout):
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            return FakeResponse()
+
+        with tempfile.NamedTemporaryFile(suffix=".jpg") as frame:
+            frame.write(b"jpeg-bytes")
+            frame.flush()
+            keyframes = [
+                SampledKeyframe(
+                    candidate_id="a",
+                    label="anchor",
+                    time_sec=3.0,
+                    path=frame.name,
+                    mime_type="image/jpeg",
+                )
+            ]
+            with patch.object(clip_judge.settings, "anthropic_api_key", "test-key"), \
+                 patch.object(clip_judge.settings, "anthropic_model_topk", "claude-sonnet-4-6"), \
+                 patch("services.clip_judge.urllib.request.urlopen", side_effect=fake_urlopen):
+                result = clip_judge._call_anthropic_multimodal_from_optional_keyframes("Profile: jynxzi", keyframes)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.provider, "anthropic_multimodal")
+        self.assertEqual(result.model, "claude-sonnet-4-6")
+        self.assertEqual(captured["payload"]["model"], "claude-sonnet-4-6")
+        content = captured["payload"]["messages"][0]["content"]
+        self.assertEqual(content[0]["type"], "image")
+        self.assertEqual(content[0]["source"]["type"], "base64")
+        self.assertEqual(content[0]["source"]["media_type"], "image/jpeg")
+        self.assertEqual(content[0]["source"]["data"], "anBlZy1ieXRlcw==")
 
     def test_multimodal_gemini_path_is_preferred_when_keyframes_exist(self) -> None:
         ranked = RankedCandidate(

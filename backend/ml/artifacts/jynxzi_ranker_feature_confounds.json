@@ -1,59 +1,59 @@
 {
   "dataset": "backend/ml/artifacts/jynxzi_vod_training_rows.jsonl",
-  "rows": 244,
+  "rows": 1510,
   "feature": "slow_open_penalty",
   "label_summary": {
     "0": {
-      "rows": 180,
-      "mean": 0.654,
+      "rows": 1030,
+      "mean": 0.75225,
       "median": 0.8,
-      "p25": 0.615,
+      "p25": 0.8,
       "p75": 0.8
     },
     "1": {
-      "rows": 64,
-      "mean": 0.719625,
+      "rows": 480,
+      "mean": 0.772979,
       "median": 0.8,
-      "p25": 0.728,
+      "p25": 0.8,
       "p75": 0.8
     }
   },
   "correlations": [
     {
       "feature": "hook_strength",
-      "correlation": -0.966895
+      "correlation": -0.943947
     },
     {
       "feature": "hook_delay_sec",
-      "correlation": 0.468036
-    },
-    {
-      "feature": "setup_depth_score",
-      "correlation": -0.415562
-    },
-    {
-      "feature": "profile_fit_score",
-      "correlation": -0.330403
-    },
-    {
-      "feature": "payoff_score",
-      "correlation": -0.290196
-    },
-    {
-      "feature": "duration",
-      "correlation": 0.239543
+      "correlation": 0.310114
     },
     {
       "feature": "context_dependency_score",
-      "correlation": 0.18767
+      "correlation": 0.210755
     },
     {
-      "feature": "chat_activity_coverage",
-      "correlation": 0.117334
+      "feature": "duration",
+      "correlation": 0.209536
     },
     {
       "feature": "chapter_local_density",
-      "correlation": 0.023361
+      "correlation": -0.193524
+    },
+    {
+      "feature": "profile_fit_score",
+      "correlation": -0.171388
+    },
+    {
+      "feature": "setup_depth_score",
+      "correlation": 0.109534
+    },
+    {
+      "feature": "payoff_score",
+      "correlation": -0.025542
+    },
+    {
+      "feature": "chat_activity_coverage",
+      "correlation": 0.020594
     }
   ],
   "recommendation": "exclude_from_supervised_ranker_training",

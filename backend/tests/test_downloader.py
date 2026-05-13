@@ -70,6 +70,53 @@ class DownloaderTests(unittest.TestCase):
         self.assertFalse(opts["keep_fragments"])
         self.assertNotIn("external_downloader", opts)
 
+    def test_twitch_training_download_opts_cap_height(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage_dir = Path(tmp)
+            url = "https://www.twitch.tv/videos/555"
+
+            with patch.object(downloader.settings, "storage_dir", str(storage_dir)), \
+                 patch.object(downloader.settings, "training_vod_max_height", 720), \
+                 patch.object(downloader.settings, "twitch_download_cache_ttl_sec", 0), \
+                 patch.object(downloader.settings, "twitch_download_use_aria2c", False), \
+                 patch.object(downloader, "update_job", create=True), \
+                 patch.object(downloader.yt_dlp, "YoutubeDL", _CaptureOptsYoutubeDL):
+                downloader.download(url, "twitch_vod_555")
+
+        self.assertIsNotNone(_CaptureOptsYoutubeDL.captured_opts)
+        self.assertIn("height<=720", str(_CaptureOptsYoutubeDL.captured_opts["format"]))
+
+    def test_non_training_download_opts_do_not_cap_height(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage_dir = Path(tmp)
+            url = "https://www.twitch.tv/videos/555"
+
+            with patch.object(downloader.settings, "storage_dir", str(storage_dir)), \
+                 patch.object(downloader.settings, "training_vod_max_height", 720), \
+                 patch.object(downloader.settings, "twitch_download_cache_ttl_sec", 0), \
+                 patch.object(downloader.settings, "twitch_download_use_aria2c", False), \
+                 patch.object(downloader, "update_job", create=True), \
+                 patch.object(downloader.yt_dlp, "YoutubeDL", _CaptureOptsYoutubeDL):
+                downloader.download(url, "regular-job")
+
+        self.assertIsNotNone(_CaptureOptsYoutubeDL.captured_opts)
+        self.assertNotIn("height<=720", str(_CaptureOptsYoutubeDL.captured_opts["format"]))
+
+    def test_download_opts_include_ytdlp_cookiefile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage_dir = Path(tmp)
+            url = "https://www.youtube.com/shorts/abc"
+
+            with patch.object(downloader.settings, "storage_dir", str(storage_dir)), \
+                 patch.object(downloader.settings, "yt_dlp_cookiefile", "/tmp/youtube.cookies.txt"), \
+                 patch.object(downloader.settings, "yt_dlp_cookies_from_browser", ""), \
+                 patch.object(downloader, "update_job", create=True), \
+                 patch.object(downloader.yt_dlp, "YoutubeDL", _CaptureOptsYoutubeDL):
+                downloader.download(url, "regular-job")
+
+        self.assertIsNotNone(_CaptureOptsYoutubeDL.captured_opts)
+        self.assertEqual(_CaptureOptsYoutubeDL.captured_opts["cookiefile"], "/tmp/youtube.cookies.txt")
+
     def test_twitch_download_opts_use_aria2c_when_available(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             job_dir = Path(tmp)
@@ -154,6 +201,42 @@ class DownloaderTests(unittest.TestCase):
             metadata = downloader.json.loads(downloader._cache_metadata_path(expected_cache_file).read_text(encoding="utf-8"))
             self.assertTrue(metadata["complete"])
             self.assertEqual(metadata["namespace"], "short_form")
+
+    def test_short_form_cache_download_uses_ytdlp_sleep_options(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage_dir = Path(tmp)
+            url = "https://www.youtube.com/shorts/abc"
+
+            with patch.object(downloader.settings, "storage_dir", str(storage_dir)), \
+                 patch.object(downloader.settings, "yt_dlp_short_form_sleep_requests_sec", 6.0), \
+                 patch.object(downloader.settings, "yt_dlp_short_form_min_sleep_interval_sec", 7.0), \
+                 patch.object(downloader.settings, "yt_dlp_short_form_max_sleep_interval_sec", 10.0), \
+                 patch.object(downloader, "update_job", create=True), \
+                 patch.object(downloader.yt_dlp, "YoutubeDL", _CaptureOptsYoutubeDL):
+                downloader.ensure_cached_download(url, cache_namespace="short_form")
+
+        self.assertIsNotNone(_CaptureOptsYoutubeDL.captured_opts)
+        self.assertEqual(_CaptureOptsYoutubeDL.captured_opts["sleep_interval_requests"], 6.0)
+        self.assertEqual(_CaptureOptsYoutubeDL.captured_opts["sleep_interval"], 7.0)
+        self.assertEqual(_CaptureOptsYoutubeDL.captured_opts["max_sleep_interval"], 10.0)
+
+    def test_non_short_form_cache_download_does_not_use_sleep_options(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage_dir = Path(tmp)
+            url = "https://example.com/video.mp4"
+
+            with patch.object(downloader.settings, "storage_dir", str(storage_dir)), \
+                 patch.object(downloader.settings, "yt_dlp_short_form_sleep_requests_sec", 6.0), \
+                 patch.object(downloader.settings, "yt_dlp_short_form_min_sleep_interval_sec", 7.0), \
+                 patch.object(downloader.settings, "yt_dlp_short_form_max_sleep_interval_sec", 10.0), \
+                 patch.object(downloader, "update_job", create=True), \
+                 patch.object(downloader.yt_dlp, "YoutubeDL", _CaptureOptsYoutubeDL):
+                downloader.ensure_cached_download(url, cache_namespace="generic_media")
+
+        self.assertIsNotNone(_CaptureOptsYoutubeDL.captured_opts)
+        self.assertNotIn("sleep_interval_requests", _CaptureOptsYoutubeDL.captured_opts)
+        self.assertNotIn("sleep_interval", _CaptureOptsYoutubeDL.captured_opts)
+        self.assertNotIn("max_sleep_interval", _CaptureOptsYoutubeDL.captured_opts)
 
     def test_stores_fresh_twitch_download_in_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -121,7 +121,10 @@ class RichSegment:
     max_rms_db: float = 0.0
     mean_rms_db: float = 0.0   # average over non-silent frames (0.0 = not set)
     max_pitch_hz: float = 0.0
+    pitch_std_hz: float = 0.0
     max_onset_rate: float = 0.0
+    voice_activity_score: float = 0.0
+    rms_burst_score: float = 0.0
     # Composite virality score (populated by scorer.score_segments)
     hype_score: float = 0.0
     # Emotional arc score of the best candidate window this segment belongs to
@@ -140,18 +143,27 @@ class RichSegment:
     chat_message_rate: float = 0.0
     chat_density_score: float = 0.0
     chat_emote_score: float = 0.0
+    chat_hype_score: float = 0.0
+    chat_laugh_score: float = 0.0
+    chat_shock_score: float = 0.0
+    chat_sadge_score: float = 0.0
+    chat_ema_rate: float = 0.0
+    chat_rate_derivative: float = 0.0
+    chat_ema_crossing_score: float = 0.0
 
     def to_tuple(self) -> Segment:
         return (self.start, self.end, self.text)
 
 
-def transcribe(audio_path: pathlib.Path) -> list[RichSegment]:
-    return transcribe_with_progress(audio_path)
+def transcribe(audio_path: pathlib.Path, *, enable_diarization: bool = True) -> list[RichSegment]:
+    return transcribe_with_progress(audio_path, enable_diarization=enable_diarization)
 
 
 def transcribe_with_progress(
     audio_path: pathlib.Path,
     progress_cb=None,
+    *,
+    enable_diarization: bool = True,
 ) -> list[RichSegment]:
     chunks_dir = audio_path.parent / "chunks"
     chunks_dir.mkdir(exist_ok=True)
@@ -223,7 +235,7 @@ def transcribe_with_progress(
     deduped = _deduplicate(raw_segments)
 
     # Speaker diarization (optional — requires HF token)
-    if settings.hf_token:
+    if enable_diarization and settings.hf_token:
         deduped = _diarize(audio_path, deduped)
 
     return deduped
@@ -561,7 +573,10 @@ def format_jsonl(segments: list[RichSegment]) -> str:
             "max_rms_db": seg.max_rms_db,
             "mean_rms_db": seg.mean_rms_db,
             "max_pitch_hz": seg.max_pitch_hz,
+            "pitch_std_hz": seg.pitch_std_hz,
             "max_onset_rate": seg.max_onset_rate,
+            "voice_activity_score": seg.voice_activity_score,
+            "rms_burst_score": seg.rms_burst_score,
             "hype_score": seg.hype_score,
             "arc_score": seg.arc_score,
             "max_motion_score": seg.max_motion_score,
@@ -575,6 +590,13 @@ def format_jsonl(segments: list[RichSegment]) -> str:
             "chat_message_rate": seg.chat_message_rate,
             "chat_density_score": seg.chat_density_score,
             "chat_emote_score": seg.chat_emote_score,
+            "chat_hype_score": seg.chat_hype_score,
+            "chat_laugh_score": seg.chat_laugh_score,
+            "chat_shock_score": seg.chat_shock_score,
+            "chat_sadge_score": seg.chat_sadge_score,
+            "chat_ema_rate": seg.chat_ema_rate,
+            "chat_rate_derivative": seg.chat_rate_derivative,
+            "chat_ema_crossing_score": seg.chat_ema_crossing_score,
         }))
     return "\n".join(lines)
 

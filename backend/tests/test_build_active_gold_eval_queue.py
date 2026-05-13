@@ -57,6 +57,8 @@ class BuildActiveGoldEvalQueueTests(unittest.TestCase):
         self.assertIn("near_threshold", {row["active_bucket"] for row in queue_rows})
         self.assertIn("proxy_positive_review", {row["active_bucket"] for row in queue_rows})
         self.assertEqual({row["queue_id"] for row in queue_rows}, {row["queue_id"] for row in sidecar_rows})
+        self.assertTrue(all("transcript" not in row for row in sidecar_rows))
+        self.assertTrue(all("prior_context" not in row for row in sidecar_rows))
 
     def test_active_bucket_detects_model_heuristic_disagreement(self) -> None:
         bucket = build_active_gold_eval_queue._active_bucket(

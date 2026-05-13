@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 from pydantic_settings import BaseSettings
-from pydantic import ConfigDict, field_validator
+from pydantic import AliasChoices, ConfigDict, Field, field_validator
 
 
 BACKEND_ROOT = Path(__file__).resolve().parent
@@ -88,7 +88,7 @@ _configure_local_tool_path()
 
 
 class Settings(BaseSettings):
-    model_config = ConfigDict(env_file=".env", extra="ignore")
+    model_config = ConfigDict(env_file=BACKEND_ROOT / ".env", extra="ignore")
 
     whisper_model: str = "base"
     whisper_device: str = "auto"
@@ -101,26 +101,56 @@ class Settings(BaseSettings):
         "http://localhost:3002",
     ]
     ollama_host: str = "http://localhost:11434"
-    ollama_model: str = "llama3.2"
+    ollama_model: str = "qwen2.5:14b"
     storage_dir: str = str(DEFAULT_STORAGE_DIR)
+    yt_dlp_cookiefile: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("YTDLP_COOKIEFILE", "YT_DLP_COOKIEFILE"),
+    )
+    yt_dlp_cookies_from_browser: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("YTDLP_COOKIES_FROM_BROWSER", "YT_DLP_COOKIES_FROM_BROWSER"),
+    )
+    yt_dlp_short_form_sleep_requests_sec: float = Field(
+        default=5.0,
+        validation_alias=AliasChoices("YTDLP_SHORT_FORM_SLEEP_REQUESTS_SEC", "YT_DLP_SHORT_FORM_SLEEP_REQUESTS_SEC"),
+    )
+    yt_dlp_short_form_min_sleep_interval_sec: float = Field(
+        default=5.0,
+        validation_alias=AliasChoices("YTDLP_SHORT_FORM_MIN_SLEEP_INTERVAL_SEC", "YT_DLP_SHORT_FORM_MIN_SLEEP_INTERVAL_SEC"),
+    )
+    yt_dlp_short_form_max_sleep_interval_sec: float = Field(
+        default=10.0,
+        validation_alias=AliasChoices("YTDLP_SHORT_FORM_MAX_SLEEP_INTERVAL_SEC", "YT_DLP_SHORT_FORM_MAX_SLEEP_INTERVAL_SEC"),
+    )
     max_clip_duration: int = 90
     max_upload_size_bytes: int | None = None
     clip_profile: str = "general"
     profiles_path: str | None = None  # Optional path to a JSON file with custom profile overrides
     hf_token: str | None = None  # HuggingFace token for pyannote diarization (optional)
+    anthropic_api_key: str | None = None  # Anthropic API key for Claude clip judging (optional)
+    anthropic_model_bulk: str = "claude-haiku-4-5-20251001"
+    anthropic_model_topk: str = "claude-sonnet-4-6"
+    anthropic_prompt_caching: bool = True
     groq_api_key: str | None = None  # Groq API key for fast semantic scoring (free tier)
     groq_model: str = "llama-3.3-70b-versatile"
     gemini_api_key: str | None = None  # Google Gemini API key for clip boundary refinement (free tier)
     gemini_model: str = "gemini-2.0-flash"
     twitch_client_id: str | None = None
     twitch_client_secret: str | None = None
-    enable_chat_analysis: bool = False
+    enable_chat_analysis: bool = True
     chat_download_timeout_sec: int = 30
     chat_join_timeout_sec: float = 1.0
     twitch_download_cache_ttl_sec: int = 0
     twitch_download_concurrent_fragments: int = 8
     twitch_download_use_aria2c: bool = True
     twitch_download_aria2_connections: int = 16
+    training_vod_prefetch: bool = True
+    training_vod_max_height: int = 720
+    training_vod_extended_window_scoped: bool = True
+    training_vod_extended_context_sec: int = 300
+    training_vod_extended_group_max_sec: int = 900
+    training_vod_group_source_prefetch: bool = True
     training_vod_workers: int = 1
     training_label_workers: int = 3
     short_form_collection_workers: int = 3
@@ -138,11 +168,21 @@ class Settings(BaseSettings):
     shortlist_llm_top_k: int = 12
     enable_clip_judge: bool = True
     clip_judge_timeout_sec: float = 90.0
+    clip_judge_fail_fast: bool = False
+    judge_provider_fallback_enabled: bool = True
     analyzer_refine_timeout_sec: float | None = None
     shortlist_judge_top_k: int = 24
+    judge_all_candidates: bool = True
     judge_blend_weight: float = 0.65
+    judge_llm_first: bool = True
+    judge_llm_first_min_confidence: float = 0.35
+    judge_llm_first_tiebreaker_weight: float = 0.01
+    judge_recall_filter_enabled: bool = True
+    judge_recall_filter_min_score: float = 0.0
     judge_context_lookback_sec: float = 120.0
     enable_multimodal_clip_judge: bool = True
+    judge_two_tier_enabled: bool = True
+    judge_topk_multimodal_k: int = 10
     judge_keyframes_per_candidate: int = 4
     judge_keyframe_width: int = 640
     enable_hook_subclassifier: bool = False

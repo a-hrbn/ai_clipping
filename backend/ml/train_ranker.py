@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import math
 import os
 import pathlib
@@ -26,14 +27,17 @@ if str(BACKEND_ROOT) not in sys.path:
 from config import settings
 from ml import mlflow_tracking
 from services.gold_eval_policy import GOLD_HOLDOUT_SPLIT_FIELD
-from services import semantic_service
+from services import content_buckets, semantic_service
 from services.training_export import export_training_rows
 from services.ranker import OFFLINE_ONLY_FEATURE_NAMES, Ranker
 from services.timeline_types import CandidateFeatures
 
 
+logger = logging.getLogger(__name__)
+
 _LIGHTGBM_PROMOTION_MIN_ROWS = 400
 _GRADIENT_BOOSTING_PROMOTION_MIN_ROWS = 400
+_ADVANCED_MODEL_PROMOTION_MIN_ROWS = min(_LIGHTGBM_PROMOTION_MIN_ROWS, _GRADIENT_BOOSTING_PROMOTION_MIN_ROWS)
 _LIGHTGBM_DEFAULT_PARAMS = {
     "n_estimators": 80,
     "learning_rate": 0.08,
@@ -41,19 +45,18 @@ _LIGHTGBM_DEFAULT_PARAMS = {
     "min_child_samples": 5,
     "feature_fraction": 1.0,
     "bagging_fraction": 1.0,
+    "reg_alpha": 0.1,
 }
 _LIGHTGBM_HPO_PARAM_KEYS = frozenset(_LIGHTGBM_DEFAULT_PARAMS)
 _BLEND_CANDIDATES = tuple(round(value, 2) for value in np.arange(0.15, 1.05, 0.05))
 _HEURISTIC_FEATURE_NAME = "heuristic_score"
-# Chat category features are all-zero in current training data (confirmed by audit).
-# chat_delta is also effectively zero (p90/p95 = 0.0, max = 0.36 across all rows).
-# Excluding them from training prevents noise from sparse constant features.
-_SPARSE_TRAINING_FEATURE_NAMES: frozenset[str] = frozenset({
-    "chat_hype_score",
-    "chat_laugh_score",
-    "chat_sadge_score",
-    "chat_shock_score",
-    "chat_delta",
+# Keep chat features trainable. Older runs had all-zero chat category columns,
+# but the replay alignment now emits numeric category and velocity signals.
+_SPARSE_TRAINING_FEATURE_NAMES: frozenset[str] = frozenset()
+_CAPABILITY_FEATURE_NAMES: frozenset[str] = frozenset({
+    "has_chat_features",
+    "has_llm_semantics",
+    "has_vector_similarity",
 })
 _CONFOUND_TRAINING_FEATURE_NAMES: frozenset[str] = frozenset({
     # Current Jynxzi eval analysis showed this penalty receiving a positive
@@ -62,15 +65,73 @@ _CONFOUND_TRAINING_FEATURE_NAMES: frozenset[str] = frozenset({
     # disambiguate slow starts from long/high-density clips.
     "slow_open_penalty",
 })
+_POSITIVE_SIGN_FEATURES: frozenset[str] = frozenset({
+    "arc_payoff_match",
+    "chat_spike_coverage",
+    "hook_strength",
+    "payoff_score",
+})
+_TOP_CHAT_INTERACTION_FEATURES = content_buckets.TOP_CHAT_INTERACTION_FEATURES
+_CONTENT_BUCKET_FEATURE_PREFIX = content_buckets.CONTENT_BUCKET_FEATURE_PREFIX
+_CONTENT_BUCKET_CHAT_INTERACTION_PREFIX = content_buckets.CONTENT_BUCKET_CHAT_INTERACTION_PREFIX
+_MAX_CANDIDATE_SOURCE_SHARE = 0.25
+_TRAINED_SCORE_CLAMP_ABS = 12.0
+_BACKGROUND_NEGATIVE_SOURCE = "background_negative"
+_BOUNDARY_PERTURBATION_SOURCE = "boundary_perturbation"
+_BACKGROUND_NEGATIVE_TARGET_MIN_ROWS = 1000
+_DYNAMIC_SOURCE_CAP_NUMERATOR = 1.5
+_DYNAMIC_SOURCE_CAP_MAX_SHARE = 0.20
+_DYNAMIC_SOURCE_CAP_MIN_SHARE = 0.08
+_BUCKET_GATE_MIN_PASSED_BUCKETS = 3
+_BUCKET_GATE_MIN_RANKING_METRIC = 0.70
+_BUCKET_GATE_MIN_ROWS = 6
+_MIN_JYNXZI_VALIDATION_GROUPS = 40
+_MIN_JYNXZI_ROLLOUT_ROWS = 1200
+_MIN_JYNXZI_ROLLOUT_POSITIVES = 400
 _TWITCH_CLIP_PROXY_SUPERVISION_MULTIPLIER = 0.5
 _SPLIT_RANDOM_SEED = int(settings.ranker_hpo_seed)
+_ARTIFACT_VERSION = 4
+_FEATURE_SCHEMA_VERSION = 6
+_DEFAULT_MAX_TRAINING_FEATURES = 40
+_LIGHTGBM_PREFERENCE_TOLERANCE = 0.02
+_JUDGE_TEACHER_FEATURE_NAMES = frozenset(
+    {
+        "judge_score",
+        "judge_confidence",
+        "judge_scroll_stop_power",
+        "judge_standalone_clarity",
+        "judge_payoff_strength",
+        "judge_narrative_completeness",
+        "judge_platform_fit_shortform",
+        "has_judge_score",
+        "judge_llm_used",
+    }
+)
+
+
+def excluded_training_feature_names() -> frozenset[str]:
+    return (
+        OFFLINE_ONLY_FEATURE_NAMES
+        | _SPARSE_TRAINING_FEATURE_NAMES
+        | _CONFOUND_TRAINING_FEATURE_NAMES
+    )
 _MIN_GROUP_NDCG_AT_5_P25 = 0.45
 _MIN_GROUP_NDCG_AT_5_MIN = 0.2
 _MIN_GROUP_RANKING_METRIC_P25 = 0.45
 _MIN_GROUP_RANKING_METRIC_MIN = 0.2
 _DEFAULT_MARGIN_CLASSIFICATION_THRESHOLD = 0.0
 _DEFAULT_PROBABILITY_CLASSIFICATION_THRESHOLD = 0.5
-_SERVING_THRESHOLD_MIN_RECALL = 0.5
+_SERVING_THRESHOLD_MIN_RECALL = 0.70
+_SERVING_THRESHOLD_MAX_SELECTED_RATE = 0.50
+_SERVING_THRESHOLD_TARGET_PRECISION = 0.55
+_SERVING_THRESHOLD_FALLBACK_MAX_SELECTED_RATE = 0.60
+_FILTER_GATE_MIN_PRECISION = 0.50
+_FILTER_GATE_MIN_RECALL = 0.65
+_FILTER_GATE_MIN_F1 = 0.55
+_FILTER_GATE_MAX_SELECTED_RATE = 0.75
+_FILTER_GATE_MIN_ACCURACY_FLOOR = 0.55
+_FILTER_GATE_BETA = 0.75
+_SERVING_THRESHOLD_HARD_MAX_SELECTED_RATE = _FILTER_GATE_MAX_SELECTED_RATE
 
 
 def _inject_heuristic_features(rows: list[dict], profile: str) -> None:
@@ -96,6 +157,180 @@ def _inject_heuristic_features(rows: list[dict], profile: str) -> None:
         features = dict(row.get("features") or {})
         features[_HEURISTIC_FEATURE_NAME] = float(score)
         row["features"] = features
+
+
+def _prepare_ranker_training_rows(rows: list[dict]) -> tuple[list[dict], dict[str, object]]:
+    filtered: list[dict] = []
+    excluded_twitch_proxy = 0
+    for row in rows:
+        if _is_twitch_proxy_training_row(row):
+            excluded_twitch_proxy += 1
+            continue
+        copied = dict(row)
+        copied["features"] = _serving_training_features(copied)
+        filtered.append(copied)
+
+    has_background_negatives = any(_is_background_negative_training_row(row) for row in filtered)
+    source_cap = _dynamic_candidate_source_share(filtered) if has_background_negatives else _MAX_CANDIDATE_SOURCE_SHARE
+    target_min_rows = _BACKGROUND_NEGATIVE_TARGET_MIN_ROWS if has_background_negatives else _ADVANCED_MODEL_PROMOTION_MIN_ROWS
+    capped, cap_report = _cap_candidate_source_share(
+        filtered,
+        source_cap,
+        min_rows=min(target_min_rows, len(filtered)),
+        refill_excluded_sources={_BOUNDARY_PERTURBATION_SOURCE} if has_background_negatives else frozenset(),
+    )
+    return capped, {
+        "input_rows": len(rows),
+        "after_twitch_proxy_exclusion": len(filtered),
+        "excluded_twitch_clip_proxy_rows": excluded_twitch_proxy,
+        "candidate_source_cap": cap_report,
+        "capability_features_enabled": sorted(_CAPABILITY_FEATURE_NAMES),
+        "content_bucket_interactions_enabled": True,
+    }
+
+
+def _is_twitch_proxy_training_row(row: dict) -> bool:
+    if _is_gold_eval_row(row):
+        return False
+    supervision_tier = str(row.get("supervision_tier") or "").strip().lower()
+    dataset_source = str(row.get("dataset_source") or "").strip().lower()
+    return supervision_tier == "twitch_clip_proxy" or dataset_source == "twitch_vod_primary"
+
+
+def _is_background_negative_training_row(row: dict) -> bool:
+    return (
+        str(row.get("supervision_tier") or "").strip().lower() == "background_negative"
+        or str(row.get("label_class") or "").strip().lower() == "background_negative"
+        or str(row.get("candidate_source") or "").strip().lower() == _BACKGROUND_NEGATIVE_SOURCE
+    )
+
+
+def _dynamic_candidate_source_share(rows: list[dict]) -> float:
+    sources = {
+        str(row.get("candidate_source") or (row.get("features") or {}).get("source") or "unknown").strip().lower() or "unknown"
+        for row in rows
+    }
+    if not sources:
+        return _MAX_CANDIDATE_SOURCE_SHARE
+    dynamic = _DYNAMIC_SOURCE_CAP_NUMERATOR / max(len(sources), 1)
+    return max(_DYNAMIC_SOURCE_CAP_MIN_SHARE, min(_DYNAMIC_SOURCE_CAP_MAX_SHARE, dynamic))
+
+
+def _serving_training_features(row: dict) -> dict[str, object]:
+    features = dict(row.get("features") or {})
+    bucket = str(row.get("content_bucket") or "").strip().lower() or _content_bucket_from_row(row, features)
+    if bucket:
+        features[f"{_CONTENT_BUCKET_FEATURE_PREFIX}{bucket}"] = 1.0
+        for name in _TOP_CHAT_INTERACTION_FEATURES:
+            value = _safe_float(features.get(name))
+            if value:
+                features[f"{_CONTENT_BUCKET_CHAT_INTERACTION_PREFIX}{bucket}__{name}"] = value
+    return features
+
+
+def _content_bucket_from_row(row: dict, features: dict) -> str:
+    return content_buckets.bucket_from_row(row, features)
+
+
+def _cap_candidate_source_share(
+    rows: list[dict],
+    max_share: float,
+    *,
+    min_rows: int = 0,
+    refill_excluded_sources: set[str] | frozenset[str] = frozenset(),
+) -> tuple[list[dict], dict[str, object]]:
+    if not rows:
+        return [], {
+            "enabled": True,
+            "max_share": float(max_share),
+            "target_min_rows": 0,
+            "removed_rows": 0,
+            "by_source_before": {},
+        }
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        source = str(row.get("candidate_source") or (row.get("features") or {}).get("source") or "unknown").strip().lower()
+        grouped.setdefault(source or "unknown", []).append(row)
+    target_min_rows = max(0, min(int(min_rows), len(rows)))
+    if len(grouped) <= 1:
+        return list(rows), {
+            "enabled": True,
+            "max_share": float(max_share),
+            "target_min_rows": target_min_rows,
+            "max_rows_per_source": len(rows),
+            "rows_before": len(rows),
+            "rows_after": len(rows),
+            "removed_rows": 0,
+            "adaptive_refill_rows": 0,
+            "refilled_by_source": {},
+            "removed_by_source": {},
+            "by_source_before": {source: len(source_rows) for source, source_rows in sorted(grouped.items())},
+            "by_source_after": _count_values(rows, "candidate_source"),
+        }
+    max_rows_per_source = max(1, int(math.ceil(len(rows) * float(max_share))))
+    kept: list[dict] = []
+    kept_by_source: dict[str, list[dict]] = {}
+    remaining_by_source: dict[str, list[dict]] = {}
+    for source, source_rows in grouped.items():
+        ordered = _seeded_row_order(source_rows)
+        selected = ordered[:max_rows_per_source]
+        kept.extend(selected)
+        kept_by_source[source] = list(selected)
+        remaining = ordered[max_rows_per_source:]
+        if remaining:
+            remaining_by_source[source] = list(remaining)
+
+    refilled_by_source: dict[str, int] = {}
+    excluded_refill_sources = {str(source).strip().lower() for source in refill_excluded_sources}
+    while target_min_rows and len(kept) < target_min_rows:
+        refill_sources = [
+            source
+            for source, source_rows in remaining_by_source.items()
+            if source_rows and source not in excluded_refill_sources
+        ]
+        if not refill_sources:
+            break
+        source = sorted(refill_sources, key=lambda value: (_refill_source_priority(value), len(kept_by_source.get(value, [])), value))[0]
+        row = remaining_by_source[source].pop(0)
+        kept.append(row)
+        kept_by_source.setdefault(source, []).append(row)
+        refilled_by_source[source] = refilled_by_source.get(source, 0) + 1
+
+    removed_by_source = {
+        source: len(source_rows)
+        for source, source_rows in sorted(remaining_by_source.items())
+        if source_rows
+    }
+    kept.sort(key=lambda row: (str(row.get("job_id", "")), str(row.get("candidate_id", ""))))
+    before = {source: len(source_rows) for source, source_rows in sorted(grouped.items())}
+    after = _count_values(kept, "candidate_source")
+    return kept, {
+        "enabled": True,
+        "max_share": float(max_share),
+        "target_min_rows": target_min_rows,
+        "max_rows_per_source": max_rows_per_source,
+        "rows_before": len(rows),
+        "rows_after": len(kept),
+        "removed_rows": len(rows) - len(kept),
+        "adaptive_refill_rows": sum(refilled_by_source.values()),
+        "refilled_by_source": refilled_by_source,
+        "refill_excluded_sources": sorted(excluded_refill_sources),
+        "removed_by_source": removed_by_source,
+        "by_source_before": before,
+        "by_source_after": after,
+    }
+
+
+def _refill_source_priority(source: str) -> int:
+    if source == _BACKGROUND_NEGATIVE_SOURCE:
+        return 0
+    if source == _BOUNDARY_PERTURBATION_SOURCE:
+        return 2
+    return 1
+
+
+def _min_validation_groups_required(profile: str) -> int:
+    return _MIN_JYNXZI_VALIDATION_GROUPS if str(profile).strip().lower() == "jynxzi" else 0
 
 
 def main() -> int:
@@ -157,6 +392,11 @@ def train_from_rows(
     if not rows:
         print("No training rows found.")
         return 1
+    original_row_count = len(rows)
+    rows, training_row_policy = _prepare_ranker_training_rows(rows)
+    if not rows:
+        print("No training rows remain after ranker training policy filters.")
+        return 1
 
     with mlflow_tracking.start_training_session(profile=profile, rows=rows) as tracking:
         gold_guard = _gold_eval_training_guard(rows)
@@ -183,6 +423,13 @@ def train_from_rows(
             print("Need both train and validation rows.")
             tracking.set_tags({"training_status": "aborted", "abort_reason": "missing_train_or_validation_rows"})
             return 1
+        validation_groups_count = len(set(_ranking_group_labels(validation_rows, str(split.get("unit", "")))))
+        min_validation_groups = _min_validation_groups_required(profile)
+        if min_validation_groups and validation_groups_count < min_validation_groups:
+            print(
+                "Training warning: validation group count below rollout target "
+                f"(groups={validation_groups_count}, required={min_validation_groups}, profile={profile})."
+            )
 
         leakage_risk = str(split.get("leakage_risk", "unknown")).lower()
         split_warning = str(split.get("warning", "")).strip()
@@ -216,7 +463,20 @@ def train_from_rows(
             tracking.set_tags({"training_status": "aborted", "abort_reason": "missing_positive_or_negative_training_rows"})
             return 1
 
-        feature_names = _numeric_feature_names(train_positive[0])
+        available_training_feature_names = _numeric_feature_names_from_rows([row["features"] for row in train_rows])
+        feature_names, feature_selection = _select_training_feature_names(
+            train_rows,
+            available_training_feature_names,
+            max_features=_ranker_max_training_features(),
+        )
+        available_numeric_feature_names = _numeric_feature_names_from_rows([row["features"] for row in rows])
+        ignored_numeric_feature_names = sorted(set(available_numeric_feature_names) - set(feature_names))
+        if ignored_numeric_feature_names:
+            logger.warning(
+                "ranker_numeric_features_not_in_training_vector count=%s names=%s",
+                len(ignored_numeric_feature_names),
+                ",".join(ignored_numeric_feature_names[:50]),
+            )
         scales = _compute_scales(train_rows, feature_names)
         train_matrix = _feature_matrix(train_rows, feature_names, scales)
         train_labels = np.array([int(row["label"]) for row in train_rows], dtype=int)
@@ -225,7 +485,7 @@ def train_from_rows(
         validation_labels = np.array([int(row["label"]) for row in validation_rows], dtype=int)
         validation_groups = _ranking_group_labels(validation_rows, split.get("unit", ""))
 
-        linear_weights = _mean_difference_weights(train_rows, feature_names, scales)
+        linear_weights = _apply_sign_constraints(_mean_difference_weights(train_rows, feature_names, scales))
         linear_raw_scores = _linear_raw_scores(validation_rows, feature_names, linear_weights, scales, 0.0)
         linear_metrics = _evaluate_scores(validation_labels, linear_raw_scores, groups=validation_groups)
 
@@ -279,10 +539,10 @@ def train_from_rows(
             {
                 "name": "logistic_regression",
                 "artifact_model_type": "logistic",
-                "weights": {
+                "weights": _apply_sign_constraints({
                     name: float(value)
                     for name, value in zip(feature_names, logistic.coef_[0], strict=False)
-                },
+                }),
                 "intercept": float(logistic.intercept_[0]),
                 "metrics": logistic_metrics,
             },
@@ -316,11 +576,32 @@ def train_from_rows(
             selected_model,
             float(blend_calibration["best_blend"]),
         )
+        training_score_array = _runtime_blended_scores(
+            train_rows,
+            profile,
+            feature_names,
+            scales,
+            selected_model,
+            float(blend_calibration["best_blend"]),
+        )
         serving_threshold_calibration = _calibrate_serving_threshold(
             validation_labels,
             serving_score_array,
             groups=validation_groups,
             source="validation",
+        )
+        filter_gate = _filter_gate_from_calibration(serving_threshold_calibration)
+        _apply_bucket_filter_gates(
+            filter_gate,
+            validation_rows,
+            serving_score_array,
+            ranking_metric_value=float(
+                selected_model["metrics"].get(
+                    "ranking_metric_value",
+                    selected_model["metrics"].get("ndcg_at_5", 0.0),
+                )
+                or 0.0
+            ),
         )
 
         model_path = None
@@ -333,15 +614,19 @@ def train_from_rows(
 
         candidate_source_mix = _candidate_source_mix(rows, "candidate_source")
         artifact = {
-            "version": 4,
+            "version": _ARTIFACT_VERSION,
             "artifact_family": "ranker_v2",
             "profile": profile,
             "model_type": selected_model["artifact_model_type"],
             "selected_model": selected_model["name"],
+            "score_mode": str(selected_model.get("score_mode") or "absolute"),
             "selection_metric": "composite_validation_score",
             "label_schema_version": 3,
-            "feature_schema_version": 4,
+            "feature_schema_version": _FEATURE_SCHEMA_VERSION,
             "feature_names": feature_names,
+            "available_numeric_feature_names": available_numeric_feature_names,
+            "ignored_numeric_feature_names": ignored_numeric_feature_names,
+            "feature_selection": feature_selection,
             "excluded_feature_names": sorted(
                 OFFLINE_ONLY_FEATURE_NAMES
                 | _SPARSE_TRAINING_FEATURE_NAMES
@@ -349,6 +634,8 @@ def train_from_rows(
                 | {_HEURISTIC_FEATURE_NAME}
             ),
             "semantic_score_config": semantic_service.semantic_score_config(),
+            "scope": "single_streamer" if profile == "jynxzi" else "profile",
+            "valid_for": [profile],
             "weights": selected_model.get("weights", {}),
             "scales": scales,
             "intercept": selected_model.get("intercept", 0.0),
@@ -357,10 +644,14 @@ def train_from_rows(
             "blend_calibration": blend_calibration,
             "serving_threshold": float(serving_threshold_calibration["threshold"]),
             "serving_threshold_calibration": serving_threshold_calibration,
+            "training_score_distribution": _score_distribution_summary(training_score_array),
+            "validation_score_distribution": _score_distribution_summary(serving_score_array),
+            "filter_gate": filter_gate,
             "hpo": _artifact_hpo_summary(hpo_artifact),
             "top_feature_importances": _feature_importance_map(selected_model, feature_names),
             "training_stats": {
                 "rows": len(rows),
+                "input_rows": original_row_count,
                 "positive_rows": len(positive),
                 "negative_rows": len(negative),
                 "train_rows": len(train_rows),
@@ -377,6 +668,7 @@ def train_from_rows(
                 "content_buckets": _count_values(rows, "content_bucket"),
                 "candidate_sources": candidate_source_mix["by_value"],
                 "candidate_source_peak_share": candidate_source_mix["peak_share"],
+                "training_row_policy": training_row_policy,
             },
             "split_strategy_warning": split_warning,
             "validation": selected_model["metrics"],
@@ -385,6 +677,14 @@ def train_from_rows(
                 for candidate in model_candidates
             },
             "model_selection": _model_selection_report(model_candidates, selected_model, len(rows)),
+            "rollout_readiness": _rollout_readiness_summary(
+                profile,
+                rows,
+                validation_rows,
+                selected_model,
+                filter_gate,
+                split.get("unit", ""),
+            ),
             "bucketed_validation": _bucketed_validation(
                 selected_model["artifact_model_type"],
                 validation_rows,
@@ -477,6 +777,13 @@ def _artifact_health_summary(artifact: dict[str, object]) -> dict[str, object]:
     validation = dict(artifact.get("validation") or {})
     split_warning = str(training_stats.get("split_strategy_warning") or artifact.get("split_strategy_warning") or "").strip()
     warnings = [split_warning] if split_warning else []
+    ignored_numeric_feature_names = sorted(
+        str(name)
+        for name in (artifact.get("ignored_numeric_feature_names") or [])
+        if str(name).strip()
+    )
+    if ignored_numeric_feature_names:
+        warnings.append("ranker_ignored_numeric_features")
     return {
         "version": int(artifact.get("version") or 0),
         "profile": str(artifact.get("profile") or ""),
@@ -484,10 +791,19 @@ def _artifact_health_summary(artifact: dict[str, object]) -> dict[str, object]:
         "selected_model": str(artifact.get("selected_model") or ""),
         "model_type": str(artifact.get("model_type") or ""),
         "feature_schema_version": int(artifact.get("feature_schema_version") or 0),
+        "feature_names_count": len(list(artifact.get("feature_names") or [])),
+        "available_numeric_feature_names_count": len(list(artifact.get("available_numeric_feature_names") or [])),
+        "ignored_numeric_feature_names": ignored_numeric_feature_names,
         "label_schema_version": int(artifact.get("label_schema_version") or 0),
         "semantic_score_config": artifact.get("semantic_score_config") or {},
+        "scope": str(artifact.get("scope") or ""),
+        "valid_for": list(artifact.get("valid_for") or []),
         "serving_threshold": float(artifact.get("serving_threshold") or _DEFAULT_MARGIN_CLASSIFICATION_THRESHOLD),
         "serving_threshold_calibration": artifact.get("serving_threshold_calibration") or {},
+        "training_score_distribution": artifact.get("training_score_distribution") or {},
+        "validation_score_distribution": artifact.get("validation_score_distribution") or {},
+        "score_distribution_drift": _score_distribution_drift_summary(artifact),
+        "filter_gate": artifact.get("filter_gate") or {},
         "excluded_feature_names": sorted(
             str(name)
             for name in (artifact.get("excluded_feature_names") or [])
@@ -512,10 +828,142 @@ def _artifact_health_summary(artifact: dict[str, object]) -> dict[str, object]:
             "precision_at_5": float(validation.get("precision_at_5") or 0.0),
             "accuracy": float(validation.get("accuracy") or 0.0),
             "f1": float(validation.get("f1") or 0.0),
+            "filter_precision": float((artifact.get("filter_gate") or {}).get("precision") or 0.0),
+            "filter_recall": float((artifact.get("filter_gate") or {}).get("recall") or 0.0),
+            "filter_f1": float((artifact.get("filter_gate") or {}).get("f1") or 0.0),
+            "filter_selected_rate": float((artifact.get("filter_gate") or {}).get("selected_rate") or 0.0),
+            "filter_gate_passed": bool((artifact.get("filter_gate") or {}).get("passed")),
         },
         "training_stats": training_stats,
         "validation": validation,
+        "rollout_readiness": artifact.get("rollout_readiness") or {},
         "model_comparison": artifact.get("model_comparison") or {},
+    }
+
+
+def _score_distribution_summary(scores: np.ndarray | list[float]) -> dict[str, float | int]:
+    values = np.asarray(scores, dtype=float)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return {
+            "rows": 0,
+            "min": 0.0,
+            "p01": 0.0,
+            "p05": 0.0,
+            "p25": 0.0,
+            "p50": 0.0,
+            "p75": 0.0,
+            "p95": 0.0,
+            "p99": 0.0,
+            "max": 0.0,
+            "mean": 0.0,
+            "std": 0.0,
+            "clamp_fraction": 0.0,
+        }
+    abs_values = np.abs(values)
+    return {
+        "rows": int(values.size),
+        "min": round(float(np.min(values)), 6),
+        "p01": round(float(np.percentile(values, 1)), 6),
+        "p05": round(float(np.percentile(values, 5)), 6),
+        "p25": round(float(np.percentile(values, 25)), 6),
+        "p50": round(float(np.percentile(values, 50)), 6),
+        "p75": round(float(np.percentile(values, 75)), 6),
+        "p95": round(float(np.percentile(values, 95)), 6),
+        "p99": round(float(np.percentile(values, 99)), 6),
+        "max": round(float(np.max(values)), 6),
+        "mean": round(float(np.mean(values)), 6),
+        "std": round(float(np.std(values)), 6),
+        "clamp_fraction": round(float(np.mean(abs_values >= _TRAINED_SCORE_CLAMP_ABS * 0.95)), 6),
+    }
+
+
+def _score_distribution_drift_summary(artifact: dict[str, object]) -> dict[str, object]:
+    reference = dict(artifact.get("training_score_distribution") or {})
+    distribution = dict(artifact.get("validation_score_distribution") or {})
+    filter_gate = dict(artifact.get("filter_gate") or {})
+    warnings: list[str] = []
+    clamp_fraction = float(distribution.get("clamp_fraction") or 0.0)
+    selected_rate = float(filter_gate.get("selected_rate") or 0.0)
+    ks_statistic = _distribution_ks_from_quantiles(reference, distribution)
+    psi = _distribution_psi_from_quantiles(reference, distribution)
+    if clamp_fraction >= 0.05:
+        warnings.append("score_clamp_fraction_high")
+    if selected_rate >= _FILTER_GATE_MAX_SELECTED_RATE:
+        warnings.append("selected_rate_at_or_above_gate")
+    if ks_statistic >= 0.25:
+        warnings.append("score_distribution_ks_drift")
+    if psi >= 0.20:
+        warnings.append("score_distribution_psi_drift")
+    return {
+        "reference": reference,
+        "baseline": distribution,
+        "ks_test_available": bool(reference and distribution),
+        "ks_statistic": round(float(ks_statistic), 6),
+        "psi": round(float(psi), 6),
+        "warnings": warnings,
+    }
+
+
+def _distribution_ks_from_quantiles(reference: dict[str, object], current: dict[str, object]) -> float:
+    if not reference or not current:
+        return 0.0
+    max_delta = 0.0
+    for key in ("p01", "p05", "p25", "p50", "p75", "p95", "p99"):
+        ref = float(reference.get(key) or 0.0)
+        cur = float(current.get(key) or 0.0)
+        scale = max(float(reference.get("std") or 0.0), float(current.get("std") or 0.0), 1.0)
+        max_delta = max(max_delta, abs(cur - ref) / scale)
+    return min(max_delta, 1.0)
+
+
+def _distribution_psi_from_quantiles(reference: dict[str, object], current: dict[str, object]) -> float:
+    if not reference or not current:
+        return 0.0
+    ref_std = max(float(reference.get("std") or 0.0), 1.0)
+    cur_std = max(float(current.get("std") or 0.0), 1.0)
+    mean_delta = abs(float(current.get("mean") or 0.0) - float(reference.get("mean") or 0.0)) / max(ref_std, cur_std)
+    std_delta = abs(cur_std - ref_std) / max(ref_std, cur_std)
+    clamp_delta = abs(float(current.get("clamp_fraction") or 0.0) - float(reference.get("clamp_fraction") or 0.0))
+    return min(mean_delta * 0.5 + std_delta * 0.35 + clamp_delta * 0.15, 5.0)
+
+
+def _rollout_readiness_summary(
+    profile: str,
+    rows: list[dict],
+    validation_rows: list[dict],
+    selected_model: dict,
+    filter_gate: dict,
+    split_unit: str,
+) -> dict[str, object]:
+    validation_groups = len(set(_ranking_group_labels(validation_rows, str(split_unit))))
+    positive_rows = sum(1 for row in rows if int(row.get("label", 0)) == 1)
+    profile_key = str(profile).strip().lower()
+    failures: list[str] = []
+    if str(selected_model.get("name") or "") == "fallback_heuristic":
+        failures.append("selected_model_is_fallback_heuristic")
+    if not bool(filter_gate.get("passed")):
+        failures.append("filter_gate_failed")
+    if profile_key == "jynxzi":
+        if len(rows) < _MIN_JYNXZI_ROLLOUT_ROWS:
+            failures.append("training_rows_below_rollout_target")
+        if positive_rows < _MIN_JYNXZI_ROLLOUT_POSITIVES:
+            failures.append("positive_rows_below_rollout_target")
+        if validation_groups < _MIN_JYNXZI_VALIDATION_GROUPS:
+            failures.append("validation_groups_below_rollout_target")
+    return {
+        "passed": not failures,
+        "failures": failures,
+        "scope": "single_streamer" if profile_key == "jynxzi" else "profile",
+        "valid_for": [profile],
+        "training_rows": len(rows),
+        "positive_rows": positive_rows,
+        "validation_groups": validation_groups,
+        "targets": {
+            "training_rows": _MIN_JYNXZI_ROLLOUT_ROWS if profile_key == "jynxzi" else 0,
+            "positive_rows": _MIN_JYNXZI_ROLLOUT_POSITIVES if profile_key == "jynxzi" else 0,
+            "validation_groups": _MIN_JYNXZI_VALIDATION_GROUPS if profile_key == "jynxzi" else 0,
+        },
     }
 
 
@@ -569,9 +1017,7 @@ def _gold_eval_training_guard(rows: list[dict]) -> dict[str, int | str] | None:
 def _numeric_feature_names(feature_row: dict) -> list[str]:
     _excluded = (
         {"candidate_id", "source", _HEURISTIC_FEATURE_NAME}
-        | OFFLINE_ONLY_FEATURE_NAMES
-        | _SPARSE_TRAINING_FEATURE_NAMES
-        | _CONFOUND_TRAINING_FEATURE_NAMES
+        | excluded_training_feature_names()
     )
     names: list[str] = []
     for key, value in feature_row.items():
@@ -580,6 +1026,105 @@ def _numeric_feature_names(feature_row: dict) -> list[str]:
         if isinstance(value, (int, float, bool)):
             names.append(key)
     return sorted(names)
+
+
+def _numeric_feature_names_from_rows(feature_rows: list[dict]) -> list[str]:
+    names: set[str] = set()
+    for feature_row in feature_rows:
+        if isinstance(feature_row, dict):
+            names.update(_numeric_feature_names(feature_row))
+    return sorted(names)
+
+
+def _ranker_max_training_features() -> int:
+    raw = (os.environ.get("RANKER_MAX_FEATURES") or str(_DEFAULT_MAX_TRAINING_FEATURES)).strip()
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return _DEFAULT_MAX_TRAINING_FEATURES
+
+
+def _select_training_feature_names(
+    rows: list[dict],
+    feature_names: list[str],
+    *,
+    max_features: int,
+) -> tuple[list[str], dict[str, object]]:
+    if max_features <= 0 or len(feature_names) <= max_features:
+        return list(feature_names), {
+            "enabled": False,
+            "max_features": int(max_features),
+            "method": "supervised_univariate_effect_size",
+            "input_feature_count": len(feature_names),
+            "selected_feature_count": len(feature_names),
+            "dropped_feature_count": 0,
+            "dropped_feature_names": [],
+        }
+
+    scored = [
+        (score, name)
+        for name in feature_names
+        if (score := _feature_selection_score(rows, name)) > 0.0
+    ]
+    scored_by_name = {name: score for score, name in scored}
+    preferred = [
+        name
+        for name in sorted(_JUDGE_TEACHER_FEATURE_NAMES & set(feature_names))
+        if scored_by_name.get(name, 0.0) > 0.0
+    ]
+    if len(preferred) > max_features:
+        preferred = [
+            name
+            for _score, name in sorted(
+                ((scored_by_name[name], name) for name in preferred),
+                key=lambda item: (-item[0], item[1]),
+            )[:max_features]
+        ]
+    if not scored:
+        selected = list(feature_names[:max_features])
+    else:
+        selected = list(preferred)
+        remaining_slots = max(0, int(max_features) - len(selected))
+        preferred_set = set(preferred)
+        selected.extend([
+            name
+            for _score, name in sorted(scored, key=lambda item: (-item[0], item[1]))
+            if name not in preferred_set
+        ][:remaining_slots])
+    selected_set = set(selected)
+    dropped = sorted(name for name in feature_names if name not in selected_set)
+    return sorted(selected), {
+        "enabled": True,
+        "max_features": int(max_features),
+        "method": "supervised_univariate_effect_size_with_judge_teacher_priority",
+        "input_feature_count": len(feature_names),
+        "selected_feature_count": len(selected),
+        "dropped_feature_count": len(dropped),
+        "dropped_feature_names": dropped,
+        "priority_feature_names": preferred,
+        "top_feature_scores": [
+            {"name": name, "score": round(float(score), 6)}
+            for score, name in sorted(scored, key=lambda item: (-item[0], item[1]))[: min(20, len(scored))]
+        ],
+    }
+
+
+def _feature_selection_score(rows: list[dict], name: str) -> float:
+    positive: list[float] = []
+    negative: list[float] = []
+    for row in rows:
+        value = _safe_float((row.get("features") or {}).get(name))
+        if int(row.get("label", 0)) == 1:
+            positive.append(value)
+        else:
+            negative.append(value)
+    if not positive or not negative:
+        return 0.0
+    pos_mean = float(np.mean(positive))
+    neg_mean = float(np.mean(negative))
+    pooled_std = float(np.std(positive + negative)) or 1.0
+    prevalence = sum(1 for value in positive + negative if abs(float(value)) > 1e-9) / max(len(positive) + len(negative), 1)
+    return abs(pos_mean - neg_mean) / pooled_std * math.sqrt(max(prevalence, 0.05))
 
 
 def _split_rows(rows: list[dict]) -> dict[str, list[dict] | str]:
@@ -855,6 +1400,14 @@ def _mean_difference_weights(
     return weights
 
 
+def _apply_sign_constraints(weights: dict[str, float]) -> dict[str, float]:
+    constrained = dict(weights)
+    for name in _POSITIVE_SIGN_FEATURES:
+        if name in constrained and constrained[name] < 0.0:
+            constrained[name] = 0.0
+    return constrained
+
+
 def _fit_pairwise_logistic(
     train_rows: list[dict],
     validation_rows: list[dict],
@@ -877,8 +1430,16 @@ def _fit_pairwise_logistic(
         name: float(value)
         for name, value in zip(feature_names, model.coef_[0], strict=False)
     }
+    weights = _apply_sign_constraints(weights)
     intercept = float(model.intercept_[0])
-    validation_scores = _linear_raw_scores(validation_rows, feature_names, weights, scales, intercept)
+    validation_scores = _pairwise_median_raw_scores(
+        validation_rows,
+        feature_names,
+        weights,
+        scales,
+        intercept,
+        split_unit,
+    )
     metrics = _evaluate_scores(
         np.array([int(row["label"]) for row in validation_rows], dtype=int),
         validation_scores,
@@ -886,7 +1447,8 @@ def _fit_pairwise_logistic(
     )
     return {
         "name": "pairwise_logistic_regression",
-        "artifact_model_type": "logistic",
+        "artifact_model_type": "pairwise_logistic",
+        "score_mode": "pairwise_median",
         "weights": weights,
         "intercept": intercept,
         "metrics": metrics,
@@ -920,7 +1482,7 @@ def _fit_lightgbm_ranker(
     validation_binary = np.array([int(row["label"]) for row in validation_rows], dtype=int)
     train_weights = np.array([_sample_weight(row) for row in train_rows], dtype=float)
 
-    resolved_params = _resolve_lightgbm_params(hpo_params, random_state=random_state)
+    resolved_params = _resolve_lightgbm_params(hpo_params, feature_names=feature_names, random_state=random_state)
     model = LGBMRanker(**resolved_params)
     try:
         callbacks = [early_stopping(10, verbose=False)] if early_stopping is not None else []
@@ -1001,6 +1563,33 @@ def _pairwise_training_matrix(
         np.array(labels, dtype=int),
         np.array(weights, dtype=float),
     )
+
+
+def _pairwise_median_raw_scores(
+    rows: list[dict],
+    feature_names: list[str],
+    weights: dict[str, float],
+    scales: dict[str, dict[str, float]],
+    intercept: float,
+    split_unit: str,
+) -> np.ndarray:
+    if not rows:
+        return np.array([], dtype=float)
+    matrix = _feature_matrix(rows, feature_names, scales)
+    groups = _ranking_group_labels(rows, split_unit)
+    if not groups or len(groups) != len(rows):
+        median = np.median(matrix, axis=0)
+        deltas = matrix - median
+    else:
+        deltas = np.zeros_like(matrix)
+        by_group: dict[str, list[int]] = {}
+        for index, group in enumerate(groups):
+            by_group.setdefault(str(group), []).append(index)
+        for indices in by_group.values():
+            group_matrix = matrix[indices]
+            deltas[indices] = group_matrix - np.median(group_matrix, axis=0)
+    vector = np.array([float(weights.get(name, 0.0)) for name in feature_names], dtype=float)
+    return deltas @ vector + float(intercept)
 
 
 def _feature_matrix(rows: list[dict], feature_names: list[str], scales: dict[str, dict[str, float]]) -> np.ndarray:
@@ -1096,6 +1685,7 @@ def _evaluate_scores(
     false_positive = int(np.sum((predicted == 1) & (labels == 0)))
     false_negative = int(np.sum((predicted == 0) & (labels == 1)))
     true_negative = int(np.sum((predicted == 0) & (labels == 0)))
+    selected_count = true_positive + false_positive
     precision = true_positive / max(true_positive + false_positive, 1)
     recall = true_positive / max(true_positive + false_negative, 1)
     f1 = (2 * precision * recall) / max(precision + recall, 1e-9)
@@ -1110,6 +1700,8 @@ def _evaluate_scores(
         "false_negative": false_negative,
         "true_negative": true_negative,
         "positive_rate": round(float(np.mean(labels == 1)), 3),
+        "selected_count": selected_count,
+        "selected_rate": round(float(selected_count / total), 3),
         "classification_threshold": round(float(classification_threshold), 6),
     }
     for k in (3, 5):
@@ -1173,6 +1765,8 @@ def _calibrate_serving_threshold(
     source: str = "validation",
     score_kind: str = "margin",
     min_recall: float = _SERVING_THRESHOLD_MIN_RECALL,
+    max_selected_rate: float = _SERVING_THRESHOLD_MAX_SELECTED_RATE,
+    target_precision: float = _SERVING_THRESHOLD_TARGET_PRECISION,
 ) -> dict[str, object]:
     default_threshold = _default_classification_threshold(score_kind)
     default_metrics = _evaluate_scores(
@@ -1185,9 +1779,13 @@ def _calibrate_serving_threshold(
     if len(labels) == 0 or len(scores) == 0:
         return {
             "source": source,
-            "metric": "f1",
+            "metric": "max_recall_under_precision_target",
+            "threshold_policy": "balanced_filter",
+            "selected_threshold_reason": "empty_scores",
             "score_kind": score_kind,
             "min_recall": float(min_recall),
+            "max_selected_rate": float(max_selected_rate),
+            "target_precision": float(target_precision),
             "threshold": float(default_threshold),
             "metrics": default_metrics,
             "default_threshold": float(default_threshold),
@@ -1199,9 +1797,13 @@ def _calibrate_serving_threshold(
     if not finite_scores:
         return {
             "source": source,
-            "metric": "f1",
+            "metric": "max_recall_under_precision_target",
+            "threshold_policy": "balanced_filter",
+            "selected_threshold_reason": "no_finite_scores",
             "score_kind": score_kind,
             "min_recall": float(min_recall),
+            "max_selected_rate": float(max_selected_rate),
+            "target_precision": float(target_precision),
             "threshold": float(default_threshold),
             "metrics": default_metrics,
             "default_threshold": float(default_threshold),
@@ -1214,7 +1816,7 @@ def _calibrate_serving_threshold(
     candidates.update(finite_scores)
     best_threshold = float(default_threshold)
     best_metrics = default_metrics
-    best_key = _serving_threshold_key(best_metrics, best_threshold, min_recall)
+    best_key = _serving_threshold_key(best_metrics, best_threshold, min_recall, max_selected_rate, target_precision)
     for threshold_candidate in sorted(candidates):
         metrics = _evaluate_scores(
             labels,
@@ -1223,7 +1825,13 @@ def _calibrate_serving_threshold(
             groups=groups,
             threshold=float(threshold_candidate),
         )
-        key = _serving_threshold_key(metrics, float(threshold_candidate), min_recall)
+        key = _serving_threshold_key(
+            metrics,
+            float(threshold_candidate),
+            min_recall,
+            max_selected_rate,
+            target_precision,
+        )
         if key > best_key:
             best_threshold = float(threshold_candidate)
             best_metrics = metrics
@@ -1231,9 +1839,18 @@ def _calibrate_serving_threshold(
 
     return {
         "source": source,
-        "metric": "f1",
+        "metric": "max_recall_under_precision_target",
+        "threshold_policy": "balanced_filter",
+        "selected_threshold_reason": _threshold_selection_reason(
+            best_metrics,
+            min_recall=min_recall,
+            max_selected_rate=max_selected_rate,
+            target_precision=target_precision,
+        ),
         "score_kind": score_kind,
         "min_recall": float(min_recall),
+        "max_selected_rate": float(max_selected_rate),
+        "target_precision": float(target_precision),
         "threshold": round(float(best_threshold), 6),
         "metrics": best_metrics,
         "default_threshold": float(default_threshold),
@@ -1242,17 +1859,265 @@ def _calibrate_serving_threshold(
     }
 
 
-def _serving_threshold_key(metrics: dict[str, float], threshold: float, min_recall: float) -> tuple:
+def _serving_threshold_key(
+    metrics: dict[str, float],
+    threshold: float,
+    min_recall: float,
+    max_selected_rate: float,
+    target_precision: float,
+) -> tuple:
     recall = float(metrics.get("recall", 0.0))
-    meets_recall = 1 if recall >= float(min_recall) else 0
+    precision = float(metrics.get("precision", 0.0))
+    selected_rate = float(metrics.get("selected_rate", 1.0))
+    f1 = float(metrics.get("f1", 0.0))
+    f0_75 = _fbeta(precision, recall, _FILTER_GATE_BETA)
+    hard_max_selected_rate = max(float(max_selected_rate), _SERVING_THRESHOLD_HARD_MAX_SELECTED_RATE)
+    meets_recall = recall >= float(min_recall)
+    meets_precision = precision >= float(target_precision)
+    meets_gate_precision = precision >= _FILTER_GATE_MIN_PRECISION
+    meets_target_selected_rate = selected_rate <= float(max_selected_rate)
+    meets_hard_selected_rate = selected_rate <= hard_max_selected_rate
+    fallback_max_selected_rate = min(
+        hard_max_selected_rate,
+        max(float(max_selected_rate), _SERVING_THRESHOLD_FALLBACK_MAX_SELECTED_RATE),
+    )
+    meets_fallback_selected_rate = selected_rate <= fallback_max_selected_rate
+    meets_filter_constraints = 1 if meets_precision and meets_recall and meets_target_selected_rate else 0
+    meets_recall_fallback = 1 if meets_recall and meets_fallback_selected_rate else 0
+    meets_gate_filter_fallback = 1 if meets_recall and meets_gate_precision and meets_fallback_selected_rate else 0
+    meets_gate_filter_hard_cap = (
+        1
+        if meets_gate_precision
+        and recall >= _FILTER_GATE_MIN_RECALL
+        and f1 >= _FILTER_GATE_MIN_F1
+        and meets_hard_selected_rate
+        else 0
+    )
+    precision_gap = max(0.0, float(target_precision) - precision)
+    recall_gap = max(0.0, float(min_recall) - recall)
+    hard_selected_rate_gap = max(0.0, selected_rate - hard_max_selected_rate)
+    fallback_selected_rate_gap = max(0.0, selected_rate - fallback_max_selected_rate)
     return (
-        meets_recall,
-        float(metrics.get("f1", 0.0)),
+        1 if meets_hard_selected_rate else 0,
+        meets_filter_constraints,
+        recall if meets_filter_constraints else 0.0,
+        meets_gate_filter_hard_cap,
+        meets_gate_filter_fallback,
+        meets_recall_fallback,
+        f0_75,
         recall,
-        float(metrics.get("precision", 0.0)),
-        float(metrics.get("accuracy", 0.0)),
+        f1,
+        precision,
+        -precision_gap,
+        -recall_gap,
+        -hard_selected_rate_gap,
+        -fallback_selected_rate_gap,
+        -selected_rate,
         -float(threshold),
     )
+
+
+def _threshold_selection_reason(
+    metrics: dict[str, float],
+    *,
+    min_recall: float,
+    max_selected_rate: float,
+    target_precision: float,
+) -> str:
+    precision = float(metrics.get("precision", 0.0))
+    recall = float(metrics.get("recall", 0.0))
+    selected_rate = float(metrics.get("selected_rate", 1.0))
+    hard_max_selected_rate = max(float(max_selected_rate), _SERVING_THRESHOLD_HARD_MAX_SELECTED_RATE)
+    if (
+        precision >= float(target_precision)
+        and recall >= float(min_recall)
+        and selected_rate <= float(max_selected_rate)
+    ):
+        return "max_recall_under_precision_target"
+    fallback_max_selected_rate = min(
+        hard_max_selected_rate,
+        max(float(max_selected_rate), _SERVING_THRESHOLD_FALLBACK_MAX_SELECTED_RATE),
+    )
+    if (
+        precision >= _FILTER_GATE_MIN_PRECISION
+        and recall >= float(min_recall)
+        and selected_rate <= fallback_max_selected_rate
+    ):
+        return "f_score_fallback_under_gate_precision"
+    if recall >= float(min_recall) and selected_rate <= fallback_max_selected_rate:
+        return "f_score_fallback_below_precision_floor"
+    if (
+        precision >= _FILTER_GATE_MIN_PRECISION
+        and recall >= _FILTER_GATE_MIN_RECALL
+        and float(metrics.get("f1", 0.0)) >= _FILTER_GATE_MIN_F1
+        and selected_rate <= hard_max_selected_rate
+    ):
+        return "best_filter_gate_under_hard_selected_rate"
+    if recall >= float(min_recall) and selected_rate > hard_max_selected_rate:
+        return "f_score_fallback_above_selected_rate"
+    if precision >= float(target_precision) and selected_rate <= float(max_selected_rate):
+        return "precision_target_below_min_recall"
+    if selected_rate <= hard_max_selected_rate:
+        return "best_degraded_under_selected_rate"
+    return "best_degraded_filter_point"
+
+
+def _fbeta(precision: float, recall: float, beta: float) -> float:
+    beta_squared = float(beta) ** 2
+    denominator = (beta_squared * float(precision)) + float(recall)
+    if denominator <= 0:
+        return 0.0
+    return (1.0 + beta_squared) * float(precision) * float(recall) / denominator
+
+
+def _filter_gate_from_calibration(calibration: dict[str, object]) -> dict[str, object]:
+    metrics = dict(calibration.get("metrics") or {})
+    precision = float(metrics.get("precision", 0.0) or 0.0)
+    recall = float(metrics.get("recall", 0.0) or 0.0)
+    f1 = float(metrics.get("f1", 0.0) or 0.0)
+    selected_count = int(
+        metrics.get(
+            "selected_count",
+            int(metrics.get("true_positive", 0) or 0) + int(metrics.get("false_positive", 0) or 0),
+        )
+        or 0
+    )
+    rows = int(metrics.get("rows") or 0)
+    selected_rate = float(metrics.get("selected_rate", selected_count / rows if rows else 1.0) or 0.0)
+    accuracy = float(metrics.get("accuracy", 0.0) or 0.0)
+    thresholds = {
+        "min_precision": _FILTER_GATE_MIN_PRECISION,
+        "min_recall": _FILTER_GATE_MIN_RECALL,
+        "min_f1": _FILTER_GATE_MIN_F1,
+        "max_selected_rate": _FILTER_GATE_MAX_SELECTED_RATE,
+        "min_accuracy_floor": _FILTER_GATE_MIN_ACCURACY_FLOOR,
+        "target_precision": float(calibration.get("target_precision") or _SERVING_THRESHOLD_TARGET_PRECISION),
+    }
+    failures: list[str] = []
+    if precision < _FILTER_GATE_MIN_PRECISION:
+        failures.append("filter_precision_below_minimum")
+    if recall < _FILTER_GATE_MIN_RECALL:
+        failures.append("filter_recall_below_minimum")
+    if f1 < _FILTER_GATE_MIN_F1:
+        failures.append("filter_f1_below_minimum")
+    if selected_rate > _FILTER_GATE_MAX_SELECTED_RATE:
+        failures.append("filter_selected_rate_above_maximum")
+    return {
+        "source": str(calibration.get("source") or ""),
+        "threshold": float(calibration.get("threshold") or 0.0),
+        "metric": str(calibration.get("metric") or ""),
+        "threshold_policy": str(calibration.get("threshold_policy") or ""),
+        "selected_threshold_reason": str(calibration.get("selected_threshold_reason") or ""),
+        "precision": round(precision, 3),
+        "recall": round(recall, 3),
+        "f1": round(f1, 3),
+        "accuracy": round(accuracy, 3),
+        "selected_rate": round(selected_rate, 3),
+        "selected_count": selected_count,
+        "rows": rows,
+        "f0_75": round(_fbeta(precision, recall, _FILTER_GATE_BETA), 3),
+        "accuracy_gate_is_diagnostic": True,
+        "thresholds": thresholds,
+        "passed": not failures,
+        "failures": failures,
+    }
+
+
+def _apply_bucket_filter_gates(
+    filter_gate: dict[str, object],
+    rows: list[dict],
+    scores: np.ndarray,
+    *,
+    ranking_metric_value: float,
+) -> None:
+    if len(rows) == 0 or len(scores) == 0:
+        return
+    by_bucket: dict[str, list[int]] = {}
+    for index, row in enumerate(rows):
+        bucket = str(row.get("content_bucket") or "").strip().lower() or _content_bucket_from_row(row, dict(row.get("features") or {}))
+        by_bucket.setdefault(bucket or "general", []).append(index)
+    bucket_gates: dict[str, dict[str, object]] = {}
+    threshold = float(filter_gate.get("threshold") or 0.0)
+    serving_threshold_per_bucket: dict[str, float] = {}
+    selected_model_per_bucket: dict[str, str] = {}
+    passed_bucket_count = 0
+    for bucket, indices in sorted(by_bucket.items()):
+        labels = np.array([int(rows[index]["label"]) for index in indices], dtype=int)
+        bucket_scores = np.array([float(scores[index]) for index in indices], dtype=float)
+        label_values = set(labels.tolist())
+        if len(label_values) == 1 and len(indices) >= _BUCKET_GATE_MIN_ROWS:
+            if int(labels[0]) == 1:
+                bucket_threshold = float(np.min(bucket_scores))
+            else:
+                bucket_threshold = float(np.max(bucket_scores) + 1e-6)
+            metrics = _evaluate_scores(labels, bucket_scores, threshold=bucket_threshold)
+        elif len(label_values) >= 2 and len(indices) >= _BUCKET_GATE_MIN_ROWS:
+            calibration = _calibrate_serving_threshold(
+                labels,
+                bucket_scores,
+                groups=None,
+                source=f"validation_bucket:{bucket}",
+            )
+            bucket_threshold = float(calibration.get("threshold") or threshold)
+            metrics = dict(calibration.get("metrics") or _evaluate_scores(labels, bucket_scores, threshold=bucket_threshold))
+        else:
+            bucket_threshold = threshold
+            metrics = _evaluate_scores(labels, bucket_scores, threshold=bucket_threshold)
+        passed = True
+        bucket_failures: list[str] = []
+        one_class_positive = len(label_values) == 1 and int(labels[0]) == 1
+        one_class_negative = len(label_values) == 1 and int(labels[0]) == 0
+        if len(indices) < _BUCKET_GATE_MIN_ROWS:
+            passed = False
+            bucket_failures.append("bucket_validation_rows_below_minimum")
+        if one_class_negative:
+            passed = False
+            bucket_failures.append("bucket_validation_one_class_negative")
+        elif one_class_positive:
+            bucket_failures.append("bucket_validation_one_class_positive")
+        if not one_class_positive and float(metrics.get("precision", 0.0)) < _FILTER_GATE_MIN_PRECISION:
+            passed = False
+            bucket_failures.append("bucket_precision_below_minimum")
+        if float(metrics.get("recall", 0.0)) < _FILTER_GATE_MIN_RECALL:
+            passed = False
+            bucket_failures.append("bucket_recall_below_minimum")
+        if not one_class_positive and float(metrics.get("f1", 0.0)) < _FILTER_GATE_MIN_F1:
+            passed = False
+            bucket_failures.append("bucket_f1_below_minimum")
+        if not one_class_positive and float(metrics.get("selected_rate", 0.0)) > _FILTER_GATE_MAX_SELECTED_RATE:
+            passed = False
+            bucket_failures.append("bucket_selected_rate_above_maximum")
+        if passed:
+            passed_bucket_count += 1
+        bucket_gates[bucket] = {
+            "rows": len(indices),
+            "threshold": float(bucket_threshold),
+            "f1": float(metrics.get("f1", 0.0)),
+            "precision": float(metrics.get("precision", 0.0)),
+            "recall": float(metrics.get("recall", 0.0)),
+            "selected_rate": float(metrics.get("selected_rate", 0.0)),
+            "passed": passed,
+            "failures": bucket_failures,
+        }
+        serving_threshold_per_bucket[bucket] = float(bucket_threshold)
+        selected_model_per_bucket[bucket] = "trained" if passed else "fallback_heuristic"
+    filter_gate["bucket_gates"] = bucket_gates
+    filter_gate["bucket_gate_policy"] = {
+        "min_passed_buckets": _BUCKET_GATE_MIN_PASSED_BUCKETS,
+        "min_ranking_metric_value": _BUCKET_GATE_MIN_RANKING_METRIC,
+        "min_bucket_rows": _BUCKET_GATE_MIN_ROWS,
+    }
+    filter_gate["passed_bucket_count"] = passed_bucket_count
+    filter_gate["serving_threshold_per_bucket"] = serving_threshold_per_bucket
+    filter_gate["selected_model_per_bucket"] = selected_model_per_bucket
+    aggregate_failures = []
+    if passed_bucket_count < _BUCKET_GATE_MIN_PASSED_BUCKETS:
+        aggregate_failures.append("bucket_gate_passed_count_below_minimum")
+    if float(ranking_metric_value) < _BUCKET_GATE_MIN_RANKING_METRIC:
+        aggregate_failures.append("bucket_gate_ranking_metric_below_minimum")
+    filter_gate["global_failures"] = list(filter_gate.get("failures") or [])
+    filter_gate["failures"] = aggregate_failures
+    filter_gate["passed"] = not aggregate_failures
 
 
 def _precision_recall_at_k(labels: np.ndarray, scores: np.ndarray, k: int) -> tuple[float, float]:
@@ -1424,13 +2289,19 @@ def _select_model(candidates: list[dict], training_row_count: int) -> dict:
         if _candidate_is_promoted(candidate, training_row_count)
     ]
     pool_candidates = eligible or candidates
-    viable = [candidate for candidate in pool_candidates if _model_meets_minimums(candidate["metrics"])]
-    pool = viable or pool_candidates
+    gate_viable = [candidate for candidate in pool_candidates if _candidate_passes_selection_gate(candidate)]
+    if not gate_viable:
+        return _fallback_heuristic_candidate(pool_candidates, reason="no_candidate_passed_filter_gate")
+    viable = [candidate for candidate in gate_viable if _model_meets_minimums(candidate["metrics"])]
+    pool = viable or gate_viable
+    preferred_tree = _preferred_lightgbm_candidate(pool)
+    if preferred_tree is not None:
+        return preferred_tree
 
     def sort_key(candidate: dict) -> tuple[float, float, float, float, str]:
         metrics = candidate["metrics"]
         return (
-            _selection_score(metrics),
+            _candidate_selection_score(candidate),
             float(metrics.get("precision_at_5", 0.0)),
             float(metrics.get("ranking_metric_value", metrics.get("ndcg_at_5", 0.0))),
             float(metrics.get("f1", 0.0)),
@@ -1441,19 +2312,73 @@ def _select_model(candidates: list[dict], training_row_count: int) -> dict:
     return max(pool, key=sort_key)
 
 
+def _preferred_lightgbm_candidate(candidates: list[dict]) -> dict | None:
+    if (os.environ.get("RANKER_PREFER_LIGHTGBM") or "1").strip().lower() in {"0", "false", "no"}:
+        return None
+    lightgbm = [
+        candidate for candidate in candidates
+        if str(candidate.get("artifact_model_type") or "").strip().lower() == "lightgbm_ranker"
+    ]
+    if not lightgbm:
+        return None
+    best = max(candidates, key=_candidate_selection_score)
+    best_score = _candidate_selection_score(best)
+    best_metrics = dict(best.get("metrics") or {})
+    tolerance = _lightgbm_preference_tolerance()
+    viable = []
+    for candidate in lightgbm:
+        score = _candidate_selection_score(candidate)
+        if score + tolerance < best_score:
+            continue
+        metrics = dict(candidate.get("metrics") or {})
+        recall_gain = float(metrics.get("recall", 0.0) or 0.0) - float(best_metrics.get("recall", 0.0) or 0.0)
+        ranking_gain = float(metrics.get("ranking_metric_value", metrics.get("ndcg_at_5", 0.0)) or 0.0) - float(
+            best_metrics.get("ranking_metric_value", best_metrics.get("ndcg_at_5", 0.0)) or 0.0
+        )
+        precision_at_5_gap = float(best_metrics.get("precision_at_5", 0.0) or 0.0) - float(metrics.get("precision_at_5", 0.0) or 0.0)
+        if recall_gain >= 0.0 or ranking_gain >= 0.0 or precision_at_5_gap <= tolerance:
+            viable.append(candidate)
+    if not viable:
+        return None
+    return max(viable, key=lambda candidate: (_candidate_selection_score(candidate), candidate["name"]))
+
+
+def _lightgbm_preference_tolerance() -> float:
+    raw = (os.environ.get("RANKER_LIGHTGBM_SELECTION_TOLERANCE") or str(_LIGHTGBM_PREFERENCE_TOLERANCE)).strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return _LIGHTGBM_PREFERENCE_TOLERANCE
+
+
+def _fallback_heuristic_candidate(candidates: list[dict], *, reason: str) -> dict:
+    reference = max(candidates, key=_candidate_selection_score) if candidates else {}
+    metrics = dict(reference.get("metrics") or {})
+    return {
+        "name": "fallback_heuristic",
+        "artifact_model_type": "fallback_heuristic",
+        "weights": {},
+        "intercept": 0.0,
+        "metrics": metrics,
+        "selection_blocked_reason": reason,
+    }
+
+
 def _model_selection_report(candidates: list[dict], selected_model: dict, training_row_count: int) -> dict[str, object]:
     rows: list[dict[str, object]] = []
     for candidate in candidates:
         metrics = dict(candidate.get("metrics") or {})
         promoted = _candidate_is_promoted(candidate, training_row_count)
         meets_minimums = _model_meets_minimums(metrics)
+        filter_gate_passed = _candidate_passes_selection_gate(candidate)
         rows.append(
             {
                 "name": str(candidate.get("name") or ""),
                 "artifact_model_type": str(candidate.get("artifact_model_type") or ""),
                 "promoted": promoted,
+                "filter_gate_passed": filter_gate_passed,
                 "meets_minimums": meets_minimums,
-                "selection_score": round(_selection_score(metrics), 6),
+                "selection_score": round(_candidate_selection_score(candidate), 6),
                 "ranking_metric": str(metrics.get("ranking_metric") or "ndcg_at_5"),
                 "ranking_metric_value": float(metrics.get("ranking_metric_value", metrics.get("ndcg_at_5", 0.0)) or 0.0),
                 "ranking_metric_min": float(metrics.get("ranking_metric_min", 0.0) or 0.0),
@@ -1468,9 +2393,15 @@ def _model_selection_report(candidates: list[dict], selected_model: dict, traini
         "training_row_count": int(training_row_count),
         "metric": "composite_validation_score",
         "selected_model": str(selected_model.get("name") or ""),
+        "prefer_lightgbm_when_close": (os.environ.get("RANKER_PREFER_LIGHTGBM") or "1").strip().lower() not in {"0", "false", "no"},
+        "lightgbm_selection_tolerance": _lightgbm_preference_tolerance(),
         "promotion_min_rows": {
             "gradient_boosting": _GRADIENT_BOOSTING_PROMOTION_MIN_ROWS,
             "lightgbm_ranker": _LIGHTGBM_PROMOTION_MIN_ROWS,
+            "pairwise_logistic": {
+                "min_precision": 0.90,
+                "min_recall": 0.50,
+            },
         },
         "candidates": rows,
     }
@@ -1478,10 +2409,16 @@ def _model_selection_report(candidates: list[dict], selected_model: dict, traini
 
 def _model_selection_blocked_reason(candidate: dict, training_row_count: int) -> str:
     artifact_model_type = str(candidate.get("artifact_model_type") or "").strip().lower()
+    if artifact_model_type == "fallback_heuristic":
+        return str(candidate.get("selection_blocked_reason") or "fallback_heuristic_selected")
     if artifact_model_type == "lightgbm_ranker" and training_row_count < _LIGHTGBM_PROMOTION_MIN_ROWS:
         return f"requires_at_least_{_LIGHTGBM_PROMOTION_MIN_ROWS}_training_rows"
     if artifact_model_type == "gradient_boosting" and training_row_count < _GRADIENT_BOOSTING_PROMOTION_MIN_ROWS:
         return f"requires_at_least_{_GRADIENT_BOOSTING_PROMOTION_MIN_ROWS}_training_rows"
+    if artifact_model_type == "pairwise_logistic" and not _pairwise_candidate_meets_promotion_gate(candidate):
+        return "pairwise_requires_precision_0_90_recall_0_50"
+    if not _candidate_passes_selection_gate(candidate):
+        return "failed_filter_gate"
     if not _model_meets_minimums(dict(candidate.get("metrics") or {})):
         return "failed_minimum_validation_gates"
     return ""
@@ -1489,6 +2426,8 @@ def _model_selection_blocked_reason(candidate: dict, training_row_count: int) ->
 
 def _candidate_is_promoted(candidate: dict, training_row_count: int) -> bool:
     artifact_model_type = str(candidate.get("artifact_model_type") or "").strip().lower()
+    if artifact_model_type == "pairwise_logistic":
+        return _pairwise_candidate_meets_promotion_gate(candidate)
     if artifact_model_type == "lightgbm_ranker":
         return training_row_count >= _LIGHTGBM_PROMOTION_MIN_ROWS
     if artifact_model_type == "gradient_boosting":
@@ -1496,7 +2435,38 @@ def _candidate_is_promoted(candidate: dict, training_row_count: int) -> bool:
     return True
 
 
-def _resolve_lightgbm_params(hpo_params: dict | None, *, random_state: int) -> dict[str, float | int | str]:
+def _candidate_passes_selection_gate(candidate: dict) -> bool:
+    if str(candidate.get("artifact_model_type") or "").strip().lower() == "pairwise_logistic":
+        return _pairwise_candidate_meets_promotion_gate(candidate)
+    return _model_passes_filter_gate(dict(candidate.get("metrics") or {}))
+
+
+def _candidate_selection_score(candidate: dict) -> float:
+    metrics = dict(candidate.get("metrics") or {})
+    if str(candidate.get("artifact_model_type") or "").strip().lower() == "pairwise_logistic":
+        ranking = float(metrics.get("ranking_metric_value", metrics.get("ndcg_at_5", 0.0)) or 0.0)
+        precision = float(metrics.get("precision", metrics.get("precision_at_5", 0.0)) or 0.0)
+        f1 = float(metrics.get("f1", 0.0) or 0.0)
+        selected_rate = float(metrics.get("selected_rate", 0.0) or 0.0)
+        selected_rate_score = max(0.0, 1.0 - max(0.0, selected_rate - 0.40))
+        return ranking * 0.35 + precision * 0.35 + f1 * 0.20 + selected_rate_score * 0.10
+    return _selection_score(metrics)
+
+
+def _pairwise_candidate_meets_promotion_gate(candidate: dict) -> bool:
+    metrics = dict(candidate.get("metrics") or {})
+    return (
+        float(metrics.get("precision", metrics.get("precision_at_5", 0.0)) or 0.0) >= 0.90
+        and float(metrics.get("recall", 0.0) or 0.0) >= 0.50
+    )
+
+
+def _resolve_lightgbm_params(
+    hpo_params: dict | None,
+    *,
+    feature_names: list[str] | None = None,
+    random_state: int,
+) -> dict[str, float | int | str | list[int]]:
     params: dict[str, float | int | str] = {
         "objective": "lambdarank",
         "verbosity": -1,
@@ -1513,6 +2483,11 @@ def _resolve_lightgbm_params(hpo_params: dict | None, *, random_state: int) -> d
             params[key] = float(value)
     if float(params.get("bagging_fraction", 1.0)) < 0.999:
         params["bagging_freq"] = 1
+    if feature_names:
+        params["monotone_constraints"] = [
+            1 if name in _POSITIVE_SIGN_FEATURES else 0
+            for name in feature_names
+        ]
     return params
 
 
@@ -1585,6 +2560,26 @@ def _calibrate_blend(
     labels = np.array([int(row["label"]) for row in validation_rows], dtype=int)
     groups = _ranking_group_labels(validation_rows, split_unit)
     results: dict[str, dict[str, float]] = {}
+    if str(selected_model.get("artifact_model_type") or "") == "fallback_heuristic":
+        metrics = _evaluate_scores(labels, heuristic_scores, groups=groups)
+        return {
+            "selection_metric": "heuristic_fallback",
+            "best_blend": 0.0,
+            "requested_best_blend": 0.0,
+            "runtime_max_blend": round(float(_effective_serving_blend(1.0, ranker=ranker)), 2),
+            "best_metrics": metrics,
+            "grid_results": {"0.00": {**metrics, "effective_blend": 0.0}},
+        }
+    if str(selected_model.get("score_mode") or "") == "pairwise_median":
+        metrics = _evaluate_scores(labels, trained_scores, groups=groups)
+        return {
+            "selection_metric": "pairwise_median_no_heuristic_blend",
+            "best_blend": 0.0,
+            "requested_best_blend": 0.0,
+            "runtime_max_blend": 0.0,
+            "best_metrics": metrics,
+            "grid_results": {"pairwise_median": {**metrics, "effective_blend": 0.0}},
+        }
 
     def _metric_key(metrics: dict[str, float], blend_value: float) -> tuple:
         # Break ties toward lower blend: when metrics are equal, prefer leaning
@@ -1666,6 +2661,8 @@ def _runtime_blended_scores(
         ranker,
     )
     safe_blend = _effective_serving_blend(blend, ranker=ranker)
+    if str(selected_model.get("score_mode") or "") == "pairwise_median":
+        return trained_scores
     return heuristic_scores * (1.0 - safe_blend) + trained_scores * safe_blend
 
 
@@ -1677,6 +2674,21 @@ def _runtime_trained_scores(
     ranker: Ranker,
 ) -> np.ndarray:
     model_type = str(selected_model.get("artifact_model_type") or "linear").strip().lower()
+    if model_type == "fallback_heuristic":
+        return np.zeros(len(rows), dtype=float)
+    if model_type == "pairwise_logistic" or str(selected_model.get("score_mode") or "") == "pairwise_median":
+        raw_scores = _pairwise_median_raw_scores(
+            rows,
+            feature_names,
+            selected_model.get("weights", {}),
+            scales,
+            float(selected_model.get("intercept", 0.0)),
+            "vod_id",
+        )
+        return np.array(
+            [ranker._normalize_trained_score(float(score), "logistic") for score in raw_scores],
+            dtype=float,
+        )
     if model_type in {"linear", "logistic"}:
         raw_scores = _linear_raw_scores(
             rows,
@@ -1707,16 +2719,32 @@ def _runtime_trained_scores(
 
 
 def _selection_score(metrics: dict[str, float]) -> float:
+    ranking = float(metrics.get("ndcg_at_5", metrics.get("ranking_metric_value", 0.0)) or 0.0)
+    f1 = float(metrics.get("f1", 0.0) or 0.0)
+    gate_passed = 1.0 if _model_passes_filter_gate(metrics) else 0.0
+    selected_rate = float(metrics.get("selected_rate", 1.0) or 1.0)
+    selected_rate_excess = max(0.0, selected_rate - _FILTER_GATE_MAX_SELECTED_RATE)
+    selected_rate_score = max(0.0, 1.0 - selected_rate_excess)
+    score = ranking * 0.4 + f1 * 0.3 + gate_passed * 0.2 + selected_rate_score * 0.1
+    if not gate_passed:
+        score *= 0.5
+    return score
+
+
+def _model_passes_filter_gate(metrics: dict[str, float]) -> bool:
+    precision = float(metrics.get("precision", metrics.get("precision_at_5", 0.0)) or 0.0)
+    recall = float(metrics.get("recall", 1.0) or 0.0)
+    selected_rate = float(metrics.get("selected_rate", 0.0) or 0.0)
     return (
-        float(metrics.get("ranking_metric_value", metrics.get("ndcg_at_5", 0.0))) * 0.4
-        + float(metrics.get("precision_at_5", 0.0)) * 0.25
-        + float(metrics.get("f1", 0.0)) * 0.2
-        + float(metrics.get("accuracy", 0.0)) * 0.15
+        precision >= _FILTER_GATE_MIN_PRECISION
+        and recall >= _FILTER_GATE_MIN_RECALL
+        and float(metrics.get("f1", 0.0) or 0.0) >= _FILTER_GATE_MIN_F1
+        and selected_rate <= _FILTER_GATE_MAX_SELECTED_RATE
     )
 
 
 def _model_meets_minimums(metrics: dict[str, float]) -> bool:
-    accuracy = float(metrics.get("accuracy", 0.0))
+    f1 = float(metrics.get("f1", 0.0))
     ranking_groups = int(metrics.get("ranking_groups", 0) or 0)
     ranking = max(
         float(metrics.get("ranking_metric_value", metrics.get("ndcg_at_5", 0.0))),
@@ -1745,7 +2773,7 @@ def _model_meets_minimums(metrics: dict[str, float]) -> bool:
         )
         if group_ranking_min < _MIN_GROUP_RANKING_METRIC_MIN or group_ranking_p25 < _MIN_GROUP_RANKING_METRIC_P25:
             return False
-    return accuracy >= 0.58 and ranking >= 0.6
+    return f1 >= 0.55 and ranking >= 0.6
 
 
 def _seeded_row_order(rows: list[dict]) -> list[dict]:
@@ -1778,6 +2806,7 @@ def _sample_weight(row: dict) -> float:
         "outcome_feedback": 1.35,
         "manual_annotation": 1.5,
         "twitch_clip_proxy": _TWITCH_CLIP_PROXY_SUPERVISION_MULTIPLIER,
+        "twitch_top_viewed_weak_positive": 1.0,
         "short_form_discovered": 1.0,
         "pipeline_feedback": 0.85,
         "synthetic": 0.6,
@@ -1798,6 +2827,7 @@ def _sample_weight(row: dict) -> float:
         "short_form_positive": 1.4,
         "short_form_negative": 1.0,
         "outcome_positive": 2.2,
+        "outcome_top_viewed_positive": 0.55,
         "outcome_negative": 1.8,
         "pipeline_positive": 1.0,
         "pipeline_negative": 0.8,

@@ -77,6 +77,44 @@ class BuildEvalDatasetTests(unittest.TestCase):
         self.assertEqual(summary["dataset_roles"]["outcome_eval"], 1)
         self.assertEqual(summary["dataset_roles"]["pipeline_negative_eval"], 1)
 
+    def test_outcome_holdout_role_is_explicit(self) -> None:
+        rows = build_eval_dataset.build_eval_dataset(
+            [
+                {
+                    "job_id": "job-1",
+                    "candidate_id": "c1",
+                    "label": 1,
+                    "selected": True,
+                    "label_class": "outcome_top_viewed_positive",
+                    "supervision_tier": "outcome_holdout",
+                    "dataset_source": "outcome_top_viewed_holdout",
+                    "candidate_source": "hype_peak",
+                    "features": {"source": "hype_peak"},
+                }
+            ]
+        )
+
+        self.assertEqual(rows[0]["dataset_role"], "outcome_holdout")
+
+    def test_outcome_train_role_is_explicit(self) -> None:
+        rows = build_eval_dataset.build_eval_dataset(
+            [
+                {
+                    "job_id": "job-1",
+                    "candidate_id": "c1",
+                    "label": 1,
+                    "selected": True,
+                    "label_class": "outcome_top_viewed_positive",
+                    "supervision_tier": "outcome_train",
+                    "dataset_source": "outcome_top_viewed_train",
+                    "candidate_source": "hype_peak",
+                    "features": {"source": "hype_peak"},
+                }
+            ]
+        )
+
+        self.assertEqual(rows[0]["dataset_role"], "outcome_train")
+
 
 if __name__ == "__main__":
     unittest.main()

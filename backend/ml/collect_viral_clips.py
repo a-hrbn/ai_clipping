@@ -641,6 +641,7 @@ def _process_clip(
         transcript,
         profile,
         llm_provider="ollama",
+        video_path=clip_path,
     )
     if not feats_list:
         return None
@@ -700,6 +701,7 @@ def process_local_video(
         transcript,
         profile,
         llm_provider="ollama",
+        video_path=video_path,
     )
     if not feats_list:
         return None

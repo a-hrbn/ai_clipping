@@ -1,18 +1,28 @@
 from __future__ import annotations
 
 import base64
+from collections import Counter
 import json
 import logging
 import pathlib
+import time
+from typing import Callable
+import urllib.error
+import urllib.request
 
 import ollama
 
 from config import settings
 from services.keyframe_sampler import SampledKeyframe
-from services.timeline_types import JudgeResult, RankedCandidate
+from services.timeline_types import CandidateFeatures, JudgeResult, RankedCandidate
 from services.transcriber import RichSegment, format_transcript
 
 logger = logging.getLogger(__name__)
+JudgeProviderCall = Callable[[str, list[SampledKeyframe] | None], JudgeResult | None]
+
+
+class ClipJudgeError(RuntimeError):
+    """Raised when the configured clip judge cannot produce a required LLM result."""
 
 _AXIS_NAMES = (
     "scroll_stop_power",
@@ -28,7 +38,7 @@ _JUDGE_WEIGHTS = {
     "narrative_completeness": 0.16,
     "platform_fit_shortform": 0.10,
 }
-_JUDGE_PROMPT = """You are judging whether a candidate clip would work as a high-performing short-form video.
+_JUDGE_PROMPT_STATIC = """You are judging whether a candidate clip would work as a high-performing short-form video.
 
 Score each axis from 0.0 to 1.0:
 - scroll_stop_power: does the opening stop the scroll quickly?
@@ -50,6 +60,8 @@ Return raw JSON only:
   "judge_confidence": <float>
 }}
 
+"""
+_JUDGE_PROMPT_DYNAMIC = """\
 Profile: {profile}
 Current rank score: {rank_score}
 Source: {source}
@@ -64,7 +76,7 @@ Prior context:
 Transcript excerpt:
 {transcript}
 """
-
+_JUDGE_PROMPT = _JUDGE_PROMPT_STATIC + _JUDGE_PROMPT_DYNAMIC
 
 def rerank_candidates(
     ranked_candidates: list[RankedCandidate],
@@ -82,34 +94,193 @@ def rerank_candidates(
         return ranked_candidates
 
     reranked: list[RankedCandidate] = list(ranked_candidates)
-    for idx, ranked in enumerate(reranked[:limit]):
-        judge_result = judge_candidate(
-            ranked,
-            segments,
+    started_at = time.perf_counter()
+    counters: Counter[str] = Counter()
+    provider_counts: Counter[str] = Counter()
+    keyframe_candidate_count = sum(1 for frames in (keyframes_by_candidate or {}).values() if frames)
+    snapshot_path = pathlib.Path(settings.storage_dir) / "feedback" / "mm_judge_snapshots.jsonl"
+    _log_provider_event(
+        "clip_judge_rerank_start",
+        profile=profile,
+        candidates_total=len(ranked_candidates),
+        candidates_limit=limit,
+        requested_provider=(provider or "auto"),
+        keyframe_candidate_count=keyframe_candidate_count,
+        fail_fast=bool(getattr(settings, "clip_judge_fail_fast", False)),
+        provider_fallback_enabled=bool(getattr(settings, "judge_provider_fallback_enabled", True)),
+    )
+    try:
+        for idx, ranked in enumerate(reranked[:limit]):
+            if not _passes_judge_recall_filter(ranked):
+                counters["recall_filtered"] += 1
+                rationale = list(ranked.rationale)
+                rationale.append("judge_recall_filtered")
+                reranked[idx] = RankedCandidate(
+                    candidate=ranked.candidate,
+                    features=ranked.features,
+                    rank_score=ranked.rank_score,
+                    rationale=rationale,
+                    base_rank_score=ranked.base_rank_score,
+                    heuristic_rank_score=ranked.heuristic_rank_score,
+                    trained_rank_score=ranked.trained_rank_score,
+                    model_blend=ranked.model_blend,
+                    trained_model_used=ranked.trained_model_used,
+                    judge_result=ranked.judge_result,
+                )
+                continue
+            counters["judge_attempted"] += 1
+            judge_result = judge_candidate(
+                ranked,
+                segments,
+                profile=profile,
+                provider=provider,
+                keyframes=(keyframes_by_candidate or {}).get(ranked.candidate.id),
+            )
+            provider_counts[str(judge_result.provider or "heuristic")] += 1
+            if judge_result.llm_used:
+                counters["llm_used"] += 1
+            else:
+                counters["heuristic_used"] += 1
+            _attach_judge_features(ranked.features, judge_result)
+            _append_judge_snapshot(ranked, judge_result, profile=profile)
+            counters["snapshots_written"] += 1
+            final_score, score_reason = _judge_adjusted_score(ranked.rank_score, judge_result)
+            counters[score_reason] += 1
+            rationale = list(ranked.rationale)
+            rationale.append("judge_reranked")
+            rationale.append(score_reason)
+            if judge_result.llm_used:
+                rationale.append("judge_llm")
+            reranked[idx] = RankedCandidate(
+                candidate=ranked.candidate,
+                features=ranked.features,
+                rank_score=final_score,
+                rationale=rationale,
+                base_rank_score=ranked.base_rank_score if ranked.base_rank_score is not None else ranked.rank_score,
+                heuristic_rank_score=ranked.heuristic_rank_score,
+                trained_rank_score=ranked.trained_rank_score,
+                model_blend=ranked.model_blend,
+                trained_model_used=ranked.trained_model_used,
+                judge_result=judge_result,
+            )
+    except Exception as exc:
+        _log_provider_event(
+            "clip_judge_rerank_failed",
             profile=profile,
-            provider=provider,
-            keyframes=(keyframes_by_candidate or {}).get(ranked.candidate.id),
+            candidates_total=len(ranked_candidates),
+            candidates_limit=limit,
+            elapsed_sec=round(time.perf_counter() - started_at, 3),
+            counters=dict(counters),
+            provider_counts=dict(provider_counts),
+            error_type=type(exc).__name__,
+            error=_safe_error_message(exc),
+            fail_fast=bool(getattr(settings, "clip_judge_fail_fast", False)),
         )
-        blended_score = _blend_scores(ranked.rank_score, judge_result.judge_score, judge_result.judge_confidence)
-        rationale = list(ranked.rationale)
-        rationale.append("judge_reranked")
-        if judge_result.llm_used:
-            rationale.append("judge_llm")
-        reranked[idx] = RankedCandidate(
-            candidate=ranked.candidate,
-            features=ranked.features,
-            rank_score=blended_score,
-            rationale=rationale,
-            base_rank_score=ranked.base_rank_score if ranked.base_rank_score is not None else ranked.rank_score,
-            heuristic_rank_score=ranked.heuristic_rank_score,
-            trained_rank_score=ranked.trained_rank_score,
-            model_blend=ranked.model_blend,
-            trained_model_used=ranked.trained_model_used,
-            judge_result=judge_result,
-        )
+        raise
 
     reranked.sort(key=lambda item: item.rank_score, reverse=True)
+    _log_provider_event(
+        "clip_judge_rerank_done",
+        profile=profile,
+        candidates_total=len(ranked_candidates),
+        candidates_limit=limit,
+        elapsed_sec=round(time.perf_counter() - started_at, 3),
+        counters=dict(counters),
+        provider_counts=dict(provider_counts),
+        snapshot_path=str(snapshot_path),
+    )
     return reranked
+
+
+def _passes_judge_recall_filter(ranked: RankedCandidate) -> bool:
+    if not bool(getattr(settings, "judge_recall_filter_enabled", True)):
+        return True
+    feature = ranked.features
+    min_score = float(getattr(settings, "judge_recall_filter_min_score", 0.0) or 0.0)
+    if ranked.rank_score >= min_score:
+        return True
+    if feature is None:
+        return ranked.candidate.score_hint > 0.0
+    recall_signals = (
+        float(feature.hook_strength) > 0.0,
+        float(feature.chat_peak) > 0.0,
+        float(feature.chat_hype_score) > 0.0,
+        float(feature.max_hype) > 0.0,
+        float(feature.payoff_score) > 0.0,
+        float(feature.face_reaction_peak) > 0.0,
+        float(feature.motion_peak) > 0.0,
+        float(feature.visual_hook_score) > 0.0,
+        float(feature.audio_pop_score) > 0.0,
+        float(feature.streamer_shout_score) > 0.0,
+        float(feature.event_surprise_score) > 0.0,
+        float(feature.game_event_score) > 0.0,
+        float(feature.vl_prompt_max_score) > 0.0,
+        bool(feature.is_clutch_window),
+        ranked.candidate.score_hint > 0.0,
+    )
+    return any(recall_signals)
+
+
+def _attach_judge_features(features: CandidateFeatures | None, judge_result: JudgeResult) -> None:
+    if features is None:
+        return
+    features.judge_score = round(float(judge_result.judge_score), 3)
+    features.judge_confidence = round(float(judge_result.judge_confidence), 3)
+    features.judge_scroll_stop_power = round(float(judge_result.scroll_stop_power), 3)
+    features.judge_standalone_clarity = round(float(judge_result.standalone_clarity), 3)
+    features.judge_payoff_strength = round(float(judge_result.payoff_strength), 3)
+    features.judge_narrative_completeness = round(float(judge_result.narrative_completeness), 3)
+    features.judge_platform_fit_shortform = round(float(judge_result.platform_fit_shortform), 3)
+    features.has_judge_score = True
+    features.judge_llm_used = bool(judge_result.llm_used)
+
+
+def _judge_adjusted_score(existing_score: float, judge_result: JudgeResult) -> tuple[float, str]:
+    if not bool(getattr(settings, "judge_llm_first", True)):
+        return (
+            _blend_scores(existing_score, judge_result.judge_score, judge_result.judge_confidence),
+            "judge_blended",
+        )
+    min_confidence = float(getattr(settings, "judge_llm_first_min_confidence", 0.35) or 0.0)
+    if not judge_result.llm_used:
+        return (
+            _blend_scores(existing_score, judge_result.judge_score, judge_result.judge_confidence),
+            "judge_fallback_blended",
+        )
+    if float(judge_result.judge_confidence) < min_confidence:
+        return (
+            _blend_scores(existing_score, judge_result.judge_score, judge_result.judge_confidence),
+            "judge_low_confidence_blended",
+        )
+    tiebreaker_weight = max(0.0, float(getattr(settings, "judge_llm_first_tiebreaker_weight", 0.01) or 0.0))
+    normalized_tiebreaker = max(-1.0, min(float(existing_score) / 12.0, 1.0))
+    score = float(judge_result.judge_score) + normalized_tiebreaker * tiebreaker_weight
+    return round(score, 3), "judge_primary_ranked"
+
+
+def _append_judge_snapshot(ranked: RankedCandidate, judge_result: JudgeResult, *, profile: str) -> None:
+    path = pathlib.Path(settings.storage_dir) / "feedback" / "mm_judge_snapshots.jsonl"
+    payload = {
+        "profile": profile,
+        "candidate_id": ranked.candidate.id,
+        "candidate_source": ranked.candidate.source,
+        "window_start": float(ranked.candidate.start),
+        "window_end": float(ranked.candidate.end),
+        "rank_score": float(ranked.rank_score),
+        "judge_score": float(judge_result.judge_score),
+        "judge_confidence": float(judge_result.judge_confidence),
+        "judge_provider": str(judge_result.provider),
+        "judge_model": str(judge_result.model),
+        "judge_llm_used": bool(judge_result.llm_used),
+        "judge_reason": str(judge_result.judge_reason),
+        "features": ranked.features.to_dict() if ranked.features is not None else {},
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=True) + "\n")
+    except OSError as exc:
+        logger.debug("clip judge snapshot persist failed: %s", exc)
 
 
 def judge_candidate(
@@ -126,6 +297,14 @@ def judge_candidate(
     ]
     heuristic = _heuristic_judge(ranked, window)
     if not window:
+        if _clip_judge_fail_fast_enabled():
+            _log_provider_event(
+                "clip_judge_candidate_failed",
+                candidate_id=ranked.candidate.id,
+                reason="empty_transcript_window",
+                fail_fast=True,
+            )
+            raise ClipJudgeError(f"clip judge has no transcript window for candidate {ranked.candidate.id}")
         return heuristic
 
     llm_result = _call_llm_judge(
@@ -138,6 +317,14 @@ def judge_candidate(
     )
     if llm_result is not None:
         return llm_result
+    if _clip_judge_fail_fast_enabled():
+        _log_provider_event(
+            "clip_judge_candidate_failed",
+            candidate_id=ranked.candidate.id,
+            reason="llm_result_missing",
+            fail_fast=True,
+        )
+        raise ClipJudgeError(f"clip judge LLM failed for candidate {ranked.candidate.id}")
     return heuristic
 
 
@@ -160,29 +347,315 @@ def _call_llm_judge(
         transcript=format_transcript(window, use_seconds=True),
     )
 
-    preferred = (provider or "auto").strip().lower()
-    if preferred == "gemini" and keyframes and settings.enable_multimodal_clip_judge:
-        return _call_gemini_multimodal(prompt, keyframes)
-    if preferred == "gemini":
-        return _call_gemini(prompt)
-    if preferred == "groq":
-        return _call_groq(prompt)
-    if preferred == "ollama":
-        return _call_ollama(prompt)
+    return _call_text_judge_prompt(prompt, provider=provider, keyframes=keyframes)
 
-    if settings.gemini_api_key and keyframes and settings.enable_multimodal_clip_judge:
-        result = _call_gemini_multimodal(prompt, keyframes)
+
+def _call_text_judge_prompt(
+    prompt: str,
+    *,
+    provider: str | None,
+    keyframes: list[SampledKeyframe] | None = None,
+) -> JudgeResult | None:
+    preferred = (provider or "auto").strip().lower()
+    attempts = _judge_provider_attempts(preferred, bool(keyframes))
+    if not attempts:
+        _log_provider_event(
+            "clip_judge_no_provider_configured",
+            preferred=preferred,
+            keyframes=bool(keyframes),
+            fail_fast=_clip_judge_fail_fast_enabled(),
+        )
+        if _clip_judge_fail_fast_enabled():
+            raise ClipJudgeError(f"clip judge has no configured LLM provider for preferred={preferred}")
+        return None
+    failed_providers: list[str] = []
+    for provider_name, call in attempts:
+        result = call(prompt, keyframes)
         if result is not None:
+            _log_provider_event(
+                "clip_judge_provider_selected",
+                provider=provider_name,
+                preferred=preferred,
+                fallback_from=failed_providers,
+                keyframes=bool(keyframes),
+                model=getattr(result, "model", ""),
+            )
             return result
+        _log_provider_event(
+            "clip_judge_provider_failed",
+            provider=provider_name,
+            preferred=preferred,
+            keyframes=bool(keyframes),
+            failure_reason="empty_result_or_parse_failure",
+        )
+        failed_providers.append(provider_name)
+        if len(failed_providers) < len(attempts):
+            _log_provider_event(
+                "clip_judge_provider_fallback",
+                failed_provider=provider_name,
+                next_provider=attempts[len(failed_providers)][0],
+                preferred=preferred,
+                keyframes=bool(keyframes),
+            )
+    _log_provider_event(
+        "clip_judge_all_providers_failed",
+        preferred=preferred,
+        attempted_providers=failed_providers,
+        keyframes=bool(keyframes),
+        fail_fast=_clip_judge_fail_fast_enabled(),
+    )
+    if _clip_judge_fail_fast_enabled():
+        raise ClipJudgeError(
+            "clip judge LLM provider failed"
+            f" preferred={preferred} attempted={','.join(failed_providers)}"
+        )
+    return None
+
+
+def _judge_provider_attempts(preferred: str, has_keyframes: bool) -> list[tuple[str, JudgeProviderCall]]:
+    if preferred == "anthropic" and has_keyframes and settings.enable_multimodal_clip_judge:
+        return [("anthropic_multimodal", _call_anthropic_multimodal_from_optional_keyframes)]
+    if preferred == "anthropic":
+        return [("anthropic", _call_anthropic_text)]
+    if preferred == "anthropic_multimodal":
+        return [("anthropic_multimodal", _call_anthropic_multimodal_from_optional_keyframes)]
+    if preferred == "anthropic_text":
+        return [("anthropic", _call_anthropic_text)]
+    if preferred == "gemini" and has_keyframes and settings.enable_multimodal_clip_judge:
+        return [("gemini_multimodal", _call_gemini_multimodal_from_optional_keyframes)]
+    if preferred == "gemini":
+        return [("gemini", _call_gemini_text)]
+    if preferred == "groq":
+        return [("groq", _call_groq_text)]
+    if preferred == "ollama":
+        return [("ollama", _call_ollama_text)]
+
+    attempts: list[tuple[str, JudgeProviderCall]] = []
+    if settings.anthropic_api_key and has_keyframes and settings.enable_multimodal_clip_judge:
+        attempts.append(("anthropic_multimodal", _call_anthropic_multimodal_from_optional_keyframes))
+    if settings.anthropic_api_key:
+        attempts.append(("anthropic", _call_anthropic_text))
+    if settings.gemini_api_key and has_keyframes and settings.enable_multimodal_clip_judge:
+        attempts.append(("gemini_multimodal", _call_gemini_multimodal_from_optional_keyframes))
     if settings.gemini_api_key:
-        result = _call_gemini(prompt)
-        if result is not None:
-            return result
+        attempts.append(("gemini", _call_gemini_text))
     if settings.groq_api_key:
-        result = _call_groq(prompt)
-        if result is not None:
-            return result
+        attempts.append(("groq", _call_groq_text))
+    fallback_enabled = bool(getattr(settings, "judge_provider_fallback_enabled", True))
+    if fallback_enabled:
+        attempts.append(("ollama", _call_ollama_text))
+    elif attempts:
+        return attempts[:1]
+    return attempts
+
+
+def _log_provider_event(event: str, **fields) -> None:
+    logger.info(json.dumps({"event": event, **fields}, ensure_ascii=True, sort_keys=True))
+
+
+def _clip_judge_fail_fast_enabled() -> bool:
+    return bool(getattr(settings, "clip_judge_fail_fast", False))
+
+
+def _safe_error_message(exc: BaseException, *, limit: int = 240) -> str:
+    text = str(exc).replace("\n", " ").strip()
+    if len(text) > limit:
+        return text[:limit].rstrip() + "..."
+    return text
+
+
+def _log_anthropic_usage(response_payload: dict, *, provider: str, model: str, keyframes: bool) -> None:
+    usage = response_payload.get("usage")
+    if not isinstance(usage, dict):
+        return
+    _log_provider_event(
+        "clip_judge_provider_usage",
+        provider=provider,
+        model=model,
+        keyframes=keyframes,
+        input_tokens=_int_or_zero(usage.get("input_tokens")),
+        output_tokens=_int_or_zero(usage.get("output_tokens")),
+        cache_creation_input_tokens=_int_or_zero(usage.get("cache_creation_input_tokens")),
+        cache_read_input_tokens=_int_or_zero(usage.get("cache_read_input_tokens")),
+    )
+
+
+def _log_openai_usage(response, *, provider: str, model: str, keyframes: bool) -> None:
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return
+    _log_provider_event(
+        "clip_judge_provider_usage",
+        provider=provider,
+        model=model,
+        keyframes=keyframes,
+        input_tokens=_int_or_zero(getattr(usage, "prompt_tokens", 0)),
+        output_tokens=_int_or_zero(getattr(usage, "completion_tokens", 0)),
+        total_tokens=_int_or_zero(getattr(usage, "total_tokens", 0)),
+    )
+
+
+def _int_or_zero(value: object) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _call_gemini_text(prompt: str, _keyframes: list[SampledKeyframe] | None = None) -> JudgeResult | None:
+    return _call_gemini(prompt)
+
+
+def _call_anthropic_text(prompt: str, _keyframes: list[SampledKeyframe] | None = None) -> JudgeResult | None:
+    return _call_anthropic(
+        prompt,
+        keyframes=None,
+        model=settings.anthropic_model_bulk,
+        provider="anthropic",
+    )
+
+
+def _call_anthropic_multimodal_from_optional_keyframes(
+    prompt: str,
+    keyframes: list[SampledKeyframe] | None = None,
+) -> JudgeResult | None:
+    if not keyframes:
+        return None
+    return _call_anthropic(
+        prompt,
+        keyframes=keyframes,
+        model=settings.anthropic_model_topk,
+        provider="anthropic_multimodal",
+    )
+
+
+def _call_gemini_multimodal_from_optional_keyframes(
+    prompt: str,
+    keyframes: list[SampledKeyframe] | None = None,
+) -> JudgeResult | None:
+    if not keyframes:
+        return None
+    return _call_gemini_multimodal(prompt, keyframes)
+
+
+def _call_groq_text(prompt: str, _keyframes: list[SampledKeyframe] | None = None) -> JudgeResult | None:
+    return _call_groq(prompt)
+
+
+def _call_ollama_text(prompt: str, _keyframes: list[SampledKeyframe] | None = None) -> JudgeResult | None:
     return _call_ollama(prompt)
+
+
+def _call_anthropic(
+    prompt: str,
+    *,
+    keyframes: list[SampledKeyframe] | None,
+    model: str,
+    provider: str,
+) -> JudgeResult | None:
+    if not settings.anthropic_api_key:
+        return None
+    try:
+        system_blocks, user_blocks = _anthropic_prompt_blocks(prompt, keyframes)
+        payload = {
+            "model": model,
+            "max_tokens": 220,
+            "temperature": 0.0,
+            "system": system_blocks,
+            "messages": [{"role": "user", "content": user_blocks}],
+        }
+        request = urllib.request.Request(
+            "https://api.anthropic.com/v1/messages",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "content-type": "application/json",
+                "x-api-key": str(settings.anthropic_api_key),
+                "anthropic-version": "2023-06-01",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=float(settings.clip_judge_timeout_sec)) as response:
+            response_payload = json.loads(response.read().decode("utf-8"))
+        _log_anthropic_usage(response_payload, provider=provider, model=model, keyframes=bool(keyframes))
+        content = _anthropic_text_content(response_payload)
+        result = _parse_judge_result(content, provider=provider, llm_used=True)
+        if result is not None:
+            result.model = model
+        else:
+            _log_provider_event(
+                "clip_judge_provider_parse_failed",
+                provider=provider,
+                model=model,
+                keyframes=bool(keyframes),
+                response_chars=len(content),
+            )
+        return result
+    except urllib.error.HTTPError as exc:
+        _log_provider_event(
+            "clip_judge_provider_error",
+            provider=provider,
+            model=model,
+            keyframes=bool(keyframes),
+            error_type=type(exc).__name__,
+            http_status=int(exc.code),
+        )
+        logger.debug("Anthropic clip judge failed: status=%s", exc.code)
+        return None
+    except Exception as exc:
+        _log_provider_event(
+            "clip_judge_provider_error",
+            provider=provider,
+            model=model,
+            keyframes=bool(keyframes),
+            error_type=type(exc).__name__,
+            error=_safe_error_message(exc),
+        )
+        logger.debug("Anthropic clip judge failed: %s", exc)
+        return None
+
+
+def _anthropic_prompt_blocks(
+    prompt: str,
+    keyframes: list[SampledKeyframe] | None,
+) -> tuple[list[dict], list[dict]]:
+    static_prompt, dynamic_prompt = _split_judge_prompt(prompt)
+    system_block = {"type": "text", "text": static_prompt}
+    if bool(getattr(settings, "anthropic_prompt_caching", True)):
+        system_block["cache_control"] = {"type": "ephemeral"}
+    user_blocks: list[dict] = []
+    if keyframes:
+        for frame in keyframes:
+            user_blocks.append(
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": frame.mime_type,
+                        "data": _base64_for_frame(frame.path),
+                    },
+                }
+            )
+        dynamic_prompt = _multimodal_prompt(dynamic_prompt, keyframes)
+    user_blocks.append({"type": "text", "text": dynamic_prompt})
+    return [system_block], user_blocks
+
+
+def _split_judge_prompt(prompt: str) -> tuple[str, str]:
+    if prompt.startswith(_JUDGE_PROMPT_STATIC):
+        return _JUDGE_PROMPT_STATIC, prompt[len(_JUDGE_PROMPT_STATIC):]
+    marker = "\nProfile: "
+    if marker in prompt:
+        static_prompt, dynamic_prompt = prompt.split(marker, 1)
+        return static_prompt.rstrip() + "\n\n", "Profile: " + dynamic_prompt
+    return _JUDGE_PROMPT_STATIC, prompt
+
+
+def _anthropic_text_content(response_payload: dict) -> str:
+    chunks: list[str] = []
+    for block in response_payload.get("content") or []:
+        if isinstance(block, dict) and block.get("type") == "text":
+            chunks.append(str(block.get("text") or ""))
+    return "\n".join(chunks).strip()
 
 
 def _call_gemini(prompt: str) -> JudgeResult | None:
@@ -199,9 +672,29 @@ def _call_gemini(prompt: str) -> JudgeResult | None:
             temperature=0.0,
             max_tokens=220,
         )
+        _log_openai_usage(response, provider="gemini", model=settings.gemini_model, keyframes=False)
         content = (response.choices[0].message.content or "").strip()
-        return _parse_judge_result(content, provider="gemini", llm_used=True)
+        result = _parse_judge_result(content, provider="gemini", llm_used=True)
+        if result is not None:
+            result.model = settings.gemini_model
+        else:
+            _log_provider_event(
+                "clip_judge_provider_parse_failed",
+                provider="gemini",
+                model=settings.gemini_model,
+                keyframes=False,
+                response_chars=len(content),
+            )
+        return result
     except Exception as exc:
+        _log_provider_event(
+            "clip_judge_provider_error",
+            provider="gemini",
+            model=settings.gemini_model,
+            keyframes=False,
+            error_type=type(exc).__name__,
+            error=_safe_error_message(exc),
+        )
         logger.debug("Gemini clip judge failed: %s", exc)
         return None
 
@@ -231,9 +724,29 @@ def _call_gemini_multimodal(prompt: str, keyframes: list[SampledKeyframe]) -> Ju
             temperature=0.0,
             max_tokens=220,
         )
+        _log_openai_usage(response, provider="gemini_multimodal", model=settings.gemini_model, keyframes=True)
         content = (response.choices[0].message.content or "").strip()
-        return _parse_judge_result(content, provider="gemini_multimodal", llm_used=True)
+        result = _parse_judge_result(content, provider="gemini_multimodal", llm_used=True)
+        if result is not None:
+            result.model = settings.gemini_model
+        else:
+            _log_provider_event(
+                "clip_judge_provider_parse_failed",
+                provider="gemini_multimodal",
+                model=settings.gemini_model,
+                keyframes=True,
+                response_chars=len(content),
+            )
+        return result
     except Exception as exc:
+        _log_provider_event(
+            "clip_judge_provider_error",
+            provider="gemini_multimodal",
+            model=settings.gemini_model,
+            keyframes=True,
+            error_type=type(exc).__name__,
+            error=_safe_error_message(exc),
+        )
         logger.debug("Gemini multimodal clip judge failed: %s", exc)
         return None
 
@@ -252,9 +765,29 @@ def _call_groq(prompt: str) -> JudgeResult | None:
             temperature=0.0,
             max_tokens=220,
         )
+        _log_openai_usage(response, provider="groq", model=settings.groq_model, keyframes=False)
         content = (response.choices[0].message.content or "").strip()
-        return _parse_judge_result(content, provider="groq", llm_used=True)
+        result = _parse_judge_result(content, provider="groq", llm_used=True)
+        if result is not None:
+            result.model = settings.groq_model
+        else:
+            _log_provider_event(
+                "clip_judge_provider_parse_failed",
+                provider="groq",
+                model=settings.groq_model,
+                keyframes=False,
+                response_chars=len(content),
+            )
+        return result
     except Exception as exc:
+        _log_provider_event(
+            "clip_judge_provider_error",
+            provider="groq",
+            model=settings.groq_model,
+            keyframes=False,
+            error_type=type(exc).__name__,
+            error=_safe_error_message(exc),
+        )
         logger.debug("Groq clip judge failed: %s", exc)
         return None
 
@@ -265,10 +798,31 @@ def _call_ollama(prompt: str) -> JudgeResult | None:
         response = client.chat(
             model=settings.ollama_model,
             messages=[{"role": "user", "content": prompt}],
+            format="json",
+            options={"temperature": 0.0},
         )
         content = response["message"]["content"].strip()
-        return _parse_judge_result(content, provider="ollama", llm_used=True)
+        result = _parse_judge_result(content, provider="ollama", llm_used=True)
+        if result is not None:
+            result.model = settings.ollama_model
+        else:
+            _log_provider_event(
+                "clip_judge_provider_parse_failed",
+                provider="ollama",
+                model=settings.ollama_model,
+                keyframes=False,
+                response_chars=len(content),
+            )
+        return result
     except Exception as exc:
+        _log_provider_event(
+            "clip_judge_provider_error",
+            provider="ollama",
+            model=settings.ollama_model,
+            keyframes=False,
+            error_type=type(exc).__name__,
+            error=_safe_error_message(exc),
+        )
         logger.debug("Ollama clip judge failed: %s", exc)
         return None
 
@@ -460,9 +1014,13 @@ def _build_context_summary(segments: list[RichSegment], candidate_start: float) 
 
 
 def _data_url_for_frame(path: str, mime_type: str) -> str:
-    data = pathlib.Path(path).read_bytes()
-    encoded = base64.b64encode(data).decode("ascii")
+    encoded = _base64_for_frame(path)
     return f"data:{mime_type};base64,{encoded}"
+
+
+def _base64_for_frame(path: str) -> str:
+    data = pathlib.Path(path).read_bytes()
+    return base64.b64encode(data).decode("ascii")
 
 
 def _axes_to_score(axes: dict[str, float]) -> float:

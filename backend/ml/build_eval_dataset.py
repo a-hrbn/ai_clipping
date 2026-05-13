@@ -149,6 +149,14 @@ def _has_outcome_feedback(row: dict) -> bool:
 
 
 def _dataset_role(row: dict) -> str:
+    supervision_tier = str(row.get("supervision_tier") or "").strip().lower()
+    dataset_source = str(row.get("dataset_source") or "").strip().lower()
+    if supervision_tier in {"outcome_train", "outcome_holdout"}:
+        return supervision_tier
+    if dataset_source.startswith("outcome_top_viewed_train") or dataset_source.startswith("outcome_auto_negative_train"):
+        return "outcome_train"
+    if dataset_source.startswith("outcome_"):
+        return "outcome_holdout"
     if str(row.get("supervision_tier") or "").strip().lower() == "gold_eval":
         return "gold_eval"
     if str(row.get("label_source") or "").strip().lower() == "gold_eval":

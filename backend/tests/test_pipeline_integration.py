@@ -112,6 +112,7 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 llm_provider=None,
                 chapters=None,
                 strategy=None,
+                **_kwargs,
             ):
                 del llm_provider, strategy
                 build_feature_calls.append((use_llm_semantics, llm_candidate_ids, chapters))
@@ -225,6 +226,9 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
             with ExitStack() as stack:
                 stack.enter_context(patch.object(pipeline.settings, "storage_dir", str(tmp_path)))
+                stack.enter_context(patch.object(pipeline.settings, "enable_chat_analysis", False))
+                stack.enter_context(patch.object(pipeline.settings, "enable_clip_judge", False))
+                stack.enter_context(patch.object(pipeline.settings, "analyzer_refine_timeout_sec", 1.0))
                 stack.enter_context(patch.object(pipeline, "update_job", side_effect=fake_update_job))
                 stack.enter_context(patch.object(pipeline.audio_extractor, "extract", return_value=audio_path))
                 stack.enter_context(patch.object(pipeline.transcriber, "transcribe_with_progress", return_value=transcript))
@@ -336,6 +340,7 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 llm_provider=None,
                 chapters=None,
                 strategy=None,
+                **_kwargs,
             ):
                 del use_llm_semantics, llm_candidate_ids, llm_provider, chapters, strategy
                 return [
@@ -410,6 +415,8 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
             with ExitStack() as stack:
                 stack.enter_context(patch.object(pipeline.settings, "storage_dir", str(tmp_path)))
+                stack.enter_context(patch.object(pipeline.settings, "enable_chat_analysis", False))
+                stack.enter_context(patch.object(pipeline.settings, "enable_clip_judge", False))
                 stack.enter_context(patch.object(pipeline, "update_job", side_effect=fake_update_job))
                 stack.enter_context(patch.object(pipeline.audio_extractor, "extract", return_value=audio_path))
                 stack.enter_context(patch.object(pipeline.transcriber, "transcribe_with_progress", return_value=transcript))
@@ -518,6 +525,7 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 llm_provider=None,
                 chapters=None,
                 strategy=None,
+                **_kwargs,
             ):
                 del use_llm_semantics, llm_candidate_ids, llm_provider, chapters, strategy
                 return [
@@ -576,6 +584,8 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
             with ExitStack() as stack:
                 stack.enter_context(patch.object(pipeline.settings, "storage_dir", str(tmp_path)))
+                stack.enter_context(patch.object(pipeline.settings, "enable_chat_analysis", False))
+                stack.enter_context(patch.object(pipeline.settings, "enable_clip_judge", False))
                 stack.enter_context(patch.object(pipeline, "update_job", side_effect=fake_update_job))
                 stack.enter_context(patch.object(pipeline.audio_extractor, "extract", return_value=audio_path))
                 stack.enter_context(patch.object(pipeline.transcriber, "transcribe_with_progress", return_value=transcript))

@@ -246,8 +246,13 @@ class ChatAnalyzerDownloadTests(unittest.TestCase):
                     "job-2",
                     out_dir,
                 )
+                metadata = json.loads(
+                    (out_dir / "chat.twitch_rechat.fetch_metadata.json").read_text(encoding="utf-8")
+                )
 
         self.assertIsNone(path)
+        self.assertTrue(metadata["unavailable"])
+        self.assertEqual(metadata["reason"], "twitch_graphql_video_missing")
         warning_log.assert_not_called()
         info_messages = [call.args[0] for call in info_log.call_args_list]
         self.assertIn(
@@ -304,13 +309,75 @@ class ChatAnalyzerDownloadTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "chat.twitch_rechat.json"
             path.write_text(
-                json.dumps([{"t": 1.5, "text": "KEKW", "emotes": ["KEKW"]}]),
+                json.dumps([{"t": 1.5, "text": "KEKW", "emotes": ["KEKW"], "id": "m1", "user": "viewer"}]),
                 encoding="utf-8",
             )
 
             rows = chat_analyzer.load_messages(path)
 
-        self.assertEqual(rows, [{"t": 1.5, "text": "KEKW", "emotes": ["KEKW"]}])
+        self.assertEqual(rows, [{"t": 1.5, "text": "KEKW", "emotes": ["KEKW"], "id": "m1", "user": "viewer"}])
+
+    def test_build_frames_preserves_multi_user_identical_emote_floods(self) -> None:
+        frames = chat_analyzer.build_frames(
+            [
+                {"t": 1.1, "text": "KEKW", "emotes": ["KEKW"], "id": "a", "user": "one"},
+                {"t": 1.2, "text": "KEKW", "emotes": ["KEKW"], "id": "b", "user": "two"},
+                {"t": 1.3, "text": "KEKW", "emotes": ["KEKW"], "id": "b", "user": "two"},
+            ]
+        )
+
+        self.assertEqual(frames[0].msgs, 2)
+        self.assertEqual(frames[0].categories["laugh"], 2)
+
+    def test_build_frames_adds_ema_crossing_for_chat_surge(self) -> None:
+        messages = [{"t": float(second), "text": "hello", "emotes": [], "id": f"b{second}"} for second in range(5)]
+        messages.extend(
+            {"t": float(second), "text": "PogChamp", "emotes": ["PogChamp"], "id": f"s{second}-{idx}"}
+            for second in range(20, 25)
+            for idx in range(8)
+        )
+
+        frames = chat_analyzer.build_frames(messages)
+        surge_frames = [frame for frame in frames if frame.t >= 20]
+
+        self.assertGreater(max(frame.rate_derivative for frame in surge_frames), 0.0)
+        self.assertGreater(max(frame.ema_crossing_score for frame in surge_frames), 0.0)
+
+    def test_enrich_segments_sets_category_scores_from_density_activity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "chat.twitch_rechat.json"
+            path.write_text(
+                json.dumps(
+                    [
+                        {"t": float(second), "text": "KEKW", "emotes": ["KEKW"], "id": f"k{second}"}
+                        for second in range(5)
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            segments = [chat_analyzer.RichSegment(start=0.0, end=5.0, text="setup")]
+
+            enriched = chat_analyzer.enrich_segments(segments, path)
+
+        self.assertGreater(enriched[0].chat_density_score, 0.0)
+        self.assertGreater(enriched[0].chat_laugh_score, 0.0)
+
+    def test_enrich_segments_sets_ema_crossing_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "chat.twitch_rechat.json"
+            rows = [{"t": float(second), "text": "hello", "emotes": [], "id": f"b{second}"} for second in range(5)]
+            rows.extend(
+                {"t": float(second), "text": "PogChamp", "emotes": ["PogChamp"], "id": f"s{second}-{idx}"}
+                for second in range(20, 25)
+                for idx in range(8)
+            )
+            path.write_text(json.dumps(rows), encoding="utf-8")
+            segments = [chat_analyzer.RichSegment(start=20.0, end=25.0, text="payoff")]
+
+            enriched = chat_analyzer.enrich_segments(segments, path)
+
+        self.assertGreater(enriched[0].chat_rate_derivative, 0.0)
+        self.assertGreater(enriched[0].chat_ema_crossing_score, 0.0)
 
     def test_enrich_segments_adds_density_features_without_spike(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

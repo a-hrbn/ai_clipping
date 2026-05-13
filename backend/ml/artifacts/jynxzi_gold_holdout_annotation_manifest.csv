@@ -1,11 +1,2 @@
-job_id,vod_url,creator_id,platform,vod_id,current_gold_rows,current_gold_positives,current_gold_negatives,diagnosis_error_rows,annotation_priority,notes
-twitch_vod_2722404357,https://www.twitch.tv/videos/2722404357,jynxzi,twitch,2722404357,3,0,3,2,,gold_holdout_candidate_batch
-e17f41fc-40ae-4d0a-8572-780dcf9d1f59,https://www.twitch.tv/videos/2697130608,jynxzi,twitch,2697130608,3,1,2,2,,gold_holdout_candidate_batch
-d8ea2edf-dd1a-4742-a039-18aba393dab5,https://www.twitch.tv/videos/2715644244,jynxzi,twitch,2715644244,2,0,2,1,,gold_holdout_candidate_batch
-a720b4c2-416d-4917-95f6-b912c6575a0a,https://www.twitch.tv/videos/2749673626,jynxzi,twitch,2749673626,2,0,2,1,,gold_holdout_candidate_batch
-bae90234-d6a3-4f23-9a8d-918bc36c2842,https://www.twitch.tv/videos/2744998185,jynxzi,twitch,2744998185,4,0,4,1,,gold_holdout_candidate_batch
-twitch_vod_2713838389,https://www.twitch.tv/videos/2713838389,jynxzi,twitch,2713838389,1,0,1,0,,gold_holdout_candidate_batch
-twitch_vod_2716471673,https://www.twitch.tv/videos/2716471673,jynxzi,twitch,2716471673,1,0,1,0,,gold_holdout_candidate_batch
-twitch_vod_2717303302,https://www.twitch.tv/videos/2717303302,jynxzi,twitch,2717303302,1,0,1,0,,gold_holdout_candidate_batch
-twitch_vod_2718976043,https://www.twitch.tv/videos/2718976043,jynxzi,twitch,2718976043,1,0,1,0,,gold_holdout_candidate_batch
-twitch_vod_2719793388,https://www.twitch.tv/videos/2719793388,jynxzi,twitch,2719793388,1,0,1,0,,gold_holdout_candidate_batch
+status,reason,rows
+skipped,user_labeled_rows_disabled,0

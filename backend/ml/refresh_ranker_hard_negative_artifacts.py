@@ -54,6 +54,7 @@ def main() -> int:
     hard_negative_payload = export_ranker_hard_negatives.export_hard_negatives(
         diagnosis_csv=diagnosis_csv,
         gold_rows_path=pathlib.Path(args.gold_rows),
+        existing_rows_path=pathlib.Path(args.hard_negative_rows_out),
         profile=args.profile,
         min_forced_score=float(args.min_forced_score),
         max_rows=int(args.max_rows),

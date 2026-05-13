@@ -179,6 +179,8 @@ def refine_candidates(
     moments: list[Moment] = []
     normalized_strategy = clip_strategy.normalize_strategy(strategy)
     rich_segments = [seg for seg in segments if isinstance(seg, RichSegment)]
+    if rich_segments and settings.enable_boundary_refinement_v2 and not _ranker_already_used_boundary_variant_set(ranked_candidates):
+        ranked_candidates = _rerank_by_boundary_variant_set(ranked_candidates, rich_segments, profile, limit=max(limit * 3, limit))
     memory_spans = vod_memory.build_memory_spans(rich_segments) if rich_segments else []
     memory_contexts = {
         ranked.candidate.id: vod_memory.candidate_memory_context(ranked.candidate, rich_segments, memory_spans)
@@ -220,6 +222,49 @@ def refine_candidates(
         moments.append(moment)
 
     return _dedup_moments(moments)
+
+
+def _rerank_by_boundary_variant_set(
+    ranked_candidates: list[RankedCandidate],
+    segments: list[RichSegment],
+    profile: str,
+    *,
+    limit: int,
+) -> list[RankedCandidate]:
+    reranked: list[RankedCandidate] = []
+    for ranked in ranked_candidates[:limit]:
+        selected_pair, pairs = boundary_refiner.refine_candidate_boundaries(ranked, segments, profile=profile)
+        if selected_pair is None:
+            reranked.append(ranked)
+            continue
+        # Set-max aggregation: a candidate gets credit for its best boundary
+        # variant, not only for the initial candidate window.
+        variant_bonus = max((pair.pair_score for pair in pairs), default=selected_pair.pair_score) * 1.25
+        copied = RankedCandidate(
+            candidate=ranked.candidate,
+            features=ranked.features,
+            rank_score=round(float(ranked.rank_score) + variant_bonus, 3),
+            rationale=[*ranked.rationale, "boundary_variant_set_max"],
+            base_rank_score=ranked.base_rank_score,
+            heuristic_rank_score=ranked.heuristic_rank_score,
+            trained_rank_score=ranked.trained_rank_score,
+            model_blend=ranked.model_blend,
+            trained_model_used=ranked.trained_model_used,
+            judge_result=ranked.judge_result,
+        )
+        reranked.append(copied)
+    reranked.extend(ranked_candidates[limit:])
+    return sorted(reranked, key=lambda item: item.rank_score, reverse=True)
+
+
+def _ranker_already_used_boundary_variant_set(ranked_candidates: list[RankedCandidate]) -> bool:
+    for ranked in ranked_candidates:
+        if "boundary_variant_set_max" in ranked.rationale:
+            return True
+        features = ranked.features
+        if features is not None and float(getattr(features, "boundary_variant_score", 0.0) or 0.0) > 0.0:
+            return True
+    return False
 
 
 def expand_variants(

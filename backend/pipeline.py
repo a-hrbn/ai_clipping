@@ -74,9 +74,16 @@ async def run_pipeline(
         # Start non-transcription tasks in the background, but keep transcription
         # as its own visible phase so long uploads do not appear stuck.
         update_job(job_id, status="transcribing", progress_pct=30)
-        # Chat download is currently disabled. Keep the enrichment call below as
-        # a stable no-op path so downstream feature extraction remains unchanged.
         chat_path = None
+        if settings.enable_chat_analysis:
+            update_job(job_id, status="downloading_chat", progress_pct=28)
+            chat_path = await loop.run_in_executor(
+                None,
+                chat_analyzer.download_chat,
+                url,
+                job_id,
+                pathlib.Path(settings.storage_dir) / job_id,
+            )
 
         audio_features_task = loop.run_in_executor(None, audio_features.extract, audio_path)
         video_features_task = loop.run_in_executor(None, video_features.extract, video_path)
@@ -166,15 +173,17 @@ async def run_pipeline(
         )
         candidate_features = await loop.run_in_executor(
             None,
-            feature_builder.build_features,
-            normalized_candidates,
-            transcript,
-            effective_profile,
-            False,
-            None,
-            None,
-            chapters,
-            normalized_strategy,
+            lambda: feature_builder.build_features(
+                normalized_candidates,
+                transcript,
+                effective_profile,
+                False,
+                None,
+                None,
+                chapters,
+                normalized_strategy,
+                video_path=video_path,
+            ),
         )
         ranked_candidates = await loop.run_in_executor(
             None,
@@ -201,15 +210,17 @@ async def run_pipeline(
             } if llm_top_k > 0 else set()
             candidate_features = await loop.run_in_executor(
                 None,
-                feature_builder.build_features,
-                normalized_candidates,
-                transcript,
-                effective_profile,
-                True,
-                llm_candidate_ids,
-                None,
-                chapters,
-                normalized_strategy,
+                lambda: feature_builder.build_features(
+                    normalized_candidates,
+                    transcript,
+                    effective_profile,
+                    True,
+                    llm_candidate_ids,
+                    None,
+                    chapters,
+                    normalized_strategy,
+                    video_path=video_path,
+                ),
             )
             ranked_candidates = await loop.run_in_executor(
                 None,
@@ -221,47 +232,165 @@ async def run_pipeline(
             )
         ranked_candidates_pre_judge = list(ranked_candidates)
         judged_ranked_candidates = list(ranked_candidates)
-        judge_top_k = min(max(settings.shortlist_judge_top_k, 0), len(ranked_candidates))
+        judge_top_k = (
+            len(ranked_candidates)
+            if settings.judge_all_candidates
+            else min(max(settings.shortlist_judge_top_k, 0), len(ranked_candidates))
+        )
         job_dir = pathlib.Path(settings.storage_dir) / job_id
         debug_dir = job_dir / "debug"
         debug_dir.mkdir(parents=True, exist_ok=True)
         sampled_keyframes: dict[str, list[keyframe_sampler.SampledKeyframe]] = {}
-        if (
-            settings.enable_clip_judge
-            and settings.enable_multimodal_clip_judge
-            and settings.gemini_api_key
-            and judge_top_k > 0
-        ):
-            sampled_keyframes = await loop.run_in_executor(
-                None,
-                keyframe_sampler.sample_candidate_keyframes,
-                video_path,
-                ranked_candidates[:judge_top_k],
-                debug_dir,
-                settings.judge_keyframes_per_candidate,
+        if not settings.enable_clip_judge:
+            logger.info(
+                json.dumps(
+                    {
+                        "event": "clip_judge_stage_disabled",
+                        "job_id": job_id,
+                        "reason": "enable_clip_judge_false",
+                    },
+                    ensure_ascii=True,
+                    sort_keys=True,
+                )
             )
         if settings.enable_clip_judge and judge_top_k > 0:
-            judge_future = loop.run_in_executor(
-                None,
-                clip_judge.rerank_candidates,
-                ranked_candidates,
-                transcript,
-                effective_profile,
-                judge_top_k,
-                None,
-                sampled_keyframes,
+            use_anthropic_two_tier = (
+                bool(settings.judge_two_tier_enabled)
+                and bool(settings.anthropic_api_key)
+                and bool(settings.enable_multimodal_clip_judge)
+                and int(settings.judge_topk_multimodal_k) > 0
+            )
+            logger.info(
+                json.dumps(
+                    {
+                        "event": "clip_judge_stage_start",
+                        "job_id": job_id,
+                        "candidates": len(ranked_candidates),
+                        "judge_top_k": judge_top_k,
+                        "anthropic_two_tier": use_anthropic_two_tier,
+                        "fail_fast": bool(getattr(settings, "clip_judge_fail_fast", False)),
+                        "provider_fallback_enabled": bool(getattr(settings, "judge_provider_fallback_enabled", True)),
+                    },
+                    ensure_ascii=True,
+                    sort_keys=True,
+                )
             )
             try:
-                judged_ranked_candidates = await asyncio.wait_for(
-                    asyncio.shield(judge_future),
-                    timeout=settings.clip_judge_timeout_sec,
-                )
+                if use_anthropic_two_tier:
+                    text_judge_future = loop.run_in_executor(
+                        None,
+                        clip_judge.rerank_candidates,
+                        ranked_candidates,
+                        transcript,
+                        effective_profile,
+                        judge_top_k,
+                        None,
+                        None,
+                    )
+                    judged_ranked_candidates = await asyncio.wait_for(
+                        asyncio.shield(text_judge_future),
+                        timeout=settings.clip_judge_timeout_sec,
+                    )
+                    multimodal_top_k = min(
+                        max(int(settings.judge_topk_multimodal_k), 0),
+                        len(judged_ranked_candidates),
+                    )
+                    if multimodal_top_k > 0:
+                        sampled_keyframes = await loop.run_in_executor(
+                            None,
+                            keyframe_sampler.sample_candidate_keyframes,
+                            video_path,
+                            judged_ranked_candidates[:multimodal_top_k],
+                            debug_dir,
+                            settings.judge_keyframes_per_candidate,
+                        )
+                        multimodal_judge_future = loop.run_in_executor(
+                            None,
+                            clip_judge.rerank_candidates,
+                            judged_ranked_candidates,
+                            transcript,
+                            effective_profile,
+                            multimodal_top_k,
+                            None,
+                            sampled_keyframes,
+                        )
+                        judged_ranked_candidates = await asyncio.wait_for(
+                            asyncio.shield(multimodal_judge_future),
+                            timeout=settings.clip_judge_timeout_sec,
+                        )
+                else:
+                    multimodal_provider_available = bool(settings.gemini_api_key or settings.anthropic_api_key)
+                    if settings.enable_multimodal_clip_judge and multimodal_provider_available:
+                        sampled_keyframes = await loop.run_in_executor(
+                            None,
+                            keyframe_sampler.sample_candidate_keyframes,
+                            video_path,
+                            ranked_candidates[:judge_top_k],
+                            debug_dir,
+                            settings.judge_keyframes_per_candidate,
+                        )
+                    judge_future = loop.run_in_executor(
+                        None,
+                        clip_judge.rerank_candidates,
+                        ranked_candidates,
+                        transcript,
+                        effective_profile,
+                        judge_top_k,
+                        None,
+                        sampled_keyframes,
+                    )
+                    judged_ranked_candidates = await asyncio.wait_for(
+                        asyncio.shield(judge_future),
+                        timeout=settings.clip_judge_timeout_sec,
+                    )
             except asyncio.TimeoutError:
-                logger.warning(
-                    "clip_judge.rerank_candidates timed out after %.1fs; skipping judge stage",
-                    settings.clip_judge_timeout_sec,
+                logger.error(
+                    json.dumps(
+                        {
+                            "event": "clip_judge_stage_failed",
+                            "job_id": job_id,
+                            "reason": "timeout",
+                            "timeout_sec": float(settings.clip_judge_timeout_sec),
+                            "fail_fast": bool(getattr(settings, "clip_judge_fail_fast", False)),
+                        },
+                        ensure_ascii=True,
+                        sort_keys=True,
+                    )
                 )
-                judged_ranked_candidates = list(ranked_candidates)
+                if bool(getattr(settings, "clip_judge_fail_fast", False)):
+                    raise
+            except clip_judge.ClipJudgeError as exc:
+                logger.error(
+                    json.dumps(
+                        {
+                            "event": "clip_judge_stage_failed",
+                            "job_id": job_id,
+                            "reason": "llm_judge_failed",
+                            "error_type": type(exc).__name__,
+                            "error": str(exc),
+                            "fail_fast": bool(getattr(settings, "clip_judge_fail_fast", False)),
+                        },
+                        ensure_ascii=True,
+                        sort_keys=True,
+                    )
+                )
+                if bool(getattr(settings, "clip_judge_fail_fast", False)):
+                    raise
+            else:
+                logger.info(
+                    json.dumps(
+                        {
+                            "event": "clip_judge_stage_done",
+                            "job_id": job_id,
+                            "judged_candidates": sum(
+                                1 for item in judged_ranked_candidates if item.judge_result is not None
+                            ),
+                            "candidates": len(judged_ranked_candidates),
+                        },
+                        ensure_ascii=True,
+                        sort_keys=True,
+                    )
+                )
         ranked_candidates = await loop.run_in_executor(
             None,
             lambda: selector.select_diverse_ranked_candidates(

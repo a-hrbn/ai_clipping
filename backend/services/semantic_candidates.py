@@ -42,6 +42,7 @@ _MODEL_REPO_ID = f"sentence-transformers/{_MODEL_NAME}"
 _model = None
 _model_lock = threading.Lock()
 _model_runtime_logged = False
+_model_unavailable_logged_reasons: set[str] = set()
 
 # ---------------------------------------------------------------------------
 # Viral pattern templates — bilingual (DE + EN)
@@ -341,25 +342,22 @@ def _get_model():
         if _model is not None:
             return _model
         try:
-            from sentence_transformers import SentenceTransformer
             cache_folder = str(_sentence_transformer_cache_folder())
             local_model_dir = _materialize_local_sentence_transformer_model(_MODEL_REPO_ID)
-            source = "local_snapshot" if local_model_dir is not None else "huggingface"
+            if local_model_dir is None:
+                _log_model_unavailable_once("local_snapshot_missing")
+                _model = None
+                return _model
+            from sentence_transformers import SentenceTransformer
+            source = "local_snapshot"
             device = _resolved_semantic_device()
             logger.info("semantic_candidates_init model=%s source=%s device=%s", _MODEL_NAME, source, device)
-            if local_model_dir is not None:
-                _model = SentenceTransformer(
-                    str(local_model_dir),
-                    local_files_only=True,
-                    device=device,
-                )
-            else:
-                _model = SentenceTransformer(
-                    _MODEL_NAME,
-                    cache_folder=cache_folder,
-                    local_files_only=False,
-                    device=device,
-                )
+            _model = SentenceTransformer(
+                str(local_model_dir),
+                cache_folder=cache_folder,
+                local_files_only=True,
+                device=device,
+            )
             if not _model_runtime_logged:
                 logger.info(
                     "semantic_candidates_runtime model=%s source=%s device=%s batch_size=%s",
@@ -370,9 +368,34 @@ def _get_model():
                 )
                 _model_runtime_logged = True
         except Exception as exc:
-            logger.warning("Could not load sentence-transformers model: %s", exc)
+            _log_model_unavailable_once("load_failed", error=str(exc))
             _model = None
     return _model
+
+
+def _log_model_unavailable_once(reason: str, *, error: str | None = None) -> None:
+    key = f"{reason}:{error or ''}"
+    if key in _model_unavailable_logged_reasons:
+        logger.debug(
+            "semantic_candidates_model_unavailable_suppressed model=%s reason=%s",
+            _MODEL_NAME,
+            reason,
+        )
+        return
+    _model_unavailable_logged_reasons.add(key)
+    if error:
+        logger.warning(
+            "semantic_candidates_model_unavailable model=%s reason=%s error=%s",
+            _MODEL_NAME,
+            reason,
+            error,
+        )
+        return
+    logger.warning(
+        "semantic_candidates_model_unavailable model=%s reason=%s",
+        _MODEL_NAME,
+        reason,
+    )
 
 
 def _resolved_semantic_device() -> str:

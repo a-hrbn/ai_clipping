@@ -39,14 +39,16 @@ def main() -> int:
     parser.add_argument("--max-rows", type=int, default=100)
     args = parser.parse_args()
 
+    rows_out = pathlib.Path(args.rows_out)
     payload = export_hard_negatives(
         diagnosis_csv=pathlib.Path(args.diagnosis_csv),
         gold_rows_path=pathlib.Path(args.gold_rows),
+        existing_rows_path=rows_out,
         profile=args.profile,
         min_forced_score=args.min_forced_score,
         max_rows=args.max_rows,
     )
-    _write_jsonl(pathlib.Path(args.rows_out), payload["rows"])
+    _write_jsonl(rows_out, payload["rows"])
     _write_json(pathlib.Path(args.summary_out), payload["summary"])
     print(json.dumps(payload["summary"], ensure_ascii=True))
     return 0
@@ -56,12 +58,14 @@ def export_hard_negatives(
     *,
     diagnosis_csv: pathlib.Path,
     gold_rows_path: pathlib.Path,
+    existing_rows_path: pathlib.Path | None = None,
     profile: str,
     min_forced_score: float = 0.0,
     max_rows: int = 100,
 ) -> dict[str, object]:
     diagnosis_rows = _read_csv(diagnosis_csv)
     gold_rows = _read_jsonl(gold_rows_path)
+    existing_rows = _read_jsonl(existing_rows_path) if existing_rows_path else []
     gold_index = _gold_row_index(gold_rows)
     selected = _select_false_positives(
         diagnosis_rows,
@@ -71,12 +75,26 @@ def export_hard_negatives(
     rows: list[dict] = []
     missing_keys: list[str] = []
     seen_keys: set[tuple[str, ...]] = set()
+    duplicate_existing_rows = 0
+    duplicate_selected_rows = 0
+
+    for row in existing_rows:
+        key = _first_row_key(row)
+        if key is not None:
+            if key in seen_keys:
+                duplicate_existing_rows += 1
+                continue
+            seen_keys.add(key)
+        rows.append(row)
+
+    carried_forward_rows = len(rows)
     for diagnosis in selected:
         key = _diagnosis_key(diagnosis)
         if key is None:
             missing_keys.append("")
             continue
         if key in seen_keys:
+            duplicate_selected_rows += 1
             continue
         seen_keys.add(key)
         source = gold_index.get(key)
@@ -85,14 +103,21 @@ def export_hard_negatives(
             continue
         rows.append(_hard_negative_row(source, diagnosis, profile))
 
+    new_rows = len(rows) - carried_forward_rows
     summary = {
         "profile": profile,
         "diagnosis_csv": str(diagnosis_csv),
         "gold_rows": str(gold_rows_path),
+        "existing_rows": str(existing_rows_path) if existing_rows_path else "",
         "diagnosis_rows": len(diagnosis_rows),
         "gold_rows_read": len(gold_rows),
+        "existing_rows_read": len(existing_rows),
+        "carried_forward_rows": carried_forward_rows,
         "selected_false_positive_rows": len(selected),
+        "new_rows": new_rows,
         "exported_rows": len(rows),
+        "duplicate_existing_rows": duplicate_existing_rows,
+        "duplicate_selected_rows": duplicate_selected_rows,
         "missing_source_rows": len(missing_keys),
         "min_forced_score": float(min_forced_score),
         "max_rows": int(max_rows),
@@ -165,6 +190,11 @@ def _gold_row_index(rows: list[dict]) -> dict[tuple[str, ...], dict]:
         for key in _row_keys(row):
             index.setdefault(key, row)
     return index
+
+
+def _first_row_key(row: dict) -> tuple[str, ...] | None:
+    keys = _row_keys(row)
+    return keys[0] if keys else None
 
 
 def _diagnosis_key(row: dict) -> tuple[str, ...] | None:

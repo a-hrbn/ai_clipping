@@ -1,3 +1,4 @@
+import base64
 import tempfile
 import unittest
 import json
@@ -134,6 +135,336 @@ class AutoTrainShortFormTests(unittest.TestCase):
         self.assertTrue(auto_train_short_form._is_short_form_candidate(youtube_short, "youtube", 8, 180))
         self.assertFalse(auto_train_short_form._is_short_form_candidate(youtube_long, "youtube", 8, 180))
         self.assertTrue(auto_train_short_form._is_short_form_candidate(tiktok_clip, "tiktok", 8, 180))
+
+    def test_discover_seed_skips_live_and_upcoming_youtube_results(self) -> None:
+        seed = {
+            "streamer": "jynxzi",
+            "platform": "youtube",
+            "source_url": "ytsearch:jynxzi shorts",
+            "language": "en",
+            "tags": "x",
+            "max_clips": "4",
+        }
+        raw_entries = [
+            {
+                "id": "upcoming",
+                "duration": 0,
+                "view_count": 100,
+                "live_status": "is_upcoming",
+                "title": "Jynxzi live soon",
+            },
+            {
+                "id": "live-now",
+                "duration": 0,
+                "view_count": 100,
+                "is_live": True,
+                "title": "Jynxzi live",
+            },
+            {
+                "id": "clip",
+                "duration": 30,
+                "view_count": 1000,
+                "like_count": 50,
+                "comment_count": 10,
+                "title": "Jynxzi clip",
+                "uploader": "Jynxzi Clips",
+                "channel": "Jynxzi Clips",
+            },
+        ]
+        with patch("ml.auto_train_short_form._extract_source_entries", return_value=raw_entries):
+            rows = auto_train_short_form._discover_seed(
+                seed,
+                min_duration=8,
+                max_duration=180,
+                top_fraction=1.0,
+                bottom_fraction=0.0,
+            )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["url"], "https://www.youtube.com/watch?v=clip")
+        self.assertEqual(rows[0]["title"], "Jynxzi clip")
+        self.assertEqual(rows[0]["uploader"], "Jynxzi Clips")
+        self.assertEqual(rows[0]["channel"], "Jynxzi Clips")
+        self.assertEqual(rows[0]["discovery_source_url"], "ytsearch:jynxzi shorts")
+
+    def test_youtube_date_search_uses_upload_date_sorted_search_url(self) -> None:
+        captured_urls: list[str] = []
+
+        class FakeYdl:
+            def __init__(self, opts):
+                self.opts = opts
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def extract_info(self, url, download=False):
+                captured_urls.append(url)
+                return {"entries": [{"id": "abc", "title": "Jynxzi fresh clip"}]}
+
+        with patch("ml.auto_train_short_form.yt_dlp.YoutubeDL", FakeYdl):
+            rows = auto_train_short_form._extract_source_entries("ytsearchdate500:jynxzi funny", 10)
+
+        self.assertEqual(rows, [{"id": "abc", "title": "Jynxzi fresh clip"}])
+        self.assertEqual(len(captured_urls), 1)
+        self.assertTrue(captured_urls[0].startswith("https://www.youtube.com/results?"))
+        self.assertIn("search_query=jynxzi+funny", captured_urls[0])
+        self.assertIn("sp=CAI%253D", captured_urls[0])
+
+    def test_youtube_channel_shorts_entries_use_page_publish_dates(self) -> None:
+        html = (
+            '{"videoId":"abc123xyz_1","title":{"runs":[{"text":"Clip A"}]},'
+            '"publishedTimeText":{"simpleText":"2 weeks ago"}}'
+            '{"videoId":"missingdate","title":{"runs":[{"text":"Clip B"}]}}'
+        )
+
+        class FakeYdl:
+            def __init__(self, opts):
+                self.opts = opts
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def extract_info(self, url, download=False):
+                return {
+                    "entries": [
+                        {
+                            "id": "abc123xyz_1",
+                            "url": "https://www.youtube.com/shorts/abc123xyz_1",
+                            "duration": 30,
+                            "title": "Clip A",
+                        },
+                        {
+                            "id": "missingdate",
+                            "url": "https://www.youtube.com/shorts/missingdate",
+                            "duration": 30,
+                            "title": "Clip B",
+                        },
+                    ]
+                }
+
+        now = datetime(2026, 5, 10, tzinfo=timezone.utc)
+        with patch("ml.auto_train_short_form.yt_dlp.YoutubeDL", FakeYdl), \
+             patch("ml.auto_train_short_form._fetch_text", return_value=html), \
+             patch("ml.auto_train_short_form._extract_single_entry_metadata_with_cache_status", return_value=(None, "failed")), \
+             patch("ml.auto_train_short_form.datetime") as datetime_mock:
+            datetime_mock.now.return_value = now
+            datetime_mock.strptime = datetime.strptime
+            rows = auto_train_short_form._extract_source_entries("https://www.youtube.com/@Clips.Delivery/shorts", 10)
+
+        self.assertEqual(rows[0]["upload_date"], "20260426")
+        self.assertGreater(int(rows[0]["timestamp"]), 0)
+        self.assertNotIn("upload_date", rows[1])
+
+    def test_youtube_channel_shorts_missing_page_dates_use_cached_metadata(self) -> None:
+        calls: list[str] = []
+        sleeps: list[float] = []
+
+        class FakeYdl:
+            def __init__(self, opts):
+                self.opts = opts
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def extract_info(self, url, download=False):
+                calls.append(url)
+                if url.endswith("/@Clips.Delivery/shorts"):
+                    return {
+                        "entries": [
+                            {
+                                "id": "abc123xyz_1",
+                                "url": "https://www.youtube.com/shorts/abc123xyz_1",
+                                "duration": 30,
+                                "title": "Flat Clip",
+                                "view_count": 100,
+                            }
+                        ]
+                    }
+                return {
+                    "id": "abc123xyz_1",
+                    "webpage_url": "https://www.youtube.com/shorts/abc123xyz_1",
+                    "duration": 28,
+                    "title": "Exact Metadata Clip",
+                    "uploader": "Clips Delivery",
+                    "timestamp": 1777737600,
+                    "upload_date": "20260502",
+                    "view_count": 250,
+                }
+
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch("ml.auto_train_short_form.yt_dlp.YoutubeDL", FakeYdl), \
+             patch("ml.auto_train_short_form._fetch_text", return_value=""), \
+             patch.object(auto_train_short_form.settings, "storage_dir", tmp), \
+             patch.object(auto_train_short_form.settings, "yt_dlp_short_form_min_sleep_interval_sec", 5.0), \
+             patch.object(auto_train_short_form.settings, "yt_dlp_short_form_max_sleep_interval_sec", 10.0), \
+             patch.object(auto_train_short_form.random, "uniform", return_value=7.5), \
+             patch.object(auto_train_short_form.time, "sleep", side_effect=lambda sec: sleeps.append(sec)):
+            first = auto_train_short_form._extract_source_entries("https://www.youtube.com/@Clips.Delivery/shorts", 10)
+            second = auto_train_short_form._extract_source_entries("https://www.youtube.com/@Clips.Delivery/shorts", 10)
+
+        self.assertEqual(first[0]["upload_date"], "20260502")
+        self.assertEqual(first[0]["title"], "Exact Metadata Clip")
+        self.assertEqual(second[0]["upload_date"], "20260502")
+        self.assertEqual(
+            calls,
+            [
+                "https://www.youtube.com/@Clips.Delivery/shorts",
+                "https://www.youtube.com/shorts/abc123xyz_1",
+                "https://www.youtube.com/@Clips.Delivery/shorts",
+            ],
+        )
+        self.assertEqual(sleeps, [7.5])
+
+    def test_youtube_relative_publish_time_parses_approximate_date(self) -> None:
+        now = datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc)
+
+        parsed = auto_train_short_form._parse_youtube_relative_publish_time("3 months ago", now=now)
+
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual(parsed.date().isoformat(), "2026-02-09")
+
+    def test_youtube_date_search_error_triggers_cooldown(self) -> None:
+        sleeps: list[float] = []
+
+        class FakeYdl:
+            def __init__(self, opts):
+                self.opts = opts
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def extract_info(self, url, download=False):
+                raise RuntimeError(
+                    "[youtube] Zsa94sijQQ8: This content isn't available, try again later. "
+                    "The current session has been rate-limited by YouTube for up to an hour."
+                )
+
+        with patch("ml.auto_train_short_form.yt_dlp.YoutubeDL", FakeYdl), \
+             patch.object(auto_train_short_form.settings, "yt_dlp_short_form_min_sleep_interval_sec", 5.0), \
+             patch.object(auto_train_short_form.settings, "yt_dlp_short_form_max_sleep_interval_sec", 10.0), \
+             patch.object(auto_train_short_form.random, "uniform", return_value=7.5), \
+             patch.object(auto_train_short_form.time, "sleep", side_effect=lambda sec: sleeps.append(sec)):
+            rows = auto_train_short_form._extract_source_entries("ytsearchdate500:jynxzi funny", 10)
+
+        self.assertEqual(rows, [])
+        self.assertEqual(sleeps, [7.5, 7.5])
+
+    def test_metadata_error_triggers_cooldown_before_fallback(self) -> None:
+        sleeps: list[float] = []
+
+        class FakeYdl:
+            def __init__(self, opts):
+                self.opts = opts
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def extract_info(self, url, download=False):
+                raise RuntimeError("[youtube] abc: Video unavailable")
+
+        with patch("ml.auto_train_short_form.yt_dlp.YoutubeDL", FakeYdl), \
+             patch.object(auto_train_short_form.settings, "yt_dlp_short_form_min_sleep_interval_sec", 5.0), \
+             patch.object(auto_train_short_form.settings, "yt_dlp_short_form_max_sleep_interval_sec", 10.0), \
+             patch.object(auto_train_short_form.random, "uniform", return_value=7.5), \
+             patch.object(auto_train_short_form.time, "sleep", side_effect=lambda sec: sleeps.append(sec)):
+            row = auto_train_short_form._extract_single_entry_metadata("https://www.youtube.com/shorts/abc")
+
+        self.assertIsNone(row)
+        self.assertEqual(sleeps, [7.5])
+
+    def test_tiktok_keyword_search_uses_bing_video_links(self) -> None:
+        rss = """<?xml version="1.0" encoding="UTF-8"?>
+        <rss><channel>
+          <item><link>https://www.tiktok.com/@clipper/video/123</link></item>
+          <item><link>https://www.tiktok.com/@clipper/video/123</link></item>
+          <item><link>https://www.tiktok.com/@other/video/456</link></item>
+        </channel></rss>
+        """
+
+        def _fake_metadata(url: str, proxy=None):
+            return {
+                "webpage_url": url,
+                "duration": 22,
+                "title": "Jynxzi funny clip",
+                "uploader": "clipper",
+            }
+
+        with patch("ml.auto_train_short_form._fetch_text", return_value=rss) as fetch_mock, \
+             patch("ml.auto_train_short_form._extract_single_entry_metadata", side_effect=_fake_metadata):
+            rows = auto_train_short_form._extract_source_entries("tiktoksearch500:jynxzi funny", 10)
+
+        self.assertEqual([row["webpage_url"] for row in rows], [
+            "https://www.tiktok.com/@clipper/video/123",
+            "https://www.tiktok.com/@other/video/456",
+        ])
+        self.assertIn("site%3Atiktok.com", fetch_mock.call_args.args[0])
+        self.assertIn("jynxzi%20funny", fetch_mock.call_args.args[0])
+
+    def test_tiktok_keyword_search_keeps_rss_fallback_when_metadata_fails(self) -> None:
+        rss = """<?xml version="1.0" encoding="UTF-8"?>
+        <rss><channel>
+          <item>
+            <title>Jynxzi rage clip</title>
+            <link>https://www.tiktok.com/@clipper/video/123</link>
+            <description>Jynxzi stream repost</description>
+            <pubDate>Tue, 05 May 2026 12:34:56 GMT</pubDate>
+          </item>
+        </channel></rss>
+        """
+
+        with patch("ml.auto_train_short_form._fetch_text", return_value=rss), \
+             patch("ml.auto_train_short_form._extract_single_entry_metadata", return_value=None):
+            rows = auto_train_short_form._extract_source_entries("tiktoksearch500:jynxzi rage", 10)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["webpage_url"], "https://www.tiktok.com/@clipper/video/123")
+        self.assertEqual(rows[0]["title"], "Jynxzi rage clip")
+        self.assertEqual(rows[0]["description"], "Jynxzi stream repost")
+        self.assertEqual(rows[0]["uploader"], "clipper")
+        self.assertEqual(rows[0]["upload_date"], "20260505")
+        self.assertGreater(rows[0]["timestamp"], 0)
+
+    def test_tiktok_keyword_search_uses_bing_html_fallback_when_rss_empty(self) -> None:
+        rss = """<?xml version="1.0" encoding="UTF-8"?><rss><channel></channel></rss>"""
+        html = """
+        <html><body>
+          <a href="https://www.tiktok.com/@clipper/video/123">Jynxzi funny TikTok clip</a>
+        </body></html>
+        """
+
+        with patch("ml.auto_train_short_form._fetch_text", side_effect=[rss, html]), \
+             patch("ml.auto_train_short_form._extract_single_entry_metadata", return_value=None):
+            rows = auto_train_short_form._extract_source_entries("tiktoksearch500:jynxzi funny", 1)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["webpage_url"], "https://www.tiktok.com/@clipper/video/123")
+        self.assertEqual(rows[0]["title"], "Jynxzi funny TikTok clip")
+        self.assertEqual(rows[0]["uploader"], "clipper")
+
+    def test_tiktok_html_fallback_decodes_bing_redirect_links(self) -> None:
+        target = "https://www.tiktok.com/@clipper/video/123"
+        encoded = "a1" + base64.urlsafe_b64encode(target.encode("utf-8")).decode("ascii").rstrip("=")
+        html = f'<a href="https://www.bing.com/ck/a?u={encoded}">Jynxzi funny TikTok clip</a>'
+
+        links = auto_train_short_form._extract_tiktok_links_from_html(html)
+
+        self.assertEqual(links, [target])
 
     def test_extract_tiktok_username_handles_profile_urls(self) -> None:
         self.assertEqual(

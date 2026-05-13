@@ -12,6 +12,7 @@ import yt_dlp
 from yt_dlp.utils import download_range_func
 from config import settings
 from job_manager import is_job_cancelled, update_job
+from services.yt_dlp_auth import apply_yt_dlp_auth_options
 
 
 class DownloadUnavailableError(RuntimeError):
@@ -41,18 +42,50 @@ def _aria2c_available() -> bool:
     return shutil.which("aria2c") is not None
 
 
-def _base_ydl_opts(job_dir: pathlib.Path) -> dict[str, object]:
-    return {
-        "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+def _format_selector(*, max_height: int = 0) -> str:
+    height = max(int(max_height or 0), 0)
+    if height <= 0:
+        return "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+    return (
+        f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/"
+        f"bestvideo[height<={height}]+bestaudio/"
+        f"best[height<={height}][ext=mp4]/"
+        f"best[height<={height}]"
+    )
+
+
+def _training_vod_max_height_for_job(job_id: str) -> int:
+    if not str(job_id or "").startswith("twitch_vod"):
+        return 0
+    try:
+        return max(int(settings.training_vod_max_height or 0), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _base_ydl_opts(job_dir: pathlib.Path, *, max_height: int = 0) -> dict[str, object]:
+    return apply_yt_dlp_auth_options({
+        "format": _format_selector(max_height=max_height),
         "outtmpl": str(job_dir / "video.%(ext)s"),
         "quiet": True,
         "no_warnings": True,
         "merge_output_format": "mp4",
-    }
+    })
 
 
-def _twitch_download_ydl_opts(job_dir: pathlib.Path) -> dict[str, object]:
-    opts = _base_ydl_opts(job_dir)
+def _apply_short_form_sleep_opts(opts: dict[str, object]) -> None:
+    sleep_requests = max(float(settings.yt_dlp_short_form_sleep_requests_sec or 0.0), 0.0)
+    min_sleep = max(float(settings.yt_dlp_short_form_min_sleep_interval_sec or 0.0), 0.0)
+    max_sleep = max(float(settings.yt_dlp_short_form_max_sleep_interval_sec or 0.0), 0.0)
+    if sleep_requests > 0:
+        opts["sleep_interval_requests"] = sleep_requests
+    if min_sleep > 0:
+        opts["sleep_interval"] = min_sleep
+        opts["max_sleep_interval"] = max(max_sleep, min_sleep)
+
+
+def _twitch_download_ydl_opts(job_dir: pathlib.Path, *, max_height: int = 0) -> dict[str, object]:
+    opts = _base_ydl_opts(job_dir, max_height=max_height)
     opts.update(
         {
             "concurrent_fragment_downloads": max(int(settings.twitch_download_concurrent_fragments or 0), 1),
@@ -341,7 +374,12 @@ def _download_uncached(
             # a JobStatus entry first. In that case progress updates are best-effort.
             pass
 
-    ydl_opts = _twitch_download_ydl_opts(job_dir) if _is_twitch_url(url) else _base_ydl_opts(job_dir)
+    max_height = _training_vod_max_height_for_job(job_id)
+    ydl_opts = (
+        _twitch_download_ydl_opts(job_dir, max_height=max_height)
+        if _is_twitch_url(url)
+        else _base_ydl_opts(job_dir, max_height=max_height)
+    )
     if ydl_opt_overrides:
         ydl_opts.update(ydl_opt_overrides)
     if disable_external_downloader:
@@ -408,7 +446,15 @@ def ensure_cached_download(
 
         temp_job_id = f"_cache_fill_{cache_namespace}_{uuid.uuid4().hex[:12]}"
         temp_job_dir = pathlib.Path(settings.storage_dir) / temp_job_id
-        downloaded_path = _download_uncached(url, temp_job_id, proxy=proxy)
+        ydl_opt_overrides = {}
+        if cache_namespace == "short_form":
+            _apply_short_form_sleep_opts(ydl_opt_overrides)
+        downloaded_path = _download_uncached(
+            url,
+            temp_job_id,
+            proxy=proxy,
+            ydl_opt_overrides=ydl_opt_overrides,
+        )
         try:
             _store_in_cache(downloaded_path, cache_path, url=url, namespace=cache_namespace)
         finally:
