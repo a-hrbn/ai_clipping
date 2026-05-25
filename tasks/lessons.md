@@ -1,5 +1,30 @@
 # Lessons
 
+- Frontend serving jobs should clean up job-local source media immediately
+  after completion, failure, or cancellation. Keep clips/debug artifacts for
+  the UI, and exclude training/backfill job ids that intentionally preserve
+  media for durable caches.
+- If a startup behavior is meant to be automatic, make the script default do it
+  directly and keep environment variables only as overrides or opt-outs.
+- Serving jobs must not let optional LLM/Judge timeouts abort the whole
+  pipeline after ranked candidates already exist. Fail-fast is useful for
+  offline judge backfills, but frontend serving should degrade to pre-judge
+  candidates and log the degradation.
+- If the app backend runs the same heavy Whisper/Semantic path as training,
+  provide a CUDA container path plus CPU fallback. Keep the base compose file
+  CPU-safe and put GPU-only image/runtime settings in a separate override.
+- When containerizing the ML backend, preinstall the intended CPU PyTorch wheel
+  set before installing app extras. Otherwise dependency resolution can pull
+  large CUDA/NVIDIA packages into a default CPU-oriented image.
+- Any data sent from FastAPI to a worker process must be explicitly converted
+  to JSON-safe primitives. Normalized runtime strategy payloads can contain
+  `set` fields such as keywords.
+- Frontend URL/upload submits must not import `pipeline.py` in the FastAPI
+  process. Run the heavy pipeline in an isolated worker process so native CV
+  crashes become job failures instead of backend crashes.
+- When frontend feedback is re-enabled as training signal, regenerate gold rows
+  from the feedback store on each run instead of preserving generated gold
+  artifacts; the append-only feedback snapshots should be the source of truth.
 - When rebuilding a repost manifest for source freshness, carry forward usable
   media paths from the previous manifest by canonical repost identity. A fresh
   discovery row usually lacks `video_path`, and exact URL-keyed caches can miss
@@ -282,3 +307,54 @@
 - YouTube's "try again later" rate limit is about request pacing, not media
   cache correctness. When applying a fix, set yt-dlp's native sleep options on
   the Short-form media cache fill rather than adding an outer manual sleep.
+- Docker-style paths from `.env` can leak into local backend runs. For yt-dlp
+  cookie auth, normalize `/app/backend/...` to the local backend root and ensure
+  parent directories exist before constructing `YoutubeDL`, otherwise cleanup
+  on `__exit__` can mask the original download failure.
+- Treat native `ffmpeg exited with code -11` as a retryable downloader-shape
+  failure for Twitch VOD downloads. Retry once without external downloader
+  options and prefer a single-file format before surfacing the error.
+- Do not wrap yt-dlp downloads in a `with YoutubeDL(...)` block when retry
+  decisions depend on the original download exception. `YoutubeDL.__exit__` can
+  raise a cookie-save cleanup error and mask the primary `extract_info` failure.
+- When a runtime feature is controlled by a subprocess environment default,
+  changing `.env` or config alone is not enough. For frontend pipeline behavior,
+  update `_pipeline_subprocess_env()` and keep an explicit override path.
+- Frontend Twitch VOD submits need the durable downloader cache enabled in both
+  config defaults and the real `.env`. Before deleting large failed/cancelled
+  job media, migrate one reusable full VOD into `_download_cache/twitch` so the
+  cleanup does not throw away a valid expensive download.
+- Existing cache directories can still be unusable when Docker created them as
+  `root`. Cache configuration must perform a write probe, not only `mkdir`, and
+  frontend worker/probe environments should carry headless OpenCV/Mesa defaults
+  alongside `MPLCONFIGDIR`.
+- If SIGKILL repeats at the same frontend progress after reducing downstream
+  parallelism, re-scope from the live job phase. Long VOD Whisper chunking must
+  be resumable; sequencing later feature extraction does not help if the kill
+  happens before that stage.
+- A durable chunk cache is not enough when the same long-lived Whisper process
+  keeps getting OOM-killed after several chunks. For frontend full-VOD
+  transcribes, isolate non-cached chunks in child processes so native/PyTorch
+  memory is returned to the OS after every chunk.
+- If frontend VOD transcription still OOMs after Whisper chunk isolation, check post-ASR diarization before changing chunk logic again. Pyannote/torchcodec can OOM the parent worker after all chunks are cached; frontend jobs should keep diarization disabled unless explicitly needed and verified.
+- When a frontend VOD already has complete transcript chunk cache, avoid full `audio.wav` extraction before cache lookup. Full-VOD audio extraction can recreate OOM/page-cache pressure even though Whisper would not need to run.
+- For long frontend VODs, never batch sparse candidate visual seconds as one min-to-max ffmpeg range. Group contiguous candidate windows so face-reaction refinement does not decode hours of non-candidate video into RAM.
+- When exposing the app through a same-origin frontend tunnel, proxy every
+  browser-consumed backend surface, not only JSON APIs. Generated clip media
+  under `/static/...` must be routed through the same origin as `/api/...`, or
+  jobs can complete while the client cannot render/download the clips.
+- A judge rerank is not a serving quality gate. If the judge says candidates
+  lack context, payoff, or narrative closure, filter them before diversity/top-k
+  filling; otherwise the UI will still emit the least-bad clips from a weak
+  candidate pool.
+- For learned proposal models, do not train on translated downstream ranker
+  features when serving uses `proposal_scorer.build_proposal_features`.
+  Train/serve feature skew makes the artifact look trained while learning the
+  wrong value distributions. Prefer serving-feature regeneration from segments,
+  or exclude skewed backfills from the default trainer.
+- Do not hide backend diagnostics just because detailed debug artifacts are not available yet. If the API returns an unavailable/pending diagnostics summary, render that state in the frontend so users know the backend is alive and which phase is blocking.
+- When updating only the frontend while a pipeline job is running, avoid Compose commands that recreate backend dependencies. Recreating the backend kills subprocess workers and leaves persisted jobs looking active unless they are explicitly reconciled.
+- If the user asks to remove a timeout after repeated Clip Judge fallbacks,
+  remove the whole-stage timeout instead of only raising it. Long LLM stages
+  need per-candidate live progress so the UI shows forward motion instead of a
+  silent fallback.

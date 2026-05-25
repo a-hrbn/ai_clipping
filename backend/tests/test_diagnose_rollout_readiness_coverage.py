@@ -41,8 +41,12 @@ class DiagnoseRolloutReadinessCoverageTests(unittest.TestCase):
             self.assertEqual(report["status"], "ok")
             self.assertEqual(report["summary"]["rows_after_training_policy"], 6)
             self.assertEqual(report["summary"]["available_groups_after_policy"], 4)
+            self.assertEqual(report["targets"]["mode"], "inventory_calibrated")
+            self.assertEqual(report["targets"]["validation_groups"], 4)
+            self.assertEqual(report["targets"]["raw_targets"]["validation_groups"], 40)
             self.assertIn("validation_groups_below_rollout_target", report["readiness"]["failures"])
-            self.assertEqual(report["diagnosis"]["available_groups_needed"], 36)
+            self.assertEqual(report["diagnosis"]["available_groups_needed"], 0)
+            self.assertIn("split_validation_groups", report["diagnosis"]["blockers"])
             self.assertEqual(report["holdout_overlap"]["holdout_only_groups"], 1)
             self.assertEqual(report["holdout_overlap"]["holdout_only_sample_groups"], ["vod-z"])
             self.assertTrue(any(group["split"] == "validation" for group in report["groups"]))
@@ -62,6 +66,31 @@ class DiagnoseRolloutReadinessCoverageTests(unittest.TestCase):
 
             self.assertEqual(report["status"], "failed")
             self.assertEqual(report["reason"], "no_dataset_rows")
+
+    def test_inventory_calibrated_targets_allow_maxed_out_jynxzi_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = Path(tmp) / "train.jsonl"
+            rows: list[dict] = []
+            for group_idx in range(38):
+                row_count = 2 if group_idx < 15 else 13
+                for row_idx in range(row_count):
+                    label = 1 if row_idx % 2 == 0 else 0
+                    rows.append(_row(f"{group_idx}-{row_idx}", f"vod-{group_idx:02d}", label))
+            dataset.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+
+            report = diagnose_rollout_readiness_coverage.diagnose_coverage(
+                dataset_path=dataset,
+                profile="jynxzi",
+            )
+
+            self.assertEqual(report["status"], "ok")
+            self.assertEqual(report["summary"]["available_groups_after_policy"], 38)
+            self.assertEqual(report["targets"]["mode"], "inventory_calibrated")
+            self.assertEqual(report["targets"]["training_rows"], 304)
+            self.assertEqual(report["targets"]["positive_rows"], 152)
+            self.assertEqual(report["targets"]["validation_groups"], 15)
+            self.assertTrue(report["readiness"]["passed"])
+            self.assertEqual(report["readiness"]["failures"], [])
 
 
 def _row(candidate_id: str, vod_id: str, label: int) -> dict:

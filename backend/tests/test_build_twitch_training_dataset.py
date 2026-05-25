@@ -1861,6 +1861,7 @@ class BuildTwitchTrainingDatasetTests(unittest.TestCase):
         ]
 
         with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(settings, "enable_chat_analysis", False), \
              patch("ml.build_twitch_training_dataset._materialize_vod", return_value=Path(tmp) / "vod.mp4"), \
              patch("ml.build_twitch_training_dataset._load_or_build_vod_feature_context", return_value=self._fake_vod_feature_context(Path(tmp))), \
              patch("ml.build_twitch_training_dataset._build_rows_for_label", return_value=built_rows):

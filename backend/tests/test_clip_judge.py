@@ -12,7 +12,7 @@ sys.modules.setdefault("whisper", types.SimpleNamespace(load_model=lambda *_args
 
 from services import clip_judge
 from services.keyframe_sampler import SampledKeyframe
-from services.timeline_types import Candidate, CandidateFeatures, RankedCandidate
+from services.timeline_types import Candidate, CandidateFeatures, JudgeResult, RankedCandidate
 from services.transcriber import RichSegment
 
 
@@ -104,6 +104,97 @@ class ClipJudgeTests(unittest.TestCase):
         self.assertEqual(judged.base_rank_score, 6.0)
         self.assertIn("judge_reranked", judged.rationale)
         self.assertIsNone(untouched.judge_result)
+
+    def test_rerank_candidates_reports_live_progress(self) -> None:
+        ranked = [
+            RankedCandidate(
+                candidate=Candidate(id="a", start=0.0, end=18.0, source="reaction", anchor_time=3.0),
+                features=CandidateFeatures(candidate_id="a", hook_strength=0.9, payoff_score=7.0, source="reaction"),
+                rank_score=6.0,
+            ),
+            RankedCandidate(
+                candidate=Candidate(id="b", start=30.0, end=48.0, source="quote", anchor_time=33.0),
+                features=CandidateFeatures(candidate_id="b", hook_strength=0.6, payoff_score=5.0, source="quote"),
+                rank_score=5.5,
+            ),
+        ]
+        segments = [RichSegment(start=0.0, end=60.0, text="setup then payoff", hype_score=3.0)]
+        progress: list[dict] = []
+
+        with patch("services.clip_judge._call_llm_judge", return_value=None):
+            clip_judge.rerank_candidates(
+                ranked,
+                segments,
+                shortlist_top_k=2,
+                progress_cb=progress.append,
+            )
+
+        self.assertGreaterEqual(len(progress), 3)
+        self.assertEqual(progress[0]["processed_candidates"], 0)
+        self.assertEqual(progress[-1]["processed_candidates"], 2)
+        self.assertEqual(progress[-1]["total_candidates"], 2)
+        self.assertEqual(progress[-1]["attempted_candidates"], 2)
+        self.assertEqual(progress[-1]["judged_candidates"], 2)
+
+    def test_rerank_candidates_batches_ollama_judge(self) -> None:
+        ranked = [
+            RankedCandidate(
+                candidate=Candidate(id="a", start=0.0, end=18.0, source="reaction", anchor_time=3.0),
+                features=CandidateFeatures(candidate_id="a", hook_strength=0.9, payoff_score=7.0, source="reaction"),
+                rank_score=6.0,
+                rationale=["baseline"],
+            ),
+            RankedCandidate(
+                candidate=Candidate(id="b", start=20.0, end=38.0, source="quote", anchor_time=25.0),
+                features=CandidateFeatures(candidate_id="b", hook_strength=0.7, payoff_score=5.0, source="quote"),
+                rank_score=5.5,
+                rationale=["baseline"],
+            ),
+        ]
+        segments = [RichSegment(start=0.0, end=60.0, text="setup then payoff", hype_score=3.0)]
+        batch_results = {
+            "a": JudgeResult(8.0, 0.8, 0.7, 0.8, 0.7, 0.8, "Strong.", 0.8, provider="ollama_batch", llm_used=True),
+            "b": JudgeResult(7.0, 0.7, 0.65, 0.7, 0.6, 0.75, "Works.", 0.7, provider="ollama_batch", llm_used=True),
+        }
+
+        with patch.object(clip_judge.settings, "clip_judge_batch_size", 2), \
+             patch("services.clip_judge._judge_ollama_batch", return_value=batch_results) as batch_mock, \
+             patch("services.clip_judge.judge_candidate") as single_mock:
+            reranked = clip_judge.rerank_candidates(
+                ranked,
+                segments,
+                provider="ollama",
+                shortlist_top_k=2,
+            )
+
+        self.assertEqual(batch_mock.call_count, 1)
+        self.assertFalse(single_mock.called)
+        self.assertTrue(all(item.judge_result is not None for item in reranked))
+        self.assertTrue(any("judge_batch" in item.rationale for item in reranked))
+
+    def test_rerank_candidates_falls_back_when_ollama_batch_misses_result(self) -> None:
+        ranked = [
+            RankedCandidate(
+                candidate=Candidate(id="a", start=0.0, end=18.0, source="reaction", anchor_time=3.0),
+                features=CandidateFeatures(candidate_id="a", hook_strength=0.9, payoff_score=7.0, source="reaction"),
+                rank_score=6.0,
+            )
+        ]
+        segments = [RichSegment(start=0.0, end=30.0, text="setup then payoff", hype_score=3.0)]
+        fallback = JudgeResult(6.5, 0.6, 0.6, 0.6, 0.6, 0.6, "Fallback.", 0.6, provider="ollama", llm_used=True)
+
+        with patch.object(clip_judge.settings, "clip_judge_batch_size", 4), \
+             patch("services.clip_judge._judge_ollama_batch", return_value={}), \
+             patch("services.clip_judge.judge_candidate", return_value=fallback) as single_mock:
+            reranked = clip_judge.rerank_candidates(
+                ranked,
+                segments,
+                provider="ollama",
+                shortlist_top_k=1,
+            )
+
+        self.assertEqual(single_mock.call_count, 1)
+        self.assertEqual(reranked[0].judge_result.provider, "ollama")
 
     def test_llm_first_mode_uses_judge_score_as_primary_rank(self) -> None:
         high_rank_low_judge = RankedCandidate(
@@ -398,6 +489,36 @@ class ClipJudgeTests(unittest.TestCase):
         self.assertEqual(result.provider, "anthropic")
         self.assertTrue(anthropic_mock.called)
         self.assertFalse(gemini_mock.called)
+
+    def test_explicit_ollama_provider_ignores_configured_cloud_providers(self) -> None:
+        ollama_result = clip_judge.JudgeResult(
+            judge_score=7.4,
+            scroll_stop_power=0.75,
+            standalone_clarity=0.7,
+            payoff_strength=0.75,
+            narrative_completeness=0.7,
+            platform_fit_shortform=0.75,
+            judge_reason="Ollama selected this.",
+            judge_confidence=0.7,
+            provider="ollama",
+            llm_used=True,
+            model="local-model",
+        )
+
+        with patch.object(clip_judge.settings, "anthropic_api_key", "test-key"), \
+             patch.object(clip_judge.settings, "gemini_api_key", "test-key"), \
+             patch.object(clip_judge.settings, "groq_api_key", "test-key"), \
+             patch("services.clip_judge._call_anthropic_text") as anthropic_mock, \
+             patch("services.clip_judge._call_gemini_text") as gemini_mock, \
+             patch("services.clip_judge._call_groq_text") as groq_mock, \
+             patch("services.clip_judge._call_ollama_text", return_value=ollama_result) as ollama_mock:
+            result = clip_judge._call_text_judge_prompt("judge this", provider="ollama", keyframes=None)
+
+        self.assertEqual(result.provider, "ollama")
+        self.assertTrue(ollama_mock.called)
+        self.assertFalse(anthropic_mock.called)
+        self.assertFalse(gemini_mock.called)
+        self.assertFalse(groq_mock.called)
 
     def test_anthropic_judge_uses_prompt_cache_control(self) -> None:
         captured = {}

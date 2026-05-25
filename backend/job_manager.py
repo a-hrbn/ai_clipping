@@ -23,6 +23,7 @@ _lock = threading.RLock()
 _write_lock = threading.Lock()
 _jobs_file = pathlib.Path(settings.storage_dir) / "jobs.json"
 _last_persisted_at = 0.0
+_jobs_file_mtime_ns = 0
 
 _JOB_TTL_SECONDS = 2 * 3600  # evict in-memory records after 2 hours
 _PERSIST_INTERVAL_SECONDS = 5.0
@@ -53,6 +54,7 @@ def _evict_expired(now: float | None = None) -> bool:
 
 
 def _load_jobs() -> None:
+    global _jobs_file_mtime_ns
     if not _jobs_file.exists():
         return
     try:
@@ -66,6 +68,7 @@ def _load_jobs() -> None:
         return
 
     loaded = 0
+    seen_job_ids: set[str] = set()
     for item in raw:
         try:
             job = JobStatus.model_validate(item)
@@ -73,11 +76,35 @@ def _load_jobs() -> None:
             logger.warning("Skipping malformed job record: %s", exc)
             continue
         _jobs[job.job_id] = job
-        _job_created_at[job.job_id] = time.monotonic()
+        _job_created_at.setdefault(job.job_id, time.monotonic())
+        seen_job_ids.add(job.job_id)
         loaded += 1
+
+    for job_id in list(_jobs):
+        if job_id not in seen_job_ids:
+            _jobs.pop(job_id, None)
+            _job_created_at.pop(job_id, None)
+            _cancelled_jobs.discard(job_id)
+            _job_session_id.pop(job_id, None)
+            _job_session_expires_at.pop(job_id, None)
+
+    try:
+        _jobs_file_mtime_ns = _jobs_file.stat().st_mtime_ns
+    except OSError:
+        _jobs_file_mtime_ns = 0
 
     if loaded:
         logger.info("Loaded %d job(s) from %s", loaded, _jobs_file)
+
+
+def _reload_jobs_from_disk_if_changed() -> None:
+    try:
+        mtime_ns = _jobs_file.stat().st_mtime_ns
+    except OSError:
+        return
+    if mtime_ns <= _jobs_file_mtime_ns:
+        return
+    _load_jobs()
 
 
 def _persist_jobs() -> None:
@@ -87,7 +114,7 @@ def _persist_jobs() -> None:
     via tempfile + os.replace so a crash mid-write can't truncate jobs.json and
     wipe the store on next boot.
     """
-    global _last_persisted_at
+    global _last_persisted_at, _jobs_file_mtime_ns
     _jobs_file.parent.mkdir(parents=True, exist_ok=True)
     with _write_lock:
         with _lock:
@@ -96,6 +123,10 @@ def _persist_jobs() -> None:
         tmp_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
         os.replace(tmp_path, _jobs_file)
         _last_persisted_at = time.monotonic()
+        try:
+            _jobs_file_mtime_ns = _jobs_file.stat().st_mtime_ns
+        except OSError:
+            _jobs_file_mtime_ns = 0
 
 
 def _should_persist_update(kwargs: dict, now: float) -> bool:
@@ -123,6 +154,7 @@ def create_job(job_id: str, profile: str = "general") -> JobStatus:
 
 def get_job(job_id: str) -> JobStatus | None:
     with _lock:
+        _reload_jobs_from_disk_if_changed()
         evicted = _evict_expired()
         job = _jobs.get(job_id)
     if evicted:
@@ -133,6 +165,7 @@ def get_job(job_id: str) -> JobStatus | None:
 def update_job(job_id: str, **kwargs) -> None:
     should_persist = False
     with _lock:
+        _reload_jobs_from_disk_if_changed()
         now = time.monotonic()
         evicted = _evict_expired(now)
         job = _jobs.get(job_id)
@@ -157,6 +190,7 @@ def update_job(job_id: str, **kwargs) -> None:
 def cancel_job(job_id: str) -> JobStatus | None:
     should_persist = False
     with _lock:
+        _reload_jobs_from_disk_if_changed()
         if _evict_expired():
             should_persist = True
         job = _jobs.get(job_id)
@@ -186,6 +220,7 @@ def cancel_job(job_id: str) -> JobStatus | None:
 def is_job_cancelled(job_id: str) -> bool:
     should_persist = False
     with _lock:
+        _reload_jobs_from_disk_if_changed()
         _evict_expired()
         if job_id in _cancelled_jobs:
             return True
@@ -213,6 +248,7 @@ def bind_job_session(job_id: str, session_id: str | None) -> None:
     if not session_id:
         return
     with _lock:
+        _reload_jobs_from_disk_if_changed()
         _evict_expired()
         if job_id not in _jobs:
             return
@@ -223,6 +259,7 @@ def bind_job_session(job_id: str, session_id: str | None) -> None:
 def touch_job_session(job_id: str, session_id: str | None) -> JobStatus | None:
     should_persist = False
     with _lock:
+        _reload_jobs_from_disk_if_changed()
         if _evict_expired():
             should_persist = True
         job = _jobs.get(job_id)

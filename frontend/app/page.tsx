@@ -2,11 +2,12 @@
 
 import { useState, useCallback, useEffect } from "react";
 import { cancelJobBeacon, submitJob, submitUpload } from "@/lib/api";
-import { ClipResult, UploadProgress } from "@/lib/types";
+import { ClipResult, PipelineDiagnostics, UploadProgress } from "@/lib/types";
 import UrlInput from "@/components/UrlInput";
 import JobStatus from "@/components/JobStatus";
 import ClipGrid from "@/components/ClipGrid";
 import AIStatus from "@/components/AIStatus";
+import PipelineDiagnosticsPanel from "@/components/PipelineDiagnosticsPanel";
 
 type AppState = "idle" | "submitting" | "uploading" | "polling" | "done" | "error";
 
@@ -109,6 +110,7 @@ export default function Home() {
   const [clips, setClips] = useState<ClipResult[]>([]);
   const [error, setError] = useState<string>("");
   const [uploadInfo, setUploadInfo] = useState<UploadProgress | null>(null);
+  const [pipelineDiagnostics, setPipelineDiagnostics] = useState<PipelineDiagnostics | null>(null);
 
   useEffect(() => {
     if (!jobId || state !== "polling") {
@@ -130,6 +132,7 @@ export default function Home() {
   async function handleSubmitUrl(url: string, profile: string | null) {
     setState("submitting");
     setError("");
+    setPipelineDiagnostics(null);
     try {
       const job = await submitJob(url, profile);
       setJobId(job.job_id);
@@ -144,6 +147,7 @@ export default function Home() {
     setState("uploading");
     setUploadInfo(null);
     setError("");
+    setPipelineDiagnostics(null);
     try {
       const job = await submitUpload(file, profile, setUploadInfo);
       setJobId(job.job_id);
@@ -170,6 +174,7 @@ export default function Home() {
     setClips([]);
     setError("");
     setUploadInfo(null);
+    setPipelineDiagnostics(null);
   }
 
   return (
@@ -259,13 +264,23 @@ export default function Home() {
       {/* Job polling */}
       {state === "polling" && jobId && (
         <section className="w-full max-w-3xl mt-10 animate-fade-up">
-          <JobStatus jobId={jobId} onDone={handleDone} onError={handleError} />
+          <JobStatus
+            jobId={jobId}
+            onDone={handleDone}
+            onError={handleError}
+            onDiagnostics={setPipelineDiagnostics}
+          />
         </section>
       )}
 
       {/* Results */}
       {state === "done" && (
         <section className="w-full max-w-3xl mt-10 animate-fade-up">
+          {pipelineDiagnostics?.available && (
+            <div className="mb-8">
+              <PipelineDiagnosticsPanel diagnostics={pipelineDiagnostics} />
+            </div>
+          )}
           <ClipGrid clips={clips} jobId={jobId ?? ""} />
           <div className="mt-12 flex justify-center">
             <button

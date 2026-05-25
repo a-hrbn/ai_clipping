@@ -10,6 +10,7 @@ ARTIFACT_DIR="$REPO_ROOT/backend/ml/artifacts"
 TMP_DIR="$REPO_ROOT/backend/tmp"
 PREWARMED_MODEL_DIR="${AI_CLIPPING_LOCAL_PREWARMED_MODEL_DIR:-$REPO_ROOT/tmp/prewarmed_sentence_transformers_local}"
 NVIDIA_DRIVER_CAPABILITIES_VALUE="${NVIDIA_DRIVER_CAPABILITIES:-compute,utility,video}"
+ENTRYPOINT_OVERRIDE="${AI_CLIPPING_LOCAL_TRAIN_ENTRYPOINT:-}"
 
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "Missing env file: $ENV_FILE" >&2
@@ -39,6 +40,12 @@ DOCKER_ARGS=(
 if [[ -d "$PREWARMED_MODEL_DIR" ]]; then
   DOCKER_ARGS+=(
     -v "$PREWARMED_MODEL_DIR:/app/backend/tmp/cache/sentence_transformers_local:ro"
+  )
+fi
+
+if [[ -n "$ENTRYPOINT_OVERRIDE" ]]; then
+  DOCKER_ARGS+=(
+    --entrypoint "$ENTRYPOINT_OVERRIDE"
   )
 fi
 

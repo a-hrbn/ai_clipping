@@ -4,6 +4,7 @@ import argparse
 import concurrent.futures
 from dataclasses import dataclass
 import hashlib
+import importlib
 import json
 import logging
 import math
@@ -1015,7 +1016,8 @@ def _load_or_build_vod_feature_context(
     source_end_sec: float = 0.0,
     source_kind: str = "full_vod",
 ) -> VodFeatureContext:
-    from services import audio_extractor, chat_analyzer, transcriber
+    audio_extractor = importlib.import_module("services.audio_extractor")
+    from services import chat_analyzer, transcriber
     import librosa
 
     cache_dir = cache_dir or _vod_feature_cache_dir(vod_id)

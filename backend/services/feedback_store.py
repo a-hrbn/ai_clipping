@@ -5,6 +5,7 @@ import pathlib
 from urllib.parse import urlparse
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from collections.abc import Mapping
 
 from models import ClipFeedbackPayload, ClipFeedbackResponse
 
@@ -34,6 +35,13 @@ class CandidateFeedback:
     feedback_notes: str | None = None
     publish_platform: str | None = None
     final_variant_key: str | None = None
+    judge_score: float | None = None
+    standalone_clarity: float | None = None
+    payoff_strength: float | None = None
+    narrative_completeness: float | None = None
+    judge_confidence: float | None = None
+    judge_provider: str | None = None
+    judge_reason: str | None = None
     updated_at: int | None = None
 
     def to_dict(self) -> dict:
@@ -44,11 +52,18 @@ def build_pipeline_feedback(
     job_id: str,
     ranked_candidates: list[RankedCandidate],
     final_moments: list[dict],
+    quality_gate_rows: list[Mapping[str, object]] | None = None,
 ) -> list[CandidateFeedback]:
-    feedback: list[CandidateFeedback] = []
+    feedback_by_id: dict[str, CandidateFeedback] = {}
+    quality_rows_by_id = {
+        str(row.get("candidate_id") or "").strip(): row
+        for row in (quality_gate_rows or [])
+        if str(row.get("candidate_id") or "").strip()
+    }
     for ranked in ranked_candidates:
         selected_moment = _matching_moment(ranked.candidate.start, ranked.candidate.end, final_moments)
         selected = selected_moment is not None
+        quality_row = quality_rows_by_id.get(ranked.candidate.id)
 
         if selected:
             rejected_reason = None
@@ -64,25 +79,57 @@ def build_pipeline_feedback(
             rejected_reason = "post_processing_filtered"
             rejection_source = "post_processing_filtered"
 
-        feedback.append(
-            CandidateFeedback(
-                job_id=job_id,
-                candidate_id=ranked.candidate.id,
-                selected=selected,
-                exported=False,
-                rank_score=round(ranked.rank_score, 4),
-                proposed_start=ranked.candidate.start,
-                proposed_end=ranked.candidate.end,
-                final_start=selected_moment["start_time"] if selected_moment else None,
-                final_end=selected_moment["end_time"] if selected_moment else None,
-                rejected_reason=rejected_reason,
-                rejection_source=rejection_source,
-                publish_platform=selected_moment.get("platform") if selected_moment else None,
-                final_variant_key=selected_moment.get("variant_key") if selected_moment else None,
-                updated_at=int(datetime.now(timezone.utc).timestamp()),
-            )
+        feedback_by_id[ranked.candidate.id] = _feedback_row(
+            job_id=job_id,
+            candidate_id=ranked.candidate.id,
+            selected=selected,
+            rank_score=ranked.rank_score,
+            proposed_start=ranked.candidate.start,
+            proposed_end=ranked.candidate.end,
+            selected_moment=selected_moment,
+            rejected_reason=rejected_reason,
+            rejection_source=rejection_source,
+            quality_row=quality_row,
         )
-    return feedback
+
+    for candidate_id, quality_row in quality_rows_by_id.items():
+        if not _quality_row_has_judge_result(quality_row):
+            continue
+        existing = feedback_by_id.get(candidate_id)
+        if existing is not None:
+            _apply_judge_fields(existing, quality_row)
+            continue
+
+        start = _as_float(quality_row.get("start"))
+        end = _as_float(quality_row.get("end"))
+        selected_moment = _matching_moment(start, end, final_moments)
+        selected = selected_moment is not None
+        accepted = bool(quality_row.get("accepted") is True or quality_row.get("kept") is True)
+        reasons = [str(reason) for reason in quality_row.get("rejection_reasons") or []]
+        if selected:
+            rejected_reason = None
+            rejection_source = None
+        elif accepted:
+            rejected_reason = "judge_quality_accepted"
+            rejection_source = "judge_quality_accepted"
+        else:
+            rejected_reason = ", ".join(reasons) or "judge_quality_rejected"
+            rejection_source = "judge_quality_rejected"
+
+        feedback_by_id[candidate_id] = _feedback_row(
+            job_id=job_id,
+            candidate_id=candidate_id,
+            selected=selected,
+            rank_score=_as_float(quality_row.get("rank_score")),
+            proposed_start=start,
+            proposed_end=end,
+            selected_moment=selected_moment,
+            rejected_reason=rejected_reason,
+            rejection_source=rejection_source,
+            quality_row=quality_row,
+        )
+
+    return list(feedback_by_id.values())
 
 
 def append_feedback_events(storage_dir: pathlib.Path, events: list[CandidateFeedback]) -> None:
@@ -327,3 +374,62 @@ def _matching_moment(start: float, end: float, moments: list[dict]) -> dict | No
         if shorter > 0 and overlap / shorter >= 0.4:
             return moment
     return None
+
+
+def _feedback_row(
+    *,
+    job_id: str,
+    candidate_id: str,
+    selected: bool,
+    rank_score: float,
+    proposed_start: float,
+    proposed_end: float,
+    selected_moment: dict | None,
+    rejected_reason: str | None,
+    rejection_source: str | None,
+    quality_row: Mapping[str, object] | None,
+) -> CandidateFeedback:
+    row = CandidateFeedback(
+        job_id=job_id,
+        candidate_id=candidate_id,
+        selected=selected,
+        exported=False,
+        rank_score=round(float(rank_score), 4),
+        proposed_start=proposed_start,
+        proposed_end=proposed_end,
+        final_start=selected_moment["start_time"] if selected_moment else None,
+        final_end=selected_moment["end_time"] if selected_moment else None,
+        rejected_reason=rejected_reason,
+        rejection_source=rejection_source,
+        publish_platform=selected_moment.get("platform") if selected_moment else None,
+        final_variant_key=selected_moment.get("variant_key") if selected_moment else None,
+        updated_at=int(datetime.now(timezone.utc).timestamp()),
+    )
+    if quality_row is not None:
+        _apply_judge_fields(row, quality_row)
+    return row
+
+
+def _apply_judge_fields(feedback: CandidateFeedback, quality_row: Mapping[str, object]) -> None:
+    feedback.judge_score = _optional_float(quality_row.get("judge_score"))
+    feedback.standalone_clarity = _optional_float(quality_row.get("standalone_clarity"))
+    feedback.payoff_strength = _optional_float(quality_row.get("payoff_strength"))
+    feedback.narrative_completeness = _optional_float(quality_row.get("narrative_completeness"))
+    feedback.judge_confidence = _optional_float(quality_row.get("judge_confidence"))
+    feedback.judge_provider = str(quality_row.get("judge_provider") or "") or None
+    feedback.judge_reason = str(quality_row.get("judge_reason") or "") or None
+
+
+def _quality_row_has_judge_result(row: Mapping[str, object]) -> bool:
+    if row.get("has_judge_result") is not None:
+        return bool(row.get("has_judge_result"))
+    return row.get("judge_score") not in (None, "")
+
+
+def _optional_float(value) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None

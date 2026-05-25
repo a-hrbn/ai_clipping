@@ -83,6 +83,12 @@ def main() -> int:
     parser.add_argument("--min-reposts", type=int, default=0)
     parser.add_argument("--min-matched-rows", type=int, default=0)
     parser.add_argument(
+        "--transcript-match-workers",
+        type=int,
+        default=1,
+        help="Parallel worker processes for transcript repost-to-VOD matching.",
+    )
+    parser.add_argument(
         "--min-matched-vods",
         type=int,
         default=0,
@@ -180,6 +186,7 @@ def main() -> int:
         max_reposts=args.max_reposts,
         min_reposts=args.min_reposts,
         min_matched_rows=args.min_matched_rows,
+        transcript_match_workers=args.transcript_match_workers,
         min_matched_vods=args.min_matched_vods,
         refresh_vods=args.refresh_vods,
         refresh_reposts=args.refresh_reposts,
@@ -231,6 +238,7 @@ def prepare_cross_platform_fingerprint_rows(
     max_reposts: int = 400,
     min_reposts: int = 0,
     min_matched_rows: int = 0,
+    transcript_match_workers: int = 1,
     min_matched_vods: int = 0,
     refresh_vods: bool = False,
     refresh_reposts: bool = False,
@@ -612,6 +620,7 @@ def prepare_cross_platform_fingerprint_rows(
                 vod_rows_with_video_path=int(summary["vod_rows_with_video_path"]),
                 repost_rows_with_video_path=int(summary["repost_rows_with_video_path"]),
                 min_confidence=round(float(min_confidence), 6),
+                transcript_match_workers=max(1, int(transcript_match_workers or 1)),
             )
             matched_rows, match_diagnostics = transcript_matcher.match_reposts_to_vods_with_diagnostics(
                 vod_rows,
@@ -619,6 +628,7 @@ def prepare_cross_platform_fingerprint_rows(
                 min_similarity=min_confidence,
                 vod_cache_root=vod_cache_root,
                 log_progress=True,
+                transcript_match_workers=transcript_match_workers,
             )
         else:
             _log_event(

@@ -163,6 +163,62 @@ class TrainingExportTests(unittest.TestCase):
             self.assertEqual(row["ordinal_label"], 1)
             self.assertEqual(row["feedback_rating"], "medium")
 
+    def test_export_training_rows_uses_judge_quality_feedback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Path(tmp)
+            debug = storage / "job-judge" / "debug"
+            debug.mkdir(parents=True, exist_ok=True)
+            (debug / "candidate_features.jsonl").write_text(
+                "\n".join([
+                    json.dumps({"candidate_id": "accepted", "max_hype": 4.0, "source": "dense_inventory"}),
+                    json.dumps({"candidate_id": "rejected", "max_hype": 2.0, "source": "dense_inventory"}),
+                ]) + "\n",
+                encoding="utf-8",
+            )
+            (debug / "feedback.jsonl").write_text(
+                "\n".join([
+                    json.dumps({
+                        "job_id": "job-judge",
+                        "candidate_id": "accepted",
+                        "selected": False,
+                        "exported": False,
+                        "final_start": None,
+                        "final_end": None,
+                        "rejected_reason": "judge_quality_accepted",
+                        "rejection_source": "judge_quality_accepted",
+                        "judge_score": 7.5,
+                        "standalone_clarity": 0.8,
+                    }),
+                    json.dumps({
+                        "job_id": "job-judge",
+                        "candidate_id": "rejected",
+                        "selected": False,
+                        "exported": False,
+                        "final_start": None,
+                        "final_end": None,
+                        "rejected_reason": "judge_score_below_min",
+                        "rejection_source": "judge_quality_rejected",
+                        "judge_score": 4.0,
+                    }),
+                ]) + "\n",
+                encoding="utf-8",
+            )
+            output = storage / "feedback" / "training_rows.jsonl"
+
+            count = export_training_rows(storage, output)
+
+            self.assertEqual(count, 2)
+            rows = {row["candidate_id"]: row for row in (json.loads(line) for line in output.read_text(encoding="utf-8").splitlines())}
+            self.assertEqual(rows["accepted"]["label"], 1)
+            self.assertEqual(rows["accepted"]["label_source"], "judge_quality_gate")
+            self.assertEqual(rows["accepted"]["supervision_tier"], "judge_feedback")
+            self.assertGreater(rows["accepted"]["sample_weight"], 1.3)
+            self.assertEqual(rows["accepted"]["features"]["judge_score"], 7.5)
+            self.assertTrue(rows["accepted"]["features"]["has_judge_score"])
+            self.assertEqual(rows["rejected"]["label"], 0)
+            self.assertEqual(rows["rejected"]["dataset_source"], "feedback_judge_export")
+            self.assertGreater(rows["rejected"]["sample_weight"], 1.1)
+
     def test_export_training_rows_preserves_variant_and_dynamic_feature_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             storage = Path(tmp)

@@ -305,6 +305,51 @@ class VideoFeaturesTests(unittest.TestCase):
         self.assertEqual(updated[0].max_face_reaction, 0.6)
         self.assertIn("face_reaction", updated[0].emotions)
 
+    def test_contiguous_ranges_groups_sparse_seconds(self) -> None:
+        self.assertEqual(video_features._contiguous_ranges([]), [])
+        self.assertEqual(
+            video_features._contiguous_ranges([1, 2, 3, 8, 9, 20]),
+            [(1, 3), (8, 9), (20, 20)],
+        )
+
+    def test_refine_face_reactions_ffmpeg_decode_uses_sparse_ranges(self) -> None:
+        frame = np.zeros((8, 8, 3), dtype=np.uint8)
+        _FakeDeepFace.calls = 0
+        decode_calls: list[tuple[float, int]] = []
+        segments = [
+            RichSegment(start=10.0, end=12.0, text="first"),
+            RichSegment(start=100.0, end=102.0, text="second"),
+        ]
+        candidates = [
+            Candidate(id="c1", start=10.0, end=12.0, source="reaction", anchor_time=11.0),
+            Candidate(id="c2", start=100.0, end=102.0, source="reaction", anchor_time=101.0),
+        ]
+
+        def _decode_batch(_path, *, start_sec, sample_count, stream_info):
+            decode_calls.append((start_sec, sample_count))
+            return {offset: frame for offset in range(sample_count)}
+
+        with patch.object(video_features, "_CV2_AVAILABLE", True), \
+             patch.object(video_features, "cv2", _NoCaptureCV2), \
+             patch.object(video_features, "_DEEPFACE_AVAILABLE", True), \
+             patch.object(video_features, "_DEEPFACE_MODEL_READY", False), \
+             patch.object(video_features, "DeepFace", _FakeDeepFace, create=True), \
+             patch.object(video_features, "_video_stream_info", return_value={"codec_name": "h264", "duration_sec": 1000.0, "width": 8, "height": 8}), \
+             patch.object(video_features, "_decode_second_frames_ffmpeg", side_effect=_decode_batch), \
+             patch.object(video_features, "_MP_FACE_DETECTION", None), \
+             patch.object(video_features, "_FACE_CASCADE", None):
+            updated = video_features.refine_face_reactions(
+                segments,
+                Path("fake-h264.mp4"),
+                candidates,
+                sample_every_sec=1,
+            )
+
+        self.assertEqual(decode_calls, [(10.0, 3), (100.0, 3)])
+        self.assertEqual(_FakeDeepFace.calls, 6)
+        self.assertEqual(updated[0].max_face_reaction, 0.8)
+        self.assertEqual(updated[1].max_face_reaction, 0.8)
+
     def test_extract_uses_mtcnn_when_mediapipe_unavailable(self) -> None:
         frame = np.zeros((8, 8, 3), dtype=np.uint8)
         with patch.object(video_features, "_CV2_AVAILABLE", True), \
@@ -436,6 +481,7 @@ class VideoFeaturesTests(unittest.TestCase):
              patch.object(video_features, "cv2", _FakeCV2), \
              patch.object(video_features, "_DEEPFACE_AVAILABLE", True), \
              patch.object(video_features, "_DEEPFACE_MODEL_READY", False), \
+             patch.object(video_features, "_DEEPFACE_WARMUP_ATTEMPTED", False), \
              patch.object(video_features, "DeepFace", _FakeDeepFaceWithBuildModel, create=True), \
              patch.object(video_features, "_MP_FACE_DETECTION", None), \
              patch.object(video_features, "_FACE_CASCADE", None), \

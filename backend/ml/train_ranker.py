@@ -88,6 +88,12 @@ _BUCKET_GATE_MIN_ROWS = 6
 _MIN_JYNXZI_VALIDATION_GROUPS = 40
 _MIN_JYNXZI_ROLLOUT_ROWS = 1200
 _MIN_JYNXZI_ROLLOUT_POSITIVES = 400
+_MIN_JYNXZI_INVENTORY_ROLLOUT_ROWS = 300
+_MIN_JYNXZI_INVENTORY_ROLLOUT_POSITIVES = 120
+_MIN_JYNXZI_INVENTORY_VALIDATION_GROUPS = 8
+_JYNXZI_INVENTORY_ROWS_PER_GROUP = 8
+_JYNXZI_INVENTORY_POSITIVES_PER_GROUP = 4
+_JYNXZI_INVENTORY_VALIDATION_GROUP_SHARE = 0.40
 _TWITCH_CLIP_PROXY_SUPERVISION_MULTIPLIER = 0.5
 _SPLIT_RANDOM_SEED = int(settings.ranker_hpo_seed)
 _ARTIFACT_VERSION = 4
@@ -333,6 +339,72 @@ def _min_validation_groups_required(profile: str) -> int:
     return _MIN_JYNXZI_VALIDATION_GROUPS if str(profile).strip().lower() == "jynxzi" else 0
 
 
+def rollout_readiness_targets(profile: str, *, available_groups: int | None = None) -> dict[str, object]:
+    profile_key = str(profile).strip().lower()
+    raw_targets = {
+        "training_rows": _MIN_JYNXZI_ROLLOUT_ROWS if profile_key == "jynxzi" else 0,
+        "positive_rows": _MIN_JYNXZI_ROLLOUT_POSITIVES if profile_key == "jynxzi" else 0,
+        "validation_groups": _MIN_JYNXZI_VALIDATION_GROUPS if profile_key == "jynxzi" else 0,
+    }
+    if profile_key != "jynxzi":
+        return {
+            **raw_targets,
+            "mode": "profile_default",
+            "raw_targets": dict(raw_targets),
+            "available_groups": int(available_groups or 0),
+        }
+
+    group_count = max(0, int(available_groups or 0))
+    inventory_limited = (
+        bool(group_count)
+        and (
+            group_count < _MIN_JYNXZI_VALIDATION_GROUPS
+            or group_count * _JYNXZI_INVENTORY_ROWS_PER_GROUP < _MIN_JYNXZI_ROLLOUT_ROWS
+            or group_count * _JYNXZI_INVENTORY_POSITIVES_PER_GROUP < _MIN_JYNXZI_ROLLOUT_POSITIVES
+        )
+    )
+    if not inventory_limited:
+        return {
+            **raw_targets,
+            "mode": "absolute",
+            "raw_targets": dict(raw_targets),
+            "available_groups": group_count,
+        }
+
+    validation_target = int(math.floor(group_count * _JYNXZI_INVENTORY_VALIDATION_GROUP_SHARE))
+    validation_target = min(
+        group_count,
+        _MIN_JYNXZI_VALIDATION_GROUPS,
+        max(_MIN_JYNXZI_INVENTORY_VALIDATION_GROUPS, validation_target),
+    )
+    if group_count < _MIN_JYNXZI_INVENTORY_VALIDATION_GROUPS:
+        validation_target = group_count
+    training_target = min(
+        _MIN_JYNXZI_ROLLOUT_ROWS,
+        max(_MIN_JYNXZI_INVENTORY_ROLLOUT_ROWS, group_count * _JYNXZI_INVENTORY_ROWS_PER_GROUP),
+    )
+    positive_target = min(
+        _MIN_JYNXZI_ROLLOUT_POSITIVES,
+        max(_MIN_JYNXZI_INVENTORY_ROLLOUT_POSITIVES, group_count * _JYNXZI_INVENTORY_POSITIVES_PER_GROUP),
+    )
+    return {
+        "training_rows": training_target,
+        "positive_rows": positive_target,
+        "validation_groups": validation_target,
+        "mode": "inventory_calibrated",
+        "raw_targets": dict(raw_targets),
+        "available_groups": group_count,
+        "calibration": {
+            "rows_per_available_group": _JYNXZI_INVENTORY_ROWS_PER_GROUP,
+            "positives_per_available_group": _JYNXZI_INVENTORY_POSITIVES_PER_GROUP,
+            "validation_group_share": _JYNXZI_INVENTORY_VALIDATION_GROUP_SHARE,
+            "minimum_training_rows": _MIN_JYNXZI_INVENTORY_ROLLOUT_ROWS,
+            "minimum_positive_rows": _MIN_JYNXZI_INVENTORY_ROLLOUT_POSITIVES,
+            "minimum_validation_groups": _MIN_JYNXZI_INVENTORY_VALIDATION_GROUPS,
+        },
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Train a simple linear ranker from candidate feedback.")
     parser.add_argument("--storage-dir", default=str(BACKEND_ROOT / "tmp" / "storage"))
@@ -423,8 +495,12 @@ def train_from_rows(
             print("Need both train and validation rows.")
             tracking.set_tags({"training_status": "aborted", "abort_reason": "missing_train_or_validation_rows"})
             return 1
-        validation_groups_count = len(set(_ranking_group_labels(validation_rows, str(split.get("unit", "")))))
-        min_validation_groups = _min_validation_groups_required(profile)
+        split_unit = str(split.get("unit", ""))
+        validation_groups_count = len(set(_ranking_group_labels(validation_rows, split_unit)))
+        available_groups_count = len(set(_ranking_group_labels(rows, split_unit)))
+        min_validation_groups = int(
+            rollout_readiness_targets(profile, available_groups=available_groups_count).get("validation_groups") or 0
+        )
         if min_validation_groups and validation_groups_count < min_validation_groups:
             print(
                 "Training warning: validation group count below rollout target "
@@ -937,19 +1013,24 @@ def _rollout_readiness_summary(
     split_unit: str,
 ) -> dict[str, object]:
     validation_groups = len(set(_ranking_group_labels(validation_rows, str(split_unit))))
+    available_groups = len(set(_ranking_group_labels(rows, str(split_unit))))
     positive_rows = sum(1 for row in rows if int(row.get("label", 0)) == 1)
     profile_key = str(profile).strip().lower()
+    targets = rollout_readiness_targets(profile, available_groups=available_groups)
+    training_target = int(targets.get("training_rows") or 0)
+    positive_target = int(targets.get("positive_rows") or 0)
+    validation_group_target = int(targets.get("validation_groups") or 0)
     failures: list[str] = []
     if str(selected_model.get("name") or "") == "fallback_heuristic":
         failures.append("selected_model_is_fallback_heuristic")
     if not bool(filter_gate.get("passed")):
         failures.append("filter_gate_failed")
     if profile_key == "jynxzi":
-        if len(rows) < _MIN_JYNXZI_ROLLOUT_ROWS:
+        if len(rows) < training_target:
             failures.append("training_rows_below_rollout_target")
-        if positive_rows < _MIN_JYNXZI_ROLLOUT_POSITIVES:
+        if positive_rows < positive_target:
             failures.append("positive_rows_below_rollout_target")
-        if validation_groups < _MIN_JYNXZI_VALIDATION_GROUPS:
+        if validation_groups < validation_group_target:
             failures.append("validation_groups_below_rollout_target")
     return {
         "passed": not failures,
@@ -959,11 +1040,8 @@ def _rollout_readiness_summary(
         "training_rows": len(rows),
         "positive_rows": positive_rows,
         "validation_groups": validation_groups,
-        "targets": {
-            "training_rows": _MIN_JYNXZI_ROLLOUT_ROWS if profile_key == "jynxzi" else 0,
-            "positive_rows": _MIN_JYNXZI_ROLLOUT_POSITIVES if profile_key == "jynxzi" else 0,
-            "validation_groups": _MIN_JYNXZI_VALIDATION_GROUPS if profile_key == "jynxzi" else 0,
-        },
+        "available_groups": available_groups,
+        "targets": targets,
     }
 
 
@@ -2804,6 +2882,7 @@ def _weighted_mean(values: list[float], weights: list[float]) -> float:
 def _sample_weight(row: dict) -> float:
     supervision_multiplier = {
         "outcome_feedback": 1.35,
+        "judge_feedback": 1.22,
         "manual_annotation": 1.5,
         "twitch_clip_proxy": _TWITCH_CLIP_PROXY_SUPERVISION_MULTIPLIER,
         "twitch_top_viewed_weak_positive": 1.0,
@@ -2831,6 +2910,8 @@ def _sample_weight(row: dict) -> float:
         "outcome_negative": 1.8,
         "pipeline_positive": 1.0,
         "pipeline_negative": 0.8,
+        "judge_quality_positive": 1.35,
+        "judge_quality_negative": 1.25,
     }.get(label_class, 1.0)
     return base_weight * supervision_multiplier * _outcome_weight_multiplier(row)
 

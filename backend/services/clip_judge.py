@@ -32,23 +32,24 @@ _AXIS_NAMES = (
     "platform_fit_shortform",
 )
 _JUDGE_WEIGHTS = {
-    "scroll_stop_power": 0.28,
-    "standalone_clarity": 0.22,
-    "payoff_strength": 0.24,
-    "narrative_completeness": 0.16,
-    "platform_fit_shortform": 0.10,
+    "scroll_stop_power": 0.30,
+    "standalone_clarity": 0.18,
+    "payoff_strength": 0.28,
+    "narrative_completeness": 0.12,
+    "platform_fit_shortform": 0.12,
 }
-_JUDGE_PROMPT_STATIC = """You are judging whether a candidate clip would work as a high-performing short-form video.
+_JUDGE_PROMPT_STATIC = """You are judging whether a candidate clip has real viral short-form potential, not just whether it is a complete stream moment.
 
 Score each axis from 0.0 to 1.0:
-- scroll_stop_power: does the opening stop the scroll quickly?
+- scroll_stop_power: does the first 1-3 seconds create immediate curiosity, shock, conflict, comedy, or reaction?
 - standalone_clarity: can a new viewer understand it without prior stream context?
-- payoff_strength: is there a satisfying reaction, reveal, punchline, or resolution?
+- payoff_strength: is there a strong reaction, reveal, punchline, clutch, argument, or quote worth replaying?
 - narrative_completeness: does it feel like a coherent mini-story rather than a fragment?
-- platform_fit_shortform: is the pacing and shape right for Shorts/Reels/TikTok?
+- platform_fit_shortform: is the pacing, density, and replay value right for Shorts/Reels/TikTok?
 
-Be strict. Penalize clips with slow setup, missing payoff, weak standalone clarity, clips that start mid-thought,
-clips that depend on prior stream context, and clips that fizzle without a clean ending.
+Be strict. A clip can be coherent and still score low if it is generic, slow, niche, purely informational, or lacks a
+memorable Jynxzi-style reaction/quote/payoff. Penalize slow setup, missing payoff, weak standalone clarity, mid-thought
+starts, clips that depend on prior stream context, and clips that fizzle without a clean ending.
 Return raw JSON only:
 {{
   "scroll_stop_power": <float>,
@@ -85,6 +86,7 @@ def rerank_candidates(
     shortlist_top_k: int | None = None,
     provider: str | None = None,
     keyframes_by_candidate: dict[str, list[SampledKeyframe]] | None = None,
+    progress_cb: Callable[[dict[str, object]], None] | None = None,
 ) -> list[RankedCandidate]:
     if not ranked_candidates:
         return []
@@ -98,6 +100,7 @@ def rerank_candidates(
     counters: Counter[str] = Counter()
     provider_counts: Counter[str] = Counter()
     keyframe_candidate_count = sum(1 for frames in (keyframes_by_candidate or {}).values() if frames)
+    batch_size = _effective_ollama_batch_size(provider, keyframes_by_candidate)
     snapshot_path = pathlib.Path(settings.storage_dir) / "feedback" / "mm_judge_snapshots.jsonl"
     _log_provider_event(
         "clip_judge_rerank_start",
@@ -108,26 +111,122 @@ def rerank_candidates(
         keyframe_candidate_count=keyframe_candidate_count,
         fail_fast=bool(getattr(settings, "clip_judge_fail_fast", False)),
         provider_fallback_enabled=bool(getattr(settings, "judge_provider_fallback_enabled", True)),
+        batch_size=batch_size,
     )
+
+    def emit_progress(index: int, ranked: RankedCandidate | None = None) -> None:
+        if progress_cb is None:
+            return
+        payload = {
+            "processed_candidates": index,
+            "total_candidates": limit,
+            "attempted_candidates": int(counters["judge_attempted"]),
+            "judged_candidates": int(counters["llm_used"] + counters["heuristic_used"]),
+            "recall_filtered_candidates": int(counters["recall_filtered"]),
+            "elapsed_sec": round(time.perf_counter() - started_at, 3),
+        }
+        if ranked is not None:
+            payload["candidate_id"] = ranked.candidate.id
+            payload["candidate_start"] = round(float(ranked.candidate.start), 3)
+            payload["candidate_end"] = round(float(ranked.candidate.end), 3)
+        progress_cb(payload)
+
+    def apply_judge_result(idx: int, ranked: RankedCandidate, judge_result: JudgeResult) -> None:
+        provider_counts[str(judge_result.provider or "heuristic")] += 1
+        if judge_result.llm_used:
+            counters["llm_used"] += 1
+        else:
+            counters["heuristic_used"] += 1
+        _attach_judge_features(ranked.features, judge_result)
+        _append_judge_snapshot(ranked, judge_result, profile=profile)
+        counters["snapshots_written"] += 1
+        final_score, score_reason = _judge_adjusted_score(ranked.rank_score, judge_result)
+        counters[score_reason] += 1
+        rationale = list(ranked.rationale)
+        rationale.append("judge_reranked")
+        rationale.append(score_reason)
+        if judge_result.llm_used:
+            rationale.append("judge_llm")
+        if judge_result.provider == "ollama_batch":
+            rationale.append("judge_batch")
+        reranked[idx] = RankedCandidate(
+            candidate=ranked.candidate,
+            features=ranked.features,
+            rank_score=final_score,
+            rationale=rationale,
+            base_rank_score=ranked.base_rank_score if ranked.base_rank_score is not None else ranked.rank_score,
+            heuristic_rank_score=ranked.heuristic_rank_score,
+            trained_rank_score=ranked.trained_rank_score,
+            model_blend=ranked.model_blend,
+            trained_model_used=ranked.trained_model_used,
+            judge_result=judge_result,
+        )
+
+    def recall_filter_candidate(idx: int, ranked: RankedCandidate) -> bool:
+        if _passes_judge_recall_filter(ranked):
+            return False
+        counters["recall_filtered"] += 1
+        rationale = list(ranked.rationale)
+        rationale.append("judge_recall_filtered")
+        reranked[idx] = RankedCandidate(
+            candidate=ranked.candidate,
+            features=ranked.features,
+            rank_score=ranked.rank_score,
+            rationale=rationale,
+            base_rank_score=ranked.base_rank_score,
+            heuristic_rank_score=ranked.heuristic_rank_score,
+            trained_rank_score=ranked.trained_rank_score,
+            model_blend=ranked.model_blend,
+            trained_model_used=ranked.trained_model_used,
+            judge_result=ranked.judge_result,
+        )
+        emit_progress(idx + 1, ranked)
+        return True
+
     try:
-        for idx, ranked in enumerate(reranked[:limit]):
+        emit_progress(0)
+        idx = 0
+        while idx < limit:
+            ranked = reranked[idx]
             if not _passes_judge_recall_filter(ranked):
-                counters["recall_filtered"] += 1
-                rationale = list(ranked.rationale)
-                rationale.append("judge_recall_filtered")
-                reranked[idx] = RankedCandidate(
-                    candidate=ranked.candidate,
-                    features=ranked.features,
-                    rank_score=ranked.rank_score,
-                    rationale=rationale,
-                    base_rank_score=ranked.base_rank_score,
-                    heuristic_rank_score=ranked.heuristic_rank_score,
-                    trained_rank_score=ranked.trained_rank_score,
-                    model_blend=ranked.model_blend,
-                    trained_model_used=ranked.trained_model_used,
-                    judge_result=ranked.judge_result,
-                )
+                recall_filter_candidate(idx, ranked)
+                idx += 1
                 continue
+
+            if batch_size > 1:
+                batch: list[tuple[int, RankedCandidate]] = []
+                cursor = idx
+                while cursor < limit and len(batch) < batch_size:
+                    candidate = reranked[cursor]
+                    if not _passes_judge_recall_filter(candidate):
+                        break
+                    batch.append((cursor, candidate))
+                    cursor += 1
+                if batch:
+                    counters["judge_attempted"] += len(batch)
+                    batch_results = _judge_ollama_batch(
+                        [candidate for _, candidate in batch],
+                        segments,
+                        profile=profile,
+                    )
+                    if batch_results:
+                        counters["batch_calls"] += 1
+                    for batch_idx, batch_ranked in batch:
+                        judge_result = batch_results.get(batch_ranked.candidate.id) if batch_results else None
+                        if judge_result is None:
+                            counters["batch_missing_result"] += 1
+                            judge_result = judge_candidate(
+                                batch_ranked,
+                                segments,
+                                profile=profile,
+                                provider=provider,
+                                keyframes=(keyframes_by_candidate or {}).get(batch_ranked.candidate.id),
+                            )
+                        apply_judge_result(batch_idx, batch_ranked, judge_result)
+                        emit_progress(batch_idx + 1, reranked[batch_idx])
+                idx = max(cursor, idx + 1)
+                continue
+
             counters["judge_attempted"] += 1
             judge_result = judge_candidate(
                 ranked,
@@ -136,33 +235,9 @@ def rerank_candidates(
                 provider=provider,
                 keyframes=(keyframes_by_candidate or {}).get(ranked.candidate.id),
             )
-            provider_counts[str(judge_result.provider or "heuristic")] += 1
-            if judge_result.llm_used:
-                counters["llm_used"] += 1
-            else:
-                counters["heuristic_used"] += 1
-            _attach_judge_features(ranked.features, judge_result)
-            _append_judge_snapshot(ranked, judge_result, profile=profile)
-            counters["snapshots_written"] += 1
-            final_score, score_reason = _judge_adjusted_score(ranked.rank_score, judge_result)
-            counters[score_reason] += 1
-            rationale = list(ranked.rationale)
-            rationale.append("judge_reranked")
-            rationale.append(score_reason)
-            if judge_result.llm_used:
-                rationale.append("judge_llm")
-            reranked[idx] = RankedCandidate(
-                candidate=ranked.candidate,
-                features=ranked.features,
-                rank_score=final_score,
-                rationale=rationale,
-                base_rank_score=ranked.base_rank_score if ranked.base_rank_score is not None else ranked.rank_score,
-                heuristic_rank_score=ranked.heuristic_rank_score,
-                trained_rank_score=ranked.trained_rank_score,
-                model_blend=ranked.model_blend,
-                trained_model_used=ranked.trained_model_used,
-                judge_result=judge_result,
-            )
+            apply_judge_result(idx, ranked, judge_result)
+            emit_progress(idx + 1, reranked[idx])
+            idx += 1
     except Exception as exc:
         _log_provider_event(
             "clip_judge_rerank_failed",
@@ -326,6 +401,132 @@ def judge_candidate(
         )
         raise ClipJudgeError(f"clip judge LLM failed for candidate {ranked.candidate.id}")
     return heuristic
+
+
+def _effective_ollama_batch_size(
+    provider: str | None,
+    keyframes_by_candidate: dict[str, list[SampledKeyframe]] | None,
+) -> int:
+    if keyframes_by_candidate and any(keyframes_by_candidate.values()):
+        return 1
+    preferred = (provider or "auto").strip().lower()
+    if preferred != "ollama":
+        return 1
+    return max(int(getattr(settings, "clip_judge_batch_size", 1) or 1), 1)
+
+
+def _judge_ollama_batch(
+    ranked_candidates: list[RankedCandidate],
+    segments: list[RichSegment],
+    *,
+    profile: str,
+) -> dict[str, JudgeResult]:
+    if not ranked_candidates:
+        return {}
+    items: list[dict[str, object]] = []
+    for ranked in ranked_candidates:
+        window = [
+            seg for seg in segments
+            if seg.end > ranked.candidate.start and seg.start < ranked.candidate.end
+        ]
+        if not window:
+            continue
+        items.append(
+            {
+                "candidate_id": ranked.candidate.id,
+                "rank_score": round(float(ranked.rank_score), 3),
+                "source": ranked.candidate.source,
+                "duration": round(max(ranked.candidate.end - ranked.candidate.start, 0.0), 2),
+                "feature_summary": _feature_summary(ranked),
+                "prior_context": _build_context_summary(segments, ranked.candidate.start),
+                "transcript": format_transcript(window, use_seconds=True),
+            }
+        )
+    if not items:
+        return {}
+
+    prompt = _batch_judge_prompt(profile=profile, items=items)
+    try:
+        client = ollama.Client(host=settings.ollama_host)
+        response = client.chat(
+            model=settings.ollama_model,
+            messages=[{"role": "user", "content": prompt}],
+            format="json",
+            options={"temperature": 0.0},
+        )
+        content = response["message"]["content"].strip()
+        results = _parse_batch_judge_results(content)
+        parsed: dict[str, JudgeResult] = {}
+        for candidate_id, payload in results.items():
+            result = _parse_judge_result(json.dumps(payload), provider="ollama_batch", llm_used=True)
+            if result is None:
+                continue
+            result.model = settings.ollama_model
+            parsed[candidate_id] = result
+        _log_provider_event(
+            "clip_judge_batch_done",
+            provider="ollama_batch",
+            model=settings.ollama_model,
+            requested_candidates=len(items),
+            parsed_candidates=len(parsed),
+        )
+        return parsed
+    except Exception as exc:
+        _log_provider_event(
+            "clip_judge_batch_failed",
+            provider="ollama_batch",
+            model=settings.ollama_model,
+            requested_candidates=len(items),
+            error_type=type(exc).__name__,
+            error=_safe_error_message(exc),
+        )
+        return {}
+
+
+def _batch_judge_prompt(*, profile: str, items: list[dict[str, object]]) -> str:
+    return (
+        "You are judging whether candidate clips have real viral short-form potential, not just whether they are complete stream moments.\n"
+        "Score each axis from 0.0 to 1.0:\n"
+        "- scroll_stop_power: does the first 1-3 seconds create immediate curiosity, shock, conflict, comedy, or reaction?\n"
+        "- standalone_clarity: can a new viewer understand it without prior stream context?\n"
+        "- payoff_strength: is there a strong reaction, reveal, punchline, clutch, argument, or quote worth replaying?\n"
+        "- narrative_completeness: does it feel like a coherent mini-story rather than a fragment?\n"
+        "- platform_fit_shortform: is the pacing, density, and replay value right for Shorts/Reels/TikTok?\n\n"
+        "Be strict. A coherent stream moment should still score low if it is generic, slow, niche, purely informational, "
+        "or lacks a memorable Jynxzi-style reaction/quote/payoff. Penalize slow setup, missing payoff, weak standalone "
+        "clarity, mid-thought starts, missing context, and clips that fizzle without a clean ending.\n"
+        "Return raw JSON only with exactly this shape:\n"
+        '{"results":[{"candidate_id":"<id>","scroll_stop_power":0.0,'
+        '"standalone_clarity":0.0,"payoff_strength":0.0,'
+        '"narrative_completeness":0.0,"platform_fit_shortform":0.0,'
+        '"judge_reason":"<short sentence>","judge_confidence":0.0}]}\n\n'
+        f"Profile: {profile}\n"
+        "Candidates:\n"
+        f"{json.dumps(items, ensure_ascii=True)}"
+    )
+
+
+def _parse_batch_judge_results(content: str) -> dict[str, dict]:
+    start = content.find("{")
+    end = content.rfind("}")
+    if start < 0 or end < start:
+        return {}
+    try:
+        data = json.loads(content[start:end + 1])
+    except json.JSONDecodeError:
+        return {}
+    raw_results = data.get("results") if isinstance(data, dict) else None
+    if not isinstance(raw_results, list):
+        return {}
+    parsed: dict[str, dict] = {}
+    for item in raw_results:
+        if not isinstance(item, dict):
+            continue
+        candidate_id = str(item.get("candidate_id") or "").strip()
+        if not candidate_id:
+            continue
+        parsed[candidate_id] = item
+    return parsed
 
 
 def _call_llm_judge(
@@ -574,7 +775,8 @@ def _call_anthropic(
             },
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=float(settings.clip_judge_timeout_sec)) as response:
+        timeout_sec = float(settings.clip_judge_timeout_sec or 0.0)
+        with urllib.request.urlopen(request, timeout=timeout_sec if timeout_sec > 0 else None) as response:
             response_payload = json.loads(response.read().decode("utf-8"))
         _log_anthropic_usage(response_payload, provider=provider, model=model, keyframes=bool(keyframes))
         content = _anthropic_text_content(response_payload)

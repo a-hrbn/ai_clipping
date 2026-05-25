@@ -1,5 +1,1140 @@
 # Task Plan
 
+## 2026-05-19 Plan: Speed Up Ollama Clip Judge
+
+- [x] Change serving Judge defaults to use a smaller Ollama model.
+- [x] Increase Ollama Judge batch size and reduce judged shortlist size.
+- [x] Ensure the selected Ollama model is available in the running Ollama container.
+- [x] Restart backend runtime and verify `/api/status` reports the new Judge model.
+- [x] Document verification results.
+
+### Review Notes
+
+- Changed serving config from `qwen2.5:14b`, Judge batch `4`, Judge Top-K
+  `80` to `qwen2.5:7b`, Judge batch `8`, Judge Top-K `50`.
+- Updated `backend/.env.example` with the same defaults so future env files do
+  not drift back to the slower setup.
+- Pulled `qwen2.5:7b` into `ai-clipping-ollama`; `ollama list` now shows both
+  `qwen2.5:7b` and the older `qwen2.5:14b`.
+- Recreated the backend container and verified it is healthy.
+- Runtime verification inside the container reports:
+  `ollama_model=qwen2.5:7b`, `clip_judge_batch_size=8`,
+  `shortlist_judge_top_k=50`, `judge_provider=ollama`.
+- `/api/status` reports Ollama active on `qwen2.5:7b`.
+- Ollama smoke test passed. First request cold-loaded the model in about
+  `29s`; immediate warm request completed in about `307ms`.
+
+## 2026-05-19 Plan: Fix Context Leakage And Judge Feedback Calibration
+
+- [x] Reproduce the stale/global callback leakage in VOD memory context selection.
+- [x] Fix context retrieval so setup/callback evidence must be locally relevant to the candidate window.
+- [x] Increase Judge-accepted/rejected feedback strength for Proposal and Ranker training without letting unjudged rows become positives.
+- [x] Add/update focused tests for context relevance and feedback weighting.
+- [x] Run focused backend tests, syntax checks, Graphify rebuild, and document results.
+
+### Review Notes
+
+- Triggered by latest job analysis: final clips reused the same unrelated
+  callback summary and `minimum_required_setup_start=358.48` across far-apart
+  windows, while low Proposal scores showed Judge feedback needs stronger
+  training influence.
+- Fixed `vod_memory` so setup/open-loop/callback spans must be locally relevant
+  to the candidate and callback spans cannot bridge beyond the configured
+  lookback window through weak one-token overlap.
+- Verified the fix against the last job: final clip setup starts are now local
+  (`516.82`, `2081.54`, `1480.38`, `8367.92`, `1397.48`) instead of all
+  leaking the same stale `358.48` callback.
+- Increased Judge feedback influence: serving Judge quality exports now receive
+  score/confidence-aware sample weights, Proposal training uses stronger
+  Judge-accepted/rejected weights, and Ranker `judge_feedback` / judge quality
+  class multipliers were raised.
+- Verification passed: focused VOD memory/training export/Proposal/Ranker tests
+  (`70 passed`), analyzer/candidate recall/pipeline integration tests
+  (`42 passed`), `py_compile`, live context check on the latest job, Graphify
+  rebuild, backend CUDA image rebuild/restart with healthy container and
+  `/api/status` response, and `git diff --check`.
+
+## 2026-05-19 Plan: Analyze Latest Job
+
+- [x] Identify the latest job and its status.
+- [x] Inspect job debug artifacts, candidate funnel, selected clips, and judge/ranker/proposal diagnostics.
+- [x] Check backend logs for errors or fallback behavior around that job.
+- [x] Summarize quality bottlenecks and concrete next actions.
+
+### Review Notes
+
+- Started after request to analyze the latest job after backend restart and
+  artifact retraining.
+- Latest completed artifact job is `1e29506f-bed5-4234-8b2b-dae688e07ca0`
+  for Twitch VOD `2774602304`; it finished with 5 clips and the frontend
+  successfully requested all five clip files.
+- Candidate funnel: 5,000 dense inventory windows, 249 merged candidates, 241
+  normalized, 339 Proposal inputs, 240 Proposal-kept, 241 pre-Judge ranked, 80
+  judged, 170 quality-kept pool entries, 12 final-ranked, 5 final clips.
+- Proposal artifact was loaded, but final clip Proposal ranks were only 17, 27,
+  86, 102, and 170. Two final clips still had very low Proposal scores
+  (`0.076561` and `0.052378`), so Proposal is preserving coverage more than
+  confidently selecting winners.
+- Clip Judge worked through Ollama without timeout or fallback and judged 80
+  candidates, but took 2,470.581 seconds. It accepted only 9 judged candidates;
+  71 judged candidates failed mostly on low judge score, narrative completeness,
+  payoff strength, and standalone clarity.
+- Final clips were mostly rescued by Judge: one dense inventory candidate moved
+  from pre-Judge score 2.399 to judged score 8.122, and one peak moved from
+  2.720 to 7.162. This confirms the Ranker/Proposal still miss some candidates
+  before Judge.
+- Chat replay was effectively unusable for most of the VOD: only 66 chat rows
+  from seconds 17-22 were fetched, with log reason
+  `twitch_rechat_fetch_stopped ... no_offset_progress offset=23`. As a result
+  chat features are zero for the selected clips.
+- Transcript/context diagnostics show some bad global context leakage: all
+  final moments had the same unrelated callback summary and
+  `minimum_required_setup_start=358.48`, which is not credible for clips hours
+  later. This can mislead Judge/final explanations and should be fixed before
+  trusting context summaries.
+
+## 2026-05-18 Plan: Retrain Proposal And Ranker Artifacts
+
+- [x] Run Proposal training through `scripts/train_proposal_local_docker.sh`.
+- [x] Inspect the Proposal training summary and artifact metrics.
+- [x] Determine the safest Ranker retrain path from existing staged/training artifacts.
+- [x] Run or prepare the Ranker retrain with the current corrected training signals.
+- [x] Verify generated artifacts and document the result.
+
+### Review Notes
+
+- Triggered after quality-fix implementation because training-signal changes do
+  not affect serving until artifacts are retrained.
+- Proposal retrain completed successfully through Docker. New
+  `jynxzi_proposal_scorer.json` is trained on 9,937 rows with 755 positives.
+  Heldout metrics: AUC 0.61846, logloss 0.321553, precision@K/recall@K
+  0.169863. Label sources now include `judge_quality_accepted`,
+  `judge_quality_rejected`, `pipeline_selected`, and `pipeline_low_rank`.
+- Ranker retrain should use the artifact-only local training path with the last
+  successful date range (`2026-01-01` to `2026-05-12`) so the workflow exports
+  current feedback/training rows instead of directly training on a stale dataset
+  file.
+- Ranker artifact-only retrain completed successfully with return code 0.
+  `jynxzi_ranker.json`, `jynxzi_boundary_ranker.json`, and
+  `jynxzi_vod_training_rows.jsonl` were rewritten at the end of the run.
+- The refreshed transcript matching stage used 64 VOD rows and 356 repost rows,
+  loaded 64 VOD transcripts, reused 328 repost transcript caches, fetched 28
+  missing repost transcripts, and produced 144 transcript matches across 52
+  VODs at the current 0.5 threshold.
+- Current training rows after the retrain: 450 VOD-ranker rows, 143
+  cross-platform rows on disk, and 9,852 proposal training rows.
+- Ranker eval artifact exists and reports 30 eval rows. Runtime model precision
+  improved over the heuristic at the selected threshold (0.909 vs 0.800), while
+  ranking metrics stayed flat on this small eval set.
+- Verification passed after retrain: artifact timestamps confirmed, summaries
+  inspected, row counts checked, and `git diff --check` passed after normalizing
+  retrain-generated CSV line endings.
+
+## 2026-05-18 Plan: Fix Clip Quality Weaknesses
+
+- [x] Fix funnel semantics before changing scoring: split `quality_kept` into judged quality pass, unjudged retained pool, and final-ranked pool so every report shows whether candidates were actually judged.
+- [x] Promote Clip-Judge and frontend feedback into durable training rows for both Proposal and Ranker, with explicit labels for selected, rejected, skipped-by-user, and low-judge-score candidates.
+- [ ] Retrain the Proposal model on real serving windows plus cross-platform positives, not only transcript-match overlap, and require heldout metrics plus live-job lift checks before trusting the artifact.
+- [x] Add Proposal calibration diagnostics: final selected candidate proposal-score distribution, missed-high-judge candidates, precision@top-k, recall@top-k, and source-specific lift for `dense_inventory`, `peak`, `quote`, and `dense_window`.
+- [x] Improve the Pre-Judge Ranker with Judge/feedback outcomes so high-judge candidates rank in the top 20 before the LLM stage instead of being rescued from ranks 24-32.
+- [x] Tighten candidate generation: replace pure brute-force dense windows with boundary-aware dense windows, transcript sentence boundaries, local context expansion, and overlap pruning before Proposal scoring.
+- [x] Add candidate boundary repair before Judge: expand weak windows to include setup/payoff context, snap starts/ends to transcript boundaries, and penalize windows with incomplete standalone text.
+- [x] Change the Clip-Judge rubric from "complete moment" to "short-form viral potential": require hook, tension/reaction/payoff, standalone clarity, and Jynxzi-specific replay value; report separate sub-scores instead of one opaque score.
+- [x] Use Judge only as a teacher/reranker, not as final truth: feed high/low judge outcomes into training, but keep final validation tied to frontend feedback and cross-platform positives.
+- [x] Add a before/after evaluation command that runs the same VOD through old vs new artifacts and reports final clip overlap, judge-score lift, proposal-score lift, and manual review samples.
+
+### Success Criteria
+
+- Final selected clips should usually have non-trivial Proposal scores; obvious winners should not depend on broad shortlist survival.
+- At least 80% of high-Judge candidates should appear in the pre-Judge top 20 on heldout jobs.
+- The frontend funnel should clearly show whether a bad final result came from generation, Proposal, Ranker, Judge, Quality Gate, or final selection.
+- The Proposal artifact should show meaningful heldout lift, not just high accuracy from many easy negatives.
+- Manual sample review should show fewer generic/low-payoff dense windows and more standalone moments with clear setup and payoff.
+
+### Review Notes
+
+- Current weakness is not one broken stage. The broad candidate search reaches enough windows, but Proposal and Ranker do not yet rank the truly promising windows strongly enough.
+- The last analyzed job proves Judge lift exists: several final candidates moved up from weak pre-Judge ranks, but their Proposal scores were still very low.
+- The most important first implementation target is diagnostics/label flow, because changing thresholds before the system learns from real outcomes would only hide the root cause.
+- Implemented the first two quality levers: funnel reports now split `judged_quality_kept` and `unjudged_quality_kept`, and transition retention uses intersection counts so non-nested stages cannot report impossible retention above 100%.
+- Clip-Judge quality gate rows now become durable training feedback only when a real judge result exists. Accepted judged rows export as weak positives and rejected judged rows export as judge-feedback negatives for both Proposal and Ranker training paths.
+- Unjudged quality passes are no longer treated as positive Judge labels for Proposal training.
+- Verification passed: candidate recall tests, feedback-store/training-export/proposal-training tests, `py_compile`, `git diff --check`, and Graphify rebuild through the local Graphify interpreter.
+- Implemented the remaining serving-quality levers: Proposal input candidates are boundary-normalized before Proposal scoring, dense windows keep more setup context, and starts that begin mid-thought are repaired to a cleaner transcript boundary before Ranker/Judge.
+- Added Proposal/Ranker lift diagnostics to the candidate funnel: positive-proxy precision/recall@K, final/high-Judge Proposal score distributions, high-Judge Proposal keep ratio, source-specific quality breakdown, and high-Judge pre-Judge top-20/top-40 ratios.
+- `/api/jobs/{job_id}` and the frontend Pipeline overview now expose Judge quality split, Proposal lift, and Ranker lift so weak jobs can be diagnosed without reading raw JSONL.
+- Added `backend/ml/evaluate_candidate_funnel.py` for current-vs-baseline debug-dir comparisons of final selections, Judge lift, Proposal lift, Ranker lift, and missed high-Judge candidates.
+- The Clip Judge prompt now scores viral short-form potential more strictly: immediate scroll-stop, Jynxzi-style reaction/quote/payoff, pacing/replay value, and standalone clarity are weighted above generic completeness.
+- Ranker training now gives explicit Judge-feedback rows a small supervision boost so future artifacts can learn from judged accepts/rejects instead of treating them like generic weak labels.
+- Still not done automatically: the Proposal/Ranker artifacts must be retrained before these training-signal changes affect production scores.
+
+## 2026-05-18 Plan: Analyze Latest Job Results
+
+- [x] Check whether current job artifacts still exist after storage cleanup.
+- [x] Inspect backend logs/artifacts for the most recent completed frontend job.
+- [x] Summarize result quality, candidate funnel, and any missing evidence.
+
+### Review Notes
+
+- Latest artifact-backed job is `d6bfbbe2-605f-40bd-8c48-7c77f72d74de` for Twitch VOD `2774602304`; it completed with 5 clips.
+- Source cleanup worked for this job: `video.mp4`, `audio.wav`, and `chunks/` are absent while clips/debug artifacts remain.
+- Candidate funnel shows 5,000 dense inventory windows plus heuristic sources, 357 proposal inputs, 240 proposal-kept candidates, 268 pre-judge ranked candidates, 80 judged candidates, 12 final-ranked candidates, and 5 final moments.
+- Clip Judge ran through Ollama successfully but took about 2,184 seconds for 80 candidates.
+- Funnel diagnostics still need a semantic cleanup: `quality_kept=195` includes 188 unjudged candidates, so it is misleading as a post-Judge quality metric.
+
+
+## 2026-05-18 Plan: Delete Serving VOD After Job
+
+- [x] Inspect where frontend URL/upload jobs store the source VOD, derived audio, clips, and debug artifacts.
+- [x] Delete the source VOD after pipeline completion/failure without removing output clips, debug diagnostics, feedback material, or training caches.
+- [x] Add focused tests and run syntax/Graphify verification for the backend change.
+
+### Review Notes
+
+- Serving/frontend jobs now delete their job-local `video.mp4` after the pipeline
+  finishes, fails, or is cancelled. `audio.wav` and `chunks/` are also removed
+  as transient source artifacts.
+- Output clips and debug artifacts are preserved because only the job-local
+  source media paths are removed, not the whole job directory.
+- Training/backfill jobs with durable cache semantics are excluded:
+  `twitch_vod*`, `proposal_training_*`, and `judge_backfill_*` keep their
+  source media.
+- The router parent process also runs the same cleanup after the isolated
+  pipeline subprocess exits, so SIGKILL/OOM worker failures still remove
+  `video.mp4`.
+- Verification passed: `py_compile`, focused pipeline cleanup tests, focused
+  router subprocess cleanup tests, `git diff --check`, and Graphify rebuild via
+  the local Graphify interpreter after system `python3` lacked `graphify`.
+
+## 2026-05-18 Plan: Start ngrok By Default
+
+- [x] Inspect the container startup script and current remote-mode default.
+- [x] Make ngrok the default remote mode while keeping an explicit local-only opt-out.
+- [x] Verify script syntax and document the operational behavior.
+
+### Review Notes
+
+- `scripts/start_containerized.sh` now defaults `AI_CLIPPING_REMOTE` to `ngrok`, so running `./scripts/start_containerized.sh` starts the ngrok tunnel automatically after the containers come up.
+- Local-only startup is still explicit and available with `AI_CLIPPING_REMOTE=none ./scripts/start_containerized.sh`.
+- Verification passed: `bash -n scripts/start_containerized.sh`.
+
+## 2026-05-18 Plan: Candidate Filtering Observability
+
+- [x] Map the exact serving funnel from candidate generation through Proposal, Ranker, Judge, Quality Gate, final selection, and frontend display.
+- [x] Extend the existing candidate recall report into a per-candidate trace with stable candidate ids, source, time window, scores, pass/fail status, and rejection reason at every stage.
+- [x] Add aggregate funnel metrics for each transition: input count, kept count, loss count, loss percentage, top rejection reasons, score distributions, and source mix changes.
+- [x] Add “lost good candidates” analysis by comparing final/high-ranker clips against earlier stages to identify whether quality loss starts in Proposal, Ranker, Judge, Quality Gate, or final diversity trimming.
+- [ ] Surface the funnel in the frontend as an inspectable table/timeline, not only summary cards: stage columns, candidate rows, filters for rejected/kept/source/reason, and direct links to preview the candidate window.
+- [x] Add debug artifacts and tests so every pipeline run can prove which stage removed each candidate and why.
+- [ ] Verify with one known weak frontend job and one known good job, then document the bottleneck and next quality lever.
+
+### Review Notes
+
+- The backend now writes `debug/candidate_trace.jsonl` with one row per
+  candidate across generation, Proposal, Ranker, Judge scope, Clip Judge,
+  Quality Gate, final ranked, and final moment stages.
+- The backend also writes `debug/candidate_funnel_summary.json` with stage
+  counts, losses, drop-stage counts, rejection-reason counts, source counts,
+  score distributions, and trace samples for final and rejected candidates.
+- `/api/jobs/{job_id}` now exposes the consolidated funnel as
+  `pipeline_diagnostics.candidate_funnel`, so the frontend no longer needs to
+  infer the funnel from separate debug artifacts.
+- The frontend Pipeline overview now includes a Candidate Funnel section with
+  stage counts, largest losses, rejection/drop reasons, and a candidate sample
+  table showing time window, source, rank, Proposal/Ranker/Judge scores, and
+  drop reason. Dedicated preview links/interactive filters are still the next
+  UI refinement.
+- Verification passed: backend syntax check, focused candidate trace tests,
+  focused jobs-router diagnostics test, frontend lint, `git diff --check`, and
+  Graphify rebuild via CLI fallback because the direct Python module import is
+  unavailable in this shell.
+- Remaining validation is empirical: run one known weak frontend job and one
+  good job, then use the new funnel to identify the actual quality bottleneck.
+
+## 2026-05-15 Plan: Align Frontend Whisper Runtime With Local Training
+
+- [x] Compare `scripts/train_local_docker.sh` and `ml.local_train` runtime defaults against the containerized frontend/backend path.
+- [x] Apply the matching Whisper/CUDA/thread/shared-memory defaults to serving without increasing concurrent Whisper model count.
+- [x] Add/adjust tests for the pipeline subprocess environment.
+- [x] Verify backend tests, Graphify rebuild, container runtime settings, and document results.
+
+### Review Notes
+
+- `scripts/train_local_docker.sh` optimizes Whisper mainly through CUDA
+  exposure, host IPC, 16 GB shared memory, fixed English transcription, CUDA
+  allocator settings, and native thread caps.
+- The containerized frontend/backend path now uses the same serving defaults:
+  `WHISPER_LANGUAGE=en`, CUDA allocator defaults when `WHISPER_DEVICE=cuda`,
+  `CUDA_VISIBLE_DEVICES=0`, tokenizers disabled, and BLAS/OpenMP thread pools
+  capped at one thread.
+- `docker-compose.yml` now gives the backend `ipc: host` and `shm_size: 16gb`;
+  `docker-compose.cuda.yml` carries the CUDA-specific runtime defaults.
+- This does not increase Whisper model concurrency. It keeps the persistent
+  isolated chunk worker from the previous optimization and removes avoidable
+  per-chunk language detection/runtime overhead.
+- Verification passed: focused backend tests, `py_compile`, `git diff --check`,
+  compose config inspection, Graphify rebuild, backend image rebuild, API
+  healthcheck, and live container runtime checks. Runtime reports
+  `whisper_device=cuda`, `whisper_language=en`, CUDA available, 16 GB shared
+  memory, and the expected thread/CUDA environment variables.
+
+## 2026-05-15 Plan: Optimize Frontend Whisper Transcription
+
+- [x] Confirm current transcription bottleneck and relevant runtime defaults.
+- [x] Replace per-chunk isolated Whisper subprocesses with a persistent isolated chunk worker.
+- [x] Preserve chunk cache/progress semantics and parent-process isolation.
+- [x] Add focused transcriber tests for persistent isolated processing.
+- [x] Verify backend tests, Graphify rebuild, container runtime config, and document results.
+
+### Review Notes
+
+- The slow path was `PIPELINE_ISOLATE_TRANSCRIPTION_CHUNKS=true` spawning a
+  separate Python process per audio chunk, which reloaded Whisper for every
+  chunk.
+- `transcribe_with_progress` now keeps isolation but sends all uncached chunks
+  to one persistent isolated worker via `--transcribe-chunks`, so Whisper loads
+  once per VOD transcription batch instead of once per chunk.
+- Cached chunk transcripts still short-circuit before model loading, progress
+  updates are still emitted per chunk, and non-isolated transcription keeps the
+  existing in-process path.
+- Verification passed: transcriber `py_compile`, focused transcriber tests,
+  pipeline/config tests, `git diff --check`, Graphify rebuild, and
+  containerized runtime checks.
+- Backend was rebuilt and restarted. Runtime reports
+  `pipeline_isolate_transcription_chunks=True`, `whisper_device=cuda`,
+  `frontend_job_cache_enabled=False`, and `shortlist_judge_top_k=80`.
+
+## 2026-05-14 Plan: Speed Up Clip Judge
+
+- [x] Inspect current Clip Judge provider flow and config/test coverage.
+- [x] Add Ollama batch judging so multiple candidates can be scored per LLM call.
+- [x] Keep non-Ollama providers on the existing single-candidate path.
+- [x] Add tests for batch judging and fallback behavior.
+- [x] Verify backend tests, frontend build hygiene if types change, Graphify rebuild, and container runtime.
+
+### Review Notes
+
+- Added `CLIP_JUDGE_BATCH_SIZE=4` as the local/default Ollama Judge batch
+  size.
+- The Ollama text Judge now scores consecutive recall-passing candidates in
+  one strict JSON batch request. With `SHORTLIST_JUDGE_TOP_K=80`, this reduces
+  the worst-case Judge calls from about 80 to about 20 before recall filtering.
+- Non-Ollama providers and multimodal/keyframe Judge paths stay on the
+  existing single-candidate path.
+- If a batch call fails or omits a candidate result, that candidate falls back
+  to the existing single-candidate `judge_candidate` path instead of being
+  silently dropped.
+- Verification passed: backend `py_compile`, focused Clip-Judge/config tests,
+  jobs-router/pipeline/recall-report tests, frontend lint/build,
+  `git diff --check`, Graphify rebuild, and containerized runtime checks.
+- Containers were rebuilt and restarted. Backend is healthy, frontend/API
+  respond, and runtime settings report `judge_provider=ollama`,
+  `clip_judge_batch_size=4`, and `clip_judge_timeout_sec=0.0`.
+
+## 2026-05-14 Plan: Add Candidate Recall Debug Report
+
+- [x] Inspect current debug artifact schema for candidate, proposal, judge, and quality-gate stages.
+- [x] Add a per-job recall report that tracks candidate counts, source mix, and losses across pipeline stages.
+- [x] Surface the recall report in backend pipeline diagnostics so the frontend can show where candidates drop.
+- [x] Verify backend tests, frontend build hygiene, Graphify rebuild, and container runtime if needed.
+
+### Review Notes
+
+- Added `services/candidate_recall_report.py` to build a per-job funnel report
+  from generated candidates, proposal audit rows, ranker output, judge scope,
+  quality-gate audit rows, final ranked candidates, and final moments.
+- Pipeline now writes `debug/candidate_recall_report.json` after final moments
+  are selected. The report includes stage counts, source counts, transition
+  losses, largest losses, top Proposal rejects, candidates outside Judge scope,
+  Quality-Gate rejects, and final candidate ids.
+- `/api/jobs/<job_id>` now exposes a `Candidate Recall` diagnostics stage so
+  the frontend can show whether candidates dropped at Proposal, Ranker/Judge,
+  Quality Gate, or final selection.
+- Frontend `JobStatus` type now includes the `judging` status used by the
+  Clip-Judge progress phase.
+- Verification passed: backend `py_compile`, focused pytest suite
+  (`test_candidate_recall_report`, `test_jobs_router`,
+  `test_pipeline_integration`, `test_config`), frontend lint/build,
+  `git diff --check`, Graphify rebuild, and containerized runtime import/API
+  checks.
+- Containers were rebuilt and restarted; backend is healthy and frontend/API
+  respond.
+
+## 2026-05-14 Plan: Remove Clip Judge Stage Timeout And Add Live Progress
+
+- [x] Inspect current Clip Judge timeout path and frontend diagnostics flow.
+- [x] Disable the whole-stage Clip Judge timeout so the Judge can finish instead of falling back.
+- [x] Persist per-candidate Clip Judge progress and surface it in job status diagnostics.
+- [x] Add frontend status label for the judging phase.
+- [x] Verify focused backend/frontend tests and update running containers.
+
+### Review Notes
+
+- Removed the whole-stage Clip Judge timeout from the serving pipeline. The
+  Judge no longer falls back to pre-judge ranking just because the full stage
+  takes longer than 90 seconds.
+- `CLIP_JUDGE_TIMEOUT_SEC=0` is now the local default, so provider request
+  timeout is disabled unless explicitly configured otherwise.
+- Added live Clip Judge progress: processed, attempted, judged,
+  recall-filtered, elapsed seconds, and current candidate window are persisted
+  to `debug/clip_judge_stage.json` while judging runs.
+- Job status now has a dedicated `judging` phase and advances progress during
+  candidate judging; the frontend stage list shows `Clip Judge`.
+- The frontend diagnostics panel now summarizes Clip Judge progress while the
+  job is still running instead of only showing the final judge result.
+- Verification passed: backend `py_compile`, focused pytest suite
+  (`test_clip_judge`, `test_jobs_router`, `test_pipeline_integration`,
+  `test_config`), frontend lint/build, `git diff --check`, Graphify rebuild,
+  and containerized runtime checks.
+- Containers were rebuilt and restarted. Runtime config now reports
+  `clip_judge_timeout_sec=0.0` and `judge_provider=ollama`; frontend and backend
+  endpoints respond.
+
+## 2026-05-14 Plan: Keep Backend Diagnostics Visible Before Debug Artifacts
+
+- [x] Confirm why the frontend hides backend diagnostics after cache cleanup.
+- [x] Show the backend diagnostics summary even when detailed debug stages are not available yet.
+- [x] Verify frontend lint/build and document the behavior.
+
+### Review Notes
+
+- Root cause: the backend did return `pipeline_diagnostics` during early phases,
+  but with `available=false` before `debug/` artifacts existed. The frontend
+  returned `null` for that state, so the whole backend diagnostics panel
+  disappeared while the job was still downloading/transcribing.
+- `PipelineDiagnosticsPanel` now renders the backend summary even before
+  detailed stages exist, with a short note that detailed candidate/ranker/judge
+  data appears after those artifacts are written.
+- The current job had no `debug/` directory yet because it was still in
+  `transcribing`; that is expected after disabling transcript cache reuse.
+- During the frontend image rebuild, Compose also recreated the backend
+  container and killed the active worker. I marked job
+  `8840d552-24ab-4362-b46a-77591479f00e` as failed so the UI does not wait
+  forever.
+- Verification passed: `npm --prefix frontend run lint`,
+  `npm --prefix frontend run build`, live `/api/jobs/...` inspection, and
+  frontend/backend containers are healthy.
+
+## 2026-05-14 Plan: Disable Frontend Job Caches And Purge Old Job Artifacts
+
+- [x] Map frontend-serving cache write paths before deleting anything.
+- [x] Add a serving setting that disables frontend download/transcript cache reads and writes.
+- [x] Keep training/cross-platform caches untouched unless explicitly requested.
+- [x] Delete existing frontend job cache/artifact directories and job metadata.
+- [x] Verify tests, runtime config, and storage cleanup.
+
+### Review Notes
+
+- Added `FRONTEND_JOB_CACHE_ENABLED=false` as the serving default in backend
+  settings, local `.env`, and `.env.example`.
+- Normal frontend/serving job IDs no longer use the Twitch VOD download cache
+  even when `TWITCH_DOWNLOAD_CACHE_TTL_SEC=-1`; training-style job IDs such as
+  `twitch_vod*` can still use the durable training cache path.
+- Frontend pipeline transcription no longer reads or writes
+  `backend/tmp/storage/_transcript_cache` when serving cache is disabled; it
+  transcribes the current job input directly.
+- Deleted old frontend job artifacts and caches from `backend/tmp/storage`,
+  including UUID job directories, `jobs.json`, `_transcript_cache`,
+  `_download_cache/twitch`, `vision_language_features`, and old materialized
+  proposal job debug material. About `90.1 GiB` was removed.
+- Preserved non-frontend training/repost caches under `_download_cache`
+  (`short_form`, `short_form_metadata`, `short_form_transcripts`) and
+  `backend/tmp/vod_feature_cache`.
+- Verification passed: `py_compile`, `backend/tests/test_downloader.py`,
+  `backend/tests/test_pipeline_integration.py`, `backend/tests/test_config.py`,
+  scoped `git diff --check`, runtime settings inspection, storage inventory,
+  and Graphify rebuild (`3312` nodes, `8869` edges, `94` communities).
+
+## 2026-05-14 Plan: Fix Clip Judge Timeout Observability And Load
+
+- [x] Confirm whether the frontend warning is a real Judge miss or a diagnostics false positive.
+- [x] Persist Clip-Judge stage outcome/degradation details into job debug artifacts.
+- [x] Reduce default local Ollama Judge load so serving judges the shortlist instead of every candidate.
+- [x] Verify tests, runtime config, and live diagnostics.
+
+### Review Notes
+
+- The warning was real: the latest test job `bec13437-9dac-48b9-94d0-6457c6053d09`
+  logged `clip_judge_stage_degraded` because the Clip Judge hit the 90s timeout
+  and fell back to 248 pre-judge ranked candidates.
+- Root cause was local serving load: `JUDGE_ALL_CANDIDATES=true` plus
+  `SHORTLIST_JUDGE_TOP_K=80` meant Ollama could be asked to judge far more than
+  the useful shortlist within the timeout.
+- Serving defaults now judge only the shortlist:
+  `JUDGE_ALL_CANDIDATES=false` and `SHORTLIST_JUDGE_TOP_K=24` in config,
+  local `.env`, and `.env.example`.
+- Pipeline runs now persist `debug/clip_judge_stage.json`, so the frontend can
+  distinguish timeout, disabled judge, empty judge result, and provider failure
+  instead of only showing a generic "no judge result" warning.
+- Verification passed: `py_compile`, focused jobs-router tests, config and
+  pipeline integration tests, and scoped `git diff --check`.
+- Graphify rebuilt successfully after backend edits: `3307` nodes, `8858`
+  edges, `96` communities.
+- Running backend container was recreated with the new env and patched with the
+  updated backend files; runtime settings now report `judge_provider=ollama`,
+  `judge_all_candidates=False`, and `shortlist_judge_top_k=24`.
+
+## 2026-05-14 Plan: Add Frontend Pipeline Observability
+
+- [x] Inspect current backend debug artifacts and job-status payload shape.
+- [x] Add a backend per-job pipeline diagnostics summary from existing debug files.
+- [x] Add frontend types and a compact diagnostics panel for candidates, proposal, ranker, judge, quality gate, and final clips.
+- [x] Verify backend tests, frontend lint/build hygiene, Graphify rebuild after backend edits, and runtime API shape.
+- [x] Document review notes with what the UI can and cannot prove.
+
+### Review Notes
+
+- Added `pipeline_diagnostics` to the job-status payload. It is derived from
+  the existing per-job debug artifacts under `backend/tmp/storage/<job_id>/debug`
+  and does not add a second tracking system.
+- The diagnostics summarize candidate generation, proposal scoring, ranker,
+  clip judge, serving quality gate, and final selection with status, counts,
+  and warning details.
+- The frontend now shows a `Pipeline Überblick` panel while a job is polling
+  and preserves the latest panel above the results after completion.
+- Older completed jobs can show `disabled` or `warning` for stages whose audit
+  files did not exist when those jobs were produced. That is intentional:
+  the panel reports what can be proven from artifacts instead of inventing a
+  green status.
+- Verification passed: backend `py_compile`, focused
+  `backend/tests/test_jobs_router.py`, `npm --prefix frontend run lint`,
+  `npm --prefix frontend run build`, `git diff --check`, Graphify rebuild, and
+  live `/api/jobs/<job_id>` runtime check from the containerized backend.
+
+## 2026-05-14 Plan: Force Clip Judge To Ollama
+
+- [x] Add an explicit Judge provider setting and thread it through the pipeline.
+- [x] Set local and example Docker env defaults to use Ollama for Clip Judge.
+- [x] Verify tests, rebuild Graphify after backend edits, rebuild backend container, and confirm runtime settings.
+
+### Review Notes
+
+- Added `JUDGE_PROVIDER` to backend settings and set `JUDGE_PROVIDER=ollama`
+  in both `.env.example` and the local Docker `.env`.
+- The pipeline now passes the configured provider into `clip_judge.rerank_candidates`.
+  With `JUDGE_PROVIDER=ollama`, the Anthropic two-tier path is disabled even if
+  an Anthropic key is still present.
+- When Ollama is forced, the pipeline skips unnecessary multimodal keyframe
+  sampling for cloud multimodal providers and uses the text-only Ollama judge.
+- `scripts/start_containerized.sh` now auto-enables `docker-compose.ollama.yml`
+  when `backend/.env` contains `JUDGE_PROVIDER=ollama`.
+- `docker-compose.ollama.yml` now points the backend at `http://ollama:11434`
+  inside the Compose network.
+- Verification passed: `py_compile`, focused Ollama provider test, full
+  `backend/tests/test_clip_judge.py`, `backend/tests/test_config.py` plus
+  pipeline integration tests, `bash -n`, Compose config rendering,
+  `git diff --check`, and Graphify rebuild.
+- Runtime verification passed: backend is healthy, Ollama container is running,
+  backend reports `judge_provider=ollama`, `ollama_host=http://ollama:11434`,
+  and the backend can reach Ollama with model `qwen2.5:14b` available.
+
+## 2026-05-14 Plan: Make Judge Timeout Non-Fatal In Serving
+
+- [x] Inspect the current Judge timeout failure and fail-fast configuration.
+- [x] Change pipeline timeout handling so pre-judge ranked candidates continue to serving.
+- [x] Set serving Docker defaults so Judge provider failures are not fail-fast by default.
+- [x] Add focused regression coverage for timeout degradation.
+- [x] Run tests, rebuild Graphify, and document the result.
+
+### Review Notes
+
+- Root cause: serving jobs already had ranked candidates, but the optional
+  Clip Judge stage was wrapped in a hard timeout path that raised when
+  `CLIP_JUDGE_FAIL_FAST=true`.
+- Judge timeouts now degrade to the pre-judge ranked candidates and log
+  `clip_judge_stage_degraded` with the fallback candidate count. Non-timeout
+  `ClipJudgeError` still respects the fail-fast setting.
+- Serving defaults are now non-fatal: `CLIP_JUDGE_FAIL_FAST=false` and
+  `JUDGE_PROVIDER_FALLBACK_ENABLED=true` in both `.env.example` and the local
+  `.env` used by Docker.
+- Verification passed: `py_compile` for `backend/pipeline.py` and
+  `backend/config.py`, focused timeout regression test, full
+  `backend/tests/test_pipeline_integration.py`, `backend/tests/test_config.py`
+  plus pipeline integration tests, `git diff --check`, and Graphify rebuild.
+- Rebuilt/restarted the backend Docker container with CUDA compose overrides.
+  Runtime verification passed: `/api/status` responds and the container reports
+  `clip_judge_fail_fast=False`, `judge_provider_fallback_enabled=True`, and
+  `clip_judge_timeout_sec=90.0`.
+- Follow-up verification caught and fixed a keyword typo in the new fallback
+  helper call sites (`timeout` -> `timeout_sec`). The backend image was rebuilt
+  again and `/api/status` still responds.
+
+## 2026-05-14 Plan: Fix Ngrok Failed Fetch
+
+- [x] Reproduce local and ngrok API reachability from the current running containers.
+- [x] Inspect frontend fetch configuration for direct localhost/backend URLs that break remotely.
+- [x] Make browser API/media requests use same-origin by default.
+- [x] Add focused verification for remote API/media fetch behavior.
+- [x] Document the root cause and verification result.
+
+### Review Notes
+
+- Root cause: the current remote/ngrok container was built with browser API
+  calls targeting `http://localhost:8000`. On another PC, that means the remote
+  client tries to fetch its own local machine, which surfaces as `failed to
+  fetch`.
+- There was also one ngrok log entry with `connect: connection refused` while
+  the frontend port was down during a restart, but the persistent remote-fetch
+  problem was the browser-side API base.
+- `frontend/lib/api.ts` now normalizes an unset or empty `NEXT_PUBLIC_API_URL`
+  to same-origin requests, so API calls use `/api/...` and clip URLs use
+  `/static/...` through the Next.js rewrite.
+- Docker defaults now build the frontend with `NEXT_PUBLIC_API_URL=` rather
+  than `http://localhost:8000`.
+- Remote was rebuilt/restarted with `AI_CLIPPING_REMOTE=ngrok
+  ./scripts/start_containerized.sh`.
+- Verification passed: local `/api/status`, remote
+  `https://catfight-preformed-entertain.ngrok-free.dev/api/status`, remote
+  frontend HTML, remote JS chunk, no `localhost:8000` in the frontend
+  container bundle, no `localhost:8000` in the fetched remote page chunk,
+  `node` frontend config tests, `npm --prefix frontend run lint`, and
+  `git diff --check`.
+
+## 2026-05-14 Plan: Wire Proposal Training Materialization Into Script
+
+- [x] Add a materializer that creates proposal debug folders from cached VOD transcripts with cross-platform positives.
+- [x] Add a proposal-training pipeline entrypoint that runs materialization, row building, then model training.
+- [x] Wire `scripts/train_proposal_local_docker.sh` to the new pipeline entrypoint.
+- [x] Add focused tests for materialization/orchestration behavior.
+- [x] Verify syntax, tests, script help, diff hygiene, and rebuild Graphify after backend edits.
+
+### Review Notes
+
+- `scripts/train_proposal_local_docker.sh` now invokes
+  `ml.train_proposal_pipeline` instead of calling the scorer trainer directly.
+- The pipeline first materializes cached positive VOD transcripts into isolated
+  proposal debug jobs under `<storage-dir>/_proposal_training_materialized`,
+  then builds serving-shape proposal rows, then trains the logistic proposal
+  scorer.
+- The materializer uses compatible VOD transcript caches first, then safely
+  falls back to the latest transcript cache for the same VOD ID when only the
+  Whisper runtime metadata differs.
+- A local non-destructive verification run against two real Jynxzi positive
+  VODs materialized 2 VODs and built 34 proposal rows with 1 positive and 33
+  negatives using reduced candidate limits.
+- Verification passed: `py_compile`, `bash -n`, script help rendering, focused
+  proposal tests (`11 passed`), `git diff --check`, and Graphify rebuild
+  (`3294` nodes, `8818` edges, `95` communities).
+
+## 2026-05-14 Plan: Fix Ngrok Clip Playback
+
+- [x] Confirm why remote job status works but returned clip media does not render.
+- [x] Route generated clip media through the same ngrok/Next.js origin.
+- [x] Add focused frontend config verification for `/static` rewrites.
+- [x] Rebuild/restart frontend in remote mode and verify existing clip media over ngrok.
+- [x] Rebuild Graphify if backend files change and document results.
+
+### Review Notes
+
+- Root cause: remote mode only rewrote `/api/:path*` from the frontend/ngrok
+  origin to the backend. Job polling succeeded, but clip files use
+  `/static/{job_id}/clips/{filename}`, so Next.js returned `404` for generated
+  media over ngrok.
+- `frontend/next.config.mjs` now rewrites both `/api/:path*` and
+  `/static/:path*` to the internal backend service.
+- Added `frontend/tests/next-config-rewrites.mjs` to lock the API and static
+  media rewrites.
+- Rebuilt/restarted with `AI_CLIPPING_REMOTE=ngrok ./scripts/start_containerized.sh`.
+- Verified the previously failing clip path:
+  `https://catfight-preformed-entertain.ngrok-free.dev/static/7141a1f5-2231-4c16-aff0-efca5908c448/clips/clip_01.mp4`
+  now returns `200` for full GET and `206` with `content-type: video/mp4` for
+  range requests.
+- Verification passed: `node --check frontend/next.config.mjs`,
+  `node frontend/tests/next-config-rewrites.mjs`,
+  `npm --prefix frontend run lint`, frontend rebuild, local `/static` route,
+  remote `/static` route, and remote clip byte download.
+- No backend code changed, so Graphify rebuild was not required.
+
+## 2026-05-14 Plan: Add Optional Ngrok Remote Startup
+
+- [x] Replace the temporary reverse-proxy setup with a versioned Next.js API rewrite.
+- [x] Add an explicit remote mode to `scripts/start_containerized.sh`.
+- [x] Preserve the default local-only startup behavior.
+- [x] Verify local mode, remote mode, ngrok URL extraction, and frontend API base.
+- [x] Document how to stop the remote tunnel.
+
+### Review Notes
+
+- `AI_CLIPPING_REMOTE=ngrok ./scripts/start_containerized.sh` now starts the
+  normal containers, rebuilds the frontend with same-origin API calls, and then
+  starts one ngrok tunnel against frontend port `3000`.
+- Next.js rewrites `/api/:path*` to the backend service
+  `http://backend:8000/api/:path*`, so no extra Python reverse proxy is needed.
+- Default local startup remains unchanged: without `AI_CLIPPING_REMOTE=ngrok`,
+  the frontend still builds with `http://localhost:8000` as the browser API
+  base.
+- Runtime verification passed with CUDA auto-selection: backend/frontend
+  containers are running, local `http://127.0.0.1:3000/api/status` returns
+  backend JSON through the frontend rewrite, and remote
+  `https://catfight-preformed-entertain.ngrok-free.dev/api/status` returns the
+  same backend status through ngrok.
+- Frontend bundle check found no `http://localhost:8000` reference after the
+  remote-mode build.
+- Verification passed: `bash -n scripts/start_containerized.sh`,
+  `node --check frontend/next.config.mjs`, Compose config rendering,
+  `npm --prefix frontend run lint`, scoped `git diff --check`, and a real
+  `AI_CLIPPING_REMOTE=ngrok ./scripts/start_containerized.sh` run.
+- Active tunnel PID/log are `backend/tmp/ngrok/ngrok.pid` and
+  `backend/tmp/ngrok/ngrok.log`. Stop command:
+  `kill "$(cat backend/tmp/ngrok/ngrok.pid)"`.
+
+## 2026-05-14 Plan: Test VOD 2771207666 Through Frontend
+
+- [x] Confirm frontend/backend containers and the frontend submission path.
+- [x] Submit `https://www.twitch.tv/videos/2771207666` through the frontend-equivalent submit path.
+- [x] Watch job status, backend logs, and cgroup OOM state until the next bottleneck.
+- [x] Re-plan and remove the full-audio extraction requirement when transcript chunks are already cached.
+- [x] Re-run the frontend-equivalent VOD test and record whether the fix holds.
+
+### Review Notes
+
+- Frontend and backend containers were running; frontend returned HTTP `200`,
+  backend `/api/status` returned active pipeline providers.
+- Job submitted with the same frontend JSON contract plus `profile=jynxzi`:
+  `2ee4f409-2bbe-4331-a5ff-60a10b70de76`.
+- First frontend-equivalent run exposed a second root cause before transcription: the pipeline still extracts a full `audio.wav` from the 6.4G VOD even when all transcript chunks are already cached. This drove cgroup memory/current above 8 GB and incremented `oom_kill` from 0 to 1 while `ffmpeg` was still extracting audio.
+- The pipeline now probes VOD duration with `ffprobe`, verifies that all
+  expected transcript chunk-cache rows exist, and skips `audio.wav` extraction,
+  Whisper, and audio-feature extraction on a complete transcript cache hit.
+- A second frontend-equivalent retry confirmed the transcript/audio fix, then
+  exposed the next memory path: full-VOD visual extraction decoded one frame per
+  second from a 4h38m VOD and grew worker RSS beyond 8 GB. The pipeline now
+  skips full-VOD visual feature extraction above
+  `PIPELINE_FULL_VISUAL_FEATURE_MAX_DURATION_SEC=7200`; candidate-window face
+  refinement and keyframe sampling remain enabled.
+- A third frontend-equivalent retry confirmed those two skips, then exposed the
+  next memory path: shortlist face-reaction refinement decoded one huge
+  min-to-max ffmpeg span for sparse candidates. Refinement now decodes only
+  contiguous candidate-second ranges instead of hours of non-candidate video.
+- Verification so far: `py_compile`, focused tests (`67 passed`), scoped
+  `git diff --check`, and Graphify rebuild (`3181` nodes, `8464` edges,
+  `96` communities).
+- Final frontend-equivalent test job
+  `232c93ec-e58c-4231-b30f-24046d4e8a18` completed successfully with
+  `status=done`, `progress_pct=100`, `download_cached=true`, `clips=5`, and
+  `oom_kill=0`. Peak observed memory stayed around `3.3 GB`, then dropped to
+  about `0.5 GB` after completion. The job output contains five clip files
+  under `backend/tmp/storage/232c93ec-e58c-4231-b30f-24046d4e8a18/clips/`.
+## 2026-05-14 Plan: Fix Remaining Frontend VOD Transcriber SIGKILL
+
+- [x] Re-check latest failed job state instead of assuming the previous OOM pattern.
+- [x] Determine whether SIGKILL hits the parent pipeline worker or the isolated Whisper chunk worker.
+- [x] Identify the actual memory trigger for VOD `2771207666`.
+- [x] Implement the smallest durable fix and update regression coverage.
+- [x] Verify in tests/container and document the result.
+
+### Review Notes
+
+- Latest failed job is `9fe48cd9-e8fc-4d51-a849-1a52cd92c5eb`, now failing
+  at `progress_pct=30` with `download_cached=True`. That points to the start
+  of transcription or the first isolated chunk, not to later feature extraction.
+- The latest job had all 28 Whisper chunk cache files written under
+  `_transcript_cache`, so ASR itself completed. The subsequent log shows
+  `transcriber_diarization_unavailable ... AudioDecoder`, followed by cgroup
+  `oom_kill=1`, which means post-ASR Pyannote/TorchCodec diarization was the
+  remaining parent-worker memory trigger.
+- Frontend pipeline jobs now pass `enable_diarization=False` by default and skip
+  the MFCC fallback unless `PIPELINE_ENABLE_DIARIZATION=true` is explicitly set.
+- Verification passed: `py_compile`, focused backend tests (`46 passed`),
+  scoped `git diff --check`, and Graphify rebuild (`3163` nodes, `8421`
+  edges, `95` communities).
+- Runtime verification passed after rebuilding the backend CUDA image:
+  container is `healthy`, `OOMKilled=false`, cgroup `oom_kill=0`, CUDA is
+  visible, and `pipeline_enable_diarization=False` inside the container.
+- Direct container proof for VOD `2771207666`: loading the existing transcript
+  chunk cache with `enable_diarization=False` returned `3540` segments, while a
+  patched `_diarize` function that would raise was never called.
+
+## 2026-05-14 Plan: Clean Backend Tmp Runtime Altlasten
+
+- [x] Inspect `backend/tmp` size distribution and current Docker/backend process state.
+- [x] Identify persistent caches that must be preserved.
+- [x] Stop stale cancelled/failed runtime workers that still hold temp files.
+- [x] Delete only stale per-job runtime directories and orphan temp fragments.
+- [x] Verify freed disk space and document what was preserved.
+
+### Review Notes
+
+- Persistent caches to preserve: `backend/tmp/vod_feature_cache`,
+  `backend/tmp/storage/_download_cache`, `backend/tmp/storage/_transcript_cache`,
+  `backend/tmp/cache`, and short-form metadata/cache directories.
+- Current largest safe cleanup candidates are failed/cancelled per-job runtime
+  directories under `backend/tmp/storage/<uuid>`.
+- `ffeabed2-c22a-4cc9-9cb5-053da047ff89` is marked `cancelled` in
+  `jobs.json`, but still has a live `pipeline_worker` and `aria2c` process,
+  so it must be stopped before deleting its partial fragments.
+- Stopped the stale cancelled worker and removed stale per-job directories for
+  failed/cancelled frontend jobs. Removed all leftover `.part`/fragment temp
+  files under `backend/tmp`.
+- `backend/tmp` dropped from about `165G` to `133G`. Remaining usage is mostly
+  intentional cache: `122G` VOD feature cache and `11G` storage cache.
+- `backend/ml/cache_cleanup.py --dry-run` reports no additional conservative
+  cleanup candidates after the manual stale UUID cleanup.
+- Restarted the backend after cleanup to clear defunct child processes from the
+  cancelled download. Container health is `healthy`, status is `running`, and
+  Docker reports `OOMKilled=false`.
+
+## 2026-05-14 Plan: Isolate Whisper Chunk Transcription From OOM
+
+- [x] Confirm repeated SIGKILL still occurs in the Whisper transcribing phase.
+- [x] Add process isolation for each non-cached Whisper chunk in frontend jobs.
+- [x] Keep the durable chunk cache and make cached chunks skip Whisper entirely.
+- [x] Add focused tests for isolated chunk execution and pipeline wiring.
+- [x] Run verification, rebuild Graphify, and restart the backend container.
+
+### Review Notes
+
+- The current failed/active frontend VOD jobs still reach `progress_pct=55`
+  with `SIGKILL`, and Docker reports `OOMKilled=true`.
+- Logs show the worker repeatedly dies during Whisper chunk processing around
+  the high-teen chunks, before feature extraction starts. The previous chunk
+  cache preserves completed work, but it does not prevent the long-lived
+  Whisper process from accumulating memory within one run.
+- Frontend pipeline runs now pass `isolate_chunks=True` by default via
+  `PIPELINE_ISOLATE_TRANSCRIPTION_CHUNKS=true`. Cache hits still bypass
+  Whisper, while cache misses run one chunk in one child process and then
+  return native/PyTorch memory to the OS when that child exits.
+- Verification passed: `py_compile`; focused transcriber/pipeline/jobs/config
+  tests -> `38 passed`; scoped `git diff --check`; Graphify rebuild (`3162`
+  nodes, `8419` edges, `94` communities); CUDA backend image rebuild/restart;
+  backend healthcheck healthy with `OOMKilled=false`; runtime probe reports
+  `pipeline_isolate_transcription_chunks=True`, `WHISPER_DEVICE=cuda`, and
+  CUDA available.
+
+## 2026-05-14 Plan: Make Frontend VOD Transcription Resumable
+
+- [x] Confirm the repeat SIGKILL phase from current job/log state.
+- [x] Inspect frontend transcription chunking and existing cache boundaries.
+- [x] Add durable per-chunk transcript checkpointing for URL/VOD jobs.
+- [x] Release transient Whisper/GPU memory after each chunk.
+- [x] Run focused transcriber/pipeline tests, diff hygiene, and Graphify.
+
+### Review Notes
+
+- New failed job `9dec6885-139b-4e51-bfd0-e61d9fa90136` reached
+  `progress_pct=55` and was killed while Whisper was still processing VOD
+  chunks. The log never reached `extracting_features`, so the previous
+  feature-overlap fix did not cover this failure.
+- The VOD media itself was reused through hardlinks/cache; the repeated cost is
+  the non-resumable Whisper chunk loop.
+- Frontend transcription now writes each completed 10-minute Whisper chunk to
+  `backend/tmp/storage/_transcript_cache/<source-hash>/chunks/`. The cache key
+  is stable for Twitch VOD URLs via `twitch_vod:<vod_id>`, so a fresh frontend
+  job for the same VOD can resume completed chunks from an earlier killed job.
+- Fully cached chunks do not load Whisper at all; cache misses still use the
+  existing singleton model and call CUDA cache cleanup after each completed
+  chunk.
+- Verification passed: `py_compile`; focused transcriber/pipeline/jobs tests
+  -> `33 passed`; scoped `git diff --check`; Graphify rebuild (`3153` nodes,
+  `8401` edges, `84` communities); CUDA backend image rebuild/restart;
+  backend healthcheck healthy with `OOMKilled=false`; runtime probe reports
+  `WHISPER_DEVICE=cuda`, CUDA available, and feature overlap disabled.
+
+## 2026-05-14 Plan: Prevent Frontend VOD Worker SIGKILL/OOM
+
+- [x] Confirm the failed job phase and runtime kill signal from current logs.
+- [x] Reduce peak memory by disabling overlapped feature extraction by default.
+- [x] Cap frontend Twitch VOD downloads to a serving-safe default height.
+- [x] Improve signal-9 job error text and add focused regression coverage.
+- [x] Run focused tests, syntax checks, diff hygiene, and Graphify after backend changes.
+
+### Review Notes
+
+- The failed frontend VOD job `c4599af9-4daf-42f0-827f-1000e5d1c677`
+  stopped at `progress_pct=55`, right after Whisper progress and before feature
+  extraction completed. Docker also reported `OOMKilled=true` for the backend
+  container state, so the failure mode was SIGKILL/peak-memory, not a Python
+  exception.
+- Pipeline workers now default to sequential feature extraction:
+  `PIPELINE_OVERLAP_FEATURE_EXTRACTION=false`. Whisper no longer overlaps with
+  audio/video feature extraction unless explicitly re-enabled.
+- Frontend Twitch VOD downloads now default to `TWITCH_DOWNLOAD_MAX_HEIGHT=720`.
+  Training VOD jobs still use `TRAINING_VOD_MAX_HEIGHT`.
+- Signal-9 failures now surface as
+  `Pipeline subprocess exited from signal 9 (SIGKILL; likely OOM or external kill)`.
+- Verification passed: focused pytest suite (`48 passed`), `py_compile`, scoped
+  `git diff --check`, Graphify rebuild (`3137` nodes, `8366` edges,
+  `87` communities), and CUDA container restart/healthcheck.
+
+## 2026-05-14 Plan: Add CUDA Backend Container With CPU Fallback
+
+- [x] Mirror the training workflow's CUDA runtime for the app backend.
+- [x] Keep the current CPU backend image as the fallback path.
+- [x] Add a Compose override that requests Docker GPU access and CUDA devices.
+- [x] Make the start script auto-select CUDA when available, otherwise CPU.
+- [x] Verify Compose configs, build paths, runtime selection, and Graphify.
+
+### Review Notes
+
+- Added a CUDA backend image using the same CUDA family as the local training
+  workflow: `pytorch/pytorch:2.10.0-cuda12.8-cudnn9-runtime`.
+- Added `docker-compose.cuda.yml` as an override for the backend only. It uses
+  the CUDA Dockerfile, requests `gpus: all`, and sets
+  `WHISPER_DEVICE=cuda`, `SEMANTIC_DEVICE=cuda`,
+  `NVIDIA_VISIBLE_DEVICES=all`, and
+  `NVIDIA_DRIVER_CAPABILITIES=compute,utility,video`.
+- `scripts/start_containerized.sh` now supports
+  `AI_CLIPPING_BACKEND_RUNTIME=auto|cuda|gpu|cpu`. `auto` probes host NVIDIA
+  visibility and Docker `--gpus all`; if either is unavailable it starts the
+  CPU backend.
+- Verified forced CPU startup and automatic CUDA startup on the current host.
+  Auto selected CUDA on the RTX 5070 Ti host.
+- Live CUDA backend verification passed:
+  `torch=2.10.0+cu128`, `torch.version.cuda=12.8`,
+  `torch.cuda.is_available()=True`, `WHISPER_DEVICE=cuda`, and
+  `SEMANTIC_DEVICE=cuda`.
+- Compose config validation, CUDA backend build, CPU fallback build, frontend
+  HTTP `200`, backend `/api/status`, backend healthcheck, scoped
+  `git diff --check`, and Graphify rebuild passed.
+
+## 2026-05-14 Plan: Containerize Frontend And Backend Runtime
+
+- [x] Confirm frontend/backend runtime commands and env boundaries.
+- [x] Add production Dockerfiles for FastAPI backend and Next.js frontend.
+- [x] Add Docker Compose wiring with persistent backend runtime/cache volumes.
+- [x] Add a start script that builds and starts the stack correctly.
+- [x] Verify Compose config/build path and rebuild Graphify after backend-related files change.
+
+### Review Notes
+
+- Added container builds for the FastAPI backend and Next.js frontend, plus
+  scoped `.dockerignore` files so local venvs, caches, generated artifacts, and
+  secrets are not copied into images.
+- `docker-compose.yml` now wires `backend` on port `8000` and `frontend` on
+  port `3000`, mounts persistent backend runtime/cache/artifact directories,
+  and exposes `host.docker.internal` for host Ollama access.
+- `scripts/start_containerized.sh` creates required runtime directories,
+  bootstraps missing env files from examples, then runs
+  `docker compose -f docker-compose.yml up --build -d`.
+- The backend image preinstalls CPU PyTorch wheels before app extras to avoid
+  pulling CUDA/NVIDIA packages into the default container image.
+- Verification passed: Compose config validation, frontend image build, backend
+  image build, start script launch, backend healthcheck, frontend HTTP `200`,
+  backend `/api/status`, CPU Torch probe, scoped `git diff --check`, and
+  Graphify rebuild.
+
+## 2026-05-14 Plan: Fix Frontend Worker Cache/Headless Runtime Warnings
+
+- [x] Confirm which warning is an actual broken runtime path.
+- [x] Make local cache env selection require write access, not just directory existence.
+- [x] Set stable headless CV defaults for frontend pipeline workers and face probes.
+- [x] Repair current root-owned runtime cache directory.
+- [x] Run focused tests, diff hygiene, and Graphify after backend changes.
+
+### Review Notes
+
+- The real broken path was `backend/tmp/matplotlib`: it existed, but was owned
+  by `root:root`, so Matplotlib fell back to a temporary `/tmp/matplotlib-*`
+  cache on every worker start.
+- Local cache setup now probes write access before accepting a cache directory
+  and falls back to a writable runtime cache if a directory only exists but is
+  not writable.
+- Frontend pipeline workers and face-detection probes now set software/headless
+  defaults for OpenCV/Mesa: `LIBGL_ALWAYS_SOFTWARE=1`,
+  `MESA_LOADER_DRIVER_OVERRIDE=swrast`, and
+  `OPENCV_FFMPEG_CAPTURE_OPTIONS=hwaccel;none`.
+- The current `backend/tmp/matplotlib` directory ownership was repaired to
+  `antonio:antonio`, and direct Matplotlib cache resolution now stays on that
+  path.
+- Verification passed: `backend/tests/test_config.py` and
+  `backend/tests/test_jobs_router.py` -> `22` tests, `py_compile`, scoped
+  `git diff --check`, direct Matplotlib cache probe, and Graphify rebuild.
+- Graphify now reports `3135` nodes, `8362` edges, and `81` communities.
+
+## 2026-05-14 Plan: Enable Twitch VOD Download Cache And Remove Stale Job Media
+
+- [x] Confirm current cache setting and identify large stale frontend VOD job directories.
+- [x] Enable Twitch VOD download cache in config, `.env`, and `.env.example`.
+- [x] Delete stale failed/cancelled job media directories and obsolete partial VOD-range downloads.
+- [x] Run focused verification, diff hygiene, and Graphify after backend config changes.
+
+### Review Notes
+
+- Twitch VOD download caching is now enabled by default with
+  `TWITCH_DOWNLOAD_CACHE_TTL_SEC=-1` in config, `.env`, and `.env.example`.
+- The existing downloaded Twitch VOD `2770356205` was migrated into the
+  canonical cache at `backend/tmp/storage/_download_cache/twitch/`.
+- Removed the stale failed/cancelled frontend job media copies and two obsolete
+  coarse VOD `.part` directories. `backend/tmp/storage` dropped from `69G` to
+  `26G`.
+- Cache usability was verified for `https://www.twitch.tv/videos/2770356205`;
+  focused downloader tests passed with `23` tests.
+- `py_compile`, scoped `git diff --check`, and Graphify rebuild passed.
+  Graphify now reports `3132` nodes, `8354` edges, and `84` communities.
+
+## 2026-05-14 Plan: Re-enable Face Detection For Frontend Pipeline Jobs
+
+- [x] Change the pipeline subprocess default so native face detection is enabled again.
+- [x] Preserve an explicit environment override for disabling face detection if it crashes.
+- [x] Update regression coverage for the new worker default.
+- [x] Run focused verification and rebuild Graphify after backend changes.
+
+### Review Notes
+
+- Frontend pipeline workers now default to
+  `AI_CLIPPING_DISABLE_FACE_DETECTION=0`, so MediaPipe/MTCNN/DeepFace can run
+  again inside the isolated worker process.
+- Explicit host override still works: launching the backend with
+  `AI_CLIPPING_DISABLE_FACE_DETECTION=1` keeps native face stacks disabled.
+- Verification passed: `backend/tests/test_jobs_router.py` -> `18` tests,
+  `py_compile`, scoped `git diff --check`, and Graphify rebuild.
+- Graphify rebuilt successfully: `3132` nodes, `8354` edges, `84`
+  communities.
+
+## 2026-05-14 Plan: Make Pipeline Worker Strategy JSON-Safe
+
+- [x] Trace why URL submit task failed before starting the worker.
+- [x] Normalize strategy payloads before serializing for the subprocess.
+- [x] Add regression coverage for set-valued strategy fields.
+- [x] Run focused verification and rebuild Graphify.
+
+### Review Notes
+
+- `clip_strategy.normalize_strategy()` returns set-valued fields such as
+  `keywords` and `exclude_keywords`. The worker-launch command now converts the
+  full strategy payload to JSON-safe primitives before `json.dumps`.
+- Sets are serialized as sorted lists, so command construction is deterministic
+  and the worker receives the same keyword content.
+- Verification passed: `py_compile`; focused jobs/job-manager tests ->
+  `24 passed`; scoped `git diff --check`.
+- Graphify rebuilt successfully with `3113` nodes, `8301` edges, and
+  `79` communities.
+
+## 2026-05-14 Plan: Isolate Pipeline URL Submits From Native CV Crashes
+
+- [x] Trace the Twitch URL submit crash path.
+- [x] Move pipeline execution out of the FastAPI process.
+- [x] Keep job progress/cancellation visible across the subprocess boundary.
+- [x] Add regression coverage for subprocess launch/failure behavior.
+- [x] Run focused verification and rebuild Graphify.
+
+### Review Notes
+
+- The crash path was `routers/jobs.py` importing `pipeline` during URL submit;
+  `pipeline.py` imports `services.video_features`, which initializes native
+  MediaPipe/MTCNN/DeepFace stacks at import time. In a headless EGL/WSL
+  context, those native imports can segfault before Python can catch anything.
+- URL and upload jobs now launch `pipeline_worker.py` in a separate Python
+  subprocess. If the worker exits from a signal, FastAPI marks the job failed
+  instead of dying with the worker.
+- Worker jobs set a writable `MPLCONFIGDIR` and default
+  `AI_CLIPPING_DISABLE_FACE_DETECTION=1`, while preserving motion/scene visual
+  features. The env can still override this if native face detection is stable.
+- `job_manager` now reloads `jobs.json` when another process updates it, so
+  progress, terminal state, and cancellation remain visible across the worker
+  boundary.
+- Verification passed: `py_compile`; focused jobs/job-manager tests ->
+  `23 passed`; scoped `git diff --check`.
+- Graphify rebuilt successfully with `3111` nodes, `8297` edges, and
+  `86` communities.
+
+## 2026-05-14 Plan: Feed Frontend Ratings Into Training
+
+- [x] Trace how frontend gold-eval ratings are stored and exported.
+- [x] Enable frontend-rated clips as default VOD training signal.
+- [x] Prevent stale generated gold artifacts from being preserved as training input.
+- [x] Update regression coverage for the new default.
+- [x] Run focused verification and rebuild Graphify.
+
+### Review Notes
+
+- Frontend gold-eval ratings already flow into
+  `tmp/storage/feedback/gold_eval_updates.jsonl` and export as
+  `gold_eval_frontend` rows with deterministic `gold_holdout_split`.
+- The normal Jynxzi VOD training run now enables
+  `VOD_RANKER_USE_USER_LABELS=1` and `VOD_RANKER_USE_GOLD_TRAIN=1` by default,
+  so frontend-rated train-split rows are passed to `--include-gold-train`.
+- The script no longer calls `export_frontend_gold_eval.py` with
+  `--merge-existing` or `--preserve-existing-if-empty`; generated gold
+  artifacts are rebuilt from the feedback store each run instead of preserving
+  stale rows.
+- A dry run against the current local feedback store exported `97` Jynxzi
+  frontend gold rows: `67` train and `30` holdout.
+- Verification passed: `bash -n`; `py_compile`; focused frontend/gold/training
+  tests -> `57 passed`; scoped `git diff --check`.
+- Graphify rebuilt successfully with `3094` nodes, `8249` edges, and
+  `86` communities.
+
+## 2026-05-14 Plan: Balance Auto-Negative Outcome Holdout
+
+- [x] Trace why the outcome holdout has positives but no auto-negative rows.
+- [x] Add deterministic holdout-floor balancing for exported auto-outcome negatives.
+- [x] Ensure split metadata and dataset_source stay consistent after balancing.
+- [x] Add regression coverage and verify current artifacts can produce mixed holdout rows.
+- [x] Rebuild Graphify after backend changes.
+
+### Review Notes
+
+- The last run's auto-outcome negative export produced `49` rows but all landed
+  in the train split, leaving the outcome holdout with `24` positives and `0`
+  negatives. That made threshold calibration skip with
+  `calibration_class_rows_below_minimum`.
+- Auto-outcome negative export now applies a deterministic holdout floor after
+  `max_rows` capping. If the stable split under-fills holdout, selected train
+  negatives are promoted until the requested holdout ratio is represented.
+- Split promotion updates `gold_holdout_split` and `dataset_source` together,
+  so downstream builders see `auto_outcome_negative_holdout` rows correctly.
+- A dry run with the current Jynxzi artifacts now exports `58` auto negatives:
+  `46` train and `12` holdout. Building the outcome holdout from that output
+  produces `36` rows: `24` positives and `12` negatives.
+- Threshold calibration on the dry-run holdout now returns `status=computed`,
+  `reason=ok`, with both classes present.
+- Verification passed: `py_compile`; focused auto-negative + outcome-holdout
+  tests -> `9 passed`; scoped `git diff --check`.
+- Graphify rebuilt successfully with `3094` nodes, `8249` edges, and
+  `86` communities.
+
+## 2026-05-14 Plan: Inventory-Calibrate Rollout Readiness Gates
+
+- [x] Inspect the current rollout-readiness targets in the diagnostic report and ranker artifact.
+- [x] Replace impossible fixed Jynxzi rollout gates with inventory-calibrated targets when available VOD groups are capped.
+- [x] Keep raw historical targets visible in reports for context.
+- [x] Add focused regression coverage and verify against the current Jynxzi artifact.
+- [x] Rebuild Graphify after backend changes.
+
+### Review Notes
+
+- Jynxzi rollout readiness now uses inventory-calibrated targets when the
+  available VOD groups cannot plausibly satisfy the old absolute rollout
+  gates. The raw historical targets remain visible under `raw_targets`.
+- With the current maxed-out artifact, the calibrated targets are
+  `training_rows=304`, `positive_rows=152`, and `validation_groups=15` for
+  `38` available policy-surviving groups.
+- Re-running the coverage diagnosis against the current Jynxzi training rows
+  now returns `passed=true`: actuals are `367` training rows, `159` positive
+  rows, and `15` validation groups.
+- Verification passed: `py_compile`; focused diagnose + train-ranker tests ->
+  `58 passed`; scoped `git diff --check`.
+- Graphify rebuilt successfully with `3089` nodes, `8234` edges, and
+  `85` communities.
+
+## 2026-05-14 Plan: Parallelize Transcript Repost Matching
+
+- [x] Add a configurable process-worker count for transcript repost matching.
+- [x] Parallelize only the independent per-repost best-match step while keeping
+  transcript cache loading and scoring semantics unchanged.
+- [x] Preserve deterministic output/diagnostic ordering.
+- [x] Add focused regression coverage and run verification.
+- [x] Rebuild Graphify after backend changes.
+
+### Review Notes
+
+- Transcript matching now accepts `--transcript-match-workers` in
+  `prepare_cross_platform_fingerprint_rows.py` and `--workers` in the direct
+  transcript matcher CLI.
+- `train_jynxzi_vod.sh` defaults `CROSS_PLATFORM_TRANSCRIPT_MATCH_WORKERS=4`,
+  exports it, logs it at startup, and passes it into the prepare stage.
+- The implementation keeps media resolution and Short transcript cache loading
+  in the parent process. Only the independent per-repost VOD best-match scan is
+  distributed through `ProcessPoolExecutor`.
+- Worker results are consumed in input order, so matched rows and diagnostic
+  rows remain deterministic relative to the serial path.
+- Verification passed: `py_compile`; `bash -n`; focused transcript/script
+  tests -> `9 passed`; focused prepare tests -> `47 passed`; scoped
+  `git diff --check`.
+- Graphify rebuilt successfully with `3085` nodes, `8223` edges, and
+  `84` communities.
+
 ## 2026-05-13 Plan: Reuse Existing Repost Media During Freshness Rebuild
 
 - [x] Document why the IboClips freshness rebuild is rematerializing many Shorts.
@@ -5948,6 +7083,105 @@ Phase 0-2 zuerst, danach **1 Woche reale Nutzung** bevor Phase 3 angefasst wird.
 - [x] Add focused tests for cache-only filtering and API-row priority.
 - [x] Run focused verification and rebuild Graphify after backend changes.
 
+## 2026-05-14 Plan: Test 20 Transcript Match Workers
+
+- [x] Raise the next-run transcript matching default from 16 to 20 workers.
+- [x] Update env defaults and the script regression check.
+- [x] Run focused verification and rebuild Graphify.
+
+### Review Notes
+
+- The active container cannot change its already-started worker count in-place;
+  `CROSS_PLATFORM_TRANSCRIPT_MATCH_WORKERS=20` applies to the next run.
+- Verification passed: `bash -n backend/ml/train_jynxzi_vod.sh` and
+  `pytest backend/tests/test_train_jynxzi_vod_script.py -q`.
+
+## 2026-05-14 Plan: Test 16 Transcript Match Workers
+
+- [x] Confirm the active run still uses the already-started worker count.
+- [x] Raise the next-run transcript matching default from 8 to 16 workers.
+- [x] Update the script regression check for the new default.
+- [x] Run focused verification and rebuild Graphify.
+
+### Review Notes
+
+- The active container still runs with `--transcript-match-workers 8`; that
+  value cannot change in-place after the process has started.
+- `train_jynxzi_vod.sh`, `.env`, and `.env.example` now default to
+  `CROSS_PLATFORM_TRANSCRIPT_MATCH_WORKERS=16` for the next run.
+- Verification passed: `bash -n backend/ml/train_jynxzi_vod.sh`,
+  `pytest backend/tests/test_train_jynxzi_vod_script.py -q`, and Graphify
+  rebuild.
+
+## 2026-05-14 Plan: Add Whole-VOD Dense Ranker Candidates
+
+- [x] Add a public dense whole-VOD candidate generator that reuses the existing dense-window proposal logic.
+- [x] Feed dense candidates into the normal ranker path even when peak candidates exist.
+- [x] Persist dense candidates in job debug artifacts so recall can be inspected per frontend run.
+- [x] Add focused tests for dense candidate generation, merge caps, and pipeline debug output.
+- [x] Run focused verification and rebuild Graphify after backend changes.
+
+### Review Notes
+
+- Frontend VOD runs now generate `dense_window` candidates from the whole VOD in
+  addition to peak and semantic candidates.
+- Dense candidates are fed into `merge_prioritized_candidates` even when peak
+  candidates exist, then scored by the same feature builder and ranker path.
+- The dense source cap is intentionally higher for this whole-VOD recall path:
+  `WHOLE_VOD_DENSE_SOURCE_CAP=48`, controlled by
+  `ENABLE_WHOLE_VOD_DENSE_CANDIDATES`.
+- Job debug output now includes `debug/candidates_dense.jsonl`, making it
+  inspectable whether the dense recall path found additional windows.
+- Verification so far: focused candidate-generator/pipeline tests passed with
+  `14` tests, `py_compile` passed, and scoped `git diff --check` passed.
+- Graphify rebuilt successfully: `3131` nodes, `8352` edges, `81`
+  communities.
+
+## 2026-05-14 Plan: Preserve yt-dlp Primary Download Errors
+
+- [x] Replace the `with YoutubeDL(...)` block with explicit close handling so cleanup errors cannot hide `extract_info` failures.
+- [x] Add a regression test where ffmpeg `-11` is followed by a cookie-save failure.
+- [x] Verify the downloader tests, syntax, diff hygiene, and Graphify rebuild.
+
+### Review Notes
+
+- The previous retry did not trigger when `YoutubeDL.__exit__` raised a
+  cookie-save `FileNotFoundError` after the primary `ffmpeg exited with code
+  -11` error.
+- `_download_uncached` now calls yt-dlp through explicit close handling, so a
+  cleanup failure cannot mask the original `extract_info` exception.
+- Regression coverage now simulates `ffmpeg -11` followed by cookie cleanup
+  failure and proves the safer Twitch retry still runs.
+- Verification so far: `py_compile` passed and
+  `backend/tests/test_downloader.py` passed with `23` tests.
+- `git diff --check` passed and Graphify rebuilt successfully: `3125` nodes,
+  `8332` edges, `86` communities.
+
+## 2026-05-14 Plan: Harden yt-dlp Cookie Paths And FFmpeg Crash Retry
+
+- [x] Confirm the downloader failure chain from the reported traceback.
+- [x] Remap Docker-style yt-dlp cookie paths to the local backend path and create the parent directory before yt-dlp can save cookies.
+- [x] Retry Twitch downloads once with safer native/single-file yt-dlp options when ffmpeg exits with code `-11`.
+- [x] Add regression tests for cookie path handling and the retry path.
+- [x] Run focused verification and rebuild Graphify after backend changes.
+
+### Review Notes
+
+- Root cause was a two-stage failure: yt-dlp first hit `ffmpeg exited with
+  code -11`, then `YoutubeDL.__exit__` tried to save cookies to the Docker-only
+  path `/app/backend/tmp/www.youtube.com_cookies.txt`, which does not exist in
+  the local backend process and masked the original downloader error.
+- `services.yt_dlp_auth` now remaps `/app/backend/...` cookie paths to the
+  local backend root and creates the cookiefile parent directory before yt-dlp
+  starts.
+- Twitch downloads now retry once after `ffmpeg exited with code -11` using
+  native yt-dlp downloading and `best[ext=mp4]/best`, avoiding the failing
+  external/merged download path where possible.
+- Verification so far: `py_compile` passed and
+  `backend/tests/test_downloader.py` passed with `22` tests.
+- Graphify rebuilt successfully: `3120` nodes, `8322` edges, `80`
+  communities.
+
 ### Review Notes
 
 - The active run proved the Twitch-label removal worked, but the VOD inventory
@@ -6028,3 +7262,269 @@ Phase 0-2 zuerst, danach **1 Woche reale Nutzung** bevor Phase 3 angefasst wird.
 - Verification passed: focused pytest -> `50 passed`; `py_compile` passed;
   scoped `git diff --check` passed; Graphify rebuilt successfully with
   `2934` nodes, `7818` edges, and `73` communities.
+
+## 2026-05-14 Plan: Ngrok Remote Frontend Setup
+
+- [x] Stop any stale ngrok tunnel processes for this project.
+- [x] Start a local reverse proxy that routes `/api` to backend and everything else to frontend.
+- [x] Rebuild/restart frontend with same-origin API calls.
+- [x] Start one ngrok tunnel for the combined local proxy and capture the public URL.
+- [x] Verify remote frontend/backend URLs and document access details.
+
+### Review Notes
+
+- A two-tunnel ngrok config was not stable in this account/session: both tunnel
+  entries reported the same public host and the agent exited. The final setup
+  uses one local proxy on `127.0.0.1:8080` and one ngrok tunnel.
+- Remote URL:
+  `https://catfight-preformed-entertain.ngrok-free.dev`.
+- Frontend was rebuilt with `NEXT_PUBLIC_API_URL=` so browser API calls target
+  same-origin `/api/...` through the proxy instead of `localhost:8000`.
+- Verified locally through the proxy: `http://127.0.0.1:8080/` and
+  `http://127.0.0.1:8080/api/status`.
+- Verified remotely through ngrok:
+  `https://catfight-preformed-entertain.ngrok-free.dev/` returns frontend HTML
+  and `/api/status` returns backend JSON.
+- Active process files:
+  `backend/tmp/ngrok/proxy.pid`, `backend/tmp/ngrok/ngrok.pid`; logs are in
+  `backend/tmp/ngrok/proxy.log` and `backend/tmp/ngrok/ngrok.log`.
+
+## 2026-05-14 Plan: Diagnose Clip Quality Model vs Pipeline
+
+- [x] Inspect the latest completed frontend job outputs and selected clips.
+- [x] Inspect current Jynxzi ranker/eval artifacts for model quality signals.
+- [x] Check candidate-generation and ranking flow enough to locate the likely bottleneck.
+- [x] Summarize whether the weakness is model quality, candidate pool quality, or downstream clipping boundaries.
+
+### Review Notes
+
+- Latest completed Jynxzi jobs use `ranking_mode=ml_blended` for most selected
+  clips, so the trained model is active in serving.
+- Current artifact is formally usable: `jynxzi_ranker.json` selects
+  `lightgbm_ranker`, and `jynxzi_ranker_eval.json` reports calibration
+  precision `0.909`, recall `0.833`, and ranking metric `0.778` on only
+  `30` calibration rows.
+- The latest debug job `9c7adf11-5b59-4244-bf7a-f3f1ab839033` produced
+  `18` peak candidates, `531` semantic candidates, `11` dense candidates, but
+  only `24` merged/normalized candidates reached ranking.
+- The judge rerank gave all top candidates weak-to-medium scores around
+  `3.9` to `5.15` and repeatedly wrote negative reasons such as unclear
+  context, no clean payoff, missing resolution, and fragmentary narrative.
+- Despite those negative judge reasons, the selector still emitted clips. That
+  indicates the serving path ranks the best available candidates but lacks a
+  strict enough abstain/reject gate when the candidate pool is weak.
+- Main likely bottleneck: pipeline selection and candidate coverage, not just
+  the trained model. The model can only rank proposed windows, and the final
+  selector currently returns clips even when the best available windows are
+  mediocre.
+
+## 2026-05-14 Plan: Tighten Serving Clip Quality Gates
+
+- [x] Add configurable post-judge quality gates for score, payoff, standalone clarity, and narrative completeness.
+- [x] Apply the gate before final diversity selection so weak candidates can be abstained instead of emitted.
+- [x] Preserve fallback behavior only when no judge result exists, without hiding judged low-quality candidates.
+- [x] Add regression tests covering rejected weak judged clips and fewer-than-target outputs.
+- [x] Run focused tests, lint/syntax checks, restart containers if needed, and document results.
+
+### Review Notes
+
+- Serving now applies `serving_quality_gate_done` after clip judging and before
+  diversity selection, so judged low-quality candidates cannot be used to fill
+  the requested clip count.
+- New defaults are visible in `backend/.env` and `backend/.env.example`:
+  minimum judge score `6.0`, standalone clarity `0.55`, payoff `0.55`,
+  narrative completeness `0.45`, and judge confidence `0.45`.
+- Job debug artifacts now include `debug/serving_quality_gate.jsonl` with
+  per-candidate acceptance/rejection reasons.
+- Applying the new gate to the latest weak debug job
+  `9c7adf11-5b59-4244-bf7a-f3f1ab839033` rejects all `24` judged candidates:
+  all were below judge-score and narrative thresholds.
+- Verification passed: `py_compile`, scoped `git diff --check`,
+  `backend/tests/test_clip_judge.py backend/tests/test_selector.py` -> `20`
+  tests, and `backend/tests/test_config.py backend/tests/test_selector.py
+  backend/tests/test_pipeline_integration.py` -> `11` tests.
+- Graphify rebuilt with the uv-managed graphify interpreter after system
+  `python3` lacked the module: `3192` nodes, `8495` edges, `97` communities.
+- Backend Docker image was rebuilt and `ai-clipping-backend` restarted healthy;
+  local and ngrok `/api/status` both respond.
+
+## 2026-05-14 Plan: Trainable Candidate Proposal Quality Lever
+
+- [x] Phase 1: Add dense candidate inventory generation that produces broad,
+  overlapping windows over the whole VOD before heuristic source caps are
+  applied.
+- [x] Phase 2: Build cheap proposal features for every dense window using
+  transcript, score timeline, chat/audio/visual aggregates, topic boundaries,
+  hook/payoff shape, and current heuristic source hits.
+- [x] Phase 3: Train a lightweight proposal model that filters thousands of
+  windows down to a small high-recall shortlist before the expensive ranker,
+  judge, face refinement, and boundary refinement stages.
+- [x] Phase 4: Create labels for the proposal model from cross-platform
+  transcript matches, frontend ratings, accepted judge outputs, rejected judge
+  outputs, and near-miss negatives around positives.
+- [x] Phase 5: Integrate the proposal model into serving behind a feature flag:
+  dense windows -> proposal scorer -> top N per VOD/chapter -> existing ranker
+  -> judge -> quality gate.
+- [x] Phase 6: Add diagnostics that compare proposal recall against current
+  heuristic candidates and show where good windows were missed.
+- [x] Phase 7: Verify the implementation with focused unit/integration tests,
+  candidate diagnostics, syntax checks, diff checks, and graph rebuild.
+
+### Review Notes
+
+- Goal: move the quality bottleneck from heuristic candidate discovery to a
+  learned proposal stage. The current trained ranker can only score candidates
+  it receives; this plan makes "what candidates exist" trainable too.
+- Added `dense_inventory` candidate generation: overlapping whole-VOD windows
+  are now generated before heuristic source caps, with configurable durations,
+  stride, and max inventory size.
+- Added a cheap `proposal_scorer` stage with deterministic fallback scoring and
+  optional JSON linear model loading from `ml/artifacts/{profile}_proposal_scorer.json`.
+- Serving now runs: heuristic candidates + dense inventory -> proposal scorer
+  -> proposal shortlist -> existing feature builder/ranker -> judge -> quality
+  gate. Existing heuristic candidates are preserved by default while the
+  proposal stage adds broader recall candidates.
+- Debug output now includes `candidates_dense_inventory.jsonl`,
+  `candidate_proposals.jsonl`, and `candidate_proposal_summary.json`.
+- Added `ml/train_proposal_scorer.py`, which trains the JSON proposal artifact
+  from frontend feedback, selected outputs, judge quality-gate labels, optional
+  cross-platform positive rows, and near-miss negatives around those positives.
+- Verification passed: `py_compile`, `git diff --check`, and focused tests
+  `backend/tests/test_candidate_generators.py`,
+  `backend/tests/test_proposal_scorer.py`,
+  `backend/tests/test_train_proposal_scorer.py`,
+  `backend/tests/test_pipeline_integration.py`, `backend/tests/test_config.py`,
+  `backend/tests/test_selector.py` -> `25` tests.
+
+## 2026-05-14 Plan: Proposal Local Docker Training Script
+
+- [x] Add a `scripts/` wrapper that mirrors `scripts/train_local_docker.sh` but
+  runs `backend/ml/train_proposal_scorer.py` with repo/container defaults.
+- [x] Support profile, storage dir, output path, positive cross-platform rows,
+  and pass-through args without duplicating Docker build/run logic.
+- [x] Verify shell syntax, help output through the Docker wrapper interface, and
+  keep Graphify current after backend script changes.
+
+### Review Notes
+
+- Added `scripts/train_proposal_local_docker.sh` as a thin wrapper around
+  `scripts/train_local_docker.sh`, so it reuses the same image build, env file,
+  GPU flags, IPC, shm size, artifact mount, tmp mount, and prewarmed model mount.
+- Default command inside the container is
+  `python -m ml.train_proposal_scorer --profile jynxzi --storage-dir /app/backend/tmp/storage --positive-rows /app/backend/ml/artifacts/jynxzi_cross_platform_fingerprint_rows.jsonl --output /app/backend/ml/artifacts/jynxzi_proposal_scorer.json`.
+- The wrapper supports `--profile`, `--storage-dir`, `--positive-rows`,
+  `--output`, `--min-rows`, env overrides, and pass-through args after `--`.
+- Verification passed: `bash -n scripts/train_proposal_local_docker.sh`,
+  `scripts/train_proposal_local_docker.sh --help`,
+  `backend/tests/test_train_proposal_scorer.py`, `git diff --check`, and
+  Graphify rebuild.
+
+## 2026-05-14 Plan: Proposal Training Backfill And Gold-Eval Removal
+
+- [x] Add a backfill script that builds proposal training rows from
+  cross-platform positive windows plus available VOD segment JSONL files.
+- [x] Extend proposal scorer training so it can train directly from the
+  generated proposal training rows, not only from fresh frontend debug jobs.
+- [x] Wire the Docker proposal training wrapper to consume the generated
+  proposal training rows by default.
+- [x] Remove existing gold-eval artifacts and disable the local training flow
+  from recreating frontend gold-eval rows.
+- [x] Verify scripts, focused tests, artifact deletion, and Graphify rebuild.
+
+### Review Notes
+
+- Added `ml/build_proposal_training_rows.py`. It first tries to label dense
+  proposal windows from cross-platform positives plus available VOD segment
+  JSONL files, then backfills from existing non-gold VOD feature rows.
+- Current local backfill produced `559` proposal rows: `211` positives and
+  `348` negatives. It explicitly skipped `64` rows whose source/tier/class was
+  gold-eval derived.
+- Trained `ml/artifacts/jynxzi_proposal_scorer.json` from the generated rows.
+- Deleted current `*gold_eval*`, active gold queue, and gold-derived hard
+  negative artifacts from `backend/ml/artifacts`, plus
+  `backend/tmp/storage/feedback/gold_eval_updates.jsonl`.
+- Verification passed so far: `py_compile`; focused pytest set
+  `backend/tests/test_train_jynxzi_vod_script.py`,
+  `backend/tests/test_train_proposal_scorer.py`,
+  `backend/tests/test_proposal_scorer.py`, and
+  `backend/tests/test_candidate_generators.py` -> `21` tests. Gold artifact
+  deletion was verified with `find`, and Graphify was rebuilt with the
+  graphify uv tool interpreter after the system `python3` import failed.
+- Additional checks passed: `bash -n scripts/train_proposal_local_docker.sh`,
+  `bash -n backend/ml/train_jynxzi_vod.sh`, and
+  `python -m ml.build_proposal_training_rows --help`. Native `zsh -n` could not
+  run because `zsh` is not installed in this environment.
+- Proposal training row audit: `559` rows, `0` gold-derived rows.
+
+## 2026-05-14 Plan: Proposal Docker Entrypoint Fix
+
+- [x] Add an explicit entrypoint override path to the shared local-training
+  Docker wrapper without changing the default VOD training behavior.
+- [x] Update the proposal wrapper to use that override so it runs
+  `python -m ml.train_proposal_scorer` instead of appending args to
+  `ml.local_train`.
+- [x] Verify shell syntax and help output through the fixed wrapper.
+
+### Review Notes
+
+- Root cause: `backend/Dockerfile.local-train` has
+  `ENTRYPOINT ["python", "-m", "ml.local_train"]`, so the proposal wrapper's
+  command was appended as arguments to `ml.local_train`.
+- `scripts/train_local_docker.sh` now supports
+  `AI_CLIPPING_LOCAL_TRAIN_ENTRYPOINT`.
+- `scripts/train_proposal_local_docker.sh` sets that entrypoint to `python` and
+  passes `-m ml.train_proposal_scorer ...`, so the proposal trainer is the
+  actual module executed inside the container.
+- Verification passed: `bash -n scripts/train_local_docker.sh
+  scripts/train_proposal_local_docker.sh` and
+  `scripts/train_proposal_local_docker.sh --help`.
+
+## 2026-05-14 Plan: Proposal Model Quality Fixes
+
+- [x] Remove skewed existing-ranker-feature backfill from the default proposal
+  training path; keep only features generated by
+  `proposal_scorer.build_proposal_features`.
+- [x] Centralize proposal source priors so training/serving use the same
+  values.
+- [x] Replace mean-difference-only training with a small L2 logistic-regression
+  trainer plus grouped evaluation metrics.
+- [x] Add gold-row filtering at trainer input boundaries, not only in the
+  backfill builder.
+- [x] Add regression tests for train/serve feature consistency, gold filtering,
+  logistic metrics, and artifact loading.
+- [x] Rebuild proposal rows/artifact, verify commands/tests, and rebuild
+  Graphify after backend edits.
+
+### Review Notes
+
+- Accepted from the external review: train/serve skew, weak mean-diff trainer,
+  missing trainer-side gold filtering, duplicated source priors, and untrained
+  artifact loading were real issues.
+- Rejected for now: removing hook/payoff early/late features and documenting
+  every heuristic magic number. Those are lower leverage than making the
+  training signal honest and measurable.
+- Existing ranker-feature backfill is no longer default. It remains available
+  only via explicit `--existing-feature-rows`, because translated downstream
+  ranker features do not match serving-time proposal features.
+- `proposal_scorer.source_prior_for_candidate()` is now the single prior table;
+  the legacy backfill path calls it instead of keeping its own prior map.
+- `train_proposal_scorer.py` now trains a small standardized L2 logistic
+  regression and records metrics (`auc`, `logloss`, `precision_at_k`,
+  `recall_at_k`, `accuracy_at_0_5`) in `training_summary`.
+- Trainer input now filters gold-derived rows even if a caller passes a
+  contaminated `--training-rows` file directly.
+- Insufficient or empty proposal artifacts are ignored by the serving loader, so
+  they cannot flatten all candidate scores to `0.5`.
+- Current honest default rebuild produced `0` proposal rows and an
+  `insufficient_rows` artifact, because the only available storage segment
+  sources are for VOD `2771207666` and it has no cross-platform positives. This
+  is intentional; the bad 559-row translated-ranker artifact is gone from the
+  default path.
+- Verification passed: `py_compile`; focused pytest
+  `backend/tests/test_train_proposal_scorer.py`,
+  `backend/tests/test_proposal_scorer.py`,
+  `backend/tests/test_candidate_generators.py`, and
+  `backend/tests/test_pipeline_integration.py` -> `25` tests;
+  `bash -n` for local training wrappers; `git diff --check`; proposal row and
+  artifact summary inspection; Graphify rebuild (`3283` nodes, `8777` edges,
+  `94` communities).

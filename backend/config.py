@@ -1,5 +1,6 @@
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 from pydantic_settings import BaseSettings
@@ -15,13 +16,31 @@ DEFAULT_MPLCONFIGDIR = DEFAULT_TMP_DIR / "matplotlib"
 
 
 def _prepare_local_cache_path(path: Path, *, fallback_name: str) -> Path:
+    candidates = [
+        path,
+        DEFAULT_TMP_DIR / "_runtime_cache" / fallback_name,
+        Path(tempfile.gettempdir()) / f"ai_clipping_{fallback_name}",
+    ]
+    seen: set[Path] = set()
+    for candidate in candidates:
+        candidate = candidate.resolve()
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if _is_writable_cache_dir(candidate):
+            return candidate
+    return candidates[-1].resolve()
+
+
+def _is_writable_cache_dir(path: Path) -> bool:
     try:
         path.mkdir(parents=True, exist_ok=True)
-        return path
-    except PermissionError:
-        fallback = (DEFAULT_TMP_DIR / fallback_name).resolve()
-        fallback.mkdir(parents=True, exist_ok=True)
-        return fallback
+        probe = path / ".write_probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
 
 
 def _resolve_local_project_path(
@@ -141,7 +160,9 @@ class Settings(BaseSettings):
     enable_chat_analysis: bool = True
     chat_download_timeout_sec: int = 30
     chat_join_timeout_sec: float = 1.0
-    twitch_download_cache_ttl_sec: int = 0
+    frontend_job_cache_enabled: bool = False
+    twitch_download_cache_ttl_sec: int = -1
+    twitch_download_max_height: int = 720
     twitch_download_concurrent_fragments: int = 8
     twitch_download_use_aria2c: bool = True
     twitch_download_aria2_connections: int = 16
@@ -160,6 +181,10 @@ class Settings(BaseSettings):
     training_ffmpeg_preset: str = "veryfast"
     training_ffmpeg_threads: int = 1
     video_feature_ffmpeg_timeout_sec: float = 120.0
+    pipeline_overlap_feature_extraction: bool = False
+    pipeline_isolate_transcription_chunks: bool = True
+    pipeline_enable_diarization: bool = False
+    pipeline_full_visual_feature_max_duration_sec: float = 7200.0
     semantic_device: str = "auto"
     semantic_batch_size: int = 0
     video_expression_sample_sec: int = 3
@@ -167,12 +192,14 @@ class Settings(BaseSettings):
     shortlist_face_reaction_sample_sec: int = 1
     shortlist_llm_top_k: int = 12
     enable_clip_judge: bool = True
-    clip_judge_timeout_sec: float = 90.0
+    clip_judge_timeout_sec: float = 0.0
+    clip_judge_batch_size: int = 4
     clip_judge_fail_fast: bool = False
+    judge_provider: str | None = None
     judge_provider_fallback_enabled: bool = True
     analyzer_refine_timeout_sec: float | None = None
-    shortlist_judge_top_k: int = 24
-    judge_all_candidates: bool = True
+    shortlist_judge_top_k: int = 80
+    judge_all_candidates: bool = False
     judge_blend_weight: float = 0.65
     judge_llm_first: bool = True
     judge_llm_first_min_confidence: float = 0.35
@@ -180,11 +207,26 @@ class Settings(BaseSettings):
     judge_recall_filter_enabled: bool = True
     judge_recall_filter_min_score: float = 0.0
     judge_context_lookback_sec: float = 120.0
+    serving_quality_gate_enabled: bool = True
+    serving_quality_min_judge_score: float = 6.0
+    serving_quality_min_standalone_clarity: float = 0.55
+    serving_quality_min_payoff_strength: float = 0.55
+    serving_quality_min_narrative_completeness: float = 0.45
+    serving_quality_min_judge_confidence: float = 0.45
     enable_multimodal_clip_judge: bool = True
     judge_two_tier_enabled: bool = True
     judge_topk_multimodal_k: int = 10
     judge_keyframes_per_candidate: int = 4
     judge_keyframe_width: int = 640
+    enable_whole_vod_dense_candidates: bool = True
+    whole_vod_dense_source_cap: int = 48
+    enable_trainable_candidate_proposal: bool = True
+    proposal_dense_durations_sec: str = "12,20,30,45,60"
+    proposal_dense_stride_sec: float = 5.0
+    proposal_dense_max_candidates: int = 5000
+    proposal_shortlist_top_k: int = 240
+    proposal_min_score: float = 0.0
+    proposal_preserve_heuristic_candidates: bool = True
     enable_hook_subclassifier: bool = False
     enable_multimodal_embeddings: bool = False
     enable_post_publish_labels: bool = False

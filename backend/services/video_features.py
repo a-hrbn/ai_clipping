@@ -109,26 +109,8 @@ else:
             _MEDIAPIPE_STATUS = "solutions_face_detection"
             _MEDIAPIPE_DETAIL = "model_selection=0"
         else:
-            from mediapipe.tasks.python.core.base_options import BaseOptions
-            from mediapipe.tasks.python.vision import FaceDetector, FaceDetectorOptions
-
-            _MP_IMAGE = mp.Image
-            _MP_IMAGE_FORMAT = mp.ImageFormat
-            _MODEL_PATH = pathlib.Path(__file__).resolve().parents[1] / "face_detection_short_range.tflite"
-            if _MODEL_PATH.exists():
-                _MP_TASKS_FACE_DETECTOR = FaceDetector.create_from_options(
-                    FaceDetectorOptions(
-                        base_options=BaseOptions(
-                            model_asset_path=str(_MODEL_PATH),
-                            delegate=BaseOptions.Delegate.CPU,
-                        ),
-                        min_detection_confidence=0.5,
-                    )
-                )
-                _MEDIAPIPE_STATUS = "tasks_face_detector"
-                _MEDIAPIPE_DETAIL = f"model_asset_path={_MODEL_PATH.name}"
-            else:
-                raise FileNotFoundError(f"MediaPipe face model missing: {_MODEL_PATH}")
+            _MEDIAPIPE_STATUS = "tasks_face_detector_disabled"
+            _MEDIAPIPE_DETAIL = "disabled_to_avoid_headless_native_crashes"
     except Exception as e:
         _MEDIAPIPE_DETAIL = str(e)
 
@@ -568,14 +550,16 @@ def refine_face_reactions(
         if not target_seconds:
             return segments
         if use_ffmpeg_decode:
-            batch_start_sec = float(min(target_seconds))
-            batch_sample_count = max(target_seconds) - min(target_seconds) + 1
-            ffmpeg_frames = _decode_second_frames_ffmpeg(
-                video_path,
-                start_sec=batch_start_sec,
-                sample_count=batch_sample_count,
-                stream_info=stream_info,
-            )
+            batch_start_sec = 0.0
+            for range_start, range_end in _contiguous_ranges(target_seconds):
+                batch = _decode_second_frames_ffmpeg(
+                    video_path,
+                    start_sec=float(range_start),
+                    sample_count=range_end - range_start + 1,
+                    stream_info=stream_info,
+                )
+                for offset, frame in batch.items():
+                    ffmpeg_frames[range_start + offset] = frame
         else:
             batch_start_sec = 0.0
 
@@ -966,6 +950,22 @@ def _candidate_seconds(
             seconds.add(sec)
         seconds.add(end)
     return sorted(seconds)
+
+
+def _contiguous_ranges(seconds: list[int]) -> list[tuple[int, int]]:
+    if not seconds:
+        return []
+    ranges: list[tuple[int, int]] = []
+    start = previous = int(seconds[0])
+    for raw_second in seconds[1:]:
+        second = int(raw_second)
+        if second == previous + 1:
+            previous = second
+            continue
+        ranges.append((start, previous))
+        start = previous = second
+    ranges.append((start, previous))
+    return ranges
 
 
 def _segment_intersects_any(seg: RichSegment, ranges: list[tuple[float, float]]) -> bool:

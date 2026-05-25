@@ -23,6 +23,7 @@ _STOPWORDS = {
     "das", "der", "die", "ein", "eine", "ist", "war", "mit", "for", "at", "be", "are", "was",
 }
 _MAX_LOOKBACK_SEC = 180.0
+_MIN_RETRIEVAL_RELEVANCE = 0.2
 
 
 def build_memory_spans(
@@ -55,15 +56,25 @@ def candidate_memory_context(
 
     prior_spans = [
         span for span in spans
-        if span.start < candidate.start - 1.0 and candidate.start - span.start <= _MAX_LOOKBACK_SEC
+        if span.start < candidate.start - 1.0
+        and candidate.start - span.start <= _MAX_LOOKBACK_SEC
+        and _span_allowed_for_candidate(span, candidate)
     ]
-    overlapping_spans = [span for span in spans if span.end > candidate.start and span.start < candidate.end]
+    overlapping_spans = [
+        span for span in spans
+        if span.end > candidate.start
+        and span.start < candidate.end
+        and _span_allowed_for_candidate(span, candidate)
+    ]
     relevant_spans = sorted(
         prior_spans + [span for span in overlapping_spans if span not in prior_spans],
         key=lambda span: _memory_relevance(span, candidate, window_tokens, window_speakers),
         reverse=True,
     )
-    retrieved = [span for span in relevant_spans if _memory_relevance(span, candidate, window_tokens, window_speakers) > 0.2][:4]
+    retrieved = [
+        span for span in relevant_spans
+        if _memory_relevance(span, candidate, window_tokens, window_speakers) > _MIN_RETRIEVAL_RELEVANCE
+    ][:4]
 
     active_topic = next(
         (
@@ -83,7 +94,11 @@ def candidate_memory_context(
         setup_span = next(
             (
                 span for span in sorted(
-                    [span for span in prior_spans if span.kind in {"setup_span", "open_loop_span"}],
+                    [
+                        span for span in prior_spans
+                        if span.kind in {"setup_span", "open_loop_span"}
+                        and _memory_relevance(span, candidate, window_tokens, window_speakers) > _MIN_RETRIEVAL_RELEVANCE
+                    ],
                     key=lambda item: (item.confidence, item.end),
                     reverse=True,
                 )
@@ -96,7 +111,11 @@ def candidate_memory_context(
         callback_span = next(
             (
                 span for span in sorted(
-                    [span for span in prior_spans if span.kind == "callback_span"],
+                    [
+                        span for span in prior_spans
+                        if span.kind == "callback_span"
+                        and _memory_relevance(span, candidate, window_tokens, window_speakers) > _MIN_RETRIEVAL_RELEVANCE
+                    ],
                     key=lambda item: (item.confidence, item.end),
                     reverse=True,
                 )
@@ -337,15 +356,21 @@ def _callback_spans(
         for setup in setup_spans:
             if setup.start >= payoff.start:
                 continue
+            setup_lead_sec = payoff.start - setup.start
+            setup_gap_sec = payoff.start - setup.end
+            if setup_lead_sec > _MAX_LOOKBACK_SEC or setup_gap_sec > _MAX_LOOKBACK_SEC:
+                continue
             overlap = len(set(setup.entities) & payoff_tokens)
             if overlap <= 0:
                 continue
             proximity = _clamp01(1.0 - ((payoff.start - setup.end) / 120.0))
+            if overlap < 2 and proximity < 0.35:
+                continue
             score = overlap * 0.45 + proximity * 0.55
             if score > best_score:
                 best_score = score
                 match = setup
-        if match is None or best_score < 0.45:
+        if match is None or best_score < 0.55:
             continue
         segments_between = [seg for seg in segments if seg.end > match.start and seg.start < payoff.end]
         spans.append(
@@ -377,7 +402,8 @@ def _memory_relevance(
     token_overlap = _jaccard(span_tokens, window_tokens)
     span_speakers = set(span.speaker_ids)
     speaker_overlap = _jaccard(span_speakers, window_speakers)
-    temporal = _clamp01(1.0 - (max(candidate.start - span.end, 0.0) / _MAX_LOOKBACK_SEC))
+    temporal_anchor = span.start if span.kind in {"callback_span", "setup_span", "open_loop_span"} else span.end
+    temporal = _clamp01(1.0 - (max(candidate.start - temporal_anchor, 0.0) / _MAX_LOOKBACK_SEC))
     kind_bonus = {
         "callback_span": 0.28,
         "setup_span": 0.22,
@@ -387,6 +413,12 @@ def _memory_relevance(
         "speaker_turn_span": 0.08,
     }.get(span.kind, 0.0)
     return _clamp01(token_overlap * 0.35 + speaker_overlap * 0.15 + temporal * 0.3 + span.confidence * 0.2 + kind_bonus)
+
+
+def _span_allowed_for_candidate(span: MemorySpan, candidate: Candidate) -> bool:
+    if span.kind in {"callback_span", "setup_span", "open_loop_span"}:
+        return candidate.start - span.start <= _MAX_LOOKBACK_SEC
+    return True
 
 
 def _topic_continuity(topic_span: MemorySpan | None, window_tokens: set[str]) -> float:

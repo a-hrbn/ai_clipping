@@ -54,9 +54,12 @@ def _format_selector(*, max_height: int = 0) -> str:
     )
 
 
-def _training_vod_max_height_for_job(job_id: str) -> int:
+def _twitch_max_height_for_job(job_id: str) -> int:
     if not str(job_id or "").startswith("twitch_vod"):
-        return 0
+        try:
+            return max(int(settings.twitch_download_max_height or 0), 0)
+        except (TypeError, ValueError):
+            return 0
     try:
         return max(int(settings.training_vod_max_height or 0), 0)
     except (TypeError, ValueError):
@@ -204,7 +207,15 @@ def _evict_expired_cache(cache_dir: pathlib.Path, ttl: int) -> None:
             continue
 
 
-def _twitch_cache_enabled(url: str) -> bool:
+def _frontend_cache_enabled_for_job(job_id: str) -> bool:
+    if bool(getattr(settings, "frontend_job_cache_enabled", False)):
+        return True
+    return str(job_id or "").startswith(("twitch_vod", "proposal_training_", "judge_backfill_"))
+
+
+def _twitch_cache_enabled(url: str, job_id: str | None = None) -> bool:
+    if job_id is not None and not _frontend_cache_enabled_for_job(job_id):
+        return False
     return _is_twitch_url(url) and int(settings.twitch_download_cache_ttl_sec or 0) != 0
 
 
@@ -329,6 +340,27 @@ def _is_transient_network_error(message: str) -> bool:
     )
 
 
+def _is_ffmpeg_segfault_error(message: str) -> bool:
+    text = (message or "").strip().lower()
+    return "ffmpeg exited with code -11" in text
+
+
+def _extract_yt_dlp_info(ydl_opts: dict[str, object], url: str) -> dict | object:
+    ydl = yt_dlp.YoutubeDL(ydl_opts)
+    primary_exc: BaseException | None = None
+    try:
+        return ydl.extract_info(url, download=True)
+    except BaseException as exc:
+        primary_exc = exc
+        raise
+    finally:
+        try:
+            ydl.close()
+        except Exception:
+            if primary_exc is None:
+                raise
+
+
 def _download_uncached(
     url: str,
     job_id: str,
@@ -374,7 +406,7 @@ def _download_uncached(
             # a JobStatus entry first. In that case progress updates are best-effort.
             pass
 
-    max_height = _training_vod_max_height_for_job(job_id)
+    max_height = _twitch_max_height_for_job(job_id)
     ydl_opts = (
         _twitch_download_ydl_opts(job_dir, max_height=max_height)
         if _is_twitch_url(url)
@@ -390,14 +422,28 @@ def _download_uncached(
         ydl_opts["proxy"] = proxy
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+        info = _extract_yt_dlp_info(ydl_opts, url)
     except DownloadCancelledError:
         raise
     except Exception as exc:
         message = str(exc).lower()
         if _is_transient_network_error(message):
             raise DownloadPausedError(str(exc)) from exc
+        if (
+            _is_twitch_url(url)
+            and not disable_external_downloader
+            and _is_ffmpeg_segfault_error(message)
+        ):
+            _cleanup_redundant_job_download_artifacts(job_dir, output_path)
+            retry_overrides = dict(ydl_opt_overrides or {})
+            retry_overrides["format"] = "best[ext=mp4]/best"
+            return _download_uncached(
+                url,
+                job_id,
+                proxy=proxy,
+                ydl_opt_overrides=retry_overrides,
+                disable_external_downloader=True,
+            )
         raise
 
     reported_paths: list[pathlib.Path] = []
@@ -467,7 +513,7 @@ def download(url: str, job_id: str, proxy: str | None = None) -> pathlib.Path:
     job_dir.mkdir(parents=True, exist_ok=True)
     output_path = job_dir / "video.mp4"
 
-    if _twitch_cache_enabled(url):
+    if _twitch_cache_enabled(url, job_id):
         cache_dir = _cache_dir("twitch")
         cache_path = _cache_path_for_url(url, namespace="twitch")
         cache_dir.mkdir(parents=True, exist_ok=True)

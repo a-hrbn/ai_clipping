@@ -9,7 +9,7 @@ from pathlib import Path
 from fastapi import HTTPException, UploadFile
 
 from routers import jobs
-from models import ClipFeedbackPayload, ClipFeedbackResponse
+from models import ClipFeedbackPayload, ClipFeedbackResponse, JobStatus
 
 
 class JobsRouterTests(unittest.TestCase):
@@ -211,14 +211,419 @@ class JobsRouterTests(unittest.TestCase):
         create_job_mock.assert_called_once_with(fake_job_id, profile="general")
         bind_session_mock.assert_called_once_with(fake_job_id, "sess-1")
 
+    def test_pipeline_command_runs_worker_in_subprocess(self) -> None:
+        cmd = jobs._pipeline_subprocess_command(
+            job_id="job-1",
+            url="https://www.twitch.tv/videos/123",
+            video_path=None,
+            profile="jynxzi",
+            strategy={"clip_style": "balanced"},
+        )
+
+        self.assertEqual(cmd[0], jobs.sys.executable)
+        self.assertTrue(cmd[1].endswith("pipeline_worker.py"))
+        self.assertIn("--url", cmd)
+        self.assertIn("https://www.twitch.tv/videos/123", cmd)
+        self.assertIn("--strategy-json", cmd)
+
+    def test_pipeline_command_serializes_set_valued_strategy_fields(self) -> None:
+        cmd = jobs._pipeline_subprocess_command(
+            job_id="job-1",
+            url="https://www.twitch.tv/videos/123",
+            video_path=None,
+            profile="jynxzi",
+            strategy={
+                "keywords": {"rage", "funny"},
+                "nested": {"exclude_keywords": {"spoiler"}},
+            },
+        )
+
+        raw_strategy = cmd[cmd.index("--strategy-json") + 1]
+        payload = jobs.json.loads(raw_strategy)
+        self.assertEqual(payload["keywords"], ["funny", "rage"])
+        self.assertEqual(payload["nested"]["exclude_keywords"], ["spoiler"])
+
+    def test_pipeline_subprocess_signal_failure_marks_job_failed(self) -> None:
+        captured = {}
+
+        class _Process:
+            async def wait(self):
+                return -11
+
+        async def fake_create_subprocess_exec(*args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return _Process()
+
+        with patch.object(jobs.asyncio, "create_subprocess_exec", side_effect=fake_create_subprocess_exec), \
+             patch.object(jobs, "get_job", return_value=JobStatus(job_id="job-1", status="downloading")), \
+             patch.object(jobs, "update_job") as update_mock:
+            asyncio.run(
+                jobs._run_pipeline_subprocess(
+                    job_id="job-1",
+                    url="https://www.twitch.tv/videos/123",
+                    profile="general",
+                    strategy={},
+                )
+            )
+
+        self.assertTrue(captured["args"][1].endswith("pipeline_worker.py"))
+        self.assertEqual(captured["kwargs"]["cwd"], str(jobs._BACKEND_ROOT))
+        update_mock.assert_called_once_with(
+            "job-1",
+            status="failed",
+            error="Pipeline subprocess exited from signal 11",
+        )
+
+    def test_pipeline_subprocess_failure_deletes_serving_source_media(self) -> None:
+        class _Process:
+            async def wait(self):
+                return -9
+
+        async def fake_create_subprocess_exec(*_args, **_kwargs):
+            return _Process()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            storage_dir = Path(tmp)
+            job_dir = storage_dir / "job-1"
+            clips_dir = job_dir / "clips"
+            debug_dir = job_dir / "debug"
+            chunks_dir = job_dir / "chunks"
+            clips_dir.mkdir(parents=True)
+            debug_dir.mkdir(parents=True)
+            chunks_dir.mkdir(parents=True)
+            video_path = job_dir / "video.mp4"
+            audio_path = job_dir / "audio.wav"
+            clip_path = clips_dir / "clip_01.mp4"
+            debug_path = debug_dir / "candidate_funnel_summary.json"
+            chunk_path = chunks_dir / "chunk_000.wav"
+            video_path.write_bytes(b"video")
+            audio_path.write_bytes(b"audio")
+            clip_path.write_bytes(b"clip")
+            debug_path.write_text("{}", encoding="utf-8")
+            chunk_path.write_bytes(b"chunk")
+
+            with patch.object(jobs.settings, "storage_dir", str(storage_dir)), \
+                 patch.object(jobs.asyncio, "create_subprocess_exec", side_effect=fake_create_subprocess_exec), \
+                 patch.object(jobs, "get_job", return_value=JobStatus(job_id="job-1", status="downloading")), \
+                 patch.object(jobs, "update_job"):
+                asyncio.run(
+                    jobs._run_pipeline_subprocess(
+                        job_id="job-1",
+                        url="https://www.twitch.tv/videos/123",
+                        profile="general",
+                        strategy={},
+                    )
+                )
+
+            self.assertFalse(video_path.exists())
+            self.assertFalse(audio_path.exists())
+            self.assertFalse(chunks_dir.exists())
+            self.assertTrue(clip_path.exists())
+            self.assertTrue(debug_path.exists())
+
+    def test_subprocess_parent_cleanup_preserves_training_source_media(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage_dir = Path(tmp)
+            job_dir = storage_dir / "twitch_vod_123"
+            job_dir.mkdir(parents=True)
+            video_path = job_dir / "video.mp4"
+            audio_path = job_dir / "audio.wav"
+            video_path.write_bytes(b"video")
+            audio_path.write_bytes(b"audio")
+
+            with patch.object(jobs.settings, "storage_dir", str(storage_dir)):
+                jobs._cleanup_serving_job_source_media("twitch_vod_123")
+
+            self.assertTrue(video_path.exists())
+            self.assertTrue(audio_path.exists())
+
+    def test_pipeline_subprocess_sigkill_error_mentions_oom(self) -> None:
+        self.assertEqual(
+            jobs._pipeline_subprocess_error(-9),
+            "Pipeline subprocess exited from signal 9 (SIGKILL; likely OOM or external kill)",
+        )
+
+    def test_pipeline_subprocess_env_enables_face_detection_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(jobs.settings, "storage_dir", str(Path(tmp) / "storage")), \
+             patch.dict(jobs.os.environ, {}, clear=True):
+            env = jobs._pipeline_subprocess_env()
+            self.assertTrue(Path(env["MPLCONFIGDIR"]).exists())
+
+        self.assertEqual(env["AI_CLIPPING_DISABLE_FACE_DETECTION"], "0")
+        self.assertIn(str(jobs._BACKEND_ROOT), env["PYTHONPATH"].split(jobs.os.pathsep))
+        self.assertEqual(env["LIBGL_ALWAYS_SOFTWARE"], "1")
+        self.assertEqual(env["MESA_LOADER_DRIVER_OVERRIDE"], "swrast")
+        self.assertEqual(env["OPENCV_FFMPEG_CAPTURE_OPTIONS"], "hwaccel;none")
+        self.assertEqual(env["PIPELINE_ENABLE_DIARIZATION"], "false")
+        self.assertEqual(env["WHISPER_LANGUAGE"], "en")
+        self.assertEqual(env["TOKENIZERS_PARALLELISM"], "false")
+        self.assertEqual(env["OMP_NUM_THREADS"], "1")
+        self.assertEqual(env["OPENBLAS_NUM_THREADS"], "1")
+        self.assertEqual(env["MKL_NUM_THREADS"], "1")
+        self.assertEqual(env["NUMEXPR_NUM_THREADS"], "1")
+        self.assertEqual(env["VECLIB_MAXIMUM_THREADS"], "1")
+
+    def test_pipeline_subprocess_env_matches_cuda_training_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(jobs.settings, "storage_dir", str(Path(tmp) / "storage")), \
+             patch.dict(jobs.os.environ, {"WHISPER_DEVICE": "cuda"}, clear=True):
+            env = jobs._pipeline_subprocess_env()
+
+        self.assertEqual(env["WHISPER_LANGUAGE"], "en")
+        self.assertEqual(env["CUDA_VISIBLE_DEVICES"], "0")
+        self.assertEqual(env["PYTORCH_CUDA_ALLOC_CONF"], "expandable_segments:True")
+
+    def test_pipeline_subprocess_env_can_enable_diarization_explicitly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(jobs.settings, "storage_dir", str(Path(tmp) / "storage")), \
+             patch.object(jobs.settings, "pipeline_enable_diarization", True), \
+             patch.dict(jobs.os.environ, {}, clear=True):
+            env = jobs._pipeline_subprocess_env()
+
+        self.assertEqual(env["PIPELINE_ENABLE_DIARIZATION"], "true")
+
+    def test_pipeline_subprocess_env_respects_explicit_face_detection_disable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(jobs.settings, "storage_dir", str(Path(tmp) / "storage")), \
+             patch.dict(jobs.os.environ, {"AI_CLIPPING_DISABLE_FACE_DETECTION": "1"}, clear=True):
+            env = jobs._pipeline_subprocess_env()
+
+        self.assertEqual(env["AI_CLIPPING_DISABLE_FACE_DETECTION"], "1")
+
+    def test_face_detection_probe_env_uses_writable_matplotlib_and_headless_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(jobs.settings, "storage_dir", str(Path(tmp) / "storage")), \
+             patch.dict(jobs.os.environ, {}, clear=True):
+            env = jobs._face_detection_probe_env()
+            self.assertTrue(Path(env["MPLCONFIGDIR"]).exists())
+
+        self.assertEqual(env["LIBGL_ALWAYS_SOFTWARE"], "1")
+        self.assertEqual(env["MESA_LOADER_DRIVER_OVERRIDE"], "swrast")
+        self.assertEqual(env["OPENCV_FFMPEG_CAPTURE_OPTIONS"], "hwaccel;none")
+
     def test_get_job_status_touches_client_session(self) -> None:
         job = {"job_id": "job-1", "status": "downloading"}
 
-        with patch.object(jobs, "touch_job_session", return_value=job) as touch_mock:
+        with patch.object(jobs, "touch_job_session", return_value=job) as touch_mock, \
+             patch.object(jobs, "_job_pipeline_diagnostics", return_value={"available": False}) as diagnostics_mock:
             result = asyncio.run(jobs.get_job_status("job-1", session_id="sess-1"))
 
-        self.assertEqual(result, job)
+        self.assertEqual(result["job_id"], "job-1")
+        self.assertEqual(result["pipeline_diagnostics"], {"available": False})
         touch_mock.assert_called_once_with("job-1", "sess-1")
+        diagnostics_mock.assert_called_once_with("job-1", job)
+
+    def test_job_pipeline_diagnostics_summarizes_debug_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(jobs.settings, "storage_dir", tmp):
+            debug_dir = Path(tmp) / "job-1" / "debug"
+            debug_dir.mkdir(parents=True)
+            (debug_dir / "candidates_peak.jsonl").write_text('{"id":"p1"}\n', encoding="utf-8")
+            (debug_dir / "candidates_semantic.jsonl").write_text('{"id":"s1"}\n', encoding="utf-8")
+            (debug_dir / "candidates_merged.jsonl").write_text(
+                '{"id":"p1"}\n{"id":"s1"}\n',
+                encoding="utf-8",
+            )
+            (debug_dir / "candidates_normalized.jsonl").write_text(
+                '{"id":"p1"}\n{"id":"s1"}\n',
+                encoding="utf-8",
+            )
+            (debug_dir / "candidates_dense_inventory.jsonl").write_text(
+                '{"id":"d1"}\n{"id":"d2"}\n',
+                encoding="utf-8",
+            )
+            (debug_dir / "candidate_proposals.jsonl").write_text('{"candidate_id":"d1"}\n', encoding="utf-8")
+            (debug_dir / "candidate_proposal_summary.json").write_text(
+                jobs.json.dumps(
+                    {
+                        "input_candidates": 4,
+                        "kept_candidates": 2,
+                        "model_artifact_loaded": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (debug_dir / "ranked_candidates_v2.jsonl").write_text(
+                "\n".join(
+                    [
+                        jobs.json.dumps(
+                            {
+                                "candidate_id": "p1",
+                                "trained_model_used": True,
+                                "judge_used": True,
+                                "selected_after_diversity": True,
+                                "pre_judge_rank_score": 3.2,
+                                "judged_rank_score": 4.1,
+                            }
+                        ),
+                        jobs.json.dumps(
+                            {
+                                "candidate_id": "s1",
+                                "trained_model_used": False,
+                                "judge_used": False,
+                                "selected_after_diversity": False,
+                                "pre_judge_rank_score": 1.1,
+                                "judged_rank_score": 1.1,
+                            }
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (debug_dir / "serving_quality_gate.jsonl").write_text('{"candidate_id":"p1","kept":true}\n', encoding="utf-8")
+            (debug_dir / "final_moments.json").write_text('[{"candidate_id":"p1"}]', encoding="utf-8")
+            (debug_dir / "candidate_recall_report.json").write_text(
+                jobs.json.dumps(
+                    {
+                        "stage_counts": {
+                            "dense_inventory": 2,
+                            "merged": 2,
+                            "proposal_kept": 2,
+                            "ranked_pre_judge": 2,
+                            "judge_scope": 1,
+                            "quality_kept": 1,
+                            "final_moments": 1,
+                        },
+                        "largest_losses": [
+                            {
+                                "transition": "ranked_to_judge_scope",
+                                "lost_count": 1,
+                                "input_count": 2,
+                                "output_count": 1,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (debug_dir / "candidate_funnel_summary.json").write_text(
+                jobs.json.dumps(
+                    {
+                        "rows": 2,
+                        "final_selected_rows": 1,
+                        "stage_counts": {"final_moments": 1},
+                        "largest_losses": [
+                            {
+                                "transition": "ranked_to_judge_scope",
+                                "lost_count": 1,
+                                "input_count": 2,
+                                "output_count": 1,
+                            }
+                        ],
+                        "drop_stage_counts": {"judge_scope": 1},
+                        "rejection_reason_counts": {"outside_judge_scope": 1},
+                        "source_counts": {"peak": 1, "semantic": 1},
+                        "final_source_counts": {"peak": 1},
+                        "quality_breakdown": {
+                            "judged_kept": 1,
+                            "unjudged_kept": 0,
+                            "judged_rejected": 0,
+                            "unjudged_rejected": 1,
+                        },
+                        "proposal_lift": {
+                            "scored_rows": 2,
+                            "positive_proxy_rows": 1,
+                            "precision_at_positive_k": 0.5,
+                        },
+                        "ranker_lift": {
+                            "high_judge_rows": 1,
+                            "high_judge_pre_judge_top20_ratio": 1.0,
+                        },
+                        "trace_samples": {
+                            "final": [{"candidate_id": "p1", "source": "peak", "final_rank": 1}],
+                            "highest_ranked_rejected": [
+                                {
+                                    "candidate_id": "s1",
+                                    "source": "semantic",
+                                    "dropped_stage": "judge_scope",
+                                    "drop_reason": "outside_judge_scope",
+                                }
+                            ],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (debug_dir / "candidate_trace.jsonl").write_text(
+                '{"candidate_id":"p1","final_selected":true}\n'
+                '{"candidate_id":"s1","dropped_stage":"judge_scope"}\n',
+                encoding="utf-8",
+            )
+
+            result = jobs._job_pipeline_diagnostics(
+                "job-1",
+                JobStatus(job_id="job-1", status="done", clips=[]),
+            )
+
+        self.assertTrue(result["available"])
+        stages = {stage["id"]: stage for stage in result["stages"]}
+        self.assertEqual(stages["candidate_generation"]["status"], "ok")
+        self.assertEqual(stages["candidate_recall"]["status"], "ok")
+        self.assertIn("Recall-Funnel", stages["candidate_recall"]["summary"])
+        self.assertEqual(stages["proposal"]["status"], "ok")
+        self.assertEqual(stages["ranker"]["status"], "ok")
+        self.assertEqual(stages["clip_judge"]["status"], "ok")
+        self.assertEqual(stages["quality_gate"]["status"], "ok")
+        self.assertEqual(stages["final_selection"]["status"], "ok")
+        self.assertIn("Stages ok", result["summary"])
+        self.assertTrue(result["candidate_funnel"]["available"])
+        self.assertEqual(result["candidate_funnel"]["rows"], 2)
+        self.assertEqual(result["candidate_funnel"]["drop_stage_counts"], {"judge_scope": 1})
+        self.assertEqual(result["candidate_funnel"]["quality_breakdown"]["judged_kept"], 1)
+        self.assertEqual(result["candidate_funnel"]["proposal_lift"]["positive_proxy_rows"], 1)
+        self.assertEqual(result["candidate_funnel"]["ranker_lift"]["high_judge_rows"], 1)
+        self.assertEqual(result["candidate_funnel"]["samples"][0]["candidate_id"], "p1")
+
+    def test_job_pipeline_diagnostics_reports_clip_judge_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(jobs.settings, "storage_dir", tmp):
+            debug_dir = Path(tmp) / "job-1" / "debug"
+            debug_dir.mkdir(parents=True)
+            (debug_dir / "ranked_candidates_v2.jsonl").write_text(
+                jobs.json.dumps(
+                    {
+                        "candidate_id": "p1",
+                        "trained_model_used": True,
+                        "judge_used": False,
+                        "selected_after_diversity": True,
+                        "pre_judge_rank_score": 3.2,
+                        "judged_rank_score": 3.2,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (debug_dir / "clip_judge_stage.json").write_text(
+                jobs.json.dumps(
+                    {
+                        "enabled": True,
+                        "attempted": True,
+                        "status": "degraded",
+                        "reason": "timeout",
+                        "candidates": 247,
+                        "judge_top_k": 24,
+                        "timeout_sec": 90.0,
+                        "fallback": "pre_judge_ranked_candidates",
+                        "fallback_candidates": 247,
+                        "judged_candidates": 0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = jobs._job_pipeline_diagnostics(
+                "job-1",
+                JobStatus(job_id="job-1", status="done", clips=[]),
+            )
+
+        stages = {stage["id"]: stage for stage in result["stages"]}
+        judge_stage = stages["clip_judge"]
+        self.assertEqual(judge_stage["status"], "warning")
+        self.assertIn("0 von 24", judge_stage["summary"])
+        self.assertIn("getimeoutet", judge_stage["details"][0])
 
     def test_submit_clip_feedback_accepts_gold_eval_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

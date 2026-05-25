@@ -11,6 +11,7 @@ JobState = Literal[
     "extracting_features",
     "diarizing",
     "analyzing",
+    "judging",
     "clipping",
     "done",
     "cancelled",
@@ -94,6 +95,7 @@ class JobStatus(BaseModel):
     download_speed: float | None = None   # bytes/s
     download_eta: int | None = None       # seconds remaining
     download_cached: bool = False
+    pipeline_diagnostics: dict | None = None
 
     @field_validator("download_eta", mode="before")
     @classmethod

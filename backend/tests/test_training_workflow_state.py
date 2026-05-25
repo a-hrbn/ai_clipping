@@ -224,7 +224,7 @@ class TrainingWorkflowStateTests(unittest.TestCase):
                 "judge_provider_fallback_enabled": "false",
                 "ranker_short_form_mode": "supplemental",
                 "ranker_gold_train_weight": "2.5",
-                "ranker_use_gold_train": "0",
+                "ranker_use_gold_train": "1",
                 "ranker_hard_negative_weight": "3.5",
                 "ranker_use_gold_hard_negatives": "0",
                 "ranker_use_user_labels": "1",
@@ -297,7 +297,8 @@ class TrainingWorkflowStateTests(unittest.TestCase):
 
         self.assertEqual(state["ranker_hard_negative_weight"], "4.0")
         self.assertEqual(state["ranker_rollout_review_negative_weight"], "4.0")
-        self.assertEqual(state["ranker_use_user_labels"], "0")
+        self.assertEqual(state["ranker_use_user_labels"], "1")
+        self.assertEqual(state["ranker_use_gold_train"], "1")
         self.assertEqual(state["ranker_rollout_threshold_min_recall"], "0.85")
         self.assertEqual(state["ranker_rollout_threshold_max_selected_rate"], "0.75")
         self.assertEqual(state["ranker_rollout_threshold_target_precision"], "0.85")

@@ -190,16 +190,11 @@ def build_auto_outcome_negative_rows(
         selected.append(prepared)
         seen_identity_keys.update(identity_keys)
 
-    selected.sort(
-        key=lambda row: (
-            str(row.get(GOLD_HOLDOUT_SPLIT_FIELD) or "") != "train",
-            str(row.get("auto_outcome_negative_tier") or "") != "hard_negative",
-            -float(row.get("auto_outcome_negative_score") or 0.0),
-            str(row.get(GOLD_HOLDOUT_KEY_FIELD) or ""),
-        )
-    )
+    selected.sort(key=_auto_negative_sort_key)
     if max_rows:
         selected = selected[:max_rows]
+    split_balance = _ensure_holdout_split_floor(selected, holdout_ratio=holdout_ratio)
+    selected.sort(key=_auto_negative_sort_key)
 
     summary = {
         "profile": profile,
@@ -218,6 +213,7 @@ def build_auto_outcome_negative_rows(
         "by_dataset_source": dict(Counter(str(row.get("dataset_source") or "") for row in selected)),
         "unique_vods": len({str(row.get("vod_id") or "") for row in selected if str(row.get("vod_id") or "")}),
         "skipped": dict(skipped),
+        "split_balance": split_balance,
         "holdout_ratio": holdout_ratio,
         "positive_exclusion_sec": float(positive_exclusion_sec),
         "hard_score_threshold": float(hard_score_threshold),
@@ -226,6 +222,49 @@ def build_auto_outcome_negative_rows(
         "as_of_date": as_of.isoformat(),
     }
     return {"rows": selected, "summary": summary}
+
+
+def _ensure_holdout_split_floor(rows: list[dict], *, holdout_ratio: float) -> dict[str, object]:
+    row_count = len(rows)
+    target_holdout_rows = int(round(row_count * _clamp_ratio(holdout_ratio)))
+    if row_count > 0 and holdout_ratio > 0:
+        target_holdout_rows = max(1, target_holdout_rows)
+    current_holdout_rows = sum(1 for row in rows if str(row.get(GOLD_HOLDOUT_SPLIT_FIELD) or "") == "holdout")
+    promoted_rows = 0
+    if current_holdout_rows < target_holdout_rows:
+        train_rows = [row for row in rows if str(row.get(GOLD_HOLDOUT_SPLIT_FIELD) or "") != "holdout"]
+        needed = min(target_holdout_rows - current_holdout_rows, len(train_rows))
+        for row in sorted(train_rows, key=_holdout_rebalance_key)[:needed]:
+            _set_auto_outcome_negative_split(row, "holdout")
+            promoted_rows += 1
+    final_holdout_rows = sum(1 for row in rows if str(row.get(GOLD_HOLDOUT_SPLIT_FIELD) or "") == "holdout")
+    return {
+        "target_holdout_rows": target_holdout_rows,
+        "initial_holdout_rows": current_holdout_rows,
+        "promoted_holdout_rows": promoted_rows,
+        "final_holdout_rows": final_holdout_rows,
+    }
+
+
+def _auto_negative_sort_key(row: dict) -> tuple[bool, bool, float, str]:
+    return (
+        str(row.get(GOLD_HOLDOUT_SPLIT_FIELD) or "") != "train",
+        str(row.get("auto_outcome_negative_tier") or "") != "hard_negative",
+        -float(row.get("auto_outcome_negative_score") or 0.0),
+        str(row.get(GOLD_HOLDOUT_KEY_FIELD) or ""),
+    )
+
+
+def _holdout_rebalance_key(row: dict) -> tuple[float, str]:
+    identity = str(row.get(GOLD_HOLDOUT_KEY_FIELD) or _primary_identity_key(row))
+    digest = hashlib.sha256(f"holdout-rebalance:{identity}".encode("utf-8")).hexdigest()
+    return int(digest[:12], 16) / 0xFFFFFFFFFFFF, identity
+
+
+def _set_auto_outcome_negative_split(row: dict, split: str) -> None:
+    split = "holdout" if str(split).strip().lower() == "holdout" else "train"
+    row[GOLD_HOLDOUT_SPLIT_FIELD] = split
+    row["dataset_source"] = f"{AUTO_OUTCOME_NEGATIVE_SOURCE}_{split}"
 
 
 def _auto_negative_row(

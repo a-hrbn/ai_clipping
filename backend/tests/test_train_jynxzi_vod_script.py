@@ -43,18 +43,26 @@ class TrainJynxziVodScriptTests(unittest.TestCase):
         self.assertIn("--full-vod-audio-vod-inventory", text)
         self.assertIn("--full-vod-audio-workers", text)
         self.assertIn('CROSS_PLATFORM_FULL_VOD_AUDIO_WORKERS="${CROSS_PLATFORM_FULL_VOD_AUDIO_WORKERS:-2}"', text)
+        self.assertIn('CROSS_PLATFORM_TRANSCRIPT_MATCH_WORKERS="${CROSS_PLATFORM_TRANSCRIPT_MATCH_WORKERS:-20}"', text)
+        self.assertIn('--transcript-match-workers "$CROSS_PLATFORM_TRANSCRIPT_MATCH_WORKERS"', text)
         self.assertIn("Twitch clip-label collection removed", text)
         self.assertIn('"twitch_vod_api" in sources', text)
         self.assertIn('merged["inventory_sources"] = sorted(sources)', text)
         self.assertIn('for key in ("created_at", "title", "vod_duration_seconds"):', text)
 
-    def test_user_labeled_gold_rows_are_disabled_by_default(self) -> None:
+    def test_frontend_gold_rows_are_disabled_by_default(self) -> None:
         script = Path(__file__).resolve().parents[1] / "ml" / "train_jynxzi_vod.sh"
         text = script.read_text(encoding="utf-8")
 
         self.assertIn('VOD_RANKER_USE_USER_LABELS="${VOD_RANKER_USE_USER_LABELS:-0}"', text)
+        self.assertIn('VOD_RANKER_USE_GOLD_TRAIN="${VOD_RANKER_USE_GOLD_TRAIN:-0}"', text)
+        self.assertIn("--include-gold-train \"$GOLD_EVAL_ROWS_PATH\"", text)
+        self.assertIn("Preparing gold eval artifacts for training merge", text)
+        self.assertNotIn("--merge-existing", text)
+        self.assertNotIn("--preserve-existing-if-empty", text)
         self.assertIn("reset_user_label_artifacts", text)
         self.assertIn("User-labeled gold eval export disabled", text)
+        self.assertIn("removed gold-eval artifacts", text)
         self.assertIn("Skipping gold eval; user-labeled rows are disabled.", text)
         self.assertIn("Skipping gold-derived hard-negative diagnosis; user-labeled rows are disabled.", text)
         self.assertIn("Skipping rollout review queue; user-labeled rows are disabled.", text)

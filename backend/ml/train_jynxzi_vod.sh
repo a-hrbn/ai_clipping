@@ -55,6 +55,7 @@ CROSS_PLATFORM_FINGERPRINT_DIAGNOSTICS_PATH="$ARTIFACT_DIR/jynxzi_cross_platform
 CROSS_PLATFORM_FINGERPRINT_ENABLED="${CROSS_PLATFORM_FINGERPRINT_ENABLED:-1}"
 CROSS_PLATFORM_FINGERPRINT_MIN_CONFIDENCE="${CROSS_PLATFORM_FINGERPRINT_MIN_CONFIDENCE:-0.50}"
 CROSS_PLATFORM_VERIFICATION_MODE="${CROSS_PLATFORM_VERIFICATION_MODE:-transcript}"
+CROSS_PLATFORM_TRANSCRIPT_MATCH_WORKERS="${CROSS_PLATFORM_TRANSCRIPT_MATCH_WORKERS:-20}"
 CROSS_PLATFORM_SOURCE_MANIFEST_PATH="${CROSS_PLATFORM_SOURCE_MANIFEST_PATH:-$BACKEND_DIR/ml/cross_platform_sources.csv}"
 CROSS_PLATFORM_URL_MANIFEST_PATH="${CROSS_PLATFORM_URL_MANIFEST_PATH:-$BACKEND_DIR/ml/viral_clips.txt}"
 CROSS_PLATFORM_MAX_REPOSTS="${CROSS_PLATFORM_MAX_REPOSTS:-3600}"
@@ -299,6 +300,7 @@ export TARGETED_BACKFILL_REQUIRE_ALL_VODS
 export CROSS_PLATFORM_FINGERPRINT_ENABLED
 export CROSS_PLATFORM_FINGERPRINT_MIN_CONFIDENCE
 export CROSS_PLATFORM_VERIFICATION_MODE
+export CROSS_PLATFORM_TRANSCRIPT_MATCH_WORKERS
 export CROSS_PLATFORM_VOD_MANIFEST_PATH
 export CROSS_PLATFORM_REPOST_MANIFEST_PATH
 export CROSS_PLATFORM_FINGERPRINT_ROWS_PATH
@@ -489,6 +491,7 @@ prepare_cross_platform_fingerprint_rows() {
     --max-reposts "$CROSS_PLATFORM_MAX_REPOSTS" \
     --min-reposts "$CROSS_PLATFORM_MIN_REPOSTS" \
     --min-matched-rows "$min_matched_rows" \
+    --transcript-match-workers "$CROSS_PLATFORM_TRANSCRIPT_MATCH_WORKERS" \
     --min-matched-vods "$min_matched_vods" \
     "$([[ "$refresh_vods" == "1" ]] && echo --refresh-vods || echo --no-refresh-vods)" \
     "$([[ "$CROSS_PLATFORM_REFRESH_REPOSTS" == "1" ]] && echo --refresh-reposts || echo --no-refresh-reposts)" \
@@ -527,7 +530,7 @@ import_mm_judge_proxy_rows() {
 export_gold_eval_rows() {
   if [[ "$VOD_RANKER_USE_USER_LABELS" != "1" ]]; then
     reset_user_label_artifacts
-    echo "User-labeled gold eval export disabled; wrote empty gold-eval artifacts."
+    echo "User-labeled gold eval export disabled; removed gold-eval artifacts."
     return 0
   fi
   "$PYTHON_BIN" ml/export_frontend_gold_eval.py \
@@ -535,9 +538,7 @@ export_gold_eval_rows() {
     --creator-id jynxzi \
     --rows-out "$GOLD_EVAL_ROWS_PATH" \
     --output "$GOLD_EVAL_DATASET_PATH" \
-    --summary-out "$GOLD_EVAL_SUMMARY_PATH" \
-    --merge-existing \
-    --preserve-existing-if-empty
+    --summary-out "$GOLD_EVAL_SUMMARY_PATH"
 }
 
 reset_user_label_artifacts() {
@@ -587,51 +588,12 @@ for path in (
 ):
     path.parent.mkdir(parents=True, exist_ok=True)
 
-for path in (gold_rows_path, gold_dataset_path, hard_negative_rows_path, rollout_queue_features_path):
+for path in (gold_rows_path, gold_dataset_path, gold_summary_path, gold_eval_report_path):
+    path.unlink(missing_ok=True)
+
+for path in (hard_negative_rows_path, rollout_queue_features_path):
     path.write_text("", encoding="utf-8")
 
-gold_summary_path.write_text(
-    json.dumps(
-        {
-            "rows": 0,
-            "eval_dataset": {
-                "rows": 0,
-                "positive_rows": 0,
-                "negative_rows": 0,
-                "dataset_roles": {"gold_eval": 0},
-            },
-            "source_rows": {
-                "frontend": 0,
-                "existing": 0,
-                "merged": 0,
-                "removed_by_policy": "user_labeled_rows_disabled",
-            },
-            "user_labeled_rows_disabled": True,
-        },
-        ensure_ascii=True,
-        indent=2,
-        sort_keys=True,
-    )
-    + "\n",
-    encoding="utf-8",
-)
-gold_eval_report_path.write_text(
-    json.dumps(
-        {
-            "rows": 0,
-            "positive_rows": 0,
-            "negative_rows": 0,
-            "metrics": {},
-            "status": "skipped",
-            "reason": "user_labeled_rows_disabled",
-        },
-        ensure_ascii=True,
-        indent=2,
-        sort_keys=True,
-    )
-    + "\n",
-    encoding="utf-8",
-)
 hard_negative_summary_path.write_text(
     json.dumps(
         {
@@ -1230,6 +1192,7 @@ echo "Using VOD ranker required cross-platform rows: $VOD_RANKER_MIN_CROSS_PLATF
 echo "Using cross-platform seed minimum rows: $CROSS_PLATFORM_SEED_MIN_MATCHED_ROWS"
 echo "Using cross-platform strict minimum rows/vods: $CROSS_PLATFORM_MIN_MATCHED_ROWS/$CROSS_PLATFORM_MIN_MATCHED_VODS"
 echo "Using cross-platform verification mode: $CROSS_PLATFORM_VERIFICATION_MODE"
+echo "Using cross-platform transcript match workers: $CROSS_PLATFORM_TRANSCRIPT_MATCH_WORKERS"
 echo "Using cross-platform second pass after VOD build: $CROSS_PLATFORM_SECOND_PASS_AFTER_VOD_BUILD"
 echo "Using cross-platform full-VOD audio fingerprints: $CROSS_PLATFORM_FULL_VOD_AUDIO_FINGERPRINTS max_vods=${CROSS_PLATFORM_FULL_VOD_AUDIO_MAX_VODS} workers=${CROSS_PLATFORM_FULL_VOD_AUDIO_WORKERS} keep_audio=${CROSS_PLATFORM_KEEP_FULL_VOD_AUDIO}"
 echo "Using cross-platform coarse VOD tiling: $CROSS_PLATFORM_COARSE_VOD_TILING tile=${CROSS_PLATFORM_COARSE_VOD_TILE_SEC}s stride=${CROSS_PLATFORM_COARSE_VOD_STRIDE_SEC}s max_tiles=${CROSS_PLATFORM_COARSE_VOD_MAX_TILES_PER_VOD}"

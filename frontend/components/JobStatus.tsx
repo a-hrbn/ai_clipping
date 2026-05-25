@@ -2,7 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { getJobStatus } from "@/lib/api";
-import { JobStatus as JobStatusType, ClipResult } from "@/lib/types";
+import { JobStatus as JobStatusType, ClipResult, PipelineDiagnostics } from "@/lib/types";
+import PipelineDiagnosticsPanel from "@/components/PipelineDiagnosticsPanel";
 
 const STAGES = [
   "queued",
@@ -12,6 +13,7 @@ const STAGES = [
   "extracting_features",
   "diarizing",
   "analyzing",
+  "judging",
   "clipping",
   "done",
 ] as const;
@@ -24,6 +26,7 @@ const STAGE_META: Record<string, { label: string; detail: string }> = {
   extracting_features:{ label: "Features extrahieren", detail: "Audio-, Video- und Chat-Signale werden ausgewertet" },
   diarizing:       { label: "Sprecher trennen",      detail: "Sprecher werden per Audioanalyse unterschieden" },
   analyzing:       { label: "KI analysiert",        detail: "Llama sucht nach viralen Momenten" },
+  judging:          { label: "Clip Judge",           detail: "Ollama bewertet die Top-Kandidaten" },
   clipping:        { label: "Clips schneiden",      detail: "FFmpeg schneidet die Szenen" },
   done:            { label: "Fertig",               detail: "Alle Clips wurden erstellt" },
   cancelled:       { label: "Abgebrochen",          detail: "Verarbeitung wurde beendet" },
@@ -45,43 +48,62 @@ interface Props {
   jobId: string;
   onDone: (clips: ClipResult[]) => void;
   onError: (msg: string) => void;
+  onDiagnostics?: (diagnostics: PipelineDiagnostics | null) => void;
 }
 
-export default function JobStatus({ jobId, onDone, onError }: Props) {
+export default function JobStatus({ jobId, onDone, onError, onDiagnostics }: Props) {
   const [status, setStatus] = useState("queued");
   const [pct, setPct] = useState(0);
   const [speed, setSpeed] = useState<number | null>(null);
   const [eta, setEta] = useState<number | null>(null);
   const [downloadCached, setDownloadCached] = useState(false);
+  const [pipelineDiagnostics, setPipelineDiagnostics] = useState<PipelineDiagnostics | null>(null);
 
   useEffect(() => {
-    const interval = setInterval(async () => {
+    let stopped = false;
+
+    const poll = async () => {
       try {
         const job: JobStatusType = await getJobStatus(jobId);
+        if (stopped) return;
         setStatus(job.status);
         setPct(job.progress_pct);
         setSpeed(job.download_speed ?? null);
         setEta(job.download_eta ?? null);
         setDownloadCached(job.download_cached ?? false);
+        const diagnostics = job.pipeline_diagnostics ?? null;
+        setPipelineDiagnostics(diagnostics);
+        onDiagnostics?.(diagnostics);
 
         if (job.status === "done") {
-          clearInterval(interval);
+          stopped = true;
           onDone(job.clips);
         } else if (job.status === "cancelled") {
-          clearInterval(interval);
+          stopped = true;
           onError(job.error ?? "Verarbeitung abgebrochen");
         } else if (job.status === "failed") {
-          clearInterval(interval);
+          stopped = true;
           onError(job.error ?? "Unbekannter Fehler");
         }
       } catch {
-        clearInterval(interval);
+        if (stopped) return;
+        stopped = true;
         onError("Verbindung zum Server verloren");
+      }
+    };
+
+    poll();
+    const interval = setInterval(() => {
+      if (!stopped) {
+        poll();
       }
     }, 2000);
 
-    return () => clearInterval(interval);
-  }, [jobId, onDone, onError]);
+    return () => {
+      stopped = true;
+      clearInterval(interval);
+    };
+  }, [jobId, onDone, onError, onDiagnostics]);
 
   const meta = STAGE_META[status] ?? { label: status, detail: "" };
   const stageIndex = STAGES.indexOf(status as typeof STAGES[number]);
@@ -178,6 +200,8 @@ export default function JobStatus({ jobId, onDone, onError }: Props) {
           );
         })}
       </div>
+
+      <PipelineDiagnosticsPanel diagnostics={pipelineDiagnostics} />
     </div>
   );
 }

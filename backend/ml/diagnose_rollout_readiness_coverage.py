@@ -76,7 +76,7 @@ def diagnose_coverage(
     )
     holdout_rows = _read_jsonl(holdout_dataset_path) if holdout_dataset_path else []
     holdout_summary = _holdout_overlap_summary(group_summaries, holdout_rows, split_unit) if holdout_rows else {}
-    targets = _targets(profile)
+    targets = _targets(profile, available_groups=len(group_summaries))
     readiness = _readiness_summary(
         prepared_rows=prepared_rows,
         validation_rows=validation_rows,
@@ -133,15 +133,8 @@ def _read_jsonl(path: pathlib.Path | None) -> list[dict]:
     return rows
 
 
-def _targets(profile: str) -> dict[str, int]:
-    profile_key = str(profile).strip().lower()
-    if profile_key != "jynxzi":
-        return {"training_rows": 0, "positive_rows": 0, "validation_groups": 0}
-    return {
-        "training_rows": train_ranker._MIN_JYNXZI_ROLLOUT_ROWS,
-        "positive_rows": train_ranker._MIN_JYNXZI_ROLLOUT_POSITIVES,
-        "validation_groups": train_ranker._MIN_JYNXZI_VALIDATION_GROUPS,
-    }
+def _targets(profile: str, *, available_groups: int | None = None) -> dict[str, object]:
+    return train_ranker.rollout_readiness_targets(profile, available_groups=available_groups)
 
 
 def _readiness_summary(
@@ -149,7 +142,7 @@ def _readiness_summary(
     prepared_rows: list[dict],
     validation_rows: list[dict],
     split_unit: str,
-    targets: dict[str, int],
+    targets: dict[str, object],
 ) -> dict[str, object]:
     positive_rows = sum(1 for row in prepared_rows if int(row.get("label", 0)) == 1)
     validation_groups = len(set(train_ranker._ranking_group_labels(validation_rows, split_unit)))
@@ -256,7 +249,7 @@ def _diagnosis(
     group_summaries: list[dict[str, object]],
     holdout_summary: dict[str, object],
     split: dict[str, object],
-    targets: dict[str, int],
+    targets: dict[str, object],
 ) -> dict[str, object]:
     available_groups = sum(1 for group in group_summaries if int(group.get("rows") or 0) > 0)
     validation_groups = int(readiness.get("validation_groups") or 0)
@@ -284,6 +277,7 @@ def _diagnosis(
         "blockers": blockers,
         "split_strategy": str(split.get("strategy") or ""),
         "split_unit": str(split.get("unit") or ""),
+        "target_mode": str(targets.get("mode") or ""),
         "available_groups_after_policy": available_groups,
         "available_groups_needed": max(0, target_validation_groups - available_groups),
         "validation_groups_unused_by_split": max(0, available_groups - validation_groups),

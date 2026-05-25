@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from services import downloader
+from services import downloader, yt_dlp_auth
 
 
 class _FakeYoutubeDL:
@@ -15,6 +15,9 @@ class _FakeYoutubeDL:
 
     def __exit__(self, exc_type, exc, tb):
         return False
+
+    def close(self) -> None:
+        return None
 
     def extract_info(self, url: str, download: bool = True):
         assert download is True
@@ -43,6 +46,29 @@ class _CaptureOptsYoutubeDL(_FakeYoutubeDL):
         super().__init__(opts)
 
 
+class _FailOnceFfmpegCrashYoutubeDL(_FakeYoutubeDL):
+    captured_opts: list[dict] = []
+
+    def __init__(self, opts: dict):
+        type(self).captured_opts.append(opts)
+        super().__init__(opts)
+
+    def extract_info(self, url: str, download: bool = True):
+        if len(type(self).captured_opts) == 1:
+            target = Path(self.opts["outtmpl"])
+            target.parent.mkdir(parents=True, exist_ok=True)
+            (target.parent / "video.temp.mp4").write_bytes(b"failed-attempt")
+            raise RuntimeError("ERROR: ffmpeg exited with code -11")
+        return super().extract_info(url, download=download)
+
+
+class _FailOnceFfmpegCrashThenCookieCloseErrorYoutubeDL(_FailOnceFfmpegCrashYoutubeDL):
+    def close(self) -> None:
+        if len(type(self).captured_opts) == 1:
+            raise FileNotFoundError("/app/backend/tmp/www.youtube.com_cookies.txt")
+        return None
+
+
 class DownloaderTests(unittest.TestCase):
     def test_coerces_float_eta_to_integer_seconds(self) -> None:
         self.assertEqual(downloader._coerce_eta_seconds(715.6143084933422), 716)
@@ -56,6 +82,22 @@ class DownloaderTests(unittest.TestCase):
     def test_negative_ttl_keeps_twitch_cache_enabled(self) -> None:
         with patch.object(downloader.settings, "twitch_download_cache_ttl_sec", -1):
             self.assertTrue(downloader._twitch_cache_enabled("https://www.twitch.tv/videos/123456"))
+
+    def test_frontend_job_cache_setting_disables_twitch_cache_for_serving_jobs(self) -> None:
+        with patch.object(downloader.settings, "frontend_job_cache_enabled", False), \
+             patch.object(downloader.settings, "twitch_download_cache_ttl_sec", -1):
+            self.assertFalse(
+                downloader._twitch_cache_enabled(
+                    "https://www.twitch.tv/videos/123456",
+                    "frontend-job",
+                )
+            )
+            self.assertTrue(
+                downloader._twitch_cache_enabled(
+                    "https://www.twitch.tv/videos/123456",
+                    "twitch_vod_123456",
+                )
+            )
 
     def test_twitch_download_opts_enable_parallel_fragments(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -86,13 +128,13 @@ class DownloaderTests(unittest.TestCase):
         self.assertIsNotNone(_CaptureOptsYoutubeDL.captured_opts)
         self.assertIn("height<=720", str(_CaptureOptsYoutubeDL.captured_opts["format"]))
 
-    def test_non_training_download_opts_do_not_cap_height(self) -> None:
+    def test_frontend_twitch_download_opts_cap_height(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             storage_dir = Path(tmp)
             url = "https://www.twitch.tv/videos/555"
 
             with patch.object(downloader.settings, "storage_dir", str(storage_dir)), \
-                 patch.object(downloader.settings, "training_vod_max_height", 720), \
+                 patch.object(downloader.settings, "twitch_download_max_height", 720), \
                  patch.object(downloader.settings, "twitch_download_cache_ttl_sec", 0), \
                  patch.object(downloader.settings, "twitch_download_use_aria2c", False), \
                  patch.object(downloader, "update_job", create=True), \
@@ -100,7 +142,23 @@ class DownloaderTests(unittest.TestCase):
                 downloader.download(url, "regular-job")
 
         self.assertIsNotNone(_CaptureOptsYoutubeDL.captured_opts)
-        self.assertNotIn("height<=720", str(_CaptureOptsYoutubeDL.captured_opts["format"]))
+        self.assertIn("height<=720", str(_CaptureOptsYoutubeDL.captured_opts["format"]))
+
+    def test_frontend_twitch_download_height_cap_can_be_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage_dir = Path(tmp)
+            url = "https://www.twitch.tv/videos/555"
+
+            with patch.object(downloader.settings, "storage_dir", str(storage_dir)), \
+                 patch.object(downloader.settings, "twitch_download_max_height", 0), \
+                 patch.object(downloader.settings, "twitch_download_cache_ttl_sec", 0), \
+                 patch.object(downloader.settings, "twitch_download_use_aria2c", False), \
+                 patch.object(downloader, "update_job", create=True), \
+                 patch.object(downloader.yt_dlp, "YoutubeDL", _CaptureOptsYoutubeDL):
+                downloader.download(url, "regular-job")
+
+        self.assertIsNotNone(_CaptureOptsYoutubeDL.captured_opts)
+        self.assertNotIn("height<=", str(_CaptureOptsYoutubeDL.captured_opts["format"]))
 
     def test_download_opts_include_ytdlp_cookiefile(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -116,6 +174,25 @@ class DownloaderTests(unittest.TestCase):
 
         self.assertIsNotNone(_CaptureOptsYoutubeDL.captured_opts)
         self.assertEqual(_CaptureOptsYoutubeDL.captured_opts["cookiefile"], "/tmp/youtube.cookies.txt")
+
+    def test_download_opts_remap_docker_ytdlp_cookiefile_to_local_backend_tmp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage_dir = Path(tmp)
+            fake_backend_root = storage_dir / "backend"
+            url = "https://www.youtube.com/shorts/abc"
+
+            with patch.object(yt_dlp_auth, "BACKEND_ROOT", fake_backend_root), \
+                 patch.object(downloader.settings, "storage_dir", str(storage_dir)), \
+                 patch.object(downloader.settings, "yt_dlp_cookiefile", "/app/backend/tmp/www.youtube.com_cookies.txt"), \
+                 patch.object(downloader.settings, "yt_dlp_cookies_from_browser", ""), \
+                 patch.object(downloader, "update_job", create=True), \
+                 patch.object(downloader.yt_dlp, "YoutubeDL", _CaptureOptsYoutubeDL):
+                downloader.download(url, "regular-job")
+
+            expected = fake_backend_root / "tmp" / "www.youtube.com_cookies.txt"
+            self.assertIsNotNone(_CaptureOptsYoutubeDL.captured_opts)
+            self.assertEqual(_CaptureOptsYoutubeDL.captured_opts["cookiefile"], str(expected))
+            self.assertTrue(expected.parent.exists())
 
     def test_twitch_download_opts_use_aria2c_when_available(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -153,6 +230,7 @@ class DownloaderTests(unittest.TestCase):
             (job_dir / "video.temp.mp4").write_bytes(b"old-temp")
 
             with patch.object(downloader.settings, "storage_dir", str(storage_dir)), \
+                 patch.object(downloader.settings, "frontend_job_cache_enabled", True), \
                  patch.object(downloader.settings, "twitch_download_cache_ttl_sec", -1), \
                  patch.object(downloader, "update_job", create=True) as update_job_mock, \
                  patch.object(downloader.yt_dlp, "YoutubeDL", side_effect=AssertionError("network should not run")):
@@ -245,6 +323,7 @@ class DownloaderTests(unittest.TestCase):
             expected_cache_file = storage_dir / "_download_cache" / "twitch" / "vod_7890.mp4"
 
             with patch.object(downloader.settings, "storage_dir", str(storage_dir)), \
+                 patch.object(downloader.settings, "frontend_job_cache_enabled", True), \
                  patch.object(downloader.settings, "twitch_download_cache_ttl_sec", -1), \
                  patch.object(downloader, "update_job", create=True), \
                  patch.object(downloader.yt_dlp, "YoutubeDL", _FakeYoutubeDLWithTemp):
@@ -263,6 +342,49 @@ class DownloaderTests(unittest.TestCase):
             self.assertEqual(metadata["vod_id"], "7890")
             self.assertEqual(metadata["size"], expected_cache_file.stat().st_size)
 
+    def test_twitch_ffmpeg_segfault_retries_without_external_downloader(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage_dir = Path(tmp)
+            url = "https://www.twitch.tv/videos/7890"
+            _FailOnceFfmpegCrashYoutubeDL.captured_opts = []
+
+            with patch.object(downloader.settings, "storage_dir", str(storage_dir)), \
+                 patch.object(downloader.settings, "twitch_download_cache_ttl_sec", 0), \
+                 patch.object(downloader.settings, "twitch_download_use_aria2c", True), \
+                 patch.object(downloader, "_aria2c_available", return_value=True), \
+                 patch.object(downloader, "update_job", create=True), \
+                 patch.object(downloader.yt_dlp, "YoutubeDL", _FailOnceFfmpegCrashYoutubeDL):
+                output_path = downloader.download(url, "job-ffmpeg-retry")
+
+            self.assertEqual(output_path.read_bytes(), b"downloaded:https://www.twitch.tv/videos/7890")
+            self.assertEqual(len(_FailOnceFfmpegCrashYoutubeDL.captured_opts), 2)
+            self.assertEqual(_FailOnceFfmpegCrashYoutubeDL.captured_opts[0]["external_downloader"], "aria2c")
+            retry_opts = _FailOnceFfmpegCrashYoutubeDL.captured_opts[1]
+            self.assertEqual(retry_opts["format"], "best[ext=mp4]/best")
+            self.assertNotIn("external_downloader", retry_opts)
+            self.assertNotIn("external_downloader_args", retry_opts)
+            self.assertFalse((storage_dir / "job-ffmpeg-retry" / "video.temp.mp4").exists())
+
+    def test_twitch_ffmpeg_retry_survives_cookie_save_error_during_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage_dir = Path(tmp)
+            url = "https://www.twitch.tv/videos/7890"
+            _FailOnceFfmpegCrashThenCookieCloseErrorYoutubeDL.captured_opts = []
+
+            with patch.object(downloader.settings, "storage_dir", str(storage_dir)), \
+                 patch.object(downloader.settings, "twitch_download_cache_ttl_sec", 0), \
+                 patch.object(downloader.settings, "twitch_download_use_aria2c", True), \
+                 patch.object(downloader, "_aria2c_available", return_value=True), \
+                 patch.object(downloader, "update_job", create=True), \
+                 patch.object(downloader.yt_dlp, "YoutubeDL", _FailOnceFfmpegCrashThenCookieCloseErrorYoutubeDL):
+                output_path = downloader.download(url, "job-ffmpeg-cookie-close")
+
+            self.assertEqual(output_path.read_bytes(), b"downloaded:https://www.twitch.tv/videos/7890")
+            self.assertEqual(len(_FailOnceFfmpegCrashThenCookieCloseErrorYoutubeDL.captured_opts), 2)
+            retry_opts = _FailOnceFfmpegCrashThenCookieCloseErrorYoutubeDL.captured_opts[1]
+            self.assertEqual(retry_opts["format"], "best[ext=mp4]/best")
+            self.assertNotIn("external_downloader", retry_opts)
+
     def test_invalid_cache_metadata_forces_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             storage_dir = Path(tmp)
@@ -276,6 +398,7 @@ class DownloaderTests(unittest.TestCase):
             )
 
             with patch.object(downloader.settings, "storage_dir", str(storage_dir)), \
+                 patch.object(downloader.settings, "frontend_job_cache_enabled", True), \
                  patch.object(downloader.settings, "twitch_download_cache_ttl_sec", -1), \
                  patch.object(downloader, "update_job", create=True), \
                  patch.object(downloader.yt_dlp, "YoutubeDL", _FakeYoutubeDL):
@@ -295,6 +418,22 @@ class DownloaderTests(unittest.TestCase):
                  patch.object(downloader, "update_job", create=True), \
                  patch.object(downloader.yt_dlp, "YoutubeDL", _FakeYoutubeDL):
                 output_path = downloader.download(url, "job-no-cache")
+
+            self.assertTrue(output_path.exists())
+            self.assertFalse(expected_cache_dir.exists())
+
+    def test_skips_twitch_cache_for_frontend_job_even_when_ttl_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage_dir = Path(tmp)
+            url = "https://www.twitch.tv/videos/555"
+            expected_cache_dir = storage_dir / "_download_cache" / "twitch"
+
+            with patch.object(downloader.settings, "storage_dir", str(storage_dir)), \
+                 patch.object(downloader.settings, "frontend_job_cache_enabled", False), \
+                 patch.object(downloader.settings, "twitch_download_cache_ttl_sec", -1), \
+                 patch.object(downloader, "update_job", create=True), \
+                 patch.object(downloader.yt_dlp, "YoutubeDL", _FakeYoutubeDL):
+                output_path = downloader.download(url, "frontend-job-no-cache")
 
             self.assertTrue(output_path.exists())
             self.assertFalse(expected_cache_dir.exists())

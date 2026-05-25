@@ -104,6 +104,33 @@ class ExportAutoOutcomeNegativesTest(unittest.TestCase):
         self.assertEqual(payload["rows"], [])
         self.assertEqual(payload["summary"]["skipped"]["undated_candidate"], 1)
 
+    def test_holdout_floor_promotes_negatives_when_stable_split_is_train_heavy(self) -> None:
+        candidates = [
+            _candidate(f"cand-{idx}", f"vod-{idx}", float(idx * 40), float(idx * 40 + 20), score=2.0, created_at="")
+            for idx in range(10)
+        ]
+
+        payload = export_auto_outcome_negatives.build_auto_outcome_negative_rows(
+            candidate_rows=candidates,
+            positive_rows=[],
+            as_of_date=date(2026, 4, 29),
+            holdout_ratio=0.2,
+            max_rows=10,
+        )
+
+        rows = payload["rows"]
+        summary = payload["summary"]
+        self.assertEqual(summary["split_balance"]["target_holdout_rows"], 2)
+        self.assertEqual(summary["holdout_rows"], 2)
+        self.assertEqual(summary["train_rows"], 8)
+        self.assertEqual(summary["by_dataset_source"]["auto_outcome_negative_holdout"], 2)
+        self.assertTrue(
+            all(
+                row["dataset_source"] == f"auto_outcome_negative_{row['gold_holdout_split']}"
+                for row in rows
+            )
+        )
+
 
 def _candidate(
     candidate_id: str,

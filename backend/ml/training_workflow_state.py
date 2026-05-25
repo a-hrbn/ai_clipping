@@ -19,7 +19,7 @@ def build_jynxzi_workflow_state(
     skip_covered: bool,
     merge_output: bool,
 ) -> dict[str, object]:
-    use_user_labels = (os.environ.get("VOD_RANKER_USE_USER_LABELS") or "0").strip() or "0"
+    use_user_labels = (os.environ.get("VOD_RANKER_USE_USER_LABELS") or "1").strip() or "1"
     return {
         "workflow": "jynxzi_vod_training",
         "date_from": date_from,
@@ -34,7 +34,7 @@ def build_jynxzi_workflow_state(
         "ranker_short_form_mode": (os.environ.get("VOD_RANKER_SHORT_FORM_MODE") or "off").strip().lower() or "off",
         "ranker_gold_train_weight": (os.environ.get("VOD_RANKER_GOLD_TRAIN_WEIGHT") or "2.0").strip() or "2.0",
         "ranker_use_gold_train": (
-            (os.environ.get("VOD_RANKER_USE_GOLD_TRAIN") or "0").strip() or "0"
+            (os.environ.get("VOD_RANKER_USE_GOLD_TRAIN") or "1").strip() or "1"
             if use_user_labels == "1"
             else "0"
         ),

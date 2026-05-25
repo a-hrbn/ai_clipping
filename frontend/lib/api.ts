@@ -1,6 +1,14 @@
 import { AIProviderStatus, ClipFeedbackPayload, ClipRequestOptions, JobStatus, UploadProgress } from "./types";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const API_BASE = normalizeApiBase(process.env.NEXT_PUBLIC_API_URL);
+
+function normalizeApiBase(value: string | undefined): string {
+  const trimmed = (value ?? "").trim();
+  if (!trimmed || trimmed === "/") {
+    return "";
+  }
+  return trimmed.replace(/\/+$/, "");
+}
 
 function formatApiErrorDetail(value: unknown): string | null {
   if (typeof value === "string" && value.trim()) {

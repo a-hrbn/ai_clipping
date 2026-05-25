@@ -14,12 +14,14 @@ class JobManagerTests(unittest.TestCase):
         self._orig_created_at = dict(job_manager._job_created_at)
         self._orig_jobs_file = job_manager._jobs_file
         self._orig_last_persisted_at = job_manager._last_persisted_at
+        self._orig_jobs_file_mtime_ns = job_manager._jobs_file_mtime_ns
         self._tmp = tempfile.TemporaryDirectory()
 
         job_manager._jobs.clear()
         job_manager._job_created_at.clear()
         job_manager._jobs_file = Path(self._tmp.name) / "jobs.json"
         job_manager._last_persisted_at = 0.0
+        job_manager._jobs_file_mtime_ns = 0
 
     def tearDown(self) -> None:
         job_manager._jobs.clear()
@@ -28,6 +30,7 @@ class JobManagerTests(unittest.TestCase):
         job_manager._job_created_at.update(self._orig_created_at)
         job_manager._jobs_file = self._orig_jobs_file
         job_manager._last_persisted_at = self._orig_last_persisted_at
+        job_manager._jobs_file_mtime_ns = self._orig_jobs_file_mtime_ns
         self._tmp.cleanup()
 
     def test_progress_updates_stay_in_memory_until_persist_boundary(self) -> None:
@@ -108,6 +111,31 @@ class JobManagerTests(unittest.TestCase):
     def test_missing_job_updates_do_not_log_warning_noise(self) -> None:
         with self.assertNoLogs(job_manager.logger, level="WARNING"):
             job_manager.update_job("missing-job", status="downloading", progress_pct=10)
+
+    def test_get_job_reloads_subprocess_updates_from_disk(self) -> None:
+        job_manager.create_job("job-subprocess", profile="general")
+        payload = [
+            {
+                "job_id": "job-subprocess",
+                "status": "transcribing",
+                "progress_pct": 35,
+                "profile": "general",
+                "clips": [],
+                "error": None,
+                "download_speed": None,
+                "download_eta": None,
+                "download_cached": False,
+            }
+        ]
+        job_manager._jobs_file.write_text(json.dumps(payload), encoding="utf-8")
+        job_manager._jobs_file_mtime_ns = 0
+
+        job = job_manager.get_job("job-subprocess")
+
+        self.assertIsNotNone(job)
+        assert isinstance(job, JobStatus)
+        self.assertEqual(job.status, "transcribing")
+        self.assertEqual(job.progress_pct, 35)
 
 
 if __name__ == "__main__":

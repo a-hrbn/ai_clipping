@@ -100,6 +100,66 @@ class CandidateGeneratorTests(unittest.TestCase):
         self.assertTrue(candidates)
         self.assertTrue(any(candidate.source == "dense_window" for candidate in candidates))
 
+    def test_generate_dense_window_candidates_is_public_whole_vod_recall_path(self) -> None:
+        segments = [
+            RichSegment(start=0.0, end=4.0, text="setup", hype_score=1.2, arc_score=0.6),
+            RichSegment(start=4.0, end=8.0, text="getting tense", hype_score=2.3, arc_score=1.5),
+            RichSegment(start=8.0, end=12.0, text="chat is waking up", hype_score=3.2, arc_score=2.2, chat_spike_score=0.35),
+            RichSegment(start=12.0, end=16.0, text="no way this works", hype_score=4.8, arc_score=3.4, max_face_reaction=0.6),
+            RichSegment(start=16.0, end=20.0, text="that's insane", hype_score=5.5, arc_score=4.0, chat_spike_score=0.55, emotions=["exclamation"]),
+        ]
+
+        candidates = candidate_generators.generate_dense_window_candidates(segments)
+
+        self.assertTrue(candidates)
+        self.assertTrue(all(candidate.source == "dense_window" for candidate in candidates))
+
+    def test_dense_candidate_inventory_scans_broad_overlapping_windows_before_caps(self) -> None:
+        segments = [
+            RichSegment(
+                start=float(index * 5),
+                end=float(index * 5 + 4),
+                text=f"segment {index}",
+                hype_score=1.0 + (index % 5),
+                arc_score=0.5 + (index % 3),
+            )
+            for index in range(18)
+        ]
+
+        inventory = candidate_generators.generate_dense_candidate_inventory(
+            segments,
+            durations=(12.0, 20.0),
+            stride_sec=5.0,
+            max_candidates=0,
+        )
+
+        self.assertGreater(len(inventory), len(candidate_generators._generate_dense_window_candidates(segments)))
+        self.assertTrue(all(candidate.source == "dense_inventory" for candidate in inventory))
+        self.assertTrue(any(18.0 <= candidate.end - candidate.start <= 20.1 for candidate in inventory))
+
+    def test_merge_prioritized_candidates_can_raise_dense_source_cap_for_ranker_recall(self) -> None:
+        dense = [
+            candidate_generators.Candidate(
+                id=f"dense_window:16:{index}:{int(start * 100)}",
+                start=start,
+                end=start + 12.0,
+                source="dense_window",
+                anchor_time=start + 6.0,
+                score_hint=3.0,
+            )
+            for index, start in enumerate((0.0, 20.0, 40.0, 60.0, 80.0))
+        ]
+
+        default_merged = candidate_generators.merge_prioritized_candidates([], dense)
+        recall_merged = candidate_generators.merge_prioritized_candidates(
+            [],
+            dense,
+            source_cap_overrides={"dense_window": 5},
+        )
+
+        self.assertEqual(len(default_merged), 3)
+        self.assertEqual(len(recall_merged), 5)
+
     def test_generate_fallback_candidates_preserves_generic_recall_sources(self) -> None:
         segments = [
             RichSegment(start=0.0, end=2.0, text="setup", speaker="STREAMER", hype_score=1.0),

@@ -48,6 +48,108 @@ export interface ClipRequestOptions {
   variant_count?: number;
 }
 
+export type PipelineStageStatus = "ok" | "warning" | "pending" | "disabled" | "error";
+
+export interface PipelineMetric {
+  label: string;
+  value: string | number | boolean | null;
+}
+
+export interface PipelineDiagnosticStage {
+  id: string;
+  label: string;
+  status: PipelineStageStatus;
+  summary: string;
+  metrics: PipelineMetric[];
+  details: string[];
+}
+
+export interface CandidateFunnelLoss {
+  transition: string;
+  from_stage: string;
+  to_stage: string;
+  input_count: number;
+  output_count: number;
+  lost_count: number;
+  retention_ratio?: number | null;
+}
+
+export interface CandidateFunnelSample {
+  candidate_id: string;
+  source?: string | null;
+  start?: number | null;
+  end?: number | null;
+  status?: string | null;
+  dropped_stage?: string | null;
+  drop_reason?: string | null;
+  proposal_score?: number | null;
+  pre_judge_rank?: number | null;
+  pre_judge_rank_score?: number | null;
+  judge_score?: number | null;
+  final_rank?: number | null;
+  sample_group?: string;
+}
+
+export interface NumericDistribution {
+  count?: number;
+  min?: number | null;
+  mean?: number | null;
+  max?: number | null;
+}
+
+export interface CandidateFunnelQualityBreakdown {
+  judged_kept?: number;
+  unjudged_kept?: number;
+  judged_rejected?: number;
+  unjudged_rejected?: number;
+}
+
+export interface CandidateFunnelProposalLift {
+  scored_rows?: number;
+  positive_proxy_rows?: number;
+  precision_at_positive_k?: number | null;
+  recall_at_positive_k?: number | null;
+  high_judge_proposal_kept_ratio?: number | null;
+  final_selected_proposal_score?: NumericDistribution;
+  high_judge_proposal_score?: NumericDistribution;
+  source_breakdown?: Record<string, { rows?: number; final_selected?: number; high_judge?: number }>;
+}
+
+export interface CandidateFunnelRankerLift {
+  high_judge_rows?: number;
+  high_judge_pre_judge_top20_ratio?: number | null;
+  high_judge_pre_judge_top40_ratio?: number | null;
+  high_judge_pre_judge_rank?: NumericDistribution;
+  final_selected_pre_judge_rank?: NumericDistribution;
+  final_selected_judge_score?: NumericDistribution;
+}
+
+export interface CandidateFunnelDiagnostics {
+  available: boolean;
+  rows: number;
+  final_selected_rows?: number;
+  stage_counts?: Record<string, number>;
+  losses?: CandidateFunnelLoss[];
+  largest_losses?: CandidateFunnelLoss[];
+  drop_stage_counts?: Record<string, number>;
+  rejection_reason_counts?: Record<string, number>;
+  source_counts?: Record<string, number>;
+  final_source_counts?: Record<string, number>;
+  quality_breakdown?: CandidateFunnelQualityBreakdown;
+  proposal_lift?: CandidateFunnelProposalLift;
+  ranker_lift?: CandidateFunnelRankerLift;
+  samples?: CandidateFunnelSample[];
+}
+
+export interface PipelineDiagnostics {
+  available: boolean;
+  job_status?: string | null;
+  last_modified?: string | null;
+  summary: string;
+  stages: PipelineDiagnosticStage[];
+  candidate_funnel?: CandidateFunnelDiagnostics;
+}
+
 export interface StatusInfo {
   label?: string;
   name: string;
@@ -74,6 +176,7 @@ export interface JobStatus {
     | "extracting_features"
     | "diarizing"
     | "analyzing"
+    | "judging"
     | "clipping"
     | "done"
     | "cancelled"
@@ -85,4 +188,5 @@ export interface JobStatus {
   download_speed: number | null;
   download_eta: number | null;
   download_cached: boolean;
+  pipeline_diagnostics?: PipelineDiagnostics | null;
 }

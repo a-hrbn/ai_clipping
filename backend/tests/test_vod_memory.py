@@ -38,6 +38,22 @@ class VodMemoryTests(unittest.TestCase):
         self.assertGreater(context["retrieved_memory_span_count"], 0.0)
         self.assertIn("Setup:", context["context_summary"])
 
+    def test_candidate_memory_context_ignores_stale_global_callbacks(self) -> None:
+        segments = [
+            RichSegment(start=0.0, end=3.0, text="Wait bro, remember this unrelated bet?", speaker="STREAMER", hype_score=2.4),
+            RichSegment(start=400.0, end=403.0, text="No way bro, that was wild.", speaker="STREAMER", emotions=["exclamation"], hype_score=5.2),
+            RichSegment(start=403.0, end=406.0, text="Everybody is reacting now.", speaker="STREAMER", emotions=["laughter"], hype_score=4.5),
+        ]
+        candidate = Candidate(id="late", start=400.0, end=406.0, source="dense_inventory", anchor_time=402.0)
+
+        spans = vod_memory.build_memory_spans(segments)
+        context = vod_memory.candidate_memory_context(candidate, segments, spans)
+
+        self.assertIsNone(context["minimum_required_setup_start"])
+        self.assertEqual(context["required_setup_lead_sec"], 0.0)
+        self.assertNotIn("Callback:", context["context_summary"])
+        self.assertNotIn("unrelated bet", context["context_summary"])
+
 
 if __name__ == "__main__":
     unittest.main()

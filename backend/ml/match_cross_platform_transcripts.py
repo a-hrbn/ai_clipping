@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import difflib
 import hashlib
 import json
@@ -57,6 +58,7 @@ _STOPWORDS = {
     "you",
     "yeah",
 }
+_WORKER_VOD_TRANSCRIPTS: list["VodTranscript"] = []
 
 
 @dataclass(frozen=True)
@@ -89,6 +91,7 @@ def main() -> int:
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT))
     parser.add_argument("--vod-cache-root", default=str(DEFAULT_VOD_CACHE_ROOT))
     parser.add_argument("--min-similarity", type=float, default=0.60)
+    parser.add_argument("--workers", type=int, default=1, help="Parallel worker processes for per-repost matching.")
     args = parser.parse_args()
 
     rows, _diagnostics = match_reposts_to_vods_with_diagnostics(
@@ -97,6 +100,7 @@ def main() -> int:
         min_similarity=args.min_similarity,
         vod_cache_root=pathlib.Path(args.vod_cache_root),
         log_progress=True,
+        transcript_match_workers=args.workers,
     )
     output = pathlib.Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -111,12 +115,14 @@ def match_reposts_to_vods(
     *,
     min_similarity: float = 0.60,
     vod_cache_root: pathlib.Path = DEFAULT_VOD_CACHE_ROOT,
+    transcript_match_workers: int = 1,
 ) -> list[dict]:
     rows, _diagnostics = match_reposts_to_vods_with_diagnostics(
         vod_rows,
         repost_rows,
         min_similarity=min_similarity,
         vod_cache_root=vod_cache_root,
+        transcript_match_workers=transcript_match_workers,
     )
     return rows
 
@@ -132,9 +138,11 @@ def match_reposts_to_vods_with_diagnostics(
     log_progress: bool = False,
     vod_progress_interval: int = 25,
     repost_progress_interval: int = 5,
+    transcript_match_workers: int = 1,
 ) -> tuple[list[dict], dict[str, object]]:
     started_at = time.monotonic()
     threshold = max(float(min_similarity), 0.0)
+    requested_workers = max(1, int(transcript_match_workers or 1))
     if log_progress:
         _log_event(
             "cross_platform_transcript_match_start",
@@ -142,6 +150,7 @@ def match_reposts_to_vods_with_diagnostics(
             repost_rows=len(repost_rows),
             min_similarity=round(threshold, 6),
             diagnostic_top_k=int(diagnostic_top_k),
+            transcript_match_workers=requested_workers,
         )
 
     vod_transcripts: list[VodTranscript] = []
@@ -186,6 +195,7 @@ def match_reposts_to_vods_with_diagnostics(
         )
 
     best_similarity_seen = 0.0
+    match_inputs: list[tuple[int, dict, str, list[str], float]] = []
     for index, repost in enumerate(repost_rows, start=1):
         repost_path = audio_matcher._resolve_media_path(str(repost.get("video_path") or ""))
         if repost_path is None:
@@ -256,13 +266,22 @@ def match_reposts_to_vods_with_diagnostics(
             skipped_repost_transcript += 1
             continue
         repost_duration = _transcript_duration(repost_transcript, fallback=_safe_float(repost.get("duration_sec")))
-        best = _best_transcript_match(
-            repost,
-            repost_text=repost_text,
-            repost_tokens=repost_tokens,
-            repost_duration=repost_duration,
-            vod_transcripts=vod_transcripts,
+        match_inputs.append((index, repost, repost_text, repost_tokens, repost_duration))
+
+    effective_workers = min(requested_workers, max(1, len(match_inputs)))
+    if log_progress and match_inputs:
+        _log_event(
+            "cross_platform_transcript_repost_match_workers",
+            requested_workers=requested_workers,
+            effective_workers=effective_workers,
+            match_inputs=len(match_inputs),
         )
+
+    for index, repost, best in _iter_repost_match_results(
+        match_inputs,
+        vod_transcripts=vod_transcripts,
+        workers=effective_workers,
+    ):
         if best is None:
             if log_progress and _should_log_progress(index, len(repost_rows), repost_progress_interval):
                 _log_repost_progress(
@@ -310,6 +329,7 @@ def match_reposts_to_vods_with_diagnostics(
         skipped_repost_transcript=skipped_repost_transcript,
         repost_transcript_cache_hits=repost_transcript_cache_hits,
         repost_transcript_cache_misses=repost_transcript_cache_misses,
+        transcript_match_workers=effective_workers,
     )
     if log_progress:
         _log_event(
@@ -326,8 +346,54 @@ def match_reposts_to_vods_with_diagnostics(
             repost_transcript_cache_misses=repost_transcript_cache_misses,
             best_similarity_seen=round(best_similarity_seen, 6),
             elapsed_sec=round(time.monotonic() - started_at, 1),
+            transcript_match_workers=effective_workers,
         )
     return output_rows, diagnostics
+
+
+def _iter_repost_match_results(
+    match_inputs: list[tuple[int, dict, str, list[str], float]],
+    *,
+    vod_transcripts: list[VodTranscript],
+    workers: int,
+):
+    if not match_inputs:
+        return
+    if workers <= 1 or len(match_inputs) <= 1:
+        for match_input in match_inputs:
+            yield _match_repost_input(match_input, vod_transcripts=vod_transcripts)
+        return
+    with concurrent.futures.ProcessPoolExecutor(
+        max_workers=int(workers),
+        initializer=_init_match_worker,
+        initargs=(vod_transcripts,),
+    ) as executor:
+        yield from executor.map(_match_repost_input_in_worker, match_inputs, chunksize=1)
+
+
+def _init_match_worker(vod_transcripts: list[VodTranscript]) -> None:
+    global _WORKER_VOD_TRANSCRIPTS
+    _WORKER_VOD_TRANSCRIPTS = vod_transcripts
+
+
+def _match_repost_input_in_worker(match_input: tuple[int, dict, str, list[str], float]) -> tuple[int, dict, TranscriptMatch | None]:
+    return _match_repost_input(match_input, vod_transcripts=_WORKER_VOD_TRANSCRIPTS)
+
+
+def _match_repost_input(
+    match_input: tuple[int, dict, str, list[str], float],
+    *,
+    vod_transcripts: list[VodTranscript],
+) -> tuple[int, dict, TranscriptMatch | None]:
+    index, repost, repost_text, repost_tokens, repost_duration = match_input
+    best = _best_transcript_match(
+        repost,
+        repost_text=repost_text,
+        repost_tokens=repost_tokens,
+        repost_duration=repost_duration,
+        vod_transcripts=vod_transcripts,
+    )
+    return index, repost, best
 
 
 def _load_vod_transcript(vod: dict, *, vod_cache_root: pathlib.Path) -> VodTranscript | None:
@@ -583,6 +649,7 @@ def _match_diagnostics(
     skipped_repost_transcript: int,
     repost_transcript_cache_hits: int,
     repost_transcript_cache_misses: int,
+    transcript_match_workers: int,
 ) -> dict[str, object]:
     scores = sorted(float(row.get("transcript_similarity") or row.get("confidence") or 0.0) for row in best_match_rows)
     top_rows = sorted(
@@ -597,6 +664,7 @@ def _match_diagnostics(
         "vod_rows_input": len(vod_rows),
         "repost_rows_input": len(repost_rows),
         "vod_transcripts_loaded": len(vod_transcripts),
+        "transcript_match_workers": max(1, int(transcript_match_workers or 1)),
         "repost_best_match_rows": len(best_match_rows),
         "matched_rows": len(matched_rows),
         "skipped_vod_transcript_rows": int(skipped_vod_transcript),

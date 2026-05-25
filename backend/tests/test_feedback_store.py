@@ -63,6 +63,54 @@ class FeedbackStoreTests(unittest.TestCase):
         self.assertEqual(feedback[0].publish_platform, "tiktok")
         self.assertEqual(feedback[0].final_variant_key, "aggressive_hook")
 
+    def test_build_pipeline_feedback_adds_judged_quality_training_rows(self) -> None:
+        feedback = feedback_store.build_pipeline_feedback(
+            "job-judge",
+            [],
+            [],
+            [
+                {
+                    "candidate_id": "accepted",
+                    "start": 10.0,
+                    "end": 25.0,
+                    "rank_score": 6.0,
+                    "accepted": True,
+                    "has_judge_result": True,
+                    "judge_score": 7.4,
+                    "standalone_clarity": 0.8,
+                    "payoff_strength": 0.7,
+                    "narrative_completeness": 0.65,
+                    "judge_confidence": 0.9,
+                    "judge_provider": "ollama",
+                },
+                {
+                    "candidate_id": "rejected",
+                    "start": 30.0,
+                    "end": 45.0,
+                    "rank_score": 5.0,
+                    "accepted": False,
+                    "has_judge_result": True,
+                    "judge_score": 4.2,
+                    "rejection_reasons": ["judge_score_below_min"],
+                },
+                {
+                    "candidate_id": "unjudged",
+                    "start": 50.0,
+                    "end": 65.0,
+                    "accepted": True,
+                    "has_judge_result": False,
+                },
+            ],
+        )
+
+        rows = {row.candidate_id: row for row in feedback}
+        self.assertEqual(set(rows), {"accepted", "rejected"})
+        self.assertEqual(rows["accepted"].rejection_source, "judge_quality_accepted")
+        self.assertEqual(rows["accepted"].judge_score, 7.4)
+        self.assertEqual(rows["accepted"].judge_provider, "ollama")
+        self.assertEqual(rows["rejected"].rejection_source, "judge_quality_rejected")
+        self.assertEqual(rows["rejected"].rejected_reason, "judge_score_below_min")
+
     def test_update_job_feedback_persists_outcome_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             storage = Path(tmp)

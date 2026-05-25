@@ -1,0 +1,62 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: ai-clipping-backend:latest
+    container_name: ai-clipping-backend
+    restart: unless-stopped
+    ipc: host
+    shm_size: "16gb"
+    env_file:
+      - ./backend/.env
+    environment:
+      STORAGE_DIR: /app/backend/tmp/storage
+      XDG_CACHE_HOME: /app/backend/tmp/cache
+      HF_HOME: /app/backend/tmp/cache/huggingface
+      HUGGINGFACE_HUB_CACHE: /app/backend/tmp/cache/huggingface/hub
+      TRANSFORMERS_CACHE: /app/backend/tmp/cache/huggingface/transformers
+      TORCH_HOME: /app/backend/tmp/cache/torch
+      MPLCONFIGDIR: /app/backend/tmp/matplotlib
+      DEEPFACE_HOME: /app/backend/tmp/cache/deepface
+      WHISPER_LANGUAGE: ${AI_CLIPPING_WHISPER_LANGUAGE:-en}
+      TOKENIZERS_PARALLELISM: "false"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+      VECLIB_MAXIMUM_THREADS: "1"
+      LIBGL_ALWAYS_SOFTWARE: "1"
+      MESA_LOADER_DRIVER_OVERRIDE: swrast
+      OPENCV_FFMPEG_CAPTURE_OPTIONS: hwaccel;none
+      OLLAMA_HOST: http://host.docker.internal:11434
+      ALLOWED_ORIGINS: ${AI_CLIPPING_ALLOWED_ORIGINS:-["http://localhost:3000","http://localhost:3001","http://localhost:3002"]}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./backend/tmp:/app/backend/tmp
+      - ./backend/ml/artifacts:/app/backend/ml/artifacts
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${AI_CLIPPING_PUBLIC_API_URL-}
+        NEXT_INTERNAL_API_URL: ${AI_CLIPPING_INTERNAL_API_URL:-http://backend:8000}
+    image: ai-clipping-frontend:latest
+    container_name: ai-clipping-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_started
+    ports:
+      - "127.0.0.1:3000:3000"

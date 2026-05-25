@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import pathlib
 import re
 import subprocess
+import sys
+import tempfile
 import threading
 import wave
 from dataclasses import dataclass, field
+from hashlib import sha256
 
 import torch
 import whisper
@@ -18,6 +22,7 @@ logger = logging.getLogger(__name__)
 # Chunk length in seconds.
 # These chunks are non-overlapping; timestamp offsets must match that exactly.
 CHUNK_SECONDS = 600  # 10 minutes
+_TRANSCRIPT_CHUNK_CACHE_VERSION = 1
 
 # Module-level Whisper singleton — loaded once on first use, reused across jobs.
 _whisper_model: whisper.Whisper | None = None
@@ -106,6 +111,7 @@ _QUESTION_RE = re.compile(r"\?")
 
 _EMPTY_TRANSCRIBE_ERROR_SNIPPET = "cannot reshape tensor of 0 elements"
 _MIN_SEGMENT_DURATION_SECONDS = 0.01
+_WORKER_RESULT_PREFIX = "TRANSCRIBER_CHUNK_RESULT "
 
 
 @dataclass
@@ -164,9 +170,12 @@ def transcribe_with_progress(
     progress_cb=None,
     *,
     enable_diarization: bool = True,
+    cache_key: str | None = None,
+    isolate_chunks: bool = False,
 ) -> list[RichSegment]:
     chunks_dir = audio_path.parent / "chunks"
     chunks_dir.mkdir(exist_ok=True)
+    chunk_cache_dir = _chunk_cache_dir(cache_key)
 
     # Split audio into fixed, non-overlapping chunks via ffmpeg CLI.
     # Use explicit PCM re-encoding (not -c copy): the segment muxer does not
@@ -188,49 +197,63 @@ def transcribe_with_progress(
     )
 
     chunk_files = _filter_transcribable_chunks(sorted(chunks_dir.glob("chunk_*.wav")))
-    model = _get_model()
+    model: whisper.Whisper | None = None
 
-    raw_segments: list[RichSegment] = []
     total_chunks = len(chunk_files)
+    segments_by_chunk: dict[int, list[RichSegment]] = {}
+    pending_chunks: list[tuple[int, pathlib.Path]] = []
+    progress_index_by_chunk: dict[int, int] = {}
 
     for progress_idx, (chunk_idx, chunk_file) in enumerate(chunk_files, start=1):
-        time_offset = chunk_idx * CHUNK_SECONDS
-        try:
-            result = _transcribe_chunk(model, chunk_file)
-        except RuntimeError as exc:
-            if _EMPTY_TRANSCRIBE_ERROR_SNIPPET not in str(exc):
-                raise
-            logger.warning(
-                "transcriber_skip_chunk chunk=%s reason=empty_tensor_runtime_error",
-                chunk_file,
-            )
+        progress_index_by_chunk[chunk_idx] = progress_idx
+        cached_segments = _load_chunk_cache(chunk_cache_dir, chunk_idx)
+        if cached_segments is not None:
+            segments_by_chunk[chunk_idx] = cached_segments
             if progress_cb is not None and total_chunks > 0:
                 progress_cb(progress_idx, total_chunks, chunk_file)
             continue
+        pending_chunks.append((chunk_idx, chunk_file))
 
-        raw_segments_payload = _validated_segments_payload(result, chunk_file=chunk_file)
-        for seg_idx, raw_seg in enumerate(raw_segments_payload):
-            seg = _normalize_segment(raw_seg, chunk_file=chunk_file, segment_index=seg_idx)
+    if isolate_chunks:
+        for chunk_idx, result in _transcribe_chunks_isolated(pending_chunks):
+            chunk_file = _chunk_file_for_index(pending_chunks, chunk_idx)
+            chunk_segments = _rich_segments_from_result(result, chunk_idx=chunk_idx, chunk_file=chunk_file)
+            segments_by_chunk[chunk_idx] = chunk_segments
+            _write_chunk_cache(chunk_cache_dir, chunk_idx, chunk_segments)
 
-            start = seg["start"] + time_offset
-            end = seg["end"] + time_offset
-            text = seg["text"].strip()
-            if not text:
+            if progress_cb is not None and total_chunks > 0:
+                progress_cb(progress_index_by_chunk[chunk_idx], total_chunks, chunk_file)
+    else:
+        for chunk_idx, chunk_file in pending_chunks:
+            try:
+                if model is None:
+                    model = _get_model()
+                result = _transcribe_chunk(model, chunk_file)
+            except RuntimeError as exc:
+                if _EMPTY_TRANSCRIBE_ERROR_SNIPPET not in str(exc):
+                    raise
+                logger.warning(
+                    "transcriber_skip_chunk chunk=%s reason=empty_tensor_runtime_error",
+                    chunk_file,
+                )
+                segments_by_chunk[chunk_idx] = []
+                if progress_cb is not None and total_chunks > 0:
+                    progress_cb(progress_index_by_chunk[chunk_idx], total_chunks, chunk_file)
+                _write_chunk_cache(chunk_cache_dir, chunk_idx, [])
+                _release_transient_inference_memory()
                 continue
 
-            wps = _calc_tempo(seg, time_offset)
-            emotions = _tag_emotions(text)
+            chunk_segments = _rich_segments_from_result(result, chunk_idx=chunk_idx, chunk_file=chunk_file)
+            segments_by_chunk[chunk_idx] = chunk_segments
+            _write_chunk_cache(chunk_cache_dir, chunk_idx, chunk_segments)
+            _release_transient_inference_memory()
 
-            raw_segments.append(RichSegment(
-                start=start,
-                end=end,
-                text=text,
-                emotions=emotions,
-                words_per_second=wps,
-            ))
+            if progress_cb is not None and total_chunks > 0:
+                progress_cb(progress_index_by_chunk[chunk_idx], total_chunks, chunk_file)
 
-        if progress_cb is not None and total_chunks > 0:
-            progress_cb(progress_idx, total_chunks, chunk_file)
+    raw_segments: list[RichSegment] = []
+    for chunk_idx, _chunk_file in chunk_files:
+        raw_segments.extend(segments_by_chunk.get(chunk_idx, []))
 
     deduped = _deduplicate(raw_segments)
 
@@ -239,6 +262,444 @@ def transcribe_with_progress(
         deduped = _diarize(audio_path, deduped)
 
     return deduped
+
+
+def load_cached_transcript(
+    cache_key: str | None,
+    *,
+    expected_duration_sec: float | None,
+    progress_cb=None,
+) -> list[RichSegment] | None:
+    if expected_duration_sec is None or expected_duration_sec <= 0:
+        return None
+    expected_chunks = max(int(math.ceil(float(expected_duration_sec) / CHUNK_SECONDS)), 1)
+    cache_dir = _chunk_cache_dir(cache_key)
+    if cache_dir is None:
+        return None
+
+    raw_segments: list[RichSegment] = []
+    for chunk_idx in range(expected_chunks):
+        cached_segments = _load_chunk_cache(cache_dir, chunk_idx)
+        if cached_segments is None:
+            return None
+        raw_segments.extend(cached_segments)
+        if progress_cb is not None:
+            progress_cb(chunk_idx + 1, expected_chunks, _chunk_cache_path(cache_dir, chunk_idx))
+
+    return _deduplicate(raw_segments)
+
+
+def _chunk_file_for_index(
+    chunk_files: list[tuple[int, pathlib.Path]],
+    chunk_idx: int,
+) -> pathlib.Path:
+    for candidate_idx, chunk_file in chunk_files:
+        if int(candidate_idx) == int(chunk_idx):
+            return chunk_file
+    raise RuntimeError(f"isolated Whisper worker returned unknown chunk index {chunk_idx}")
+
+
+def _rich_segments_from_result(
+    result: dict,
+    *,
+    chunk_idx: int,
+    chunk_file: pathlib.Path,
+) -> list[RichSegment]:
+    time_offset = int(chunk_idx) * CHUNK_SECONDS
+    chunk_segments: list[RichSegment] = []
+    raw_segments_payload = _validated_segments_payload(result, chunk_file=chunk_file)
+    for seg_idx, raw_seg in enumerate(raw_segments_payload):
+        seg = _normalize_segment(raw_seg, chunk_file=chunk_file, segment_index=seg_idx)
+
+        start = seg["start"] + time_offset
+        end = seg["end"] + time_offset
+        text = seg["text"].strip()
+        if not text:
+            continue
+
+        wps = _calc_tempo(seg, time_offset)
+        emotions = _tag_emotions(text)
+
+        chunk_segments.append(RichSegment(
+            start=start,
+            end=end,
+            text=text,
+            emotions=emotions,
+            words_per_second=wps,
+        ))
+    return chunk_segments
+
+
+def _transcribe_chunk_isolated(chunk_file: pathlib.Path) -> dict:
+    output_path: pathlib.Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix=f"{chunk_file.stem}.",
+            suffix=".transcript.json",
+            dir=str(chunk_file.parent),
+            delete=False,
+        ) as handle:
+            output_path = pathlib.Path(handle.name)
+        command = [
+            sys.executable,
+            "-m",
+            "services.transcriber",
+            "--transcribe-chunk",
+            str(chunk_file),
+            str(output_path),
+        ]
+        logger.info("transcriber_chunk_subprocess_start chunk=%s", chunk_file)
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            message = _compact_subprocess_output(completed.stderr or completed.stdout)
+            raise RuntimeError(
+                f"isolated Whisper chunk failed for {chunk_file} "
+                f"with exit code {completed.returncode}: {message}"
+            )
+        try:
+            payload = json.loads(output_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"isolated Whisper chunk wrote invalid output for {chunk_file}: {exc}"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"isolated Whisper chunk output for {chunk_file} was not a mapping")
+        segments = payload.get("segments")
+        if not isinstance(segments, list):
+            raise RuntimeError(f"isolated Whisper chunk output for {chunk_file} did not contain segments")
+        logger.info(
+            "transcriber_chunk_subprocess_done chunk=%s segments=%s",
+            chunk_file,
+            len(segments),
+        )
+        return {"segments": segments}
+    finally:
+        if output_path is not None:
+            try:
+                output_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _transcribe_chunks_isolated(chunk_files: list[tuple[int, pathlib.Path]]) -> list[tuple[int, dict]]:
+    if not chunk_files:
+        return []
+
+    manifest_path: pathlib.Path | None = None
+    common_dir = pathlib.Path(chunk_files[0][1]).parent
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix="transcriber_chunks.",
+            suffix=".manifest.json",
+            dir=str(common_dir),
+            delete=False,
+            mode="w",
+            encoding="utf-8",
+        ) as handle:
+            manifest_path = pathlib.Path(handle.name)
+            json.dump(
+                [
+                    {
+                        "chunk_index": int(chunk_idx),
+                        "chunk_path": str(chunk_file),
+                    }
+                    for chunk_idx, chunk_file in chunk_files
+                ],
+                handle,
+                ensure_ascii=True,
+            )
+
+        command = [
+            sys.executable,
+            "-m",
+            "services.transcriber",
+            "--transcribe-chunks",
+            str(manifest_path),
+        ]
+        logger.info(
+            "transcriber_chunk_worker_start chunks=%s first_chunk=%s",
+            len(chunk_files),
+            chunk_files[0][1],
+        )
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        stderr_lines: list[str] = []
+
+        def _read_stderr() -> None:
+            assert process.stderr is not None
+            for line in process.stderr:
+                line = line.strip()
+                if line:
+                    stderr_lines.append(line)
+
+        stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
+        stderr_thread.start()
+
+        results: list[tuple[int, dict]] = []
+        seen_chunks: set[int] = set()
+        assert process.stdout is not None
+        for line in process.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            if not line.startswith(_WORKER_RESULT_PREFIX):
+                stderr_lines.append(line)
+                continue
+            payload = json.loads(line[len(_WORKER_RESULT_PREFIX):])
+            if not isinstance(payload, dict):
+                raise RuntimeError("isolated Whisper worker emitted a non-object payload")
+            chunk_idx = int(payload["chunk_index"])
+            segments = payload.get("segments")
+            if not isinstance(segments, list):
+                raise RuntimeError(f"isolated Whisper worker omitted segments for chunk {chunk_idx}")
+            seen_chunks.add(chunk_idx)
+            results.append((chunk_idx, {"segments": segments}))
+
+        returncode = process.wait()
+        stderr_thread.join(timeout=1.0)
+        if returncode != 0:
+            message = _compact_subprocess_output("\n".join(stderr_lines))
+            raise RuntimeError(
+                f"isolated Whisper chunk worker failed with exit code {returncode}: {message}"
+            )
+
+        expected_chunks = {int(chunk_idx) for chunk_idx, _chunk_file in chunk_files}
+        missing_chunks = sorted(expected_chunks - seen_chunks)
+        if missing_chunks:
+            raise RuntimeError(
+                f"isolated Whisper chunk worker completed without results for chunks {missing_chunks}"
+            )
+
+        logger.info("transcriber_chunk_worker_done chunks=%s", len(results))
+        return results
+    finally:
+        if manifest_path is not None:
+            try:
+                manifest_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _transcribe_chunk_worker_main(argv: list[str] | None = None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    if len(args) == 2 and args[0] == "--transcribe-chunks":
+        return _transcribe_chunks_worker_main(pathlib.Path(args[1]))
+    if len(args) != 3 or args[0] != "--transcribe-chunk":
+        print(
+            "usage: python -m services.transcriber "
+            "--transcribe-chunk <chunk.wav> <output.json> | --transcribe-chunks <manifest.json>",
+            file=sys.stderr,
+        )
+        return 2
+    chunk_file = pathlib.Path(args[1])
+    output_path = pathlib.Path(args[2])
+    try:
+        model = _get_model()
+        result = _transcribe_chunk(model, chunk_file)
+        output_path.write_text(
+            json.dumps(
+                {
+                    "segments": _validated_segments_payload(result, chunk_file=chunk_file),
+                },
+                ensure_ascii=True,
+            ),
+            encoding="utf-8",
+        )
+        return 0
+    except RuntimeError as exc:
+        if _EMPTY_TRANSCRIBE_ERROR_SNIPPET in str(exc):
+            output_path.write_text(
+                json.dumps({"segments": []}, ensure_ascii=True),
+                encoding="utf-8",
+            )
+            return 0
+        raise
+
+
+def _transcribe_chunks_worker_main(manifest_path: pathlib.Path) -> int:
+    try:
+        raw_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"invalid chunk manifest {manifest_path}: {exc}", file=sys.stderr)
+        return 2
+    if not isinstance(raw_manifest, list):
+        print(f"invalid chunk manifest {manifest_path}: expected list", file=sys.stderr)
+        return 2
+
+    try:
+        model = _get_model()
+        for raw_item in raw_manifest:
+            if not isinstance(raw_item, dict):
+                raise RuntimeError("chunk manifest item must be an object")
+            chunk_idx = int(raw_item["chunk_index"])
+            chunk_file = pathlib.Path(str(raw_item["chunk_path"]))
+            try:
+                result = _transcribe_chunk(model, chunk_file)
+                segments = _validated_segments_payload(result, chunk_file=chunk_file)
+            except RuntimeError as exc:
+                if _EMPTY_TRANSCRIBE_ERROR_SNIPPET not in str(exc):
+                    raise
+                segments = []
+            print(
+                _WORKER_RESULT_PREFIX
+                + json.dumps(
+                    {
+                        "chunk_index": chunk_idx,
+                        "segments": segments,
+                    },
+                    ensure_ascii=True,
+                ),
+                flush=True,
+            )
+        return 0
+    except Exception as exc:
+        print(
+            f"isolated Whisper chunk worker failed: {type(exc).__name__}: {_compact_exception_message(exc)}",
+            file=sys.stderr,
+        )
+        return 1
+
+
+def _compact_subprocess_output(output: str, limit: int = 1200) -> str:
+    message = " ".join(str(output or "").split())
+    if len(message) <= limit:
+        return message
+    return message[: limit - 3] + "..."
+
+
+def stable_cache_key_for_source(source: str | pathlib.Path | None) -> str | None:
+    value = str(source or "").strip()
+    if not value:
+        return None
+    return sha256(value.encode("utf-8")).hexdigest()
+
+
+def _chunk_cache_dir(cache_key: str | None) -> pathlib.Path | None:
+    digest = stable_cache_key_for_source(cache_key)
+    if not digest:
+        return None
+    cache_dir = pathlib.Path(settings.storage_dir) / "_transcript_cache" / digest / "chunks"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
+
+
+def _chunk_cache_path(cache_dir: pathlib.Path | None, chunk_idx: int) -> pathlib.Path | None:
+    if cache_dir is None:
+        return None
+    return cache_dir / f"chunk_{chunk_idx:03d}.json"
+
+
+def _chunk_cache_metadata(chunk_idx: int) -> dict[str, object]:
+    return {
+        "version": _TRANSCRIPT_CHUNK_CACHE_VERSION,
+        "chunk_index": int(chunk_idx),
+        "chunk_seconds": CHUNK_SECONDS,
+        "whisper_model": str(settings.whisper_model or ""),
+        "language": str(settings.whisper_language or "").strip().lower(),
+    }
+
+
+def _load_chunk_cache(cache_dir: pathlib.Path | None, chunk_idx: int) -> list[RichSegment] | None:
+    cache_path = _chunk_cache_path(cache_dir, chunk_idx)
+    if cache_path is None or not cache_path.exists():
+        return None
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        logger.warning("transcriber_chunk_cache_invalid path=%s reason=read_error", cache_path)
+        return None
+    if not isinstance(payload, dict):
+        logger.warning("transcriber_chunk_cache_invalid path=%s reason=payload_type", cache_path)
+        return None
+    if payload.get("metadata") != _chunk_cache_metadata(chunk_idx):
+        return None
+    raw_segments = payload.get("segments")
+    if not isinstance(raw_segments, list):
+        logger.warning("transcriber_chunk_cache_invalid path=%s reason=segments_type", cache_path)
+        return None
+    try:
+        return [_segment_from_cache_record(record) for record in raw_segments]
+    except (TypeError, ValueError):
+        logger.warning("transcriber_chunk_cache_invalid path=%s reason=segment_payload", cache_path)
+        return None
+
+
+def _write_chunk_cache(
+    cache_dir: pathlib.Path | None,
+    chunk_idx: int,
+    segments: list[RichSegment],
+) -> None:
+    cache_path = _chunk_cache_path(cache_dir, chunk_idx)
+    if cache_path is None:
+        return
+    payload = {
+        "metadata": _chunk_cache_metadata(chunk_idx),
+        "segments": [_segment_cache_record(segment) for segment in segments],
+    }
+    tmp_path = cache_path.with_suffix(f"{cache_path.suffix}.tmp")
+    try:
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=True, sort_keys=True), encoding="utf-8")
+        tmp_path.replace(cache_path)
+    except OSError as exc:
+        logger.warning(
+            "transcriber_chunk_cache_write_failed path=%s error_type=%s error=%s",
+            cache_path,
+            type(exc).__name__,
+            _compact_exception_message(exc),
+        )
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _segment_cache_record(segment: RichSegment) -> dict[str, object]:
+    return {
+        "start": float(segment.start),
+        "end": float(segment.end),
+        "text": segment.text,
+        "speaker": segment.speaker,
+        "emotions": list(segment.emotions),
+        "words_per_second": float(segment.words_per_second),
+    }
+
+
+def _segment_from_cache_record(record: object) -> RichSegment:
+    if not isinstance(record, dict):
+        raise TypeError("cached segment must be a mapping")
+    emotions = record.get("emotions") or []
+    if not isinstance(emotions, list):
+        raise TypeError("cached segment emotions must be a list")
+    return RichSegment(
+        start=float(record["start"]),
+        end=float(record["end"]),
+        text=str(record.get("text") or "").strip(),
+        speaker=str(record.get("speaker") or "UNKNOWN"),
+        emotions=[str(value) for value in emotions],
+        words_per_second=float(record.get("words_per_second") or 0.0),
+    )
+
+
+def _release_transient_inference_memory() -> None:
+    if torch.cuda.is_available():
+        try:
+            torch.cuda.empty_cache()
+        except Exception as exc:
+            logger.debug(
+                "transcriber_cuda_empty_cache_failed error_type=%s error=%s",
+                type(exc).__name__,
+                _compact_exception_message(exc),
+            )
 
 
 def _filter_transcribable_chunks(
@@ -606,3 +1067,7 @@ def _fmt(seconds: float) -> str:
     m = int((seconds % 3600) // 60)
     s = int(seconds % 60)
     return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+if __name__ == "__main__":
+    raise SystemExit(_transcribe_chunk_worker_main())

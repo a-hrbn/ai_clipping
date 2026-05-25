@@ -129,6 +129,37 @@ class TrainRankerTests(unittest.TestCase):
             {"short_form_supplemental": 1, "twitch_vod_primary": 2},
         )
 
+    def test_rollout_readiness_summary_uses_inventory_calibrated_targets(self) -> None:
+        rows: list[dict] = []
+        for group_idx in range(38):
+            for row_idx in range(8):
+                rows.append(
+                    {
+                        "vod_id": f"vod-{group_idx:02d}",
+                        "candidate_id": f"{group_idx}-{row_idx}",
+                        "label": 1 if row_idx < 4 else 0,
+                        "features": {"x": 1.0 if row_idx < 4 else -1.0},
+                    }
+                )
+        validation_rows = [row for row in rows if row["vod_id"] < "vod-15"]
+
+        summary = train_ranker._rollout_readiness_summary(
+            "jynxzi",
+            rows,
+            validation_rows,
+            {"name": "logistic_regression"},
+            {"passed": True},
+            "vod_id",
+        )
+
+        self.assertTrue(summary["passed"])
+        self.assertEqual(summary["targets"]["mode"], "inventory_calibrated")
+        self.assertEqual(summary["targets"]["raw_targets"]["training_rows"], 1200)
+        self.assertEqual(summary["targets"]["training_rows"], 304)
+        self.assertEqual(summary["targets"]["positive_rows"], 152)
+        self.assertEqual(summary["targets"]["validation_groups"], 15)
+        self.assertEqual(summary["available_groups"], 38)
+
     def test_prepare_ranker_training_rows_refills_source_cap_to_advanced_model_minimum(self) -> None:
         rows = [
             {

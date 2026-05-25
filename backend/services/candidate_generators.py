@@ -6,6 +6,8 @@ from services import chapter_segmenter, clip_strategy
 
 _DENSE_TARGET_DURATIONS = (9.0, 16.0, 28.0, 45.0)
 _DENSE_PER_DURATION = 12
+_DENSE_INVENTORY_DURATIONS = (12.0, 20.0, 30.0, 45.0, 60.0)
+_DENSE_INVENTORY_STRIDE_SEC = 5.0
 
 
 def generate_candidates(
@@ -56,6 +58,74 @@ def generate_fallback_candidates(
     return _filter_candidates(_generate_fallback_candidates_for_segments(segments, normalized_strategy), normalized_strategy)
 
 
+def generate_dense_window_candidates(
+    segments: list[RichSegment],
+    chapters: list[Chapter] | None = None,
+    strategy: dict | None = None,
+) -> list[Candidate]:
+    normalized_strategy = clip_strategy.normalize_strategy(strategy)
+    if chapters:
+        candidates: list[Candidate] = []
+        for chapter in chapters:
+            chapter_segments = chapter_segmenter.segments_for_chapter(segments, chapter)
+            candidates.extend(_generate_dense_window_candidates(chapter_segments))
+        return _filter_candidates(candidates, normalized_strategy)
+    return _filter_candidates(_generate_dense_window_candidates(segments), normalized_strategy)
+
+
+def generate_dense_candidate_inventory(
+    segments: list[RichSegment],
+    chapters: list[Chapter] | None = None,
+    strategy: dict | None = None,
+    *,
+    durations: tuple[float, ...] | list[float] | None = None,
+    stride_sec: float = _DENSE_INVENTORY_STRIDE_SEC,
+    max_candidates: int = 0,
+) -> list[Candidate]:
+    """Generate broad overlapping whole-VOD windows before heuristic caps."""
+    normalized_strategy = clip_strategy.normalize_strategy(strategy)
+    clean_durations = tuple(
+        sorted({float(duration) for duration in (durations or _DENSE_INVENTORY_DURATIONS) if float(duration) > 0})
+    )
+    if len(segments) < 1 or not clean_durations:
+        return []
+
+    stride = max(float(stride_sec or _DENSE_INVENTORY_STRIDE_SEC), 1.0)
+    ranges = _dense_inventory_ranges(segments, chapters, normalized_strategy)
+    candidates: list[Candidate] = []
+    seen_ids: set[str] = set()
+    for range_index, (range_start, range_end) in enumerate(ranges):
+        for duration in clean_durations:
+            latest_start = max(range_start, range_end - duration)
+            start = range_start
+            window_index = 0
+            while start <= latest_start + 0.001:
+                end = min(range_end, start + duration)
+                if end - start >= min(duration * 0.55, 8.0):
+                    candidate = _dense_inventory_candidate(
+                        segments,
+                        start=start,
+                        end=end,
+                        duration=duration,
+                        range_index=range_index,
+                        window_index=window_index,
+                    )
+                    if candidate.id not in seen_ids and clip_strategy.candidate_in_time_range(
+                        candidate.start,
+                        candidate.end,
+                        normalized_strategy,
+                    ):
+                        candidates.append(candidate)
+                        seen_ids.add(candidate.id)
+                start += stride
+                window_index += 1
+
+    candidates.sort(key=lambda candidate: (-candidate.score_hint, candidate.start, candidate.end))
+    if max_candidates and max_candidates > 0 and len(candidates) > max_candidates:
+        candidates = candidates[:max_candidates]
+    return sorted(candidates, key=lambda candidate: (candidate.start, candidate.end, candidate.anchor_time))
+
+
 def _generate_fallback_candidates_for_segments(segments: list[RichSegment], strategy: dict | None = None) -> list[Candidate]:
     candidates: list[Candidate] = []
     candidates.extend(_generate_hype_peak_candidates(segments))
@@ -77,12 +147,15 @@ def merge_prioritized_candidates(
     supplemental: list[Candidate],
     *,
     supplemental_source_cap: int = 4,
+    source_cap_overrides: dict[str, int] | None = None,
     strategy: dict | None = None,
 ) -> list[Candidate]:
     normalized_strategy = clip_strategy.normalize_strategy(strategy)
     merged: list[Candidate] = []
     supplemental_counts: dict[str, int] = {}
     source_caps = clip_strategy.source_caps(normalized_strategy)
+    for source, cap in (source_cap_overrides or {}).items():
+        source_caps[str(source)] = max(int(cap), 0)
 
     for candidate in primary:
         if not clip_strategy.candidate_in_time_range(candidate.start, candidate.end, normalized_strategy):
@@ -529,6 +602,62 @@ def _generate_dense_window_candidates(segments: list[RichSegment]) -> list[Candi
             )
             used_ranges.append((start, end))
     return candidates
+
+
+def _dense_inventory_ranges(
+    segments: list[RichSegment],
+    chapters: list[Chapter] | None,
+    strategy: dict,
+) -> list[tuple[float, float]]:
+    time_start = float(strategy.get("time_range_start_sec", 0.0) or 0.0)
+    time_end = strategy.get("time_range_end_sec")
+    ranges: list[tuple[float, float]] = []
+    if chapters:
+        for chapter in chapters:
+            start = max(float(chapter.start), time_start)
+            end = float(chapter.end)
+            if time_end is not None:
+                end = min(end, float(time_end))
+            if end > start:
+                ranges.append((start, end))
+    else:
+        start = max(float(segments[0].start), time_start)
+        end = float(segments[-1].end)
+        if time_end is not None:
+            end = min(end, float(time_end))
+        if end > start:
+            ranges.append((start, end))
+    return ranges
+
+
+def _dense_inventory_candidate(
+    segments: list[RichSegment],
+    *,
+    start: float,
+    end: float,
+    duration: float,
+    range_index: int,
+    window_index: int,
+) -> Candidate:
+    window = [seg for seg in segments if seg.end > start and seg.start < end]
+    if window:
+        anchor = max(window, key=_anchor_signal)
+        anchor_time = anchor.start + (anchor.end - anchor.start) / 2.0
+        score_hint = _dense_coarse_score(window, duration)
+        tags = sorted({emotion for seg in window for emotion in seg.emotions})
+    else:
+        anchor_time = start + (end - start) / 2.0
+        score_hint = 0.0
+        tags = []
+    return Candidate(
+        id=f"dense_inventory:{int(round(duration))}:{range_index}:{window_index}:{int(start * 100)}",
+        start=round(max(0.0, start), 3),
+        end=round(max(end, start + 1.0), 3),
+        source="dense_inventory",
+        anchor_time=round(anchor_time, 3),
+        score_hint=round(score_hint, 3),
+        tags=tags,
+    )
 
 
 def _dense_window_proposals(
