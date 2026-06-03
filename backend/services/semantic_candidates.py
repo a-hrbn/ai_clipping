@@ -308,12 +308,15 @@ def _link_snapshot_contents(source_dir: Path, target_dir: Path) -> None:
 
 
 def _materialize_local_sentence_transformer_model(model_repo_id: str) -> Path | None:
+    model_dir = _local_sentence_transformer_model_dir(model_repo_id)
+    if _materialized_model_complete(model_dir):
+        return model_dir
+
     hub_snapshot = _snapshot_dir("hub", model_repo_id)
     transformer_snapshot = _snapshot_dir("transformers", model_repo_id)
     if not _has_sentence_transformer_metadata(hub_snapshot):
         return None
 
-    model_dir = _local_sentence_transformer_model_dir(model_repo_id)
     model_dir.mkdir(parents=True, exist_ok=True)
 
     # Newer sentence-transformers / huggingface-hub releases may place the full
@@ -371,6 +374,11 @@ def _get_model():
             _log_model_unavailable_once("load_failed", error=str(exc))
             _model = None
     return _model
+
+
+def preload_model() -> bool:
+    """Load the SentenceTransformer on the caller thread before threaded use."""
+    return _get_model() is not None
 
 
 def _log_model_unavailable_once(reason: str, *, error: str | None = None) -> None:

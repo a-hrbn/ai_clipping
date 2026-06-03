@@ -39,6 +39,27 @@ def build_jynxzi_workflow_state(
             else "0"
         ),
         "ranker_hard_negative_weight": (os.environ.get("VOD_RANKER_HARD_NEGATIVE_WEIGHT") or "4.0").strip() or "4.0",
+        "ranker_serving_hard_negative_enabled": (
+            os.environ.get("SERVING_HARD_NEGATIVE_ENABLED") or "1"
+        ).strip() or "1",
+        "ranker_serving_hard_negative_weight": (
+            os.environ.get("VOD_RANKER_SERVING_HARD_NEGATIVE_WEIGHT") or "2.0"
+        ).strip() or "2.0",
+        "ranker_serving_hard_negative_pre_judge_top_k": (
+            os.environ.get("SERVING_HARD_NEGATIVE_PRE_JUDGE_TOP_K") or "80"
+        ).strip() or "80",
+        "ranker_serving_hard_negative_max_per_vod": (
+            os.environ.get("SERVING_HARD_NEGATIVE_MAX_PER_VOD") or "20"
+        ).strip() or "20",
+        "ranker_serving_hard_negative_max_rows": (
+            os.environ.get("SERVING_HARD_NEGATIVE_MAX_ROWS") or "300"
+        ).strip() or "300",
+        "ranker_serving_hard_negative_positive_exclusion_overlap": (
+            os.environ.get("SERVING_HARD_NEGATIVE_POSITIVE_EXCLUSION_OVERLAP") or "0.25"
+        ).strip() or "0.25",
+        "ranker_serving_hard_negative_min_rank_score": (
+            os.environ.get("SERVING_HARD_NEGATIVE_MIN_RANK_SCORE") or "-999.0"
+        ).strip() or "-999.0",
         "ranker_use_gold_hard_negatives": (
             (os.environ.get("VOD_RANKER_USE_GOLD_HARD_NEGATIVES") or "0").strip() or "0"
             if use_user_labels == "1"
@@ -83,6 +104,20 @@ def build_jynxzi_workflow_state(
         "outcome_holdout_target_positive_rows": (
             os.environ.get("OUTCOME_HOLDOUT_TARGET_POSITIVE_ROWS") or "300"
         ).strip() or "300",
+        "recent_vod_holdout_enabled": (
+            os.environ.get("RECENT_VOD_HOLDOUT_ENABLED") or "1"
+        ).strip() or "1",
+        "recent_vod_holdout_count": (
+            os.environ.get("RECENT_VOD_HOLDOUT_COUNT") or "10"
+        ).strip() or "10",
+        "recent_vod_holdout_policy_path": (
+            os.environ.get("RECENT_VOD_HOLDOUT_POLICY_PATH")
+            or str(BACKEND_ROOT / "ml" / "artifacts" / "jynxzi_recent_vod_holdout_policy.jsonl")
+        ).strip(),
+        "training_holdout_policy_rows_path": (
+            os.environ.get("TRAINING_HOLDOUT_POLICY_ROWS_PATH")
+            or str(BACKEND_ROOT / "ml" / "artifacts" / "jynxzi_training_holdout_policy_rows.jsonl")
+        ).strip(),
         "rollout_readiness_target_new_vod_groups": (
             os.environ.get("ROLLOUT_READINESS_TARGET_NEW_VOD_GROUPS") or "20"
         ).strip() or "20",

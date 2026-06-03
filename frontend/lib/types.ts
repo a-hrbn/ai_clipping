@@ -24,7 +24,24 @@ export interface ClipResult {
   projected_retention_score?: number | null;
 }
 
-export type ClipFeedbackRating = "good" | "medium" | "bad";
+export type ClipFeedbackRating = "excellent" | "good" | "maybe" | "medium" | "bad" | "boundary_bad";
+export type ClipFeedbackTag =
+  | "good_clip"
+  | "false_positive"
+  | "missed_viral"
+  | "wrong_boundary"
+  | "wrong_duration"
+  | "strong_hook"
+  | "funny_reaction"
+  | "shock_or_rage"
+  | "fanmail_reveal"
+  | "quoteable"
+  | "good_context"
+  | "weak_context"
+  | "slow_start"
+  | "no_payoff"
+  | "too_long"
+  | "bad_boundary";
 export type ClipFeedbackMode = "training_feedback" | "gold_eval";
 
 export interface ClipFeedbackPayload {
@@ -32,6 +49,7 @@ export interface ClipFeedbackPayload {
   mode?: ClipFeedbackMode;
   rating?: ClipFeedbackRating;
   gold_grade?: 0 | 1 | 2 | 3;
+  feedback_tags?: ClipFeedbackTag[];
   notes?: string;
 }
 
@@ -46,6 +64,32 @@ export interface ClipRequestOptions {
   time_range?: { start_sec?: number; end_sec?: number };
   clip_style?: "balanced" | "aggressive_hook" | "context_balanced" | "reaction_first" | "quote_first";
   variant_count?: number;
+}
+
+export interface ReviewCandidate {
+  candidate_id: string;
+  preview_url?: string | null;
+  source?: string | null;
+  clip_type?: string | null;
+  start_time: number;
+  end_time: number;
+  duration: number;
+  rank_score?: number | null;
+  proposal_score?: number | null;
+  pre_judge_rank?: number | null;
+  judge_score?: number | null;
+  selected: boolean;
+  rejected_reason?: string | null;
+  rejection_source?: string | null;
+  judge_reason?: string | null;
+  feedback_rating?: ClipFeedbackRating | null;
+  feedback_tags?: ClipFeedbackTag[];
+  feedback_notes?: string | null;
+}
+
+export interface ReviewCandidateResponse {
+  job_id: string;
+  candidates: ReviewCandidate[];
 }
 
 export type PipelineStageStatus = "ok" | "warning" | "pending" | "disabled" | "error";
@@ -77,6 +121,7 @@ export interface CandidateFunnelLoss {
 export interface CandidateFunnelSample {
   candidate_id: string;
   source?: string | null;
+  clip_type?: string | null;
   start?: number | null;
   end?: number | null;
   status?: string | null;
@@ -115,6 +160,14 @@ export interface CandidateFunnelProposalLift {
   source_breakdown?: Record<string, { rows?: number; final_selected?: number; high_judge?: number }>;
 }
 
+export interface CandidateFunnelClipTypeLift {
+  rows?: number;
+  final_selected?: number;
+  high_judge?: number;
+  proposal_kept?: number;
+  mean_proposal_score?: number | null;
+}
+
 export interface CandidateFunnelRankerLift {
   high_judge_rows?: number;
   high_judge_pre_judge_top20_ratio?: number | null;
@@ -135,9 +188,12 @@ export interface CandidateFunnelDiagnostics {
   rejection_reason_counts?: Record<string, number>;
   source_counts?: Record<string, number>;
   final_source_counts?: Record<string, number>;
+  clip_type_counts?: Record<string, number>;
+  final_clip_type_counts?: Record<string, number>;
   quality_breakdown?: CandidateFunnelQualityBreakdown;
   proposal_lift?: CandidateFunnelProposalLift;
   ranker_lift?: CandidateFunnelRankerLift;
+  clip_type_lift?: Record<string, CandidateFunnelClipTypeLift>;
   samples?: CandidateFunnelSample[];
 }
 
@@ -171,6 +227,7 @@ export interface JobStatus {
   status:
     | "queued"
     | "downloading"
+    | "downloading_chat"
     | "extracting_audio"
     | "transcribing"
     | "extracting_features"

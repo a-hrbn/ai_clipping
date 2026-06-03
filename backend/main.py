@@ -50,3 +50,18 @@ def serve_clip(job_id: str, filename: str) -> FileResponse:
     if not clip_path.is_file():
         raise HTTPException(status_code=404, detail="Not found")
     return FileResponse(str(clip_path), media_type="video/mp4", filename=filename)
+
+
+@app.get("/static/{job_id}/review_clips/{filename}")
+def serve_review_clip(job_id: str, filename: str) -> FileResponse:
+    if not _JOB_ID_RE.fullmatch(job_id) or not _CLIP_FILENAME_RE.fullmatch(filename):
+        raise HTTPException(status_code=404, detail="Not found")
+    storage_root = pathlib.Path(settings.storage_dir).resolve()
+    clip_path = (storage_root / job_id / "review_clips" / filename).resolve()
+    try:
+        clip_path.relative_to(storage_root)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Not found")
+    if not clip_path.is_file():
+        raise HTTPException(status_code=404, detail="Not found")
+    return FileResponse(str(clip_path), media_type="video/mp4", filename=filename)

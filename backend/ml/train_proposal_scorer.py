@@ -31,8 +31,29 @@ DEFAULT_FEATURES = (
     "heuristic_hit_count",
     "strategy_relevance",
     "dense_inventory",
+    "multimodal_proxy_score",
+    "rage_score",
+    "clutch_score",
+    "funny_reaction_score",
+    "trash_talk_payoff_score",
+    "chat_shock_score",
+    "ranked_tension_score",
+    "failed_setup_score",
+    "streamer_persona_beat_score",
+    "context_pattern_score",
+    "context_pattern_support",
+    "context_pattern_views_prior",
+    "context_pattern_confidence",
+    "context_pattern_similarity_margin",
+    "setup_present_score",
+    "payoff_present_score",
+    "context_strength_score",
+    "context_completeness_score",
 )
 DEFAULT_ARTIFACT_DIR = Path(__file__).resolve().parent / "artifacts"
+_CROSS_PLATFORM_POSITIVE_WEIGHT = 2.4
+_CROSS_PLATFORM_PROPOSAL_FALSE_NEGATIVE_WEIGHT = 5.0
+_CROSS_PLATFORM_NEAR_MISS_WEIGHT = 0.8
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -83,13 +104,12 @@ def collect_training_rows(storage_dir: Path, positive_rows_path: Path | None = N
         if not proposal_rows:
             continue
         labels = _job_labels(debug_dir)
-        labels.update(
-            {
-                candidate_id: label
-                for candidate_id, label in _cross_platform_labels(debug_dir, proposal_rows, positive_index).items()
-                if candidate_id not in labels
-            }
-        )
+        for candidate_id, label in _cross_platform_labels(debug_dir, proposal_rows, positive_index).items():
+            existing = labels.get(candidate_id)
+            if existing is not None and _is_manual_feedback_label(existing[2]):
+                continue
+            if int(label[0]) == 1 or existing is None:
+                labels[candidate_id] = label
         for proposal in proposal_rows:
             candidate_id = str(proposal.get("candidate_id") or "").strip()
             if not candidate_id or candidate_id not in labels:
@@ -232,10 +252,18 @@ def _job_labels(debug_dir: Path) -> dict[str, tuple[int, float, str]]:
         if not candidate_id:
             continue
         rating = str(row.get("feedback_rating") or "").strip().lower()
-        if rating == "good":
-            labels[candidate_id] = (1, 2.2, "frontend_good")
+        tags = {str(tag).strip().lower() for tag in row.get("feedback_tags") or []}
+        if rating == "excellent":
+            labels[candidate_id] = (1, 3.0, "frontend_excellent")
+        elif rating == "good":
+            labels[candidate_id] = (1, 2.4 if "good_clip" in tags else 2.2, "frontend_good_clip" if "good_clip" in tags else "frontend_good")
+        elif rating == "boundary_bad":
+            labels[candidate_id] = (0, 1.4, "frontend_boundary_bad")
         elif rating == "bad":
-            labels[candidate_id] = (0, 1.8, "frontend_bad")
+            if {"wrong_boundary", "wrong_duration", "bad_boundary", "too_long"} & tags:
+                labels[candidate_id] = (0, 1.1, "frontend_boundary_or_duration")
+            else:
+                labels[candidate_id] = (0, 2.1 if "false_positive" in tags else 1.8, "frontend_false_positive" if "false_positive" in tags else "frontend_bad")
         elif bool(row.get("selected")):
             labels.setdefault(candidate_id, (1, 1.0, "pipeline_selected"))
         elif row.get("rejection_source") == "low_rank":
@@ -302,10 +330,22 @@ def _cross_platform_labels(
                 gap = min(abs(start - pos_end), abs(pos_start - end))
                 nearest_gap = gap if nearest_gap is None else min(nearest_gap, gap)
         if best_overlap >= 0.45:
-            labels[candidate_id] = (1, 2.0, "cross_platform_positive")
+            accepted = bool(row.get("accepted") is True)
+            if accepted:
+                labels[candidate_id] = (1, _CROSS_PLATFORM_POSITIVE_WEIGHT, "cross_platform_positive")
+            else:
+                labels[candidate_id] = (
+                    1,
+                    _CROSS_PLATFORM_PROPOSAL_FALSE_NEGATIVE_WEIGHT,
+                    "cross_platform_proposal_false_negative",
+                )
         elif nearest_gap is not None and nearest_gap <= 180.0:
-            labels[candidate_id] = (0, 0.8, "cross_platform_near_miss")
+            labels[candidate_id] = (0, _CROSS_PLATFORM_NEAR_MISS_WEIGHT, "cross_platform_near_miss")
     return labels
+
+
+def _is_manual_feedback_label(label_source: str) -> bool:
+    return str(label_source or "").startswith("frontend_")
 
 
 def _positive_window_index(path: Path | None) -> dict[str, list[tuple[float, float]]]:

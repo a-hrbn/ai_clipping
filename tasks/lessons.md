@@ -1,5 +1,40 @@
 # Lessons
 
+- Per-repost transcript match cleanup must score the dominant VOD across all
+  accepted match kinds, not only `multi_window_chunk`. A strong single-window
+  or audio match can otherwise coexist with a weak chunk match on the wrong
+  VOD and leak noisy positive labels into ranker training.
+- When increasing ranker training throughput, tune the actual VOD phase worker
+  default in `local_train.py`; label-worker changes alone do not shorten the
+  many-VOD phase queue enough for large cross-platform training sets.
+- Multi-window transcript matching should not feed raw chunk hits directly into
+  ranker training. Clean accepted matches per repost first: merge near-duplicate
+  windows inside the same VOD and restrict chunk positives to the dominant VOD
+  unless there is explicit evidence for a true multi-VOD compilation.
+- When Judge diagnostics show value on precision but instability on recall,
+  do not remove the Judge. Demote it from hard override to blended score
+  signal, make subscore gates soft by default, and preserve candidate variants
+  through merge before tuning model/training again.
+- When the user explicitly excludes Proposal/Ranker improvements, keep clip
+  quality fixes scoped to downstream serving behavior and diagnostics. Do not
+  retrain, boost, or change model promotion logic under that request.
+- For extensible context discovery, prefer dynamic artifact-backed pattern
+  features over adding new hardcoded taxonomy buckets. If a temporary
+  hardcoded bucket is replaced by a pattern store, remove the old bucket and
+  its feature columns so two competing context systems do not coexist.
+- Containerized development should bind-mount backend/frontend source and run
+  reload/watch servers by default. If the container only mounts cache/artifact
+  directories, code edits require image rebuilds and the user loses rapid
+  iteration.
+- Cross-platform positives are valid as training labels, offline recall
+  diagnostics, and explicit debug calibration, but they must not be enabled as
+  normal frontend Serving boosts. Using known repost positives during the same
+  VOD inference is evaluation leakage and makes product-quality measurements
+  look better than the model actually is.
+- Streamer-specific training wrappers should tolerate harmless arguments from
+  adjacent training workflows, especially date-range flags. If an option is
+  irrelevant for that trainer, consume it explicitly as a no-op instead of
+  forwarding it until `argparse` aborts a long Docker run.
 - Frontend serving jobs should clean up job-local source media immediately
   after completion, failure, or cancellation. Keep clips/debug artifacts for
   the UI, and exclude training/backfill job ids that intentionally preserve
@@ -358,3 +393,25 @@
   remove the whole-stage timeout instead of only raising it. Long LLM stages
   need per-candidate live progress so the UI shows forward motion instead of a
   silent fallback.
+- Do not let evaluation labels become a serving crutch. Cross-Platform
+  positives are valid training/evaluation signal, but frontend serving should
+  not rescue, boost, or quality-gate-bypass a candidate merely because that VOD
+  window is already known from repost matching unless the user explicitly asks
+  for an oracle/debug mode.
+- For serving SIGSEGVs in ML import paths, reproduce inside the pipeline
+  subprocess with `PYTHONFAULTHANDLER=1` before changing high-level pipeline
+  logic. If Torch/Triton and TensorFlow/DeepFace are both involved, control
+  import order in `pipeline_worker.py`; a late preload inside `pipeline.py` can
+  still crash after native CV libraries have initialized.
+- After backend implementation changes, verify the live container, not only the
+  checkout. In production Compose, backend source may be baked into the image,
+  and `backend/.env` can override new config defaults until the image is rebuilt
+  and the container is recreated.
+- After adding a new frontend-consumed backend route in this Docker setup, verify the live container route list or rebuild/recreate the backend before telling the user it is available. Local pytest can pass while the browser still hits the old baked image and returns 404.
+- Keep frontend labeling controls minimal unless the user explicitly asks for taxonomy tags. Extra reason tags add labeling friction; prefer the smallest rating scale that still maps to training labels.
+- Cross-platform repost matching must distinguish single-moment Shorts from recap/compilation Shorts. A single contiguous transcript window can structurally miss high-view recap clips; use chunked matching plus explicit acceptance reasons instead of lowering the global threshold blindly.
+- Local Docker training containers that bind-mount `backend/tmp` and `backend/ml/artifacts` must run as the host UID/GID, or root-owned checkpoints and media caches will later break host-side smoke tests and resumed training with `PermissionError`.
+- Do not scale local VOD-ranker training workers from CPU count alone. Video
+  feature extraction with face detection can OOM a 24-32 GiB WSL/Docker host
+  before the staged dataset is written; default worker planning must account for
+  available RAM and keep explicit high-parallelism overrides opt-in.

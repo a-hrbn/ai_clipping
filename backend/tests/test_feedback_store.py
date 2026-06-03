@@ -134,6 +134,7 @@ class FeedbackStoreTests(unittest.TestCase):
                 ClipFeedbackPayload(
                     candidate_id="c1",
                     rating="good",
+                    feedback_tags=["good_clip"],
                     notes="guter opener",
                 ),
             )
@@ -143,6 +144,7 @@ class FeedbackStoreTests(unittest.TestCase):
             self.assertEqual(response.notes, "guter opener")
             rows = feedback_store._read_feedback_rows(debug / "feedback.jsonl")
             self.assertEqual(rows[0]["feedback_rating"], "good")
+            self.assertEqual(rows[0]["feedback_tags"], ["good_clip"])
             self.assertEqual(rows[0]["feedback_notes"], "guter opener")
 
     def test_update_job_feedback_persists_gold_eval_rows_separately(self) -> None:

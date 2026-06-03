@@ -138,6 +138,37 @@ class RankerTests(unittest.TestCase):
         self.assertIn("chat_velocity_spike", rationale)
         self.assertIn("vision_language_match", rationale)
 
+    def test_ranker_context_primary_stage_beats_context_poor_hype(self) -> None:
+        hype_only = CandidateFeatures(
+            candidate_id="hype-only",
+            max_hype=8.0,
+            mean_hype=7.0,
+            chat_peak=0.2,
+            source="dense_inventory",
+        )
+        contextual = CandidateFeatures(
+            candidate_id="contextual",
+            max_hype=1.0,
+            mean_hype=1.0,
+            hook_strength=0.35,
+            payoff_score=2.0,
+            standalone_score=0.7,
+            setup_present_score=0.82,
+            payoff_present_score=0.86,
+            context_strength_score=0.78,
+            context_completeness_score=0.81,
+            context_pattern_confidence=0.75,
+            context_pattern_label="fanmail_unboxing",
+            source="quote",
+        )
+
+        details = Ranker(enable_trained_model=False).score_details([hype_only, contextual], profile="general")
+        by_id = {item["candidate_id"]: item for item in details}
+
+        self.assertGreater(by_id["contextual"]["score"], by_id["hype-only"]["score"])
+        self.assertIn("context_primary_boost", by_id["contextual"]["rationale"])
+        self.assertIn("context_missing_penalty", by_id["hype-only"]["rationale"])
+
     def test_selector_prefers_stronger_candidate(self) -> None:
         candidates = [
             Candidate(id="strong", start=0.0, end=12.0, source="reaction", anchor_time=2.0),

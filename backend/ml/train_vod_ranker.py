@@ -13,7 +13,13 @@ BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from ml import analyze_ranker_feature_confounds, build_twitch_training_dataset, train_ranker, training_workflow_state
+from ml import (
+    analyze_ranker_feature_confounds,
+    build_twitch_training_dataset,
+    outcome_view_weighting,
+    train_ranker,
+    training_workflow_state,
+)
 from services import vision_language_features
 from services.gold_eval_policy import (
     GOLD_HOLDOUT_POLICY_FIELD,
@@ -36,6 +42,7 @@ _DEFAULT_ROLLOUT_REVIEW_NEGATIVE_WEIGHT = _DEFAULT_HARD_NEGATIVE_WEIGHT
 _DEFAULT_OUTCOME_POSITIVE_WEIGHT = 0.55
 _DEFAULT_AUTO_OUTCOME_HARD_NEGATIVE_WEIGHT = 1.0
 _DEFAULT_AUTO_OUTCOME_BACKGROUND_NEGATIVE_WEIGHT = 0.25
+_DEFAULT_SERVING_HARD_NEGATIVE_WEIGHT = 2.0
 _DEFAULT_CROSS_PLATFORM_WEIGHT = 1.0
 _DEFAULT_CROSS_PLATFORM_PATH = BACKEND_ROOT / "ml" / "artifacts" / "jynxzi_cross_platform_fingerprint_rows.jsonl"
 _PRIMARY_LABEL_POLICIES = {"all", "outcome_only"}
@@ -69,6 +76,11 @@ _NEW_MODALITY_FEATURE_NAMES = [
     "pre_roll_hook_score",
     "shout_onset_score",
     "streamer_shout_score",
+    "context_pattern_score",
+    "context_pattern_support",
+    "context_pattern_views_prior",
+    "context_pattern_confidence",
+    "context_pattern_similarity_margin",
     "vad_voice_ratio",
     "vl_clutch_score",
     "vl_comedy_score",
@@ -172,6 +184,21 @@ def main() -> int:
         type=float,
         default=_DEFAULT_HARD_NEGATIVE_WEIGHT,
         help="Sample-weight multiplier for diagnosis-mined hard-negative rows.",
+    )
+    parser.add_argument(
+        "--include-serving-hard-negative-train",
+        default="",
+        help=(
+            "Optional serving-trace hard-negative JSONL rows exported from recent "
+            "frontend/backend jobs. Rows are high-ranked organic candidates that "
+            "miss known cross-platform outcome windows."
+        ),
+    )
+    parser.add_argument(
+        "--serving-hard-negative-weight",
+        type=float,
+        default=_DEFAULT_SERVING_HARD_NEGATIVE_WEIGHT,
+        help="Sample-weight multiplier for serving-trace hard-negative rows.",
     )
     parser.add_argument(
         "--include-outcome-positive-train",
@@ -323,6 +350,16 @@ def main() -> int:
     holdout_policy_rows = _read_jsonl(holdout_policy_path) if holdout_policy_path and holdout_policy_path.exists() else []
     hard_negative_path = pathlib.Path(args.include_hard_negative_train) if args.include_hard_negative_train else None
     hard_negative_rows = _read_jsonl(hard_negative_path) if hard_negative_path and hard_negative_path.exists() else []
+    serving_hard_negative_path = (
+        pathlib.Path(args.include_serving_hard_negative_train)
+        if args.include_serving_hard_negative_train
+        else None
+    )
+    serving_hard_negative_rows = (
+        _read_jsonl(serving_hard_negative_path)
+        if serving_hard_negative_path and serving_hard_negative_path.exists()
+        else []
+    )
     outcome_positive_path = (
         pathlib.Path(args.include_outcome_positive_train)
         if args.include_outcome_positive_train
@@ -386,6 +423,8 @@ def main() -> int:
             rollout_review_negative_weight=args.rollout_review_negative_weight,
             hard_negative_rows=hard_negative_rows,
             hard_negative_weight=args.hard_negative_weight,
+            serving_hard_negative_rows=serving_hard_negative_rows,
+            serving_hard_negative_weight=args.serving_hard_negative_weight,
             outcome_positive_rows=outcome_positive_rows,
             outcome_positive_weight=args.outcome_positive_weight,
             auto_outcome_negative_rows=auto_outcome_negative_rows,
@@ -417,6 +456,7 @@ def main() -> int:
                     gold_train_path,
                     holdout_policy_path,
                     hard_negative_path,
+                    serving_hard_negative_path,
                     outcome_positive_path,
                     auto_outcome_negative_path,
                     cross_platform_path,
@@ -452,6 +492,8 @@ def main() -> int:
         rollout_review_negative_weight=args.rollout_review_negative_weight,
         hard_negative_rows=hard_negative_rows,
         hard_negative_weight=args.hard_negative_weight,
+        serving_hard_negative_rows=serving_hard_negative_rows,
+        serving_hard_negative_weight=args.serving_hard_negative_weight,
         outcome_positive_rows=outcome_positive_rows,
         outcome_positive_weight=args.outcome_positive_weight,
         auto_outcome_negative_rows=auto_outcome_negative_rows,
@@ -497,6 +539,8 @@ def build_composite_dataset(
     rollout_review_negative_weight: float = _DEFAULT_ROLLOUT_REVIEW_NEGATIVE_WEIGHT,
     hard_negative_rows: list[dict] | None = None,
     hard_negative_weight: float = _DEFAULT_HARD_NEGATIVE_WEIGHT,
+    serving_hard_negative_rows: list[dict] | None = None,
+    serving_hard_negative_weight: float = _DEFAULT_SERVING_HARD_NEGATIVE_WEIGHT,
     outcome_positive_rows: list[dict] | None = None,
     outcome_positive_weight: float = _DEFAULT_OUTCOME_POSITIVE_WEIGHT,
     auto_outcome_negative_rows: list[dict] | None = None,
@@ -521,8 +565,10 @@ def build_composite_dataset(
         rollout_review_negative_weight=rollout_review_negative_weight,
         hard_negative_rows=hard_negative_rows,
         hard_negative_weight=hard_negative_weight,
-            outcome_positive_rows=outcome_positive_rows,
-            outcome_positive_weight=outcome_positive_weight,
+        serving_hard_negative_rows=serving_hard_negative_rows,
+        serving_hard_negative_weight=serving_hard_negative_weight,
+        outcome_positive_rows=outcome_positive_rows,
+        outcome_positive_weight=outcome_positive_weight,
         auto_outcome_negative_rows=auto_outcome_negative_rows,
         auto_outcome_hard_negative_weight=auto_outcome_hard_negative_weight,
         auto_outcome_background_negative_weight=auto_outcome_background_negative_weight,
@@ -548,6 +594,8 @@ def build_composite_dataset_with_report(
     rollout_review_negative_weight: float = _DEFAULT_ROLLOUT_REVIEW_NEGATIVE_WEIGHT,
     hard_negative_rows: list[dict] | None = None,
     hard_negative_weight: float = _DEFAULT_HARD_NEGATIVE_WEIGHT,
+    serving_hard_negative_rows: list[dict] | None = None,
+    serving_hard_negative_weight: float = _DEFAULT_SERVING_HARD_NEGATIVE_WEIGHT,
     outcome_positive_rows: list[dict] | None = None,
     outcome_positive_weight: float = _DEFAULT_OUTCOME_POSITIVE_WEIGHT,
     auto_outcome_negative_rows: list[dict] | None = None,
@@ -645,6 +693,20 @@ def build_composite_dataset_with_report(
                 _prepare_hard_negative_rows(hard_negative_rows, profile, hard_negative_weight),
                 holdout_policy,
                 stage="hard_negative_rows",
+                report=exclusion_report,
+            ),
+        )
+    if serving_hard_negative_rows:
+        merged = _merge_gold_train_rows(
+            merged,
+            _filter_holdout_training_rows(
+                _prepare_serving_hard_negative_rows(
+                    serving_hard_negative_rows,
+                    profile,
+                    serving_hard_negative_weight,
+                ),
+                holdout_policy,
+                stage="serving_hard_negative_rows",
                 report=exclusion_report,
             ),
         )
@@ -1242,6 +1304,8 @@ def _train_per_streamer(
     rollout_review_negative_weight: float = _DEFAULT_ROLLOUT_REVIEW_NEGATIVE_WEIGHT,
     hard_negative_rows: list[dict] | None = None,
     hard_negative_weight: float = _DEFAULT_HARD_NEGATIVE_WEIGHT,
+    serving_hard_negative_rows: list[dict] | None = None,
+    serving_hard_negative_weight: float = _DEFAULT_SERVING_HARD_NEGATIVE_WEIGHT,
     outcome_positive_rows: list[dict] | None = None,
     outcome_positive_weight: float = 2.0,
     auto_outcome_negative_rows: list[dict] | None = None,
@@ -1279,6 +1343,8 @@ def _train_per_streamer(
             rollout_review_negative_weight=rollout_review_negative_weight,
             hard_negative_rows=_filter_gold_train_rows(hard_negative_rows or [], broadcaster),
             hard_negative_weight=hard_negative_weight,
+            serving_hard_negative_rows=_filter_gold_train_rows(serving_hard_negative_rows or [], broadcaster),
+            serving_hard_negative_weight=serving_hard_negative_weight,
             outcome_positive_rows=_filter_gold_train_rows(outcome_positive_rows or [], broadcaster),
             outcome_positive_weight=outcome_positive_weight,
             auto_outcome_negative_rows=_filter_gold_train_rows(auto_outcome_negative_rows or [], broadcaster),
@@ -1517,6 +1583,7 @@ def _prepare_outcome_positive_train_rows(
             copied["exposure_corrected_view_ratio"] = round(views / baseline, 4) if baseline > 0 else 0.0
         copied["ordinal_label"] = int(copied.get("ordinal_label", 3) or 3)
         copied[GOLD_HOLDOUT_SPLIT_FIELD] = "train"
+        copied = outcome_view_weighting.annotate_cross_platform_view_weight(copied)
         base_weight = _as_float(copied.get("sample_weight")) or 1.0
         copied["sample_weight"] = round(base_weight * weight, 3)
         creator = str(copied.get("creator_id") or copied.get("streamer") or "").strip().lower()
@@ -1661,6 +1728,51 @@ def _prepare_hard_negative_rows(
     return prepared
 
 
+def _prepare_serving_hard_negative_rows(
+    rows: list[dict],
+    profile: str,
+    hard_negative_weight: float,
+) -> list[dict]:
+    weight = max(0.0, float(hard_negative_weight))
+    prepared: list[dict] = []
+    for row in rows:
+        if int(row.get("label", -1)) != 0:
+            continue
+        if str(row.get(GOLD_HOLDOUT_SPLIT_FIELD) or "").strip().lower() not in {"", "train"}:
+            continue
+        copied = dict(row)
+        copied["features"] = dict(row.get("features") or {})
+        if not copied["features"]:
+            continue
+        copied["label"] = 0
+        copied["selected"] = False
+        copied["dataset_source"] = "serving_trace_hard_negative_train"
+        copied["label_source"] = "serving_trace"
+        copied["supervision_tier"] = "serving_hard_negative"
+        copied["supervision_reason"] = str(
+            copied.get("supervision_reason")
+            or "high_ranked_serving_candidate_without_cross_platform_outcome"
+        )
+        copied["label_class"] = "serving_trace_hard_negative"
+        copied["ordinal_label"] = 0
+        copied[GOLD_HOLDOUT_SPLIT_FIELD] = "train"
+        base_weight = _as_float(copied.get("sample_weight")) or 1.0
+        copied["sample_weight"] = round(base_weight * weight, 3)
+        creator = str(
+            copied.get("creator_id")
+            or copied.get("streamer")
+            or copied.get("profile_hint")
+            or ""
+        ).strip().lower()
+        copied["profile_hint"] = creator or profile
+        if not copied.get("candidate_source"):
+            copied["candidate_source"] = str(copied["features"].get("source") or "serving_trace")
+        copied["feature_provenance"] = dict(copied.get("feature_provenance") or {})
+        copied["feature_provenance"]["serving_trace_hard_negative"] = True
+        prepared.append(copied)
+    return prepared
+
+
 def _prepare_auto_outcome_negative_rows(
     rows: list[dict],
     profile: str,
@@ -1740,7 +1852,7 @@ def _prepare_cross_platform_vod_labels(
         copied["window_start"] = round(start, 2)
         copied["window_end"] = round(max(end, start + 1.0), 2)
         copied["broadcaster"] = str(copied.get("broadcaster") or copied.get("creator_id") or copied.get("streamer") or profile)
-        copied["label_class"] = "weak_positive"
+        copied["label_class"] = "cross_platform_outcome_positive"
         preserved_label_source = str(copied.get("label_source") or copied.get("dataset_source") or "cross_platform_transcript_match")
         copied["label_source"] = preserved_label_source
         copied["platform_source"] = str(copied.get("platform_source") or "cross_platform_shortform")
@@ -1762,7 +1874,9 @@ def _prepare_cross_platform_vod_labels(
             if preserved_label_source == "cross_platform_transcript_match"
             else ":audio_fingerprint_matched_shortform_outcome"
         )
+        copied = outcome_view_weighting.annotate_cross_platform_view_weight(copied)
         copied["training_sample_weight_multiplier"] = weight
+        copied["cross_platform_recall_target"] = True
         prepared.append(copied)
     return prepared
 

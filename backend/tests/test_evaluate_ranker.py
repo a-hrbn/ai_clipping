@@ -51,6 +51,8 @@ class EvaluateRankerTests(unittest.TestCase):
         self.assertIn("trained_forced_artifact", report["metrics"])
         self.assertIn("forced_artifact_delta", report["metrics"])
         self.assertIn("selected_rate", report["metrics"]["forced_artifact_delta"])
+        self.assertIn("viral", report["by_outcome_view_tier"])
+        self.assertIn("4", report["by_rank_target"])
 
 
 def _write_artifact(artifact_dir: Path) -> None:
@@ -98,6 +100,8 @@ def _row(candidate_id: str, label: int, hook_strength: float, vod_id: str) -> di
         "candidate_id": candidate_id,
         "label": label,
         "vod_id": vod_id,
+        "outcome_view_tier": "viral" if label else "",
+        "rank_target": 4 if label else 0,
         "features": {
             "candidate_id": candidate_id,
             "hook_strength": hook_strength,

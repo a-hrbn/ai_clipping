@@ -130,6 +130,30 @@ class SemanticCandidatesTests(unittest.TestCase):
                 semantic_candidates._materialized_model_complete(model_dir)
             )
 
+    def test_materialize_prefers_existing_complete_local_model_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cache_root = Path(tmp_dir) / "cache"
+            model_dir = (
+                cache_root
+                / "sentence_transformers_local"
+                / "sentence-transformers--paraphrase-multilingual-MiniLM-L12-v2"
+            )
+            (model_dir / "1_Pooling").mkdir(parents=True)
+            (model_dir / "modules.json").write_text("[]", encoding="utf-8")
+            (model_dir / "config_sentence_transformers.json").write_text("{}", encoding="utf-8")
+            (model_dir / "1_Pooling" / "config.json").write_text("{}", encoding="utf-8")
+            (model_dir / "config.json").write_text("{}", encoding="utf-8")
+            (model_dir / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+            (model_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
+            (model_dir / "model.safetensors").write_text("weights", encoding="utf-8")
+
+            with patch.object(semantic_candidates, "DEFAULT_CACHE_DIR", cache_root):
+                resolved = semantic_candidates._materialize_local_sentence_transformer_model(
+                    "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+                )
+
+            self.assertEqual(resolved, model_dir)
+
     def test_materialize_returns_none_when_split_cache_is_incomplete(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             cache_root = Path(tmp_dir) / "cache"

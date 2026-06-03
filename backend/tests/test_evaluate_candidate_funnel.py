@@ -82,6 +82,106 @@ class EvaluateCandidateFunnelTests(unittest.TestCase):
         self.assertEqual(delta["high_judge_rows_delta"], 6)
         self.assertEqual(delta["score_summary_delta"]["final_judge_score_mean"], 0.5)
 
+    def test_positive_window_recall_reports_stage_and_topk_hits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = Path(tmp) / "job-1"
+            debug_dir = job_dir / "debug"
+            debug_dir.mkdir(parents=True)
+            (job_dir / "request.json").write_text(
+                json.dumps({"url": "https://www.twitch.tv/videos/123"}),
+                encoding="utf-8",
+            )
+            (debug_dir / "candidate_trace.jsonl").write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "candidate_id": "hit",
+                                "start": 10.0,
+                                "end": 30.0,
+                                "pre_judge_rank": 12,
+                                "stages": {
+                                    "proposal_input": {"status": "seen"},
+                                    "proposal_kept": {"status": "kept"},
+                                    "ranked_pre_judge": {"status": "ranked"},
+                                },
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "candidate_id": "miss",
+                                "start": 100.0,
+                                "end": 120.0,
+                                "pre_judge_rank": 2,
+                                "stages": {"proposal_input": {"status": "seen"}},
+                            }
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            positives = Path(tmp) / "positives.jsonl"
+            positives.write_text(
+                "\n".join(
+                    [
+                        json.dumps({"vod_id": "123", "window_start": 12.0, "window_end": 24.0}),
+                        json.dumps({"vod_id": "999", "window_start": 0.0, "window_end": 5.0}),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            recall = evaluate_candidate_funnel.positive_window_recall(debug_dir, positives)
+
+        self.assertEqual(recall["positive_windows"], 1)
+        self.assertEqual(recall["recall_by_stage"]["proposal_kept"]["matched_positive_windows"], 1)
+        self.assertEqual(recall["top_k_recall"]["pre_judge_top20"]["recall"], 1.0)
+
+    def test_positive_window_recall_does_not_count_excluded_judge_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = Path(tmp) / "job-1"
+            debug_dir = job_dir / "debug"
+            debug_dir.mkdir(parents=True)
+            (job_dir / "request.json").write_text(
+                json.dumps({"url": "https://www.twitch.tv/videos/123"}),
+                encoding="utf-8",
+            )
+            (debug_dir / "candidate_trace.jsonl").write_text(
+                json.dumps(
+                    {
+                        "candidate_id": "outside-judge-scope",
+                        "start": 10.0,
+                        "end": 30.0,
+                        "pre_judge_rank": 167,
+                        "quality_accepted": True,
+                        "quality_has_judge_result": False,
+                        "stages": {
+                            "proposal_input": {"status": "seen"},
+                            "proposal_kept": {"status": "kept"},
+                            "ranked_pre_judge": {"status": "ranked"},
+                            "judge_scope": {"status": "excluded", "rank": 167},
+                            "quality_gate": {"status": "kept"},
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            positives = Path(tmp) / "positives.jsonl"
+            positives.write_text(
+                json.dumps({"vod_id": "123", "window_start": 12.0, "window_end": 24.0}) + "\n",
+                encoding="utf-8",
+            )
+
+            recall = evaluate_candidate_funnel.positive_window_recall(debug_dir, positives)
+
+        self.assertEqual(recall["recall_by_stage"]["ranked_pre_judge"]["matched_positive_windows"], 1)
+        self.assertEqual(recall["recall_by_stage"]["judge_scope"]["matched_positive_windows"], 0)
+        self.assertEqual(recall["recall_by_stage"]["clip_judge"]["matched_positive_windows"], 0)
+        self.assertEqual(recall["recall_by_stage"]["quality_gate"]["matched_positive_windows"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

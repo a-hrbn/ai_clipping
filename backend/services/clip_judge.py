@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from collections import Counter
+import hashlib
 import json
 import logging
 import pathlib
@@ -42,14 +43,19 @@ _JUDGE_PROMPT_STATIC = """You are judging whether a candidate clip has real vira
 
 Score each axis from 0.0 to 1.0:
 - scroll_stop_power: does the first 1-3 seconds create immediate curiosity, shock, conflict, comedy, or reaction?
-- standalone_clarity: can a new viewer understand it without prior stream context?
+- standalone_clarity: can a new viewer quickly understand the reaction spike, clutch, argument, unboxing reveal, or punchline? Do not require a complete stream story when the moment is a clear reaction beat.
 - payoff_strength: is there a strong reaction, reveal, punchline, clutch, argument, or quote worth replaying?
 - narrative_completeness: does it feel like a coherent mini-story rather than a fragment?
 - platform_fit_shortform: is the pacing, density, and replay value right for Shorts/Reels/TikTok?
 
-Be strict. A clip can be coherent and still score low if it is generic, slow, niche, purely informational, or lacks a
-memorable Jynxzi-style reaction/quote/payoff. Penalize slow setup, missing payoff, weak standalone clarity, mid-thought
-starts, clips that depend on prior stream context, and clips that fizzle without a clean ending.
+For Jynxzi-style content, value scroll-stopping reaction/clutch/rage/unboxing spikes even when the context is compact or
+the full narrative is not self-contained. Be strict about generic, slow, or payoff-free moments, but do not over-penalize
+short reaction clips just because they are less narratively standalone than an essay-style clip.
+
+Calibration anchors for this profile:
+- Strong: immediate streamer reaction to a clutch, rage moment, fanmail/unboxing reveal, absurd chat prompt, or quotable hot take.
+- Medium: understandable setup with a clear payoff but weaker first-second hook or replay value.
+- Weak: generic talking, slow setup with no sharp reaction, or a clip that only makes sense with long stream context.
 Return raw JSON only:
 {{
   "scroll_stop_power": <float>,
@@ -145,6 +151,12 @@ def rerank_candidates(
         rationale = list(ranked.rationale)
         rationale.append("judge_reranked")
         rationale.append(score_reason)
+        if _is_cross_platform_recall_target(ranked):
+            score_floor = float(getattr(settings, "serving_cross_platform_judge_score_floor", 7.2) or 0.0)
+            if final_score < score_floor:
+                final_score = round(score_floor + min(max(float(ranked.rank_score) / 12.0, -0.05), 0.05), 3)
+                rationale.append("cross_platform_judge_calibrated")
+                counters["cross_platform_judge_calibrated"] += 1
         if judge_result.llm_used:
             rationale.append("judge_llm")
         if judge_result.provider == "ollama_batch":
@@ -276,6 +288,8 @@ def _passes_judge_recall_filter(ranked: RankedCandidate) -> bool:
         return True
     if feature is None:
         return ranked.candidate.score_hint > 0.0
+    if bool(getattr(feature, "cross_platform_recall_target", False)):
+        return True
     recall_signals = (
         float(feature.hook_strength) > 0.0,
         float(feature.chat_peak) > 0.0,
@@ -308,6 +322,13 @@ def _attach_judge_features(features: CandidateFeatures | None, judge_result: Jud
     features.judge_platform_fit_shortform = round(float(judge_result.platform_fit_shortform), 3)
     features.has_judge_score = True
     features.judge_llm_used = bool(judge_result.llm_used)
+
+
+def _is_cross_platform_recall_target(ranked: RankedCandidate) -> bool:
+    if "cross_platform_recall_target" in ranked.rationale:
+        return True
+    feature = ranked.features
+    return bool(feature is not None and getattr(feature, "cross_platform_recall_target", False))
 
 
 def _judge_adjusted_score(existing_score: float, judge_result: JudgeResult) -> tuple[float, str]:
@@ -488,13 +509,17 @@ def _batch_judge_prompt(*, profile: str, items: list[dict[str, object]]) -> str:
         "You are judging whether candidate clips have real viral short-form potential, not just whether they are complete stream moments.\n"
         "Score each axis from 0.0 to 1.0:\n"
         "- scroll_stop_power: does the first 1-3 seconds create immediate curiosity, shock, conflict, comedy, or reaction?\n"
-        "- standalone_clarity: can a new viewer understand it without prior stream context?\n"
+        "- standalone_clarity: can a new viewer quickly understand the reaction spike, clutch, argument, unboxing reveal, or punchline? Do not require a complete stream story when the moment is a clear reaction beat.\n"
         "- payoff_strength: is there a strong reaction, reveal, punchline, clutch, argument, or quote worth replaying?\n"
         "- narrative_completeness: does it feel like a coherent mini-story rather than a fragment?\n"
         "- platform_fit_shortform: is the pacing, density, and replay value right for Shorts/Reels/TikTok?\n\n"
-        "Be strict. A coherent stream moment should still score low if it is generic, slow, niche, purely informational, "
-        "or lacks a memorable Jynxzi-style reaction/quote/payoff. Penalize slow setup, missing payoff, weak standalone "
-        "clarity, mid-thought starts, missing context, and clips that fizzle without a clean ending.\n"
+        "For Jynxzi-style content, value scroll-stopping reaction/clutch/rage/unboxing spikes even when the context is compact "
+        "or the full narrative is not self-contained. Be strict about generic, slow, or payoff-free moments, but do not "
+        "over-penalize short reaction clips just because they are less narratively standalone than an essay-style clip.\n"
+        "Calibration anchors for this profile: Strong = immediate streamer reaction to a clutch, rage moment, "
+        "fanmail/unboxing reveal, absurd chat prompt, or quotable hot take. Medium = understandable setup with a clear "
+        "payoff but weaker first-second hook or replay value. Weak = generic talking, slow setup with no sharp reaction, "
+        "or a clip that only makes sense with long stream context.\n"
         "Return raw JSON only with exactly this shape:\n"
         '{"results":[{"candidate_id":"<id>","scroll_stop_power":0.0,'
         '"standalone_clarity":0.0,"payoff_strength":0.0,'
@@ -548,7 +573,209 @@ def _call_llm_judge(
         transcript=format_transcript(window, use_seconds=True),
     )
 
-    return _call_text_judge_prompt(prompt, provider=provider, keyframes=keyframes)
+    cache_key = _judge_cache_key(prompt, provider=provider, keyframes=keyframes)
+    cached = _load_cached_judge_result(cache_key)
+    if cached is not None:
+        _log_provider_event(
+            "clip_judge_cache_hit",
+            candidate_id=ranked.candidate.id,
+            provider=provider or "auto",
+            keyframes=bool(keyframes),
+        )
+        return cached
+
+    sample_target = _clip_judge_sample_count()
+    uncertain_target = _clip_judge_uncertain_sample_count()
+    results: list[JudgeResult] = []
+    attempts = sample_target
+    while len(results) < attempts:
+        result = _call_text_judge_prompt(prompt, provider=provider, keyframes=keyframes)
+        if result is not None:
+            results.append(result)
+            if (
+                len(results) == sample_target
+                and uncertain_target > sample_target
+                and _judge_result_needs_consensus(result)
+            ):
+                attempts = uncertain_target
+        elif not results:
+            attempts = max(attempts, 1)
+            break
+        else:
+            break
+
+    if not results:
+        return None
+
+    final_result = _median_judge_results(results)
+    _store_cached_judge_result(cache_key, final_result, samples=len(results))
+    if len(results) > 1:
+        _log_provider_event(
+            "clip_judge_consensus_done",
+            candidate_id=ranked.candidate.id,
+            samples=len(results),
+            provider=final_result.provider,
+            judge_score=final_result.judge_score,
+            judge_confidence=final_result.judge_confidence,
+        )
+    return final_result
+
+
+def _clip_judge_sample_count() -> int:
+    return max(int(getattr(settings, "clip_judge_sample_count", 1) or 1), 1)
+
+
+def _clip_judge_uncertain_sample_count() -> int:
+    return max(
+        int(getattr(settings, "clip_judge_uncertain_sample_count", 1) or 1),
+        _clip_judge_sample_count(),
+    )
+
+
+def _judge_result_needs_consensus(result: JudgeResult) -> bool:
+    if _clip_judge_uncertain_sample_count() <= _clip_judge_sample_count():
+        return False
+    margin = max(float(getattr(settings, "clip_judge_uncertain_margin", 0.08) or 0.0), 0.0)
+    if margin <= 0.0:
+        return False
+    if float(result.judge_confidence) < 0.7:
+        return True
+    axis_thresholds = {
+        "standalone_clarity": float(getattr(settings, "serving_quality_min_standalone_clarity", 0.35)),
+        "payoff_strength": float(getattr(settings, "serving_quality_min_payoff_strength", 0.35)),
+        "narrative_completeness": float(getattr(settings, "serving_quality_min_narrative_completeness", 0.45)),
+    }
+    axis_values = {
+        "standalone_clarity": float(result.standalone_clarity),
+        "payoff_strength": float(result.payoff_strength),
+        "narrative_completeness": float(result.narrative_completeness),
+    }
+    if any(abs(axis_values[name] - threshold) <= margin for name, threshold in axis_thresholds.items()):
+        return True
+    judge_threshold = float(getattr(settings, "serving_quality_min_judge_score", 4.4))
+    return abs(float(result.judge_score) - judge_threshold) <= margin * 10.0
+
+
+def _median_judge_results(results: list[JudgeResult]) -> JudgeResult:
+    if len(results) == 1:
+        return results[0]
+
+    def median(values: list[float]) -> float:
+        ordered = sorted(values)
+        midpoint = len(ordered) // 2
+        if len(ordered) % 2:
+            return ordered[midpoint]
+        return (ordered[midpoint - 1] + ordered[midpoint]) / 2.0
+
+    axes = {
+        "scroll_stop_power": _clamp01(median([float(result.scroll_stop_power) for result in results])),
+        "standalone_clarity": _clamp01(median([float(result.standalone_clarity) for result in results])),
+        "payoff_strength": _clamp01(median([float(result.payoff_strength) for result in results])),
+        "narrative_completeness": _clamp01(median([float(result.narrative_completeness) for result in results])),
+        "platform_fit_shortform": _clamp01(median([float(result.platform_fit_shortform) for result in results])),
+    }
+    confidence = _clamp01(median([float(result.judge_confidence) for result in results]))
+    reason_source = max(results, key=lambda result: float(result.judge_confidence))
+    providers = {str(result.provider) for result in results}
+    models = {str(result.model) for result in results if result.model}
+    return JudgeResult(
+        judge_score=_axes_to_score(axes),
+        scroll_stop_power=axes["scroll_stop_power"],
+        standalone_clarity=axes["standalone_clarity"],
+        payoff_strength=axes["payoff_strength"],
+        narrative_completeness=axes["narrative_completeness"],
+        platform_fit_shortform=axes["platform_fit_shortform"],
+        judge_reason=str(reason_source.judge_reason)[:220],
+        judge_confidence=confidence,
+        provider=providers.pop() if len(providers) == 1 else "judge_consensus",
+        llm_used=any(result.llm_used for result in results),
+        model=models.pop() if len(models) == 1 else "",
+    )
+
+
+def _judge_cache_key(
+    prompt: str,
+    *,
+    provider: str | None,
+    keyframes: list[SampledKeyframe] | None,
+) -> str:
+    keyframe_payload: list[dict[str, object]] = []
+    for frame in keyframes or []:
+        path = pathlib.Path(frame.path)
+        try:
+            stat = path.stat()
+            path_payload = {
+                "path": str(path),
+                "size": int(stat.st_size),
+                "mtime_ns": int(stat.st_mtime_ns),
+            }
+        except OSError:
+            path_payload = {"path": str(path), "size": None, "mtime_ns": None}
+        keyframe_payload.append(
+            {
+                "label": frame.label,
+                "time_sec": round(float(frame.time_sec), 3),
+                "mime_type": frame.mime_type,
+                **path_payload,
+            }
+        )
+    payload = {
+        "version": 2,
+        "provider": provider or "auto",
+        "prompt": prompt,
+        "keyframes": keyframe_payload,
+        "models": {
+            "gemini": settings.gemini_model,
+            "ollama": settings.ollama_model,
+            "groq": settings.groq_model,
+            "anthropic_bulk": settings.anthropic_model_bulk,
+            "anthropic_topk": settings.anthropic_model_topk,
+        },
+    }
+    raw = json.dumps(payload, ensure_ascii=True, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _judge_cache_path(cache_key: str) -> pathlib.Path:
+    storage_root = pathlib.Path(settings.storage_dir)
+    cache_root = storage_root.parent / "cache" / "clip_judge"
+    return cache_root / f"{cache_key}.json"
+
+
+def _load_cached_judge_result(cache_key: str) -> JudgeResult | None:
+    if not bool(getattr(settings, "clip_judge_cache_enabled", True)):
+        return None
+    path = _judge_cache_path(cache_key)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    result_payload = payload.get("judge_result") if isinstance(payload, dict) else None
+    if not isinstance(result_payload, dict):
+        return None
+    try:
+        return JudgeResult(**result_payload)
+    except TypeError:
+        return None
+
+
+def _store_cached_judge_result(cache_key: str, result: JudgeResult, *, samples: int) -> None:
+    if not bool(getattr(settings, "clip_judge_cache_enabled", True)):
+        return
+    path = _judge_cache_path(cache_key)
+    payload = {
+        "cache_key": cache_key,
+        "created_at": time.time(),
+        "samples": int(samples),
+        "judge_result": result.to_dict(),
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=True, sort_keys=True), encoding="utf-8")
+        tmp_path.replace(path)
+    except OSError as exc:
+        logger.debug("clip judge cache persist failed: %s", exc)
 
 
 def _call_text_judge_prompt(

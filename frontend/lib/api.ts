@@ -1,4 +1,11 @@
-import { AIProviderStatus, ClipFeedbackPayload, ClipRequestOptions, JobStatus, UploadProgress } from "./types";
+import {
+  AIProviderStatus,
+  ClipFeedbackPayload,
+  ClipRequestOptions,
+  JobStatus,
+  ReviewCandidateResponse,
+  UploadProgress,
+} from "./types";
 
 const API_BASE = normalizeApiBase(process.env.NEXT_PUBLIC_API_URL);
 
@@ -252,4 +259,10 @@ export async function submitClipFeedback(jobId: string, payload: ClipFeedbackPay
     }
     throw new Error(msg);
   }
+}
+
+export async function getReviewCandidates(jobId: string, limit = 80): Promise<ReviewCandidateResponse> {
+  const res = await fetch(`${API_BASE}/api/jobs/${jobId}/review-candidates?limit=${encodeURIComponent(String(limit))}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
 }

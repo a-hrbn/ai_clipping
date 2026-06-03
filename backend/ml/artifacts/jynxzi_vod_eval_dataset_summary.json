@@ -1,63 +1,71 @@
 {
-  "rows": 600,
-  "positive_rows": 221,
-  "negative_rows": 379,
-  "eval_groups": 53,
+  "rows": 529,
+  "positive_rows": 241,
+  "negative_rows": 288,
+  "eval_groups": 25,
   "dataset_roles": {
-    "gold_eval": 64,
-    "pipeline_negative_eval": 325,
-    "pipeline_positive_eval": 211
+    "pipeline_negative_eval": 288,
+    "pipeline_positive_eval": 241
   },
   "by_label_class": {
-    "auto_outcome_background_negative": 16,
-    "background_negative": 139,
-    "boundary_near_miss_negative": 170,
-    "cross_platform_outcome_positive": 105,
-    "gold_negative": 54,
-    "gold_positive": 10,
-    "weak_positive": 106
+    "auto_outcome_background_negative": 26,
+    "background_negative": 106,
+    "boundary_near_miss_negative": 156,
+    "cross_platform_outcome_positive": 241
   },
   "by_supervision_tier": {
-    "auto_outcome_negative": 16,
-    "background_negative": 139,
-    "boundary_near_miss": 170,
-    "cross_platform_outcome": 211,
-    "gold_eval": 64
+    "auto_outcome_negative": 26,
+    "background_negative": 106,
+    "boundary_near_miss": 156,
+    "cross_platform_outcome": 241
   },
   "by_platform": {
-    "general": 536,
-    "twitch": 64
+    "general": 527,
+    "twitch": 2
   },
   "by_variant": {
-    "balanced": 600
+    "balanced": 529
   },
   "by_source": {
-    "audio_burst": 6,
-    "background_negative": 150,
-    "boundary_perturbation": 203,
-    "chat_sync": 8,
-    "controversy": 6,
-    "dense_window": 38,
-    "hot_take": 7,
-    "hype_peak": 47,
-    "narrative_reveal": 3,
-    "peak": 46,
-    "quote": 3,
+    "audio_burst": 14,
+    "background_negative": 128,
+    "boundary_perturbation": 204,
+    "chat_sync": 4,
+    "clean_reaction": 14,
+    "controversy": 3,
+    "dense_window": 20,
+    "hot_take": 3,
+    "hype_peak": 24,
+    "narrative_reveal": 32,
+    "peak": 2,
+    "quote": 1,
     "reaction": 2,
-    "silence_break": 2,
-    "story_payoff": 16,
-    "tension_build": 30,
-    "twitch_label_proxy": 29,
-    "visual_reveal": 4
+    "silence_break": 6,
+    "story_payoff": 3,
+    "tension_build": 31,
+    "twitch_label_proxy": 14,
+    "visual_reveal": 24
   },
   "by_content_bucket": {
-    "general": 430,
-    "quote_driven": 16,
-    "reaction": 10,
-    "story": 87,
-    "visual_action": 57
+    "general": 354,
+    "quote_driven": 7,
+    "reaction": 20,
+    "story": 86,
+    "visual_action": 62
+  },
+  "by_outcome_view_tier": {
+    "breakout_viral": 8,
+    "clipped": 25,
+    "elite_viral": 5,
+    "strong": 23,
+    "viral": 67
+  },
+  "by_rank_target": {
+    "3": 52,
+    "4": 193,
+    "5": 13
   },
   "gold_holdout_splits": {
-    "train": 185
+    "train": 149
   }
 }

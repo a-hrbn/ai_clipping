@@ -6,13 +6,13 @@ import statistics
 import re
 
 from config import settings
-from services import boundary_refiner, chapter_segmenter, clip_similarity, clip_strategy, coherence_scorer, game_event_features, hook_rewrite, profile_config, semantic_service, trend_prior, vision_language_features, vod_memory
+from services import boundary_refiner, chapter_segmenter, clip_similarity, clip_strategy, clip_taxonomy, coherence_scorer, context_patterns, context_quality, game_event_features, hook_rewrite, profile_config, semantic_service, trend_prior, vision_language_features, vod_memory
 from services.game_events import GameEvent
 from services.timeline_types import Candidate, CandidateFeatures, Chapter
 from services.transcriber import RichSegment
 
 _TOKEN_RE = re.compile(r"[a-zA-Z0-9']+")
-FEATURE_BUILD_VERSION = 12
+FEATURE_BUILD_VERSION = 13
 _LLM_SEMANTIC_MAX_WORKERS = 4
 
 
@@ -291,6 +291,23 @@ def _build_candidate_features(
             has_vector_similarity=False,
             feature_build_version=FEATURE_BUILD_VERSION,
             source=candidate.source,
+            clip_type="general",
+            multimodal_proxy_score=0.0,
+            rage_score=0.0,
+            clutch_score=0.0,
+            funny_reaction_score=0.0,
+            trash_talk_payoff_score=0.0,
+            jynxzi_chat_shock_score=0.0,
+            ranked_tension_score=0.0,
+            failed_setup_score=0.0,
+            streamer_persona_beat_score=0.0,
+            context_pattern_score=0.0,
+            context_pattern_support=0.0,
+            context_pattern_views_prior=0.0,
+            context_pattern_confidence=0.0,
+            context_pattern_similarity_margin=0.0,
+            context_pattern_id="",
+            context_pattern_label="",
         )
 
     profile_weights = profile_config.get_profile(profile)
@@ -341,6 +358,19 @@ def _build_candidate_features(
     audio_pop_score = _audio_pop_score(window, candidate.anchor_time)
     shout_scores = _streamer_shout_scores(window, candidate.anchor_time)
     game_scores = game_event_features.features_for_window(game_events or [], start=candidate.start, end=candidate.end)
+    taxonomy = clip_taxonomy.classify_segments(window, source=candidate.source)
+    context_pattern = context_patterns.score_segments(window, profile=profile)
+    multimodal_proxy_score = _multimodal_proxy_score(
+        chat_peak=chat_peak,
+        motion_peak=motion_peak,
+        face_peak=face_reaction_peak,
+        visual_hook_score=visual_hook_score,
+        audio_pop_score=audio_pop_score,
+        game_event_score=float(game_scores.get("game_event_score", 0.0) or 0.0),
+        laughter_count=laughter_count,
+        exclamation_count=exclamation_count,
+        max_hype=max_hype,
+    )
     hook_scores = _hook_reranker_scores(window)
     vl_scores = {**vision_language_features.empty_scores(), **(vision_scores or {})}
     boundary_set_scores = {
@@ -371,6 +401,41 @@ def _build_candidate_features(
         payoff_clarity_score,
         post_hook_hype,
     ))
+    token_count = len(_TOKEN_RE.findall(" ".join(seg.text.lower() for seg in window)))
+    clip_type_signal = max(taxonomy.scores.values(), default=0.0)
+    setup_present_score = max(
+        hook_strength,
+        memory_context["setup_depth_score"],
+        memory_context["topic_continuity_score"] * 0.8,
+        min(len(window) / 3.0, 1.0) * 0.35 + min(token_count / 18.0, 1.0) * 0.45 + context_pattern.confidence * 0.20,
+    )
+    payoff_present_score = max(
+        payoff_score / 5.0,
+        payoff_clarity_score,
+        memory_context["callback_strength"],
+        nonverbal_payoff_score,
+        clip_type_signal * 0.75,
+        context_pattern.confidence * 0.45,
+    )
+    context_strength_score = context_quality.strength_score(
+        pattern_confidence=context_pattern.confidence,
+        pattern_score=context_pattern.score,
+        pattern_views_prior=context_pattern.views_prior,
+        source_prior=context_quality.source_prior(candidate.source),
+        clip_type_signal=clip_type_signal,
+        payoff_present=payoff_present_score,
+        setup_present=setup_present_score,
+    )
+    context_completeness_score = context_quality.completeness_score(
+        setup_present=setup_present_score,
+        payoff_present=payoff_present_score,
+        standalone=standalone_score,
+        context_efficiency=context_efficiency,
+        pattern_confidence=context_pattern.confidence,
+        token_coverage=context_quality.token_coverage_score(token_count, duration),
+        context_dependency=context_dependency_score,
+        weak_resolution=weak_resolution_penalty,
+    )
     profile_fit_score = _profile_fit_score(
         candidate.source,
         chat_peak,
@@ -556,6 +621,27 @@ def _build_candidate_features(
         has_vector_similarity=has_vector_similarity,
         feature_build_version=FEATURE_BUILD_VERSION,
         source=candidate.source,
+        clip_type=taxonomy.clip_type,
+        multimodal_proxy_score=round(multimodal_proxy_score, 3),
+        rage_score=taxonomy.scores.get("rage", 0.0),
+        clutch_score=taxonomy.scores.get("clutch", 0.0),
+        funny_reaction_score=taxonomy.scores.get("funny_reaction", 0.0),
+        trash_talk_payoff_score=taxonomy.scores.get("trash_talk_payoff", 0.0),
+        jynxzi_chat_shock_score=taxonomy.scores.get("chat_shock", 0.0),
+        ranked_tension_score=taxonomy.scores.get("ranked_tension", 0.0),
+        failed_setup_score=taxonomy.scores.get("failed_setup", 0.0),
+        streamer_persona_beat_score=taxonomy.scores.get("streamer_persona_beat", 0.0),
+        context_pattern_score=context_pattern.score,
+        context_pattern_support=context_pattern.support,
+        context_pattern_views_prior=context_pattern.views_prior,
+        context_pattern_confidence=context_pattern.confidence,
+        context_pattern_similarity_margin=context_pattern.similarity_margin,
+        context_pattern_id=context_pattern.pattern_id,
+        context_pattern_label=context_pattern.label,
+        setup_present_score=round(context_quality.clamp01(setup_present_score), 3),
+        payoff_present_score=round(context_quality.clamp01(payoff_present_score), 3),
+        context_strength_score=round(context_strength_score, 3),
+        context_completeness_score=round(context_completeness_score, 3),
     )
 
 
@@ -751,6 +837,29 @@ def _visual_hook_score(window: list[RichSegment], anchor_time: float) -> float:
         score += min(seg.max_face_reaction, 1.0) * 0.25
         score += min(seg.visual_activity / 6.0, 1.0) * 0.2
     return _clamp01(score)
+
+
+def _multimodal_proxy_score(
+    *,
+    chat_peak: float,
+    motion_peak: float,
+    face_peak: float,
+    visual_hook_score: float,
+    audio_pop_score: float,
+    game_event_score: float,
+    laughter_count: int,
+    exclamation_count: int,
+    max_hype: float,
+) -> float:
+    return _clamp01(
+        min(chat_peak, 1.0) * 0.16
+        + max(min(motion_peak, 1.0), min(face_peak, 1.0)) * 0.20
+        + min(visual_hook_score, 1.0) * 0.16
+        + min(audio_pop_score, 1.0) * 0.14
+        + min(game_event_score, 1.0) * 0.12
+        + min((laughter_count + exclamation_count) / 4.0, 1.0) * 0.10
+        + min(max_hype / 6.0, 1.0) * 0.12
+    )
 
 
 def _audio_pop_score(window: list[RichSegment], anchor_time: float) -> float:

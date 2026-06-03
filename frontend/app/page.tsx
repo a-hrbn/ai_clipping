@@ -8,6 +8,7 @@ import JobStatus from "@/components/JobStatus";
 import ClipGrid from "@/components/ClipGrid";
 import AIStatus from "@/components/AIStatus";
 import PipelineDiagnosticsPanel from "@/components/PipelineDiagnosticsPanel";
+import CandidateReviewPanel from "@/components/CandidateReviewPanel";
 
 type AppState = "idle" | "submitting" | "uploading" | "polling" | "done" | "error";
 
@@ -279,6 +280,11 @@ export default function Home() {
           {pipelineDiagnostics?.available && (
             <div className="mb-8">
               <PipelineDiagnosticsPanel diagnostics={pipelineDiagnostics} />
+            </div>
+          )}
+          {jobId && (
+            <div className="mb-8">
+              <CandidateReviewPanel jobId={jobId} />
             </div>
           )}
           <ClipGrid clips={clips} jobId={jobId ?? ""} />

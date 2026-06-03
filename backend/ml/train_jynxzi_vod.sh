@@ -24,6 +24,10 @@ OUTCOME_TRAIN_DATASET_PATH="$ARTIFACT_DIR/jynxzi_outcome_train_dataset.jsonl"
 OUTCOME_TRAIN_SUMMARY_PATH="$ARTIFACT_DIR/jynxzi_outcome_train_summary.json"
 OUTCOME_HOLDOUT_DATASET_PATH="$ARTIFACT_DIR/jynxzi_outcome_holdout_dataset.jsonl"
 OUTCOME_HOLDOUT_SUMMARY_PATH="$ARTIFACT_DIR/jynxzi_outcome_holdout_summary.json"
+RECENT_VOD_HOLDOUT_POLICY_PATH="$ARTIFACT_DIR/jynxzi_recent_vod_holdout_policy.jsonl"
+RECENT_VOD_HOLDOUT_SUMMARY_PATH="$ARTIFACT_DIR/jynxzi_recent_vod_holdout_summary.json"
+TRAINING_HOLDOUT_POLICY_ROWS_PATH="$ARTIFACT_DIR/jynxzi_training_holdout_policy_rows.jsonl"
+TRAINING_HOLDOUT_POLICY_SUMMARY_PATH="$ARTIFACT_DIR/jynxzi_training_holdout_policy_summary.json"
 OUTCOME_FEATURE_SOURCE_PATH="$ARTIFACT_DIR/jynxzi_outcome_feature_source_rows.jsonl"
 OUTCOME_RANKER_EVAL_PATH="$ARTIFACT_DIR/jynxzi_outcome_holdout_eval.json"
 ROLLOUT_EVAL_SOURCE_PATH="$ARTIFACT_DIR/jynxzi_rollout_eval_source.json"
@@ -40,6 +44,8 @@ TARGETED_BACKFILL_VOD_MANIFEST_SUMMARY_PATH="$ARTIFACT_DIR/jynxzi_targeted_backf
 TARGETED_BACKFILL_PRE_REMATCH_GUARD_PATH="$ARTIFACT_DIR/jynxzi_targeted_backfill_pre_rematch_guard.json"
 HARD_NEGATIVE_ROWS_PATH="$ARTIFACT_DIR/jynxzi_ranker_hard_negative_train_rows.jsonl"
 HARD_NEGATIVE_SUMMARY_PATH="$ARTIFACT_DIR/jynxzi_ranker_hard_negative_train_summary.json"
+SERVING_HARD_NEGATIVE_ROWS_PATH="$ARTIFACT_DIR/jynxzi_serving_hard_negative_train_rows.jsonl"
+SERVING_HARD_NEGATIVE_SUMMARY_PATH="$ARTIFACT_DIR/jynxzi_serving_hard_negative_train_summary.json"
 AUTO_OUTCOME_NEGATIVE_ROWS_PATH="$ARTIFACT_DIR/jynxzi_auto_outcome_negative_rows.jsonl"
 AUTO_OUTCOME_NEGATIVE_TRAIN_ROWS_PATH="$ARTIFACT_DIR/jynxzi_auto_outcome_negative_train_rows.jsonl"
 AUTO_OUTCOME_NEGATIVE_HOLDOUT_ROWS_PATH="$ARTIFACT_DIR/jynxzi_auto_outcome_negative_holdout_rows.jsonl"
@@ -93,6 +99,7 @@ VOD_RANKER_SHORT_FORM_MODE="${VOD_RANKER_SHORT_FORM_MODE:-off}"
 VOD_RANKER_GOLD_TRAIN_WEIGHT="${VOD_RANKER_GOLD_TRAIN_WEIGHT:-2.0}"
 VOD_RANKER_USE_GOLD_TRAIN="${VOD_RANKER_USE_GOLD_TRAIN:-0}"
 VOD_RANKER_HARD_NEGATIVE_WEIGHT="${VOD_RANKER_HARD_NEGATIVE_WEIGHT:-4.0}"
+VOD_RANKER_SERVING_HARD_NEGATIVE_WEIGHT="${VOD_RANKER_SERVING_HARD_NEGATIVE_WEIGHT:-2.0}"
 VOD_RANKER_USE_GOLD_HARD_NEGATIVES="${VOD_RANKER_USE_GOLD_HARD_NEGATIVES:-0}"
 VOD_RANKER_USE_USER_LABELS="${VOD_RANKER_USE_USER_LABELS:-0}"
 VOD_RANKER_ROLLOUT_REVIEW_NEGATIVE_WEIGHT="${VOD_RANKER_ROLLOUT_REVIEW_NEGATIVE_WEIGHT:-4.0}"
@@ -113,6 +120,12 @@ AUTO_OUTCOME_NEGATIVE_HOLDOUT_RATIO="${AUTO_OUTCOME_NEGATIVE_HOLDOUT_RATIO:-0.20
 AUTO_OUTCOME_NEGATIVE_POSITIVE_EXCLUSION_SEC="${AUTO_OUTCOME_NEGATIVE_POSITIVE_EXCLUSION_SEC:-180}"
 AUTO_OUTCOME_NEGATIVE_HARD_SCORE_THRESHOLD="${AUTO_OUTCOME_NEGATIVE_HARD_SCORE_THRESHOLD:-7.5}"
 AUTO_OUTCOME_NEGATIVE_MAX_ROWS="${AUTO_OUTCOME_NEGATIVE_MAX_ROWS:-2000}"
+SERVING_HARD_NEGATIVE_ENABLED="${SERVING_HARD_NEGATIVE_ENABLED:-1}"
+SERVING_HARD_NEGATIVE_PRE_JUDGE_TOP_K="${SERVING_HARD_NEGATIVE_PRE_JUDGE_TOP_K:-80}"
+SERVING_HARD_NEGATIVE_MAX_PER_VOD="${SERVING_HARD_NEGATIVE_MAX_PER_VOD:-20}"
+SERVING_HARD_NEGATIVE_MAX_ROWS="${SERVING_HARD_NEGATIVE_MAX_ROWS:-300}"
+SERVING_HARD_NEGATIVE_POSITIVE_EXCLUSION_OVERLAP="${SERVING_HARD_NEGATIVE_POSITIVE_EXCLUSION_OVERLAP:-0.25}"
+SERVING_HARD_NEGATIVE_MIN_RANK_SCORE="${SERVING_HARD_NEGATIVE_MIN_RANK_SCORE:--999.0}"
 ROLLOUT_REVIEW_THRESHOLD="${ROLLOUT_REVIEW_THRESHOLD:-3.0}"
 ROLLOUT_REVIEW_THRESHOLD_MARGIN="${ROLLOUT_REVIEW_THRESHOLD_MARGIN:-1.5}"
 ROLLOUT_DISAGREEMENT_HEURISTIC_THRESHOLD="${ROLLOUT_DISAGREEMENT_HEURISTIC_THRESHOLD:-8.0}"
@@ -127,6 +140,8 @@ SHORT_FORM_BACKFILL_ARTIFACT_HEALTH_PATH="$SHORT_FORM_BACKFILL_ARTIFACT_DIR/jynx
 PERSISTED_SHORT_FORM_BACKFILL_ARTIFACT_JSON_PATH="$ARTIFACT_DIR/jynxzi_short_form_backfill_ranker.json"
 PERSISTED_SHORT_FORM_BACKFILL_ARTIFACT_HEALTH_PATH="$ARTIFACT_DIR/jynxzi_short_form_backfill_artifact_health.json"
 OUTCOME_HOLDOUT_TARGET_POSITIVE_ROWS="${OUTCOME_HOLDOUT_TARGET_POSITIVE_ROWS:-300}"
+RECENT_VOD_HOLDOUT_ENABLED="${RECENT_VOD_HOLDOUT_ENABLED:-1}"
+RECENT_VOD_HOLDOUT_COUNT="${RECENT_VOD_HOLDOUT_COUNT:-10}"
 ROLLOUT_READINESS_TARGET_NEW_VOD_GROUPS="${ROLLOUT_READINESS_TARGET_NEW_VOD_GROUPS:-20}"
 ROLLOUT_READINESS_TARGET_AVAILABLE_GROUPS="${ROLLOUT_READINESS_TARGET_AVAILABLE_GROUPS:-40}"
 ROLLOUT_READINESS_MAX_CANDIDATES_PER_VOD="${ROLLOUT_READINESS_MAX_CANDIDATES_PER_VOD:-3}"
@@ -272,6 +287,7 @@ export VOD_RANKER_SHORT_FORM_MODE
 export VOD_RANKER_GOLD_TRAIN_WEIGHT
 export VOD_RANKER_USE_GOLD_TRAIN
 export VOD_RANKER_HARD_NEGATIVE_WEIGHT
+export VOD_RANKER_SERVING_HARD_NEGATIVE_WEIGHT
 export VOD_RANKER_USE_GOLD_HARD_NEGATIVES
 export VOD_RANKER_USE_USER_LABELS
 export VOD_RANKER_ROLLOUT_REVIEW_NEGATIVE_WEIGHT
@@ -289,7 +305,21 @@ export AUTO_OUTCOME_NEGATIVE_HOLDOUT_RATIO
 export AUTO_OUTCOME_NEGATIVE_POSITIVE_EXCLUSION_SEC
 export AUTO_OUTCOME_NEGATIVE_HARD_SCORE_THRESHOLD
 export AUTO_OUTCOME_NEGATIVE_MAX_ROWS
+export SERVING_HARD_NEGATIVE_ENABLED
+export SERVING_HARD_NEGATIVE_ROWS_PATH
+export SERVING_HARD_NEGATIVE_SUMMARY_PATH
+export SERVING_HARD_NEGATIVE_PRE_JUDGE_TOP_K
+export SERVING_HARD_NEGATIVE_MAX_PER_VOD
+export SERVING_HARD_NEGATIVE_MAX_ROWS
+export SERVING_HARD_NEGATIVE_POSITIVE_EXCLUSION_OVERLAP
+export SERVING_HARD_NEGATIVE_MIN_RANK_SCORE
 export OUTCOME_HOLDOUT_TARGET_POSITIVE_ROWS
+export RECENT_VOD_HOLDOUT_ENABLED
+export RECENT_VOD_HOLDOUT_COUNT
+export RECENT_VOD_HOLDOUT_POLICY_PATH
+export RECENT_VOD_HOLDOUT_SUMMARY_PATH
+export TRAINING_HOLDOUT_POLICY_ROWS_PATH
+export TRAINING_HOLDOUT_POLICY_SUMMARY_PATH
 export OUTCOME_FEATURE_SOURCE_PATH
 export VOD_INVENTORY_PATH
 export EMPTY_TWITCH_LABELS_PATH
@@ -416,7 +446,7 @@ run_vod_training() {
     --work-dir "$WORK_DIR" \
     --include-short-form "$SHORT_FORM_PATH" \
     --short-form-mode "$VOD_RANKER_SHORT_FORM_MODE" \
-    --holdout-policy-rows "$OUTCOME_HOLDOUT_DATASET_PATH" \
+    --holdout-policy-rows "$TRAINING_HOLDOUT_POLICY_ROWS_PATH" \
     --include-outcome-positive-train "$OUTCOME_TRAIN_DATASET_PATH" \
     --outcome-positive-weight "$VOD_RANKER_OUTCOME_POSITIVE_WEIGHT" \
     --include-auto-outcome-negative-train "$AUTO_OUTCOME_NEGATIVE_TRAIN_ROWS_PATH" \
@@ -453,6 +483,12 @@ run_vod_training() {
     TRAIN_ARGS+=(
       --include-hard-negative-train "$HARD_NEGATIVE_ROWS_PATH"
       --hard-negative-weight "$VOD_RANKER_HARD_NEGATIVE_WEIGHT"
+    )
+  fi
+  if [[ "$SERVING_HARD_NEGATIVE_ENABLED" == "1" && -s "$SERVING_HARD_NEGATIVE_ROWS_PATH" ]]; then
+    TRAIN_ARGS+=(
+      --include-serving-hard-negative-train "$SERVING_HARD_NEGATIVE_ROWS_PATH"
+      --serving-hard-negative-weight "$VOD_RANKER_SERVING_HARD_NEGATIVE_WEIGHT"
     )
   fi
   "$PYTHON_BIN" ml/train_vod_ranker.py "${TRAIN_ARGS[@]}"
@@ -974,6 +1010,24 @@ export_hard_negative_rows() {
     --profile jynxzi
 }
 
+export_serving_hard_negative_rows() {
+  if [[ "$SERVING_HARD_NEGATIVE_ENABLED" != "1" ]]; then
+    echo "Serving hard-negative export disabled."
+    return 0
+  fi
+  "$PYTHON_BIN" ml/export_serving_hard_negatives.py \
+    --storage-dir "$BACKEND_DIR/tmp/storage" \
+    --positive-rows "$CROSS_PLATFORM_FINGERPRINT_ROWS_PATH" \
+    --rows-out "$SERVING_HARD_NEGATIVE_ROWS_PATH" \
+    --summary-out "$SERVING_HARD_NEGATIVE_SUMMARY_PATH" \
+    --profile jynxzi \
+    --pre-judge-top-k "$SERVING_HARD_NEGATIVE_PRE_JUDGE_TOP_K" \
+    --max-per-vod "$SERVING_HARD_NEGATIVE_MAX_PER_VOD" \
+    --max-rows "$SERVING_HARD_NEGATIVE_MAX_ROWS" \
+    --positive-exclusion-overlap "$SERVING_HARD_NEGATIVE_POSITIVE_EXCLUSION_OVERLAP" \
+    --min-rank-score "$SERVING_HARD_NEGATIVE_MIN_RANK_SCORE"
+}
+
 refresh_outcome_feature_source() {
   "$PYTHON_BIN" - <<'PY'
 import json
@@ -1107,6 +1161,23 @@ build_outcome_holdout_dataset() {
   build_outcome_dataset holdout "$AUTO_OUTCOME_NEGATIVE_HOLDOUT_ROWS_PATH" "$OUTCOME_HOLDOUT_DATASET_PATH" "$OUTCOME_HOLDOUT_SUMMARY_PATH" "$OUTCOME_HOLDOUT_TARGET_POSITIVE_ROWS"
 }
 
+build_recent_vod_holdout_policy() {
+  "$PYTHON_BIN" -m ml.build_recent_vod_holdout \
+    --profile jynxzi \
+    --vod-inventory "$VOD_INVENTORY_PATH" \
+    --output "$RECENT_VOD_HOLDOUT_POLICY_PATH" \
+    --summary-output "$RECENT_VOD_HOLDOUT_SUMMARY_PATH" \
+    --count "$([[ "$RECENT_VOD_HOLDOUT_ENABLED" == "1" ]] && echo "$RECENT_VOD_HOLDOUT_COUNT" || echo 0)"
+}
+
+build_training_holdout_policy_rows() {
+  "$PYTHON_BIN" -m ml.build_training_holdout_policy \
+    --input "$OUTCOME_HOLDOUT_DATASET_PATH" \
+    --input "$RECENT_VOD_HOLDOUT_POLICY_PATH" \
+    --output "$TRAINING_HOLDOUT_POLICY_ROWS_PATH" \
+    --summary-output "$TRAINING_HOLDOUT_POLICY_SUMMARY_PATH"
+}
+
 select_rollout_eval_report() {
   "$PYTHON_BIN" - <<'PY'
 import json
@@ -1197,6 +1268,7 @@ echo "Using cross-platform second pass after VOD build: $CROSS_PLATFORM_SECOND_P
 echo "Using cross-platform full-VOD audio fingerprints: $CROSS_PLATFORM_FULL_VOD_AUDIO_FINGERPRINTS max_vods=${CROSS_PLATFORM_FULL_VOD_AUDIO_MAX_VODS} workers=${CROSS_PLATFORM_FULL_VOD_AUDIO_WORKERS} keep_audio=${CROSS_PLATFORM_KEEP_FULL_VOD_AUDIO}"
 echo "Using cross-platform coarse VOD tiling: $CROSS_PLATFORM_COARSE_VOD_TILING tile=${CROSS_PLATFORM_COARSE_VOD_TILE_SEC}s stride=${CROSS_PLATFORM_COARSE_VOD_STRIDE_SEC}s max_tiles=${CROSS_PLATFORM_COARSE_VOD_MAX_TILES_PER_VOD}"
 echo "Using targeted backfill require-all-vods: $TARGETED_BACKFILL_REQUIRE_ALL_VODS"
+echo "Using recent VOD holdout: enabled=$RECENT_VOD_HOLDOUT_ENABLED count=$RECENT_VOD_HOLDOUT_COUNT"
 echo "Using VOD ranker MM-judge proxy: $VOD_RANKER_USE_MM_JUDGE_PROXY weight=$VOD_RANKER_MM_JUDGE_WEIGHT"
 echo "Using VOD ranker rollout-review-negative weight: $VOD_RANKER_ROLLOUT_REVIEW_NEGATIVE_WEIGHT"
 echo "Using rollout threshold recall target: $VOD_RANKER_ROLLOUT_THRESHOLD_MIN_RECALL"
@@ -1207,6 +1279,8 @@ if [[ "$VOD_RANKER_USE_USER_LABELS" != "1" ]]; then
 fi
 echo "Building Twitch VOD inventory for cross-platform matching..."
 build_twitch_vod_inventory
+echo "Building latest-VOD holdout policy..."
+build_recent_vod_holdout_policy
 mkdir -p "$(dirname "$EMPTY_TWITCH_LABELS_PATH")"
 : > "$EMPTY_TWITCH_LABELS_PATH"
 echo "Twitch clip-label collection removed; training uses cross-platform outcomes from VOD inventory."
@@ -1228,6 +1302,9 @@ build_targeted_backfill_feature_cache
 echo "Preparing diagnosis hard-negative rows for training merge..."
 export_hard_negative_rows
 
+echo "Exporting serving hard-negative rows for training merge..."
+export_serving_hard_negative_rows
+
 echo "Exporting auto-outcome negative rows for training and holdout..."
 export_auto_outcome_negative_rows
 
@@ -1239,6 +1316,9 @@ build_outcome_train_dataset
 
 echo "Building label-light outcome holdout dataset..."
 build_outcome_holdout_dataset
+
+echo "Building merged training holdout policy rows..."
+build_training_holdout_policy_rows
 
 echo "Importing multimodal judge proxy rows..."
 import_mm_judge_proxy_rows
@@ -1262,6 +1342,8 @@ print(
         dependency_paths=[
             Path("ml/artifacts/jynxzi_outcome_train_dataset.jsonl"),
             Path("ml/artifacts/jynxzi_outcome_holdout_dataset.jsonl"),
+            Path(os.environ["RECENT_VOD_HOLDOUT_POLICY_PATH"]),
+            Path(os.environ["TRAINING_HOLDOUT_POLICY_ROWS_PATH"]),
             Path(os.environ["OUTCOME_FEATURE_SOURCE_PATH"]),
             Path(os.environ["TARGETED_BACKFILL_FEATURE_ROWS_PATH"]),
             Path("ml/artifacts/jynxzi_auto_outcome_negative_train_rows.jsonl"),
@@ -1270,6 +1352,7 @@ print(
             Path(os.environ["CROSS_PLATFORM_SOURCE_MANIFEST_PATH"]),
             Path(os.environ["CROSS_PLATFORM_URL_MANIFEST_PATH"]),
             Path(os.environ["CROSS_PLATFORM_FINGERPRINT_ROWS_PATH"]),
+            Path(os.environ["SERVING_HARD_NEGATIVE_ROWS_PATH"]),
             Path("ml/artifacts/jynxzi_cross_platform_fingerprint_summary.json"),
             Path(os.environ["MM_JUDGE_PROXY_ROWS_PATH"]),
         ],
@@ -1289,8 +1372,11 @@ from ml.training_workflow_state import should_reevaluate
 
 dependency_paths = [
     Path(os.environ["OUTCOME_FEATURE_SOURCE_PATH"]),
+    Path(os.environ["RECENT_VOD_HOLDOUT_POLICY_PATH"]),
+    Path(os.environ["TRAINING_HOLDOUT_POLICY_ROWS_PATH"]),
     Path(os.environ["TARGETED_BACKFILL_FEATURE_ROWS_PATH"]),
     Path(os.environ["CROSS_PLATFORM_FINGERPRINT_ROWS_PATH"]),
+    Path(os.environ["SERVING_HARD_NEGATIVE_ROWS_PATH"]),
     Path("ml/artifacts/jynxzi_cross_platform_fingerprint_summary.json"),
 ]
 if os.environ.get("VOD_RANKER_USE_USER_LABELS") == "1":
@@ -1332,6 +1418,8 @@ if [[ "$SHOULD_TRAIN" != "yes" && "$SHOULD_EVALUATE" != "yes" ]]; then
   echo "Eval dataset:   $EVAL_DATASET_PATH"
   echo "Ranker eval:    $RANKER_EVAL_PATH"
   echo "Auto-negative:  $AUTO_OUTCOME_NEGATIVE_ROWS_PATH"
+  echo "Recent holdout: $RECENT_VOD_HOLDOUT_POLICY_PATH"
+  echo "Holdout policy: $TRAINING_HOLDOUT_POLICY_ROWS_PATH"
   echo "Pipeline eval:  $PIPELINE_EVAL_PATH"
   exit 0
 fi
@@ -1394,10 +1482,12 @@ PY
 )"
     if [[ "$CROSS_PLATFORM_DIGEST_AFTER" != "$CROSS_PLATFORM_DIGEST_BEFORE" ]]; then
       echo "Cross-platform outcomes changed after VOD-cache backfill. Rebuilding outcome datasets and retraining once."
+      export_serving_hard_negative_rows
       export_auto_outcome_negative_rows
       refresh_outcome_feature_source
       build_outcome_train_dataset
       build_outcome_holdout_dataset
+      build_training_holdout_policy_rows
       rm -f "$STAGED_DATASET_PATH"
       run_vod_training "$STAGED_DATASET_PATH"
       promote_staged_vod_dataset
@@ -1448,6 +1538,9 @@ build_outcome_train_dataset
 
 echo "Building label-light outcome holdout dataset..."
 build_outcome_holdout_dataset
+
+echo "Refreshing merged training holdout policy rows..."
+build_training_holdout_policy_rows
 
 echo "Calibrating recall-friendly ranker serving threshold on outcome-holdout rows..."
 "$PYTHON_BIN" ml/calibrate_ranker_threshold.py \

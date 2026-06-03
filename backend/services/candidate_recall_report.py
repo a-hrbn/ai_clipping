@@ -4,6 +4,7 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from services import clip_taxonomy
 from services.timeline_types import Candidate, RankedCandidate
 
 _SAMPLE_LIMIT = 8
@@ -40,6 +41,9 @@ def build_candidate_recall_report(
     final_ranked: Sequence[RankedCandidate],
     final_moments: Sequence[Mapping[str, Any]],
     judge_top_k: int,
+    judge_scope_ranked: Sequence[RankedCandidate] | None = None,
+    positive_windows: Sequence[Mapping[str, Any]] | None = None,
+    positive_overlap_ratio: float = 0.45,
 ) -> dict[str, Any]:
     """Build a compact funnel report for where serving candidates survive or drop."""
 
@@ -76,7 +80,11 @@ def build_candidate_recall_report(
         if row.get("accepted") is True and _row_candidate_id(row)
     }
     pre_judge_ids = {item.candidate.id for item in pre_judge_ranked}
-    judge_scope_ids = {item.candidate.id for item in pre_judge_ranked[: max(int(judge_top_k or 0), 0)]}
+    judge_scope_source = judge_scope_ranked if judge_scope_ranked is not None else pre_judge_ranked
+    judge_scope_ids = {
+        item.candidate.id
+        for item in judge_scope_source[: max(int(judge_top_k or 0), 0)]
+    }
     quality_kept_ids = {
         _row_candidate_id(row)
         for row in quality_gate_rows
@@ -175,6 +183,29 @@ def build_candidate_recall_report(
         key=lambda row: float(row.get("rank_score") or row.get("judge_score") or 0.0),
         reverse=True,
     )
+    judge_scope_limit = max(int(judge_top_k or 0), 0)
+    normal_judge_ids = {
+        item.candidate.id for item in pre_judge_ranked[:judge_scope_limit]
+    }
+    recall_reserved_samples = [
+        _ranked_sample(item, stage="judge_recall_reserved")
+        for item in judge_scope_source[:judge_scope_limit]
+        if item.candidate.id not in normal_judge_ids
+    ]
+
+    positive_window_recall = _positive_window_recall_summary(
+        positive_windows or [],
+        stage_candidates=stage_candidates,
+        proposal_audit_rows=proposal_audit_rows,
+        pre_judge_ranked=pre_judge_ranked,
+        judged_ranked=judged_ranked,
+        quality_gate_rows=quality_gate_rows,
+        final_ranked=final_ranked,
+        final_moments=final_moments,
+        judge_top_k=judge_top_k,
+        judge_scope_ranked=judge_scope_ranked,
+        overlap_ratio=positive_overlap_ratio,
+    )
 
     return {
         "stage_counts": {stage: len(candidate_sets.get(stage, set())) for stage in stage_ids},
@@ -199,11 +230,13 @@ def build_candidate_recall_report(
         },
         "ranker": {
             "ranked_rows": len(pre_judge_ranked),
-            "judge_top_k": max(int(judge_top_k or 0), 0),
+            "judge_top_k": judge_scope_limit,
             "not_in_judge_scope_top": [
                 _ranked_sample(item, stage="not_in_judge_scope")
-                for item in pre_judge_ranked[max(int(judge_top_k or 0), 0): max(int(judge_top_k or 0), 0) + _SAMPLE_LIMIT]
-            ],
+                for item in pre_judge_ranked
+                if item.candidate.id not in judge_scope_ids
+            ][:_SAMPLE_LIMIT],
+            "recall_reserved": recall_reserved_samples[:_SAMPLE_LIMIT],
         },
         "quality_gate": {
             "input_rows": len(quality_gate_rows),
@@ -219,6 +252,7 @@ def build_candidate_recall_report(
             "moment_rows": len(final_moments),
             "candidate_ids": sorted(final_moment_ids),
         },
+        "positive_window_recall": positive_window_recall,
     }
 
 
@@ -232,6 +266,7 @@ def build_candidate_trace(
     final_ranked: Sequence[RankedCandidate],
     final_moments: Sequence[Mapping[str, Any]],
     judge_top_k: int,
+    judge_scope_ranked: Sequence[RankedCandidate] | None = None,
 ) -> list[dict[str, Any]]:
     """Build one consolidated trace row per candidate across the serving funnel."""
 
@@ -300,20 +335,33 @@ def build_candidate_trace(
             trace_row["rejection_reasons"].append("proposal_rejected")
 
     judge_scope_limit = max(int(judge_top_k or 0), 0)
-    judge_scope_ids = {
-        _base_candidate_id(item.candidate.id)
-        for item in pre_judge_ranked[:judge_scope_limit]
+    judge_scope_source = judge_scope_ranked if judge_scope_ranked is not None else pre_judge_ranked
+    judge_scope_rank_by_id = {
+        _base_candidate_id(item.candidate.id): index
+        for index, item in enumerate(judge_scope_source[:judge_scope_limit], start=1)
     }
+    judge_scope_ids = set(judge_scope_rank_by_id)
     for index, ranked in enumerate(pre_judge_ranked, start=1):
         candidate_id = ranked.candidate.id
+        base_candidate_id = _base_candidate_id(candidate_id)
         trace_row = row_for(candidate_id)
         _merge_candidate_identity(trace_row, ranked.candidate)
         trace_row["pre_judge_rank"] = index
         trace_row["pre_judge_rank_score"] = _round_optional(ranked.rank_score)
         trace_row["trained_model_used"] = bool(ranked.trained_model_used)
         mark_stage(candidate_id, "ranked_pre_judge", "ranked", rank=index, rank_score=_round_optional(ranked.rank_score))
-        if index <= judge_scope_limit:
-            mark_stage(candidate_id, "judge_scope", "included", rank=index)
+        if base_candidate_id in judge_scope_ids:
+            judge_scope_rank = judge_scope_rank_by_id.get(base_candidate_id)
+            mark_stage(
+                candidate_id,
+                "judge_scope",
+                "included",
+                rank=judge_scope_rank,
+                pre_judge_rank=index,
+                recall_reserved=index > judge_scope_limit,
+            )
+            trace_row["judge_scope_rank"] = judge_scope_rank
+            trace_row["judge_recall_reserved"] = bool(index > judge_scope_limit)
         else:
             mark_stage(candidate_id, "judge_scope", "excluded", rank=index)
             trace_row["rejection_reasons"].append("outside_judge_scope")
@@ -414,11 +462,16 @@ def build_candidate_funnel_summary(
     reason_counts: Counter[str] = Counter()
     source_counts: Counter[str] = Counter()
     final_source_counts: Counter[str] = Counter()
+    clip_type_counts: Counter[str] = Counter()
+    final_clip_type_counts: Counter[str] = Counter()
     for row in trace_rows:
         source = str(row.get("source") or "unknown")
         source_counts[source] += 1
+        clip_type = str(row.get("clip_type") or "general")
+        clip_type_counts[clip_type] += 1
         if row.get("final_selected"):
             final_source_counts[source] += 1
+            final_clip_type_counts[clip_type] += 1
         reasons = row.get("rejection_reasons") if isinstance(row.get("rejection_reasons"), list) else []
         reason_counts.update(str(reason) for reason in reasons)
 
@@ -439,6 +492,8 @@ def build_candidate_funnel_summary(
         "rejection_reason_counts": dict(sorted(reason_counts.items())),
         "source_counts": dict(sorted(source_counts.items())),
         "final_source_counts": dict(sorted(final_source_counts.items())),
+        "clip_type_counts": dict(sorted(clip_type_counts.items())),
+        "final_clip_type_counts": dict(sorted(final_clip_type_counts.items())),
         "score_distributions": {
             field: _distribution([row.get(field) for row in trace_rows])
             for field in score_fields
@@ -446,8 +501,268 @@ def build_candidate_funnel_summary(
         "quality_breakdown": _quality_breakdown(trace_rows),
         "proposal_lift": _proposal_lift_summary(trace_rows),
         "ranker_lift": _ranker_lift_summary(trace_rows),
+        "clip_type_lift": _clip_type_quality_breakdown(trace_rows),
+        "positive_window_recall": dict(report.get("positive_window_recall") or {}),
         "trace_samples": _trace_samples(trace_rows),
     }
+
+
+def _positive_window_recall_summary(
+    positive_windows: Sequence[Mapping[str, Any]],
+    *,
+    stage_candidates: Mapping[str, Sequence[Candidate]],
+    proposal_audit_rows: Sequence[Mapping[str, Any]],
+    pre_judge_ranked: Sequence[RankedCandidate],
+    judged_ranked: Sequence[RankedCandidate],
+    quality_gate_rows: Sequence[Mapping[str, Any]],
+    final_ranked: Sequence[RankedCandidate],
+    final_moments: Sequence[Mapping[str, Any]],
+    judge_top_k: int,
+    judge_scope_ranked: Sequence[RankedCandidate] | None,
+    overlap_ratio: float,
+) -> dict[str, Any]:
+    threshold = max(min(float(overlap_ratio or 0.0), 1.0), 0.0)
+    stage_samples = _positive_recall_stage_samples(
+        stage_candidates=stage_candidates,
+        proposal_audit_rows=proposal_audit_rows,
+        pre_judge_ranked=pre_judge_ranked,
+        judged_ranked=judged_ranked,
+        quality_gate_rows=quality_gate_rows,
+        final_ranked=final_ranked,
+        final_moments=final_moments,
+        judge_top_k=judge_top_k,
+        judge_scope_ranked=judge_scope_ranked,
+    )
+    details: list[dict[str, Any]] = []
+    recall_counts: Counter[str] = Counter()
+    for index, row in enumerate(positive_windows, start=1):
+        positive = _positive_window_sample(row, index)
+        if positive is None:
+            continue
+        matched_stages: list[str] = []
+        best_by_stage: dict[str, dict[str, Any] | None] = {}
+        for stage in _STAGE_ORDER:
+            best = _best_positive_stage_match(positive, stage_samples.get(stage, []))
+            if best is not None:
+                best_by_stage[stage] = best
+                if float(best.get("overlap_ratio") or 0.0) >= threshold:
+                    matched_stages.append(stage)
+                    recall_counts[stage] += 1
+            else:
+                best_by_stage[stage] = None
+
+        last_matched_stage = matched_stages[-1] if matched_stages else None
+        first_missed_after_match = None
+        if last_matched_stage:
+            seen_match = False
+            for stage in _STAGE_ORDER:
+                if stage == last_matched_stage:
+                    seen_match = True
+                    continue
+                if seen_match and stage not in matched_stages:
+                    first_missed_after_match = stage
+                    break
+
+        details.append(
+            {
+                **positive,
+                "matched": bool(matched_stages),
+                "matched_stages": matched_stages,
+                "last_matched_stage": last_matched_stage,
+                "first_missed_stage_after_last_match": first_missed_after_match,
+                "best_by_stage": best_by_stage,
+            }
+        )
+
+    return {
+        "positive_windows": len(details),
+        "overlap_ratio": threshold,
+        "recall_by_stage": {
+            stage: {
+                "matched": int(recall_counts.get(stage, 0)),
+                "total": len(details),
+                "ratio": round(float(recall_counts.get(stage, 0)) / len(details), 6) if details else None,
+            }
+            for stage in _STAGE_ORDER
+        },
+        "details": details,
+    }
+
+
+def _positive_recall_stage_samples(
+    *,
+    stage_candidates: Mapping[str, Sequence[Candidate]],
+    proposal_audit_rows: Sequence[Mapping[str, Any]],
+    pre_judge_ranked: Sequence[RankedCandidate],
+    judged_ranked: Sequence[RankedCandidate],
+    quality_gate_rows: Sequence[Mapping[str, Any]],
+    final_ranked: Sequence[RankedCandidate],
+    final_moments: Sequence[Mapping[str, Any]],
+    judge_top_k: int,
+    judge_scope_ranked: Sequence[RankedCandidate] | None,
+) -> dict[str, list[dict[str, Any]]]:
+    samples: dict[str, list[dict[str, Any]]] = {
+        stage: [_candidate_sample(candidate, stage=stage) for candidate in candidates]
+        for stage, candidates in stage_candidates.items()
+    }
+    samples["proposal_input"] = [
+        _proposal_row_sample(row, stage="proposal_input")
+        for row in proposal_audit_rows
+        if _row_candidate_id(row)
+    ]
+    samples["proposal_kept"] = [
+        _proposal_row_sample(row, stage="proposal_kept")
+        for row in proposal_audit_rows
+        if row.get("accepted") is True and _row_candidate_id(row)
+    ]
+    samples["ranked_pre_judge"] = [
+        {**_ranked_sample(ranked, stage="ranked_pre_judge"), "pre_judge_rank": index}
+        for index, ranked in enumerate(pre_judge_ranked, start=1)
+    ]
+    judge_scope_source = judge_scope_ranked if judge_scope_ranked is not None else pre_judge_ranked
+    judge_limit = max(int(judge_top_k or 0), 0)
+    samples["judge_scope"] = [
+        {**_ranked_sample(ranked, stage="judge_scope"), "judge_scope_rank": index}
+        for index, ranked in enumerate(judge_scope_source[:judge_limit], start=1)
+    ]
+    clip_judge_rows: list[dict[str, Any]] = []
+    for index, ranked in enumerate(judged_ranked, start=1):
+        row = {**_ranked_sample(ranked, stage="clip_judge"), "judged_rank": index}
+        if ranked.judge_result is not None:
+            row["judge_score"] = _round_optional(ranked.judge_result.judge_score)
+            row["judge_confidence"] = _round_optional(ranked.judge_result.judge_confidence)
+            row["judge_provider"] = ranked.judge_result.provider
+        clip_judge_rows.append(row)
+    samples["clip_judge"] = clip_judge_rows
+    samples["quality_gate"] = [
+        _quality_row_sample(row, stage="quality_gate")
+        for row in quality_gate_rows
+        if _row_candidate_id(row)
+    ]
+    samples["judged_quality_kept"] = [
+        _quality_row_sample(row, stage="judged_quality_kept")
+        for row in quality_gate_rows
+        if (row.get("accepted") is True or row.get("kept") is True or row.get("status") == "kept")
+        and _row_has_judge_result(row)
+        and _row_candidate_id(row)
+    ]
+    samples["unjudged_quality_kept"] = [
+        _quality_row_sample(row, stage="unjudged_quality_kept")
+        for row in quality_gate_rows
+        if (row.get("accepted") is True or row.get("kept") is True or row.get("status") == "kept")
+        and not _row_has_judge_result(row)
+        and _row_candidate_id(row)
+    ]
+    samples["quality_kept"] = [
+        _quality_row_sample(row, stage="quality_kept")
+        for row in quality_gate_rows
+        if (row.get("accepted") is True or row.get("kept") is True or row.get("status") == "kept")
+        and _row_candidate_id(row)
+    ]
+    samples["final_ranked"] = [
+        {**_ranked_sample(ranked, stage="final_ranked"), "final_rank": index}
+        for index, ranked in enumerate(final_ranked, start=1)
+    ]
+    samples["final_moments"] = [
+        _final_moment_sample(moment, index)
+        for index, moment in enumerate(final_moments, start=1)
+    ]
+    return samples
+
+
+def _positive_window_sample(row: Mapping[str, Any], index: int) -> dict[str, Any] | None:
+    start = _safe_float(row.get("window_start"))
+    end = _safe_float(row.get("window_end"))
+    if start is None or end is None or end <= start:
+        return None
+    return {
+        "index": index,
+        "positive_id": str(
+            row.get("candidate_id")
+            or row.get("repost_source_url")
+            or row.get("source_url")
+            or f"positive:{index}"
+        ),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "duration": round(end - start, 3),
+        "source_url": str(row.get("repost_source_url") or row.get("source_url") or ""),
+        "title": str(row.get("repost_title") or row.get("short_title") or row.get("title") or ""),
+        "views": _round_optional(row.get("repost_views")),
+        "similarity": _round_optional(row.get("transcript_similarity") or row.get("confidence")),
+    }
+
+
+def _final_moment_sample(moment: Mapping[str, Any], index: int) -> dict[str, Any]:
+    return {
+        "candidate_id": _base_candidate_id(str(moment.get("candidate_id") or f"final:{index}")),
+        "stage": "final_moments",
+        "source": str(moment.get("source") or ""),
+        "start": _round_optional(moment.get("start_time") if moment.get("start_time") is not None else moment.get("start")),
+        "end": _round_optional(moment.get("end_time") if moment.get("end_time") is not None else moment.get("end")),
+        "final_moment_index": index,
+    }
+
+
+def _best_positive_stage_match(
+    positive: Mapping[str, Any],
+    samples: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    best: dict[str, Any] | None = None
+    best_ratio = 0.0
+    pos_start = _safe_float(positive.get("start"))
+    pos_end = _safe_float(positive.get("end"))
+    if pos_start is None or pos_end is None or pos_end <= pos_start:
+        return None
+    for sample in samples:
+        start = _safe_float(sample.get("start"))
+        end = _safe_float(sample.get("end"))
+        if start is None or end is None or end <= start:
+            continue
+        overlap = max(0.0, min(end, pos_end) - max(start, pos_start))
+        if overlap <= 0.0:
+            continue
+        candidate_duration = max(end - start, 0.001)
+        positive_duration = max(pos_end - pos_start, 0.001)
+        ratio = max(overlap / candidate_duration, overlap / positive_duration)
+        if ratio <= best_ratio:
+            continue
+        best_ratio = ratio
+        best = {
+            key: value
+            for key, value in sample.items()
+            if key
+            in {
+                "candidate_id",
+                "stage",
+                "source",
+                "start",
+                "end",
+                "score",
+                "model_score",
+                "heuristic_score",
+                "accepted",
+                "rank_score",
+                "pre_judge_rank",
+                "judge_scope_rank",
+                "judged_rank",
+                "judge_score",
+                "quality_accepted",
+                "has_judge_result",
+                "rejection_reasons",
+                "final_rank",
+                "final_moment_index",
+            }
+        }
+        best["overlap_ratio"] = round(ratio, 6)
+    return best
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _candidate_ids(candidates: Sequence[Candidate]) -> set[str]:
@@ -541,6 +856,7 @@ def _proposal_row_sample(row: Mapping[str, Any], *, stage: str) -> dict[str, Any
         "heuristic_score": _round_optional(row.get("heuristic_score")),
         "accepted": bool(row.get("accepted") is True),
         "rationale": list(row.get("rationale") or []),
+        "clip_type": _clip_type_from_row(row),
     }
 
 
@@ -587,6 +903,8 @@ def _merge_sample_identity(row: dict[str, Any], sample: Mapping[str, Any]) -> No
     row["end"] = row.get("end") if row.get("end") is not None else sample.get("end")
     if row.get("duration") is None and row.get("start") is not None and row.get("end") is not None:
         row["duration"] = _round_optional(float(row["end"]) - float(row["start"]))
+    if not row.get("clip_type") and sample.get("clip_type"):
+        row["clip_type"] = sample.get("clip_type")
 
 
 def _finalize_trace_row(row: dict[str, Any]) -> None:
@@ -698,6 +1016,7 @@ def _compact_trace_sample(row: Mapping[str, Any]) -> dict[str, Any]:
         "start": row.get("start"),
         "end": row.get("end"),
         "status": row.get("status"),
+        "clip_type": row.get("clip_type"),
         "dropped_stage": row.get("dropped_stage"),
         "drop_reason": row.get("drop_reason"),
         "proposal_score": row.get("proposal_score"),
@@ -803,6 +1122,44 @@ def _source_quality_breakdown(rows: Sequence[Mapping[str, Any]]) -> dict[str, di
         if _optional_float(row.get("judge_score"), 0.0) >= 7.0:
             bucket["high_judge"] += 1
     return dict(sorted(by_source.items()))
+
+
+def _clip_type_quality_breakdown(rows: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, int | float | None]]:
+    by_type: dict[str, dict[str, int | float | None]] = {}
+    for row in rows:
+        clip_type = str(row.get("clip_type") or "general")
+        bucket = by_type.setdefault(
+            clip_type,
+            {
+                "rows": 0,
+                "final_selected": 0,
+                "high_judge": 0,
+                "proposal_kept": 0,
+                "mean_proposal_score": None,
+            },
+        )
+        bucket["rows"] = int(bucket["rows"] or 0) + 1
+        if row.get("final_selected"):
+            bucket["final_selected"] = int(bucket["final_selected"] or 0) + 1
+        if _optional_float(row.get("judge_score"), 0.0) >= 7.0:
+            bucket["high_judge"] = int(bucket["high_judge"] or 0) + 1
+        if bool(row.get("proposal_accepted")):
+            bucket["proposal_kept"] = int(bucket["proposal_kept"] or 0) + 1
+    for clip_type, bucket in by_type.items():
+        scores = [
+            _optional_float(row.get("proposal_score"), 0.0)
+            for row in rows
+            if str(row.get("clip_type") or "general") == clip_type and row.get("proposal_score") is not None
+        ]
+        bucket["mean_proposal_score"] = round(sum(scores) / len(scores), 6) if scores else None
+    return dict(sorted(by_type.items()))
+
+
+def _clip_type_from_row(row: Mapping[str, Any]) -> str:
+    features = row.get("features")
+    if isinstance(features, Mapping):
+        return clip_taxonomy.best_type_from_feature_row(features)
+    return str(row.get("clip_type") or "general")
 
 
 def _ratio(numerator: int, denominator: int) -> float | None:

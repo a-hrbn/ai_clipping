@@ -221,18 +221,26 @@ def _is_positive_feedback_row(row: dict) -> bool:
 
 def _feedback_row_score(row: dict) -> float:
     rating = str(row.get("feedback_rating") or "").strip().lower()
+    if rating == "excellent":
+        return 1.0
     if rating == "good":
         return 1.0
-    if rating == "medium":
+    if rating in {"maybe", "medium"}:
         return 0.55
-    if rating == "bad":
+    if rating in {"bad", "boundary_bad"}:
         return 0.0
     return 0.5
 
 
 def _feedback_row_labels(row: dict) -> list[str]:
     rating = str(row.get("feedback_rating") or "").strip().lower()
-    return [rating] if rating in {"good", "medium", "bad"} else []
+    labels = [rating] if rating in {"excellent", "good", "maybe", "medium", "bad", "boundary_bad"} else []
+    labels.extend(
+        str(tag).strip().lower()
+        for tag in row.get("feedback_tags") or []
+        if str(tag).strip()
+    )
+    return labels
 
 
 def _extract_feedback_texts(row: dict, transcripts_dir: pathlib.Path) -> dict[str, str] | None:

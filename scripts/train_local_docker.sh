@@ -11,6 +11,7 @@ TMP_DIR="$REPO_ROOT/backend/tmp"
 PREWARMED_MODEL_DIR="${AI_CLIPPING_LOCAL_PREWARMED_MODEL_DIR:-$REPO_ROOT/tmp/prewarmed_sentence_transformers_local}"
 NVIDIA_DRIVER_CAPABILITIES_VALUE="${NVIDIA_DRIVER_CAPABILITIES:-compute,utility,video}"
 ENTRYPOINT_OVERRIDE="${AI_CLIPPING_LOCAL_TRAIN_ENTRYPOINT:-}"
+CONTAINER_USER="${AI_CLIPPING_LOCAL_TRAIN_USER:-$(id -u):$(id -g)}"
 
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "Missing env file: $ENV_FILE" >&2
@@ -30,7 +31,10 @@ DOCKER_ARGS=(
   --ipc=host
   --shm-size=16g
   --add-host=host.docker.internal:host-gateway
+  --user "$CONTAINER_USER"
   --env-file "$ENV_FILE"
+  -e "HOME=/app/backend/tmp"
+  -e "MPLCONFIGDIR=/app/backend/tmp/matplotlib"
   -e "OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}"
   -e "NVIDIA_DRIVER_CAPABILITIES=${NVIDIA_DRIVER_CAPABILITIES_VALUE}"
   -v "$ARTIFACT_DIR:/app/backend/ml/artifacts"

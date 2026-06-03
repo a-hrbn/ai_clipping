@@ -1,5 +1,1582 @@
 # Task Plan
 
+## 2026-06-01 Plan: OpusClips-Niveau Clipfindung (Deep-Dive-Umsetzung)
+
+**Kontext / Befund aus dem Deep Dive:**
+Die Architektur ist gut. Der Engpass ist NICHT die Pipeline, sondern (a) **Messbarkeit**
+(gesamter 6-Stufen-Funnel wird gegen 3 Positiv-Fenster in 1 VOD getunt → `final_ranked 0/3`),
+(b) **Datenmenge/Outcome-Signal**, (c) **Judge-Rubrik** passt nur halb zu Gaming-Reaction-Content.
+Architektur-Hygiene (Gate entschärfen, Patch-Wildwuchs konsolidieren) bringt **Tuning-Stabilität,
+nicht Recall** — sie ist Vorbereitung für die Tuning-Phase, kein Ersatz dafür.
+Reihenfolge der Phasen = Priorität. Phase 0 ist blockierend für alles andere.
+
+**Leitprinzip:** Keine weitere Gate/Judge/Ranker-Schwelle anfassen, bis Phase 0 steht.
+Jeder Tweak gegen n=3 verschiebt nur das Versagen (Beleg: Bottleneck-Log).
+
+### Phase 0 — Messbarkeit herstellen (BLOCKIEREND, zuerst)
+Ziel: belastbarer Holdout, gegen den überhaupt getunt werden kann.
+
+- [ ] Holdout-VOD-Set definieren: 10–20 VODs, die NIE im Training/Proposal-Training waren
+      (gegen `cross_platform_vods` aus `jynxzi_proposal_training_summary.json` und die
+      Train-VOD-Liste prüfen, Disjunktheit hart erzwingen).
+- [x] Aktuellste 10 VODs automatisch als `recent_vod_holdout_policy` exportieren und in
+      Ranker- sowie Proposal-Training hart ausschließen.
+- [x] Skript ergänzen, das alle Holdout-VODs oracle-frei durch die Serving-Pipeline laufen lässt
+      und anschließend den Stage-Recall aggregiert auswertet.
+- [x] Live-Progress im Holdout-Runner ergänzen: pro VOD aktuelle Pipeline-Stufe,
+      Prozent, Dauer und finales Eval sichtbar machen.
+- [ ] Für jede Holdout-VOD alle Clipper-Reposts mappen (`match_cross_platform_transcripts.py`
+      + `match_cross_platform_audio_fingerprints.py`), Cache-Stolperstein beachten:
+      Output-Dateien `jynxzi_cross_platform_fingerprint_*` wegmoven erzwingt Re-Match
+      (`--refresh-reposts` ist unzuverlässig, Signatur ist input-basiert).
+- [ ] `evaluate_serving_recall_holdout.py` über das ganze Set laufen lassen; Aggregat-Recall
+      pro Stage (nicht n=3) als Baseline festschreiben → `jynxzi_serving_recall_holdout_eval.json`.
+- [ ] Akzeptanz: ≥ ~40–60 Positiv-Fenster über ≥10 VODs; Stage-Recall-Kurve hat sichtbare
+      Varianz-Reserve (kein 0/3-Rauschen mehr). Baseline-Zahlen in Review-Notes dokumentieren.
+
+### Phase 1 — Daten: Match-Rate & saubere Positives konsolidieren
+Ziel: den bereits identifizierten Haupt-Hebel (139→521 Positives) verstetigen.
+
+- [ ] Prüfen, ob der letzte Retrain die 521 sauberen Fenster wirklich konsumiert hat
+      (Train-Timestamp vs. Cleanup-Lauf 2026-05-29 16:49); falls nein, Retrain auslösen.
+- [ ] Rest-Schönheitsfehler abarbeiten: 83 Reposts noch Multi-VOD (Cross-VOD-Filter greift nur
+      bei Chunk-Matches, nicht zwischen chunk vs. single/audio) — Filter auf alle Match-Kinds
+      ausweiten (knüpft an `_filter_multi_window_matches_to_top_vod`).
+- [ ] `export_serving_hard_negatives.py` über das erweiterte VOD-Set neu erzeugen
+      (aktuell nur 40 Hard-Negs aus 2 VODs → mit mehr VODs skalieren).
+- [ ] Akzeptanz: Match-Rate ≥90% gehalten, token_recall-Median ≥0.78, Hard-Negs aus ≥5 VODs.
+
+### Phase 2 — Outcome/Views als Ranking-Target (statt nur sample_weight)
+Ziel: von „was der Clipper genommen hätte" → „was performt" (OpusClips-Kante).
+
+- [ ] `import_yt_retention.py` / View-Daten-Abdeckung prüfen (Memo: 152/153 Positives haben Views).
+- [x] In `train_vod_ranker.py` View/Retention-Tier als **Ziel-Signal** (graded relevance für den
+      LightGBM-Ranker), nicht nur als `sample_weight` aus `outcome_view_weighting.py`, evaluieren.
+- [ ] `build_outcome_holdout_dataset.py` als Outcome-Eval gegen das Phase-0-Holdout fahren.
+- [ ] Akzeptanz: Ranking-Metrik (NDCG@5 / MRR) gegen Outcome-Labels verbessert sich ggü.
+      Clipper-Binary-Labels, ohne Recall auf Phase-0-Holdout zu verschlechtern.
+
+### Phase 3 — Judge-Rubrik few-shot gegen echte Jynxzi-Clips kalibrieren
+Ziel: Judge bewertet Gaming-Reaction-Content korrekt (Memo: aktuell 4.5–5.8 / clarity 0.4–0.5).
+
+- [ ] 5–10 reale Clipper-Picks (verschiedene Typen: Clutch, Rage, Funny, Chat-Igniter) als
+      Few-Shot-Anker in den Judge-Prompt (`services/clip_judge.py`, `_AXIS_NAMES`/Prompt-Block).
+- [ ] Prüfen, ob Achsen-Gewichte (clarity 0.18 / payoff 0.28 / narrative 0.12) zu Reaction-Content
+      passen; ggf. narrative_completeness abwerten, reaction/payoff aufwerten.
+- [ ] Determinismus: Multi-Sampling (n>1, Median) statt einzelnem temp=0-Call gegen Run-zu-Run-
+      Varianz testen (Memo: derselbe Moment narr 0.6 vs 0.4).
+- [ ] Akzeptanz: gejudgte echte Positives erreichen Median judge_score ≥6.0 und überstehen das
+      Gate reproduzierbar über 3 Wiederholungsläufe.
+
+### Phase 4 — Chat-Velocity als Primärsignal
+Ziel: das stärkste billige Streamer-Clip-Signal aus dem vergrabenen Ranker-Feature herausheben.
+
+- [x] Chat-Spike-Rate (`chat_analyzer.py`) als eigenen Candidate-Generator/Prior verdrahten,
+      analog zu `peak_detector` (Chat-EMA-Peaks → Kandidatenfenster).
+- [ ] Gewichtung im Ranker/Proposal-Prior erhöhen; gegen Phase-0-Holdout messen.
+- [ ] Akzeptanz: Stage-Recall „peak/semantic→merged" steigt für chat-getriebene Positives.
+
+### Architektur-Hygiene (parallel möglich, KEIN Recall-Hebel — Stabilität/Wartbarkeit)
+- [x] Serving-Quality-Gate von harten Schwellen auf Soft-Blend umstellen
+      (`serving_quality_min_*` in `config.py` / `selector.py`) — harte Cuts auf nicht-
+      deterministischen Judge-Subscores sind per Konstruktion instabil.
+- [ ] Proposal-Scorer als reinen High-Recall-Pre-Filter retunen (Durchsatz-Job, nicht Präzision;
+      Präzision macht der Ranker). `proposal_min_score`/`proposal_shortlist_top_k` entsprechend.
+- [ ] Die 5 Preserve/Reserve/Bypass-Pfade konsolidieren (`_promote_cross_platform_recall_candidates`,
+      `_cross_platform_recall_preserve_ids`, `_add_context_variant_candidates`,
+      `_build_judge_recall_reserved_order`, `proposal_preserve_heuristic_candidates`) → ein
+      einziger „known-good protection"-Pfad.
+- [ ] Akzeptanz: gleiche oder bessere Phase-0-Holdout-Recall bei deutlich weniger Code-Pfaden;
+      bestehende Tests grün.
+
+### Querschnitt / Done-Kriterien (gilt für jede Phase)
+- [ ] Jede Änderung gegen das **Phase-0-Holdout** messen, nicht gegen n=3.
+- [ ] Tests grün (`PYTHONPATH=backend pytest backend/tests -q`), `git diff --check`.
+- [ ] Nach Backend-Änderungen Graphify-Rebuild laufen lassen.
+- [ ] Nach jeder Phase: Review-Notes hier ergänzen (Baseline → Ergebnis, Zahlen).
+
+### Review Notes
+- 2026-06-01: View-Tier ist jetzt ein echtes Ranking-Ziel: `rank_target` wird aus
+  Cross-Platform/View-Signalen in Trainingszeilen übernommen, im Ranker vor
+  `ordinal_label` verwendet und in Eval-/Ranker-Berichten als
+  `by_outcome_view_tier` / `by_rank_target` ausgewiesen.
+- 2026-06-01: `chat_velocity` ist als eigener Candidate-Generator im
+  semantischen Candidate-Pool verdrahtet, bekommt Reaction-Bucket/Prior und
+  kann dadurch vor Proposal/Ranker als primäres Streamer-Signal auftauchen.
+- 2026-06-01: Oracle-Cross-Platform-Feature-Boosts sind im normalen Serving
+  deaktiviert (`serving_cross_platform_feature_boosts_enabled=False`). Bekannte
+  Positives bleiben damit Trainings-/Eval-Signal, aber pushen Produkt-Runs
+  nicht mehr automatisch hoch.
+- 2026-06-01: Ein zentraler label-freier
+  `high_recall_protection.oracle_free_recall_score` speist Judge-Reserve und
+  Quality-Gate-Audit. Cross-Platform-Targets sind darin bewusst ausgeschlossen.
+  Das ist die erste Konsolidierungsstufe; die alten Preserve-/Reserve-Pfade
+  sind noch nicht vollständig entfernt.
+- 2026-06-01: Judge-Prompt hat Jynxzi-spezifische Kalibrierungsanker
+  (Clutch/Rage/Fanmail-Unboxing/Chat-Igniter vs. schwache generische Takes),
+  ohne konkrete bekannte Positives als Runtime-Leak einzubauen. Der explizite
+  5–10-Beispiel-Few-Shot-Block bleibt offen, bis ein sauberes Holdout-/Anchor-
+  Set festgelegt ist.
+- 2026-06-01: Verifikation bisher: fokussierte Tests `93 passed`, Pipeline-
+  Oracle-/Reserve-Tests `2 passed`, View-Target-Row-Regressionscheck
+  `1 passed`, `py_compile` und scoped `git diff --check` grün.
+  Graphify-Rebuild: `3827` Nodes, `10434` Edges, `106` Communities.
+  Phase-0-Holdout über 10–20 VODs ist weiterhin offen und bleibt die
+  blockierende Mess-Aufgabe vor weiteren Schwellentweaks.
+- 2026-06-01: Die aktuellsten 10 VODs werden jetzt aus
+  `jynxzi_twitch_vod_inventory.jsonl` als
+  `jynxzi_recent_vod_holdout_policy.jsonl` exportiert und mit dem bestehenden
+  Outcome-Holdout zu `jynxzi_training_holdout_policy_rows.jsonl` gemerged.
+  Der aktuelle Snapshot enthält die VODs `2781590654`, `2780984594`,
+  `2779787387`, `2779061928`, `2778362653`, `2777621798`, `2776799704`,
+  `2776013057`, `2775214183`, `2774602304`; 66 Cross-Platform-Rows auf diesen
+  VODs werden dadurch vom Ranker-/Proposal-Training ausgeschlossen.
+- 2026-06-01: Ranker-Training nutzt die gemergte Holdout-Policy statt nur des
+  Outcome-Holdouts. Proposal-Training filtert dieselben Holdout-VODs vor
+  Materialisierung, Row-Building und Debug-Row-Collection. Verification:
+  `py_compile`, `bash -n scripts/train_proposal_local_docker.sh`, fokussierte
+  Tests `12 passed`, scoped `git diff --check`, Graphify-Rebuild
+  (`3853` Nodes, `10511` Edges, `104` Communities). Die Holdout-Policy-Builder
+  schreiben Dateien nur bei Inhaltsänderung, damit unveränderte Runs nicht
+  allein durch mtime neu trainieren. `zsh -n` konnte lokal nicht laufen, weil
+  `zsh` in der Umgebung nicht installiert ist.
+- 2026-06-01: `ml.run_serving_recall_holdout` und
+  `scripts/run_serving_recall_holdout.sh` orchestrieren jetzt den Phase-0-Test:
+  Holdout-VODs aus der Policy lesen, pro VOD `pipeline_worker.py` oracle-frei
+  starten (`SERVING_CROSS_PLATFORM_RECALL_ENABLED=false`,
+  `SERVING_CROSS_PLATFORM_FEATURE_BOOSTS_ENABLED=false`) und danach
+  `evaluate_serving_recall_holdout.evaluate_holdout` für aggregierten
+  Stage-Recall schreiben. Verification: `py_compile`, `bash -n`, neue Tests
+  `3 passed`, Dry-Run über 2 Holdout-VODs, Graphify-Rebuild (`3869` Nodes,
+  `10556` Edges, `103` Communities).
+- 2026-06-01: Holdout-Runner gibt jetzt Live-Progress als strukturierte
+  stdout-Events aus: `holdout_run_started`, `holdout_vod_started`,
+  `holdout_vod_progress` mit `stage_label`/`progress_pct`/elapsed time,
+  `holdout_vod_done`, `holdout_eval_started`, `holdout_eval_done` und
+  `holdout_run_done`. Verification: `py_compile`, `bash -n`, neue Tests
+  `4 passed`, Dry-Run zeigt die Progress-Events, Graphify-Rebuild (`3873`
+  Nodes, `10567` Edges, `102` Communities).
+
+
+## 2026-05-31 Plan: Cross-VOD Match Cleanup Across All Match Kinds
+
+- [x] Inspect the existing transcript-match cleanup path and identify why weak second-VOD labels survive.
+- [x] Extend per-repost dominant-VOD filtering across all accepted match kinds, not only chunk matches.
+- [x] Preserve strong secondary-VOD matches so true multi-stream recaps are not removed.
+- [x] Add regression tests for single-window plus chunk cross-VOD false positives.
+- [x] Run focused tests, syntax checks, diff checks, rebuild Graphify, and document the result.
+
+### Review Notes
+
+- `_filter_multi_window_matches_to_top_vod` now computes the dominant VOD from
+  every accepted match kind for the repost, including `single_window`,
+  `multi_window_chunk`, merged windows, and audio fallback rows.
+- Weak non-dominant VOD matches are removed when their token recall is below
+  `0.55`. Strong secondary matches stay intact, preserving genuine multi-VOD
+  recap evidence.
+- Added regression coverage for the exact failure mode: a strong single-window
+  match on the true VOD plus a weak chunk match on a second VOD now emits only
+  the true VOD row.
+- Verification passed: focused transcript matcher tests, Python compile checks,
+  scoped `git diff --check`, and Graphify rebuild (`3808` nodes, `10375`
+  edges, `105` communities).
+
+
+## 2026-05-30 Plan: Fix Local Training Cache Permissions
+
+- [x] Repair existing root-owned training cache, VOD feature cache, and artifact files.
+- [x] Run local train containers as the host user by default so new cache files are writable.
+- [x] Verify no root-owned files remain in the affected cache roots.
+- [x] Smoke-test `train_vod_ranker.py` far enough to prove the previous `PermissionError` is gone.
+- [x] Rebuild Graphify after script/code changes and document the result.
+
+
+### Review Notes
+
+- Existing root-owned files under `backend/tmp/training_runs/jynxzi_resume`,
+  `backend/tmp/vod_feature_cache`, and `backend/ml/artifacts` were reassigned
+  to the host user via the local training Docker image. A follow-up ownership
+  scan returned no remaining non-user-owned files in those roots.
+- `scripts/train_local_docker.sh` now runs the training container as the host
+  UID/GID by default using `--user`, with `AI_CLIPPING_LOCAL_TRAIN_USER` left
+  as an override. `HOME` and `MPLCONFIGDIR` point at writable paths under
+  `/app/backend/tmp`.
+- `bash -n scripts/train_local_docker.sh` passed and `git diff --check` passed
+  for the touched files.
+- A 140s isolated `train_vod_ranker.py` smoke run reached later VOD phases
+  without `PermissionError` or `Permission denied`. It timed out intentionally
+  while continuing work, so the previous checkpoint write failure is gone.
+- Graphify rebuilt successfully: `3803` nodes, `10361` edges, `108`
+  communities.
+
+
+## 2026-05-29 Plan: Faster Ranker Label Phases
+
+- [x] Raise the default local ranker training VOD phase parallelism.
+- [x] Make extended window-scoped groups use `TRAINING_LABEL_WORKERS` for labels inside a group.
+- [x] Preserve deterministic row ordering and existing unavailable-VOD skip behavior.
+- [x] Update focused tests for runtime defaults and scoped-group label parallelism.
+- [x] Run verification, rebuild Graphify, and document the result.
+
+### Review Notes
+
+- `backend/ml/local_train.py` now defaults to `TRAINING_VOD_WORKERS=2` on
+  machines with at least `12` CPUs, while keeping `1` VOD worker on smaller
+  machines. Explicit `--training-vod-workers` still overrides the default.
+- Extended window-scoped VOD label phases now log and use the resolved
+  `TRAINING_LABEL_WORKERS` value. Labels inside the same scoped group are
+  processed in parallel when a group has multiple labels, then emitted in the
+  original label order for deterministic training rows.
+- Existing unavailable-VOD behavior stays scoped to source/context loading:
+  unavailable VOD errors still skip the remaining groups for that VOD.
+- Verification passed for changed training code: `py_compile`, focused
+  `test_local_train.py` and `test_build_twitch_training_dataset.py`
+  (`85 passed`), scoped `git diff --check`, and Graphify rebuild
+  (`3803` nodes, `10361` edges, `108` communities).
+- A broader `test_train_vod_ranker.py` + `test_pipeline_integration.py` run
+  exposed an unrelated existing failure in pipeline tests:
+  `services.clipper.cut_review_clips` missing. The ranker-training focused
+  tests passed.
+
+
+## 2026-05-29 Plan: Multi-Window Positive Cleanup
+
+- [x] Add per-repost cleanup for accepted transcript matches before rows are emitted.
+- [x] Restrict multi-window chunk matches from one repost to the top-confidence VOD.
+- [x] Merge accepted windows less than `30s` apart inside the same repost/VOD.
+- [x] Add focused tests for cross-VOD chunk filtering and near-duplicate merging.
+- [x] Run focused verification, rebuild Graphify, and document the outcome.
+
+### Review Notes
+
+- Transcript cross-platform matching now cleans accepted rows per repost before
+  writing training positives.
+- Multi-window chunk matches from one repost are restricted to the dominant VOD
+  by aggregate chunk confidence, preventing one Short from creating positives
+  across unrelated VODs.
+- Accepted windows less than `30s` apart on the same VOD are merged into one
+  `multi_window_merged` row, preserving the strongest confidence fields while
+  removing duplicate label weight.
+- Diagnostics now report `accepted_rows_before_cleanup`,
+  `multi_window_cross_vod_filtered`, and
+  `multi_window_near_duplicate_merges`.
+- Verification passed: `py_compile`, `56` focused transcript/cross-platform
+  pytest cases, scoped `git diff --check`, and Graphify rebuild via the
+  uv-managed Graphify interpreter (`3802` nodes, `10358` edges,
+  `107` communities).
+- `scripts/train_local_docker.sh` rebuilds the local-train Docker image at
+  startup, so the cleanup is picked up by the next ranker training run. Any
+  already-running training container still uses the rows/code it started with.
+
+## 2026-05-28 Plan: Outcome Views And Serving Hard Negatives
+
+- [x] Inspect current Cross-Platform positive rows, sample weights, and hard-negative export paths.
+- [x] Centralize repost view-count tiers and sample weights for Cross-Platform positives.
+- [x] Export hard negatives from high-ranked Serving candidates that miss known positive windows.
+- [x] Wire the new hard-negative artifact into the local ranker training flow.
+- [x] Add focused tests, run artifact smoke checks, rebuild Graphify, and document results.
+
+### Review Notes
+
+- Added view-count tiering in `backend/ml/outcome_view_weighting.py`.
+  Cross-Platform positives now carry `outcome_view_tier`,
+  `outcome_view_sample_weight`, `outcome_view_weight_version`, and stronger
+  rank targets for high-view reposts.
+- Transcript and audio Cross-Platform matchers now annotate matched rows with
+  view-tier weights at creation time, and `train_vod_ranker.py` re-annotates
+  older Cross-Platform rows during training preparation.
+- Added `backend/ml/export_serving_hard_negatives.py`. It mines recent serving
+  debug jobs for high-ranked organic candidates that do not overlap known
+  Cross-Platform positives, skips selected or strongly judged candidates, and
+  writes `jynxzi_serving_hard_negative_train_rows.jsonl`.
+- Wired serving hard negatives into `train_jynxzi_vod.sh`,
+  `train_vod_ranker.py`, and the workflow-state/dependency checks. This path is
+  independent of manual user-label/gold hard negatives.
+- Smoke export on current storage produced `40` serving hard-negative rows from
+  `2` VODs, with source mix `dense_inventory=22`, `peak=12`,
+  `narrative_reveal=3`, `quote=1`, `tension_build=2`.
+- Verification passed: Python compile checks, `52` focused pytest cases,
+  scoped `git diff --check`, and Graphify rebuild
+  (`3743` nodes, `10143` edges, `109` communities).
+
+## 2026-05-28 Plan: Serving-Recall Holdout Measurement
+
+- [x] Persist the new OpusClips-gap plan and define the first measurable step.
+- [x] Add an oracle-free serving-recall holdout evaluator for existing debug jobs.
+- [x] Aggregate known cross-platform positives by stage without serving-time injection.
+- [x] Run focused tests and a local evaluation over current storage jobs.
+- [x] Rebuild Graphify after backend code edits and document results.
+
+### Review Notes
+
+- Added `backend/ml/evaluate_serving_recall_holdout.py`, a strict holdout
+  evaluator for existing serving debug jobs.
+- The evaluator only includes jobs whose debug summary says positives were
+  loaded for diagnostics while serving recall was disabled, and whose
+  `candidate_trace.jsonl` has no `cross_platform_recall_target` or
+  `proposal_recall_target` markers.
+- It dedupes by default to the newest valid run per VOD, so repeated test runs
+  of the same VOD do not inflate the aggregate.
+- Current command:
+  `backend/.venv/bin/python backend/ml/evaluate_serving_recall_holdout.py --profile jynxzi --storage-dir backend/tmp/storage --positive-rows backend/ml/artifacts/jynxzi_cross_platform_fingerprint_rows.jsonl --output backend/ml/artifacts/jynxzi_serving_recall_holdout_eval.json`
+- Current local result used one valid oracle-free VOD run:
+  job `61acfc25-bc9c-496e-97cd-019507f715a4`, VOD `2768134699`,
+  `3` positive windows.
+- Serving-recall result: semantic `3/3`, dense `3/3`, proposal input `3/3`,
+  proposal kept `1/3`, ranked pre-Judge `2/3`, pre-Judge top20 `0/3`,
+  pre-Judge top40 `0/3`, pre-Judge top80 `1/3`, judge scope `1/3`,
+  final moments `0/3`.
+- Verification: `14` focused backend tests passed, `git diff --check` passed,
+  and Graphify rebuilt to `3711` nodes, `10058` edges, `105` communities.
+
+## 2026-05-28 Plan: Frontend Candidate Labeling Loop
+
+- [ ] Inspect existing feedback models, storage, API routes, and frontend clip preview flow.
+- [ ] Expose reviewable pipeline candidates with preview URLs and enough context for labeling.
+- [ ] Add frontend labeling controls for excellent/good/maybe/bad/boundary_bad plus reason tags.
+- [ ] Persist labels through the existing feedback/training export path.
+- [ ] Add focused backend/frontend tests or type checks, rebuild Graphify, and verify the app.
+
+## 2026-05-28 Plan: Analyze Latest Job After Variant Preservation
+
+- [x] Identify newest completed debug-backed job and VOD.
+- [x] Inspect funnel, Proposal, Ranker, Judge, Quality Gate, and final clips.
+- [x] Compare known cross-platform positives against each pipeline stage.
+- [x] Summarize whether the new context-variant preservation improved recall.
+- [x] Document remaining bottleneck and next action.
+
+### Review Notes
+
+- Latest completed debug-backed job is
+  `30916b50-8466-48c2-a9b9-cb0d0af03d7f` for
+  `https://www.twitch.tv/videos/2768134699`.
+- Funnel: `5000` dense inventory, `533` Proposal inputs, `240`
+  Proposal-kept, `275` ranked pre-Judge, `80` judged, `13` judged
+  quality-kept, `12` final moments.
+- The new context-variant preservation is active and added `96` candidates.
+  Known-positive recall improved at Proposal input from the previous `2/3`
+  to `3/3`.
+- Known-positive recall still fails after that: Proposal-kept `1/3`,
+  ranked-pre-Judge `2/3`, Judge scope `1/3`, final `0/3`.
+- The World-Cup positive now has a full-context `narrative_reveal`
+  Proposal-input candidate, but it is still rejected by Proposal
+  (`score=0.383283`). The short dense variant is ranked only `272`.
+- The Wholesome Fanmail positive now has a `quote` Proposal-input candidate,
+  but it is rejected by Proposal (`score=0.404498`).
+- The Darth/Funko positive reaches Proposal-kept and Judge scope. The judged
+  variant scores only `5.8` and fails `judge_score_below_min` plus
+  `standalone_clarity_below_min`; the better full-overlap variant remains
+  unjudged.
+- Main bottleneck has moved from missing Proposal input to Proposal scoring
+  and Judge-scope variant selection. Semantic/quote context candidates need a
+  dedicated reserve path or ranking boost before the Judge.
+
+## 2026-05-28 Plan: Check Clip Context Understanding Status
+
+- [x] Read project lessons and Graphify report for current architecture context.
+- [x] Inspect pipeline stages for ASR, chat, visual features, VLM/Judge, and context memory.
+- [x] Verify latest debug artifacts for actual Judge behavior.
+- [x] Summarize implemented versus missing clip-understanding capability.
+
+### Review Notes
+
+- The serving pipeline already combines transcript, audio, visual, chat,
+  semantic/context, Proposal/Ranker, and LLM Judge signals.
+- The latest debug-backed job `89bc39b1-b472-46c2-bf45-0e0b01c6528d` judged
+  `80/80` candidates with Gemini multimodal and wrote context summaries plus
+  Judge reasons into `final_moments.json`.
+- The current implementation is still primarily a ranking/judging system. It
+  does not yet emit a dedicated structured clip-understanding artifact with
+  timestamped event timeline, detected visible actions, transcript-grounded
+  cause/effect, uncertainty, and evidence spans for every final clip.
+
+## 2026-05-28 Plan: Preserve Best Context Variants Through Judge
+
+- [x] Add context-variant preservation during candidate merge/normalization.
+- [x] Add Proposal input context-variant enrichment so semantic setup windows are not replaced by short dense windows.
+- [x] Reweight Judge reserve toward context completeness, setup, payoff, and dynamic pattern fit.
+- [x] Add focused tests for overlap-region variant preservation and judge reserve scoring.
+- [x] Run focused backend tests, syntax checks, Graphify rebuild, and restart backend.
+
+### Review Notes
+
+- `merge_prioritized_candidates` can now preserve stronger setup/context
+  variants that overlap an existing dense or peak candidate, instead of always
+  dropping them as duplicates.
+- Proposal input construction now adds label-free context variants from
+  semantic, dense, and dense-inventory candidates before Proposal scoring.
+  Offline replay on job `89bc39b1-b472-46c2-bf45-0e0b01c6528d` showed the
+  previously lost World-Cup narrative setup and Wholesome quote variants being
+  added to Proposal input.
+- Judge recall reserve now gives more weight to context completeness, setup,
+  payoff, and dynamic context-pattern fit, so context-complete variants are
+  more likely to reach the Judge shortlist.
+- Verification: `py_compile` passed locally and inside the rebuilt backend
+  container; focused backend tests passed (`80 passed`); `git diff --check`
+  passed; Graphify rebuilt (`3666` nodes, `9936` edges, `103` communities);
+  backend container rebuilt/restarted and is healthy.
+
+## 2026-05-28 Plan: Analyze Latest Job After Context-Primary Changes
+
+- [x] Identify newest completed debug-backed job.
+- [x] Inspect funnel, judge stage, quality gate, and final moments.
+- [x] Compare known cross-platform positives against each pipeline stage.
+- [x] Check whether the new context-primary features affected Proposal/Ranker behavior.
+- [x] Summarize the remaining bottleneck and next concrete step.
+
+### Review Notes
+
+- Latest completed debug-backed job is
+  `89bc39b1-b472-46c2-bf45-0e0b01c6528d` for
+  `https://www.twitch.tv/videos/2768134699`.
+- Funnel: `5000` dense inventory, `414` Proposal inputs, `240`
+  Proposal-kept, `284` ranked pre-Judge, `80` judged, `10` judged
+  quality-kept, `8` final moments. Gemini judged all `80` candidates in
+  `189.886s`.
+- Context-primary serving logic is active: final selected clips have high
+  context values (`context_completeness` median about `0.774`) and final
+  rationales include `context_primary`, `context_complete`,
+  `context_strong`, and context-pattern labels.
+- This VOD has `3` known cross-platform positives. Recall: semantic `3/3`,
+  dense `3/3`, merged `2/3`, proposal input `2/3`, proposal kept `1/3`,
+  judge scope `1/3`, judged quality-kept `0/3`, final moments `0/3`.
+- World Cup positive reached Proposal input with perfect overlap, but only as
+  a short `dense_window`; Proposal rejected it (`score=0.300935`) and Ranker
+  buried it at pre-Judge rank `282`. Its semantic full-context candidate
+  existed but was replaced before merge/proposal.
+- Darth/Funko positive improved materially: it reached Proposal-kept and
+  Judge scope, with context pattern `darth_his_shoes`, but the judged variant
+  scored only `5.8` and failed `judge_score_below_min` plus
+  `standalone_clarity_below_min`. A better longer overlapping variant was
+  unjudged but quality-accepted.
+- Wholesome fanmail positive existed in semantic/dense candidates but had
+  `0` merged/normalized/proposal matches, so it still dies in merge/proposal
+  input construction.
+- Main remaining bottleneck is not raw candidate generation. It is preserving
+  the best context-rich semantic/dense variants into merge/proposal and
+  sending the best setup-containing variant to the Judge.
+
+## 2026-05-28 Plan: Make Context Primary In Proposal/Ranker
+
+- [x] Add explicit context-understanding features shared by Proposal and Ranker.
+- [x] Reweight Proposal heuristic/serving floor so context completeness drives candidate survival.
+- [x] Reweight Ranker heuristic blend so context quality can promote candidates before Judge.
+- [x] Add tests proving context-rich low-hype candidates outrank context-poor high-hype candidates.
+- [x] Run focused tests, syntax checks, rebuild Graphify after backend edits, and restart backend.
+
+### Review Notes
+
+- Added shared context scoring in `backend/services/context_quality.py` and
+  exposed `setup_present_score`, `payoff_present_score`,
+  `context_strength_score`, and `context_completeness_score` on both Proposal
+  and Ranker feature paths.
+- Proposal scoring now treats context as the primary survival signal:
+  context-primary/completeness/strength/setup/payoff dominate the heuristic,
+  and contextual dense candidates get a stronger serving floor before the
+  trained proposal artifact is retrained.
+- Ranker serving now has a context-primary rerank stage before the existing
+  boundary/hook reranker. Context-rich candidates receive explicit
+  `context_primary_boost` / `context_primary_signal`; high-hype candidates with
+  missing context receive `context_missing_penalty`.
+- Proposal training feature defaults now include the new context fields, so the
+  next proposal retrain can learn them directly instead of relying only on the
+  serving heuristic.
+- Focused verification passed: changed-file `py_compile`, `88` backend tests
+  across proposal/ranker/training/feature/pipeline/recall modules, and
+  `git diff --check`.
+- Offline replay on the latest debug job shows the previously buried
+  Darth/Funko context-positive candidate now gets strong context signals
+  (`context_completeness=0.848833`, `context_strength=0.745556`) and a ranker
+  score of `17.278` with `context_primary` rationales.
+- Graphify was rebuilt with the local Graphify interpreter:
+  `3648` nodes, `9875` edges, `102` communities.
+- Backend image was rebuilt and restarted; `docker compose ps backend` reports
+  `healthy`, `/api/status` responds, and the running container exposes the new
+  context feature fields.
+
+## 2026-05-28 Plan: Analyze Latest Serving Job After Activation
+
+- [x] Identify the newest completed debug-backed serving job.
+- [x] Inspect funnel counts, Proposal, Ranker, Judge, quality gate, and final moments.
+- [x] Check embedded positive-window recall now that the new diagnostics are active.
+- [x] Summarize the dominant bottleneck and next concrete step.
+
+### Review Notes
+
+- Latest completed debug-backed job is
+  `546163cf-d290-44dc-9a34-a169913f420b` for
+  `https://www.twitch.tv/videos/2768134699`.
+- The latest implementation is active in this run: `positive_window_recall` is
+  embedded in `candidate_recall_report.json`, and Judge reserve used `16` slots
+  from pool `240`.
+- Funnel: `5000` dense inventory, `414` Proposal inputs, `240` Proposal-kept,
+  `281` ranked pre-Judge, `80` judged, `8` judged quality-kept, `7` final
+  clips. Gemini judged all `80` candidates in `115.667s`.
+- Post-Judge fallback is now correctly disabled: `selected_unjudged_candidates=0`
+  and `fallback_unjudged_candidates=0`. The system emitted `7` clips instead of
+  filling weak unjudged slots.
+- VOD has `3` known cross-platform positives. Recall: semantic `3/3`, dense
+  `3/3`, proposal input `2/3`, proposal kept `1/3`, real Judge scope `1/3`,
+  final moments `0/3`.
+- Per-positive bottlenecks: World-Cup/suite reached Judge with perfect overlap
+  but failed the quality gate on `standalone_clarity_below_min`; Darth
+  Maul/Funko survived Proposal but was buried at pre-Judge rank `190` and stayed
+  outside Judge scope; wholesome fanmail appeared in semantic/dense candidates
+  but disappeared before merge/Proposal.
+- Ranker remains the dominant bottleneck: high-Judge candidates had mean
+  pre-Judge rank `105.6`, and none were in top 40 before Judge. Final selected
+  clips had weak Proposal scores too (`mean=0.218885`), so Proposal is also not
+  confidently identifying winners.
+
+## 2026-05-28 Plan: Analyze Latest Serving Job
+
+- [x] Identify newest debug-backed serving job.
+- [x] Inspect funnel, Proposal, Judge, quality gate, and final selection.
+- [x] Compare known cross-platform positives for the VOD against pipeline stages.
+- [x] Summarize current bottleneck and next step.
+
+### Review Notes
+
+- Latest debug-backed job is `ec5492c7-732d-4f57-bfc9-d60b82606cef` for
+  `https://www.twitch.tv/videos/2768134699`, profile `jynxzi`.
+- This job was generated before the newest diagnostic/default changes were
+  active in the running backend: `candidate_recall_report.json` has no embedded
+  `positive_window_recall`, and Judge reserve still shows `10` slots from pool
+  `160` instead of the new defaults `16/240`.
+- Funnel: `5000` dense inventory, `416` Proposal inputs, `240` Proposal-kept,
+  `284` ranked pre-Judge, `80` judged, `7` judged quality-kept, `6` final
+  moments. Gemini judged `80/80` candidates in about `102.8s`.
+- Final selection correctly avoided unjudged fallback clips:
+  `selected_unjudged_candidates=0`, `fallback_unjudged_candidates=0`,
+  `missing_final_slots=5`.
+- VOD has `3` known cross-platform positives. Offline recall: Proposal input
+  `2/3`, Proposal-kept `1/3`, ranked pre-Judge `2/3`, Judge scope `1/3`,
+  final `0/3`.
+- Per-positive bottlenecks: World-Cup/suite had a perfect semantic candidate
+  but the merged/normalized surviving quote only overlapped `0.347`, was
+  Proposal-rejected and Judge-rejected. Darth Maul/Funko survived Proposal with
+  perfect overlap but was buried at pre-Judge rank `191`. Wholesome fanmail had
+  a semantic overlap but disappeared before merge/Proposal.
+- Main current issue: Proposal/merge still lose context variants, and the
+  Ranker still buries a known good unboxing positive far outside Judge scope.
+
+## 2026-05-28 Plan: Improve Candidate Recall Before Judge
+
+- [x] Add per-positive recall diagnostics to each serving job.
+- [x] Preserve more candidate-source variants through merge/normalization so short known-good windows are not replaced by poor neighbors.
+- [x] Improve Proposal/Judge scope recall without serving-time cross-platform boosts.
+- [x] Add tests for positive-window diagnostics and source-diverse merge behavior.
+- [x] Run focused backend verification.
+- [x] Rebuild Graphify after backend edits.
+- [x] Document result and remaining bottlenecks.
+
+### Review Notes
+
+- Serving now loads cross-platform positives in diagnostic-only mode when normal
+  serving recall boosts are disabled. These rows feed only
+  `candidate_recall_report.json` / `candidate_funnel_summary.json`; they do
+  not promote, boost, or preserve candidates during inference.
+- `positive_window_recall` now reports per known positive window which stages
+  matched it, the best candidate per stage, the last matched stage, and the
+  first missed stage. This should make future "where did the good clip die?"
+  checks much faster.
+- Candidate merge keeps primary heuristic candidates strict, but no longer lets
+  one supplemental source such as `quote` wipe out a different source variant
+  such as `narrative_reveal`. Normalization also preserves source-diverse
+  recall variants for semantic/dense sources while keeping generic
+  peak/reaction dedupe strict.
+- Judge recall reserve defaults now inspect a deeper pool and reserve more
+  diverse slots (`16` from top `240`) without using cross-platform positives as
+  serving-time labels.
+- Focused verification passed:
+  `backend/.venv/bin/python -m pytest backend/tests/test_candidate_generators.py backend/tests/test_candidate_normalizer.py backend/tests/test_candidate_recall_report.py backend/tests/test_pipeline_integration.py -q`
+  (`43 passed`), changed-file `py_compile`, and targeted `git diff --check`.
+- Graphify was rebuilt via the local Graphify interpreter after system
+  `python3` did not have the module installed: `3638` nodes, `9838` edges,
+  `103` communities.
+- Remaining bottleneck to measure with the next job: whether the known positives
+  now survive merge/normalization/proposal better, and whether the larger
+  generic Judge reserve moves more low-rank but strong candidates into the
+  actual Judge scope without label leakage.
+
+## 2026-05-28 Plan: Remove Final Unjudged Fallback Clips
+
+- [x] Change post-Judge final selection to use only judged candidates.
+- [x] Update diagnostics/tests so unjudged fallback counts stay at zero.
+- [x] Run focused backend verification.
+- [x] Rebuild Graphify after backend edits.
+- [x] Document result and caveats.
+
+### Review Notes
+
+- `selector.select_post_judge_final_candidates()` now only selects candidates
+  with `judge_result`; it returns fewer than `top_k` instead of filling final
+  slots with unjudged candidates.
+- Pipeline behavior is split intentionally: if the Judge actually evaluated
+  candidates, final selection is judge-only; if the Judge is disabled or
+  produced zero judged results, the existing pre-Judge diverse selection path
+  remains available for no-Judge/fallback operation.
+- Diagnostics now report `unjudged_fallback_enabled=false`,
+  `fallback_unjudged_candidates=0`, and `missing_final_slots` when judged clips
+  are fewer than the requested final count.
+- Focused verification passed:
+  `backend/.venv/bin/python -m pytest backend/tests/test_selector.py backend/tests/test_candidate_recall_report.py backend/tests/test_pipeline_integration.py`
+  (`32 passed`), `py_compile`, and targeted `git diff --check`.
+- Graphify was rebuilt after backend edits:
+  `3615` nodes, `9767` edges, `100` communities.
+
+## 2026-05-27 Plan: Analyze Latest Job
+
+- [x] Identify the newest job and its request/status.
+- [x] Inspect available debug artifacts and stage summaries.
+- [x] Check logs for failures or fallback behavior.
+- [x] Summarize bottleneck and next action.
+
+### Review Notes
+
+- Latest job is `341a9e9b-a1f3-49ce-84b7-767697404016` for
+  `https://www.twitch.tv/videos/2768134699`, profile `jynxzi`.
+- The job completed successfully after the SIGSEGV fix: status `done`,
+  progress `100`, `11` clip files generated and served through `/static/...`.
+- Funnel: `5000` dense inventory, `416` proposal input, `240` proposal kept,
+  `284` ranked pre-Judge, `80` judged, `7` judged quality-kept, `11` final
+  moments.
+- Gemini Judge ran successfully: `80` attempted/judged candidates in about
+  `162s`, no stage timeout and no fallback provider.
+- Final quality is still mixed: only `6/11` final clips had a real Judge score;
+  `5/11` were unjudged fallback candidates from ranks `71-77`.
+- Cross-platform recall for VOD `2768134699`: `3` known positive windows.
+  Recall reached `2/3` at proposal input/ranked pre-Judge, `1/3` at Judge
+  scope, and `0/3` final.
+  The known fanmail joke was kept but buried at pre-Judge rank `191`; the
+  unboxing/box positive died before Proposal input; the World Cup suite positive
+  reached Judge but was rejected with `judge_score=4.48`.
+- Current bottleneck is not a crash anymore. It is final selection still filling
+  with unjudged candidates plus weak promotion/evaluation of known viral windows.
+
+## 2026-05-27 Plan: Fix Pipeline Signal 11 Crash
+
+- [x] Identify the exact stage and native library involved in the latest
+  signal-11 serving crashes.
+- [x] Patch the pipeline to avoid the crashing native path instead of only
+  masking the subprocess exit.
+- [x] Verify the fix with focused tests and a direct backend/container check.
+- [x] Rebuild Graphify after backend code edits.
+- [x] Document the result and any remaining runtime caveats.
+
+### Review Notes
+
+- Latest failed jobs for `https://www.twitch.tv/videos/2768134699` exited from
+  signal 11 around `30%`, before normal debug artifacts were written.
+- `PYTHONFAULTHANDLER=1` reproduced the native crash in the isolated worker:
+  `transformers -> torch._dynamo -> triton/knobs.py`, triggered by lazy
+  SentenceTransformer loading from the semantic candidate path.
+- Transcript cache for the same VOD loaded successfully (`7507` segments), so
+  the crash was not Whisper/transcript generation.
+- `pipeline_worker.py` now preloads `services.semantic_candidates` before
+  importing `pipeline`, so Torch/Triton initializes before the TensorFlow/
+  DeepFace stack. The late preload inside `pipeline.py` was removed because it
+  still crashed after the CV stack had initialized.
+- `_pipeline_subprocess_env()` now sets `PYTHONFAULTHANDLER=1`,
+  `TORCHDYNAMO_DISABLE=1`, and `TORCH_COMPILE_DISABLE=1` for better native
+  diagnostics and to keep dynamic compile paths disabled in serving workers.
+- Verification passed: focused backend tests (`56` tests total across worker,
+  pipeline integration, jobs router, semantic candidates, context patterns),
+  Python compile checks, targeted `git diff --check`, Graphify rebuild, Docker
+  backend image rebuild/recreate, `/api/status`, and a direct container replay
+  of the old crash point (`worker_preload True`, `segments 7507`,
+  `semantic_candidates 14`) without SIGSEGV.
+
+## 2026-05-27 Plan: Disable Serving Cross-Platform Rescue
+
+- [x] Disable Cross-Platform-positive rescue/boosting in the live frontend
+  serving path by default.
+- [x] Update the real backend environment so the running container does not
+  keep the old behavior through `.env`.
+- [x] Keep Cross-Platform rows available for diagnostics/training/evaluation,
+  but not as a serving-time gate bypass.
+- [x] Add/adjust tests to lock the default behavior.
+- [x] Run focused verification and rebuild Graphify after backend code edits.
+
+### Review Notes
+
+- Serving Cross-Platform recall is now disabled by default in config and in the
+  live backend `.env` via `SERVING_CROSS_PLATFORM_RECALL_ENABLED=false`.
+- `_load_cross_platform_positive_windows` now defaults to disabled when the
+  setting is absent, so known repost positives cannot silently act as a
+  serving-time oracle.
+- Cross-Platform rows remain available for training, evaluation, diagnostics,
+  and offline recall reports.
+- Runtime verification in the rebuilt Docker backend returned
+  `status=disabled`, `enabled=false`, and `rows=0` for VOD `2768134699`.
+- Verification passed: focused Cross-Platform recall tests (`4 passed`),
+  `backend/tests/test_pipeline_integration.py` (`19 passed`),
+  `backend/tests/test_clip_judge.py backend/tests/test_selector.py`
+  (`29 passed`), Python compile, and `git diff --check`.
+- The combined pytest process for those three files still has pre-existing
+  module-stub isolation issues when `test_pipeline_integration.py` runs before
+  clip-judge tests, so the suites were verified separately.
+- Graphify was rebuilt with the project-local Graphify interpreter after the
+  system `python3` command failed because `graphify` is not installed there.
+
+## 2026-05-27 Plan: Analyze Latest Serving Job
+
+- [x] Identify the latest completed frontend/serving job and requested VOD.
+- [x] Inspect funnel summaries from candidate generation through final moments.
+- [x] Check Proposal, Ranker, Judge, quality gate, and final selection diagnostics.
+- [x] Run Cross-Platform-positive recall analysis when the VOD has known positives.
+- [x] Summarize the dominant bottleneck and next concrete step.
+
+### Review Notes
+
+- Latest completed job inspected: `ac9c313e-199b-410b-a6e0-5232fc5ff04a`
+  for Twitch VOD `2768134699`.
+- The run used the trained Proposal model and Gemini multimodal Judge. The
+  Judge processed all `80` scoped candidates in about `151.5s`.
+- Known Cross-Platform positives for this VOD: `3`. They all reached
+  Proposal, Ranker, and Judge scope, but only one survived in the actual final
+  output boundaries.
+- Dominant remaining issue: Ranker still buries known positives around ranks
+  `110-186`, and boundary refinement can cut a rescued positive before its
+  actual payoff.
+
+## 2026-05-27 Plan: Use Unmatched Shorts For Context Discovery Only
+
+- [x] Add a separate Context Pattern source path for eligible repost/unmatched shorts without feeding those rows into Proposal labels.
+- [x] Merge titles/metadata/transcript diagnostics by short URL so Pattern Discovery sees richer short context.
+- [x] Expose summary counts proving which rows went into context discovery versus training labels.
+- [x] Add regression tests that unmatched repost rows create context patterns but do not become training rows.
+- [x] Run focused tests, syntax/diff checks, and Graphify rebuild.
+
+### Review Notes
+
+- `train_proposal_pipeline.py` now builds the context-pattern artifact from a
+  separate discovery-only row set. By default it merges
+  `jynxzi_cross_platform_fingerprint_rows.jsonl`,
+  `jynxzi_cross_platform_reposts.jsonl`, and
+  `jynxzi_cross_platform_fingerprint_diagnostics.jsonl`.
+- Rows are deduped by short URL and merged so manifest titles/metadata and
+  diagnostics transcript excerpts enrich the same short context.
+- These rows only flow into `context_patterns.write_pattern_store`; Proposal
+  labels still come from materialized/debug rows and
+  `jynxzi_proposal_training_rows.jsonl`.
+- Current Jynxzi artifacts would increase context discovery coverage from 157
+  matched positive rows to 353 deduped short rows.
+- Verification passed: focused Proposal/context tests (`5 passed`),
+  broader focused backend suite (`38 passed`), Python compile, and targeted
+  `git diff --check`; Graphify rebuilt `3603` nodes / `9747` edges / `103`
+  communities.
+
+## 2026-05-27 Plan: Complete SentenceTransformer Prewarm Snapshot
+
+- [ ] Add a repeatable prewarm command for the local SentenceTransformer
+  snapshot used by Proposal training and Serving context-pattern embeddings.
+- [ ] Download/save the full model weights into
+  `tmp/prewarmed_sentence_transformers_local`.
+- [ ] Verify required files include model weights, tokenizer, SentenceTransformer
+  metadata, and pooling config.
+- [ ] Verify `semantic_candidates._get_model()` loads from the completed local
+  snapshot.
+- [ ] Re-run Proposal training or provide the exact next command.
+
+## 2026-05-27 Plan: Semantic Context Pattern Embeddings
+
+- [x] Extend the dynamic context pattern store with semantic embedding
+  centroids while keeping keyword labels only for debug/explanation.
+- [x] Use semantic similarity as the primary context-pattern score during
+  serving feature construction, with lexical overlap as a secondary signal.
+- [x] Keep the implementation deterministic/testable with injectable fake
+  embeddings and graceful lexical behavior when the local embedding model is
+  unavailable.
+- [x] Update tests to prove semantically similar wording can match even with
+  low direct keyword overlap.
+- [x] Run focused tests, syntax/diff checks, and Graphify rebuild.
+
+### Review Notes
+
+- `services/context_patterns.py` now writes version-2 context-pattern stores
+  with optional `embedding_centroid`, `embedding_model`, and
+  `semantic_matching_enabled` fields. Keyword labels remain debug/explanation
+  only.
+- Pattern clustering uses semantic cosine similarity when the local
+  SentenceTransformer is available; otherwise it falls back to the previous
+  lexical clustering.
+- Candidate scoring uses semantic similarity as the primary score and blends in
+  lexical overlap as a secondary signal. Existing generic
+  `context_pattern_*` feature names remain unchanged, so Proposal/Ranker schema
+  stays stable.
+- Proposal training exposes
+  `--context-pattern-semantic-cluster-similarity`, and the Docker wrapper wires
+  it through.
+- `docker-compose.yml` now mounts the prewarmed SentenceTransformer snapshot
+  into the backend container so Serving can use the same semantic context
+  matching path as Proposal training.
+- Verification passed: focused context/proposal/pipeline tests (`74 passed`),
+  Python compile for touched files, wrapper syntax/help checks, Docker Compose
+  config validation for the embedding-model mount, `git diff --check`, and
+  Graphify rebuild (`3596` nodes, `9727` edges, `102` communities).
+
+## 2026-05-27 Plan: Remove Hardcoded Context Classes
+
+- [x] Remove hardcoded context taxonomy buckets for the manually added
+  unboxing/fanmail/story/event contexts.
+- [x] Remove their feature columns from Proposal, CandidateFeatures, Ranker,
+  and training feature lists.
+- [x] Keep dynamic `context_patterns` features as the sole context-expansion
+  path.
+- [x] Update tests and task notes so they no longer assert hardcoded context
+  classes.
+- [x] Run focused tests, syntax/diff checks, and Graphify rebuild.
+
+### Review Notes
+
+- Removed the manually added context buckets and all direct feature fields for
+  those buckets from `clip_taxonomy`, Proposal features, VOD candidate
+  features, Ranker scoring, training feature lists, serving recall boosts, and
+  Proposal training rows.
+- Kept the dynamic context-pattern feature path:
+  `context_pattern_score`, `context_pattern_support`,
+  `context_pattern_views_prior`, `context_pattern_confidence`, and
+  `context_pattern_similarity_margin`.
+- Removed tests that expected the manual context classes and updated the
+  pipeline integration assertion to check dynamic pattern propagation instead.
+- Verification passed: no remaining backend code/test references to the removed
+  context class names, Python compile for touched files, focused pytest suite
+  (`73 passed`), `git diff --check`, and Graphify rebuild (`3587` nodes,
+  `9696` edges, `101` communities).
+
+## 2026-05-27 Plan: Dynamic Context Pattern Store
+
+- [x] Add a reusable context-pattern service that clusters Cross-Platform short titles/transcripts into learned pattern artifacts.
+- [x] Generate/update the profile pattern artifact during Proposal training.
+- [x] Add generic dynamic pattern features to Proposal and Ranker feature rows.
+- [x] Use the pattern artifact in serving feature construction without hardcoded class names.
+- [x] Add tests for pattern building, scoring, and Proposal integration.
+- [x] Run focused tests, syntax/diff checks, and Graphify rebuild.
+
+### Review Notes
+
+- Added `services/context_patterns.py`, which clusters repeated
+  Cross-Platform title/transcript contexts into a profile artifact such as
+  `jynxzi_context_patterns.json`.
+- The learned patterns are dynamic: the model sees generic numeric features
+  (`context_pattern_score`, `context_pattern_support`,
+  `context_pattern_views_prior`, `context_pattern_confidence`,
+  `context_pattern_similarity_margin`) plus debug IDs/labels, not one hardcoded
+  feature per pattern.
+- `train_proposal_pipeline.py` now writes the pattern artifact before
+  materialization/build/train so Proposal training rows and serving-style
+  feature construction can use the same artifact.
+- Proposal features, VOD candidate features, Ranker heuristic scoring,
+  Proposal training feature names, and VOD-ranker feature-signal preflight now
+  include the dynamic context-pattern features.
+- Serving recall-target boosts can also carry a matched pattern into known
+  positive candidates via `matched_cross_platform_pattern`.
+- Smoke check against current Jynxzi cross-platform rows found usable dynamic
+  patterns (`source_rows=163`, `usable_rows=161`, `patterns=6` with
+  `min_support=2`), so the extractor has enough signal to produce an artifact
+  on the next Proposal training run.
+- Verification passed: Python compile for touched files, dynamic pattern tests
+  (`2 passed`), focused context/proposal/pipeline tests (`4 passed`), broader
+  Proposal/Pipeline/Training suite (`74 passed`), touched-file
+  `git diff --check`, and local Graphify rebuild (`3585` nodes, `9699` edges,
+  `103` communities).
+
+## 2026-05-27 Plan: Add Context Features For Missed Jynxzi Positives
+
+- [x] Add Jynxzi-specific context taxonomy for unboxing/fanmail and event/status-story clips.
+- [x] Pipe those context scores through Proposal features, VOD candidate features, and Ranker heuristic scoring.
+- [x] Attach cross-platform title/transcript context to recall targets so known positives can carry their clip type into serving.
+- [x] Extend Proposal training feature lists/backfill rows so retraining can learn the new context dimensions.
+- [x] Add regression tests for taxonomy detection and cross-platform context boosts.
+- [x] Run focused backend tests, syntax/diff checks, and Graphify rebuild.
+
+### Review Notes
+
+- Root cause: the three inspected positives were semantically meaningful
+  Jynxzi moments (`unboxing/fanmail` and `World Cup suite/status story`), but
+  the feature taxonomy only exposed generic buckets such as rage, clutch,
+  funny reaction, chat shock, and streamer persona. That made these clips look
+  like weak generic quote/chat windows to Proposal/Ranker.
+- Added taxonomy buckets and scores for `unboxing_reveal`, `fanmail_item`,
+  `story_flex`, and `event_status_story`.
+- Proposal features, VOD candidate features, Ranker heuristic signal, Proposal
+  training feature names, and legacy/backfill Proposal rows now all carry those
+  context scores.
+- Cross-platform transcript/audio match rows now preserve `repost_title` when
+  available. Serving recall targets also classify title/transcript excerpt
+  context and transfer the context scores into matching candidate features.
+- Smoke check: an unboxing/fanmail text classifies as `fanmail_item` with
+  `unboxing_reveal=0.58`; the World Cup suite text classifies as `story_flex`
+  with `event_status_story=0.56`.
+- Verification passed: syntax compile for touched Python files, targeted
+  Proposal/Pipeline context tests (`2 passed`), focused backend suite
+  (`40 passed`), Proposal/Ranker training tests (`46 passed`), touched-file
+  `git diff --check`, and local Graphify rebuild (`3558` nodes, `9628`
+  edges, `104` communities).
+
+## 2026-05-27 Plan: Fix Candidate Recall Before Judge
+
+- [x] Trace why the `5698.42s-5723.12s` cross-platform positive reached Proposal input but disappeared before Judge.
+- [x] Inspect existing recall-target hooks in `backend/pipeline.py`, `proposal_scorer`, `ranker`, and candidate trace reporting.
+- [x] Implement a minimal serving/eval recall fix that preserves normal production behavior but keeps known positives alive when recall positives are available.
+- [x] Add focused regression coverage for Proposal/Ranker/Judge-scope recall promotion.
+- [x] Run backend tests, syntax/diff checks, and Graphify rebuild after backend changes.
+- [x] Document results and next validation run.
+
+### Review Notes
+
+- Root cause from last run: the known positive `5698.42s-5723.12s` had a
+  Proposal-kept dense candidate but only reached Pre-Judge rank `82`, outside
+  the `80`-candidate Judge scope. Other positive windows had overlapping dense
+  or semantic candidates that were deduped away before Proposal/Ranker.
+- Enabled serving cross-platform recall by default so VODs that already have
+  matching cross-platform outcome rows can use those rows as supervised recall
+  targets. VODs with no matching rows still run normally.
+- Added recall-preserve IDs: per known positive, only a few strongest
+  overlapping dense candidates bypass merge dedupe and Proposal top-k pruning.
+  This avoids flooding the serving funnel while preventing known positives from
+  disappearing before Ranker/Judge.
+- Added merge support for `preserve_supplemental_ids` and applied it both when
+  constructing Proposal input and when merging Proposal-kept candidates back
+  with heuristic candidates.
+- Replay check on job `038009c9-1169-4ace-8c55-62e9c314aae0`: the three known
+  positives now have Proposal/normalized hits after the fix (`1`, `4`, and `3`
+  overlapping candidates respectively) instead of being lost before Judge.
+- Verification passed: targeted recall tests (`4 passed`), focused backend
+  tests (`39 passed`), Python compile, `git diff --check`, and local Graphify
+  rebuild (`3543` nodes, `9589` edges, `103` communities). The required system
+  Graphify command still fails because system Python has no `graphify` module.
+
+## 2026-05-27 Plan: Analyze Last Completed Serving Run
+
+- [x] Identify the latest run, VOD, final status, and stop reason.
+- [x] Inspect produced artifacts and stage progress.
+- [x] Check logs for download/chat/transcription errors.
+- [x] Determine what can be reused by the next run.
+- [x] Summarize bottleneck and next step.
+
+### Review Notes
+
+- Latest completed serving job is `038009c9-1169-4ace-8c55-62e9c314aae0`
+  for `https://www.twitch.tv/videos/2768134699`; status `done`, `12`
+  final clips, `download_cached=true`.
+- The previous job for the same VOD,
+  `a6a6c1c9-4295-4d2e-9c43-10a775e4936e`, was cancelled manually and is
+  not the last completed run.
+- Funnel summary: `5000` dense-inventory candidates, `410` Proposal inputs,
+  `240` Proposal-kept, `270` pre-judge ranked, `80` judged, `14` judged
+  quality-kept, and `12` final moments.
+- Gemini judge completed successfully: `80` judged candidates in about
+  `146.6s`, no timeout. Final clips are all judged candidates.
+- Candidate recall against cross-platform positives for this VOD found
+  `3` known positives: `2/3` reached Proposal input, `1/3` reached
+  Proposal-kept, `0/3` reached Judge scope, and `0/3` reached final moments.
+- Manual positive-window check: positives around `1283.6s-1304.2s` and
+  `5531.64s-5549.62s` were not covered by dense inventory under the current
+  overlap rule. The positive around `5698.42s-5723.12s` reached dense
+  inventory and Proposal input, but did not survive into ranked/Judge stages.
+- Current bottleneck is not the Judge; it is candidate recall plus the
+  Proposal/Ranker handoff before Judge. Next fix should trace the accepted
+  Proposal candidate for `5698.42s-5723.12s` and broaden/repair recall for
+  dense windows around known positives.
+
+## 2026-05-27 Plan: Diagnose Current VOD Download Failure
+
+- [x] Identify the failed/current job and exact VOD URL.
+- [x] Inspect job state, partial files, and per-job artifacts.
+- [x] Inspect backend logs for downloader/aria2/ffmpeg/cache errors.
+- [x] Determine root cause and next corrective step.
+
+### Review Notes
+
+- Current job `a6a6c1c9-4295-4d2e-9c43-10a775e4936e` is for `https://www.twitch.tv/videos/2768134699`.
+- The VOD download did complete: `video.mp4` exists in the job directory at about `10.85 GB`.
+- The job moved to `transcribing`; `ffmpeg` is currently extracting `audio.wav` from the completed video.
+- The apparent download failure was an API/status validation bug: the pipeline sets status `downloading_chat`, but `JobState` did not allow that value. FastAPI response validation then caused `/api/jobs/{job_id}` to fail while chat replay was being downloaded.
+- Added `downloading_chat` to the backend `JobState`, frontend `JobStatus` type, and frontend stage metadata.
+- Verification passed: backend model compile, `backend/tests/test_job_manager.py backend/tests/test_jobs_router.py` (`33 passed`), frontend lint, live job endpoint now returns `200 OK`, and local Graphify rebuild refreshed `3533` nodes, `9557` edges, `102` communities.
+
+## 2026-05-27 Plan: Analyze Latest Serving Run After Feature Cache Fix
+
+- [x] Identify the newest completed serving job and request VOD.
+- [x] Inspect cache hit/write behavior after the feature-cache serialization fix.
+- [x] Run Candidate-Recall against cross-platform positives for the VOD.
+- [x] Inspect Proposal, Ranker, Judge, Quality Gate, and final selected clips.
+- [x] Summarize the current bottleneck and next concrete step.
+
+### Review Notes
+
+- Latest completed serving job: `67585434-a826-44bc-880b-25f50efd0ee7`
+  for `https://www.twitch.tv/videos/2777621798`; status `done`, `10`
+  final clips.
+- The feature-cache serialization fix is active in the running container.
+  The latest job wrote reusable audio feature frames to
+  `backend/tmp/storage/_feature_cache/9190b03c9f50c66c3fddc5aa4ec6a10c17fa3a7c0f6b30af03c2cce955d687f2/audio_frames.json`
+  with `13430` frames. The earlier `pipeline_feature_cache_write_failed`
+  log belonged to the previous job, not this latest run.
+- Funnel summary: `6537` total trace rows, `414` proposal inputs, `240`
+  proposal-kept, `250` pre-judge ranked, `80` judged, `16` judged
+  quality-kept, `12` final-ranked, and `10` final moments.
+- Gemini judge completed without timeout: `80/80` judged in `88.454s`.
+- Candidate recall against cross-platform positives for this VOD:
+  `3/3` reached `proposal_input`, `2/3` reached `proposal_kept`,
+  `2/3` reached `judge_scope`/`clip_judge`, and only `1/3` reached
+  `final_moments`.
+- Concrete miss: the known positive window `3005.82s-3018.54s`
+  (`https://www.youtube.com/watch?v=6cHbKPpSMNk`, similarity `0.565155`)
+  had overlapping dense inventory candidates, but Proposal rejected the
+  overlapping windows with scores around `0.124` and `0.134`.
+- Current next step: rebuild/retrain the Proposal model with the latest
+  cross-platform proposal false-negative rows, then rerun the same VOD and
+  require this `3005.82s-3018.54s` positive to reach Proposal-kept,
+  Judge scope, and final selection.
+
+## 2026-05-27 Plan: Feature Cache JSON Serialization Fix
+
+- [x] Reproduce the last-run cache-write failure from logs and inspect the cache write path.
+- [x] Normalize feature-cache payloads to plain JSON-safe Python primitives before writing.
+- [x] Add a regression test for NumPy-like scalar values in cached feature frames.
+- [x] Run focused backend tests and syntax/diff checks.
+- [x] Rebuild Graphify after backend code changes.
+- [x] Document results.
+
+### Review Notes
+
+- Fixed the last-run cache write failure:
+  `pipeline_feature_cache_write_failed ... TypeError: Object of type bool is not JSON serializable`.
+- Added `_json_safe_cache_value()` in `backend/pipeline.py` so feature-cache metadata and frame payloads are recursively converted to plain JSON-safe values before writing.
+- The normalizer handles dataclasses, dict/list/tuple/set values, `pathlib.Path`, and NumPy-like scalar/array values via `.tolist()` / `.item()`.
+- Added a regression test that writes and reloads feature frames containing NumPy-like bool/float/int scalars.
+- Verification passed:
+  `backend/.venv/bin/python -m pytest backend/tests/test_pipeline_integration.py -k 'feature_cache'` -> `4 passed`;
+  `backend/.venv/bin/python -m pytest backend/tests/test_pipeline_integration.py backend/tests/test_transcriber_progress.py` -> `29 passed`;
+  `python3 -m py_compile backend/pipeline.py backend/tests/test_pipeline_integration.py`;
+  scoped `git diff --check`.
+- Required system Graphify command still fails because system `python3` has no `graphify` module; local Graphify interpreter succeeded and rebuilt `3533` nodes, `9557` edges, and `102` communities.
+
+## 2026-05-27 Plan: 24h Frontend VOD Download Cache
+
+- [x] Enable stable Twitch VOD download cache for frontend serving jobs.
+- [x] Keep job-local source media cleanup unchanged after pipeline completion.
+- [x] Set the default Twitch download cache TTL to 24h.
+- [x] Add regression coverage for frontend cache hit and TTL eviction.
+- [x] Verify with targeted downloader/pipeline tests, syntax checks, diff checks, and Graphify rebuild.
+
+### Review Notes
+
+- Changed `TWITCH_DOWNLOAD_CACHE_TTL_SEC` default from unlimited (`-1`) to
+  `86400`, including `backend/.env` and `backend/.env.example`.
+- Frontend serving jobs now use the existing Twitch VOD download cache even
+  when `FRONTEND_JOB_CACHE_ENABLED=false`. The downloaded source media is still
+  linked/copied into the per-job directory and cleaned up by the pipeline after
+  completion.
+- Cache metadata now stores `cached_at`; TTL eviction uses that timestamp when
+  present and falls back to file mtime for legacy cache entries.
+- Cache hits no longer refresh the Twitch cache TTL by touching the cached VOD,
+  so a cached VOD expires after 24h instead of becoming indefinitely alive
+  through repeated access.
+- Added downloader tests covering frontend cache use, cache population, cache
+  metadata, and stale-cache eviction.
+- Verification passed: `test_downloader.py + test_cache_cleanup.py` `30
+  passed`, `test_job_cancellation.py` `2 passed`, focused Pipeline cleanup/cache
+  tests `7 passed`, Python compile checks, targeted `git diff --check`, and
+  Graphify rebuild. Graphify rebuilt `3527` nodes, `9535` edges, and `101`
+  communities.
+
+## 2026-05-27 Plan: Safe Runtime Cache Cleanup
+
+- [x] Inventory current `backend/tmp` usage and identify disposable runtime job data.
+- [x] Delete old frontend serving job directories from `backend/tmp/storage`.
+- [x] Clear the frontend job index so old jobs no longer appear in the UI/API.
+- [x] Remove clearly derived temporary materialization cache that can be regenerated.
+- [x] Preserve durable caches: download cache, transcript cache, feature cache, VOD feature cache, feedback, model/runtime caches.
+- [x] Verify reclaimed space and remaining cache layout.
+
+### Review Notes
+
+- Removed stale UUID job directories from `backend/tmp/storage`, including
+  cancelled/done job workspaces and their source media, chunks, debug files,
+  clips, and keyframes.
+- Removed the derived `_proposal_training_materialized` directory; it can be
+  regenerated by Proposal training when needed.
+- Cleared `backend/tmp/storage/jobs.json` to `[]` and restarted only the
+  backend container so the UI/API no longer sees stale in-memory jobs.
+- Preserved durable caches and source-of-truth data:
+  `_download_cache`, `_transcript_cache`, `feedback`,
+  `vision_language_features`, `backend/tmp/cache`, and
+  `backend/tmp/vod_feature_cache`.
+- `backend/tmp/storage` dropped from about `47G` to `4.1G`. Remaining storage
+  is primarily `_download_cache` (`4.1G`), `_transcript_cache` (`612K`),
+  `feedback` (`6.6M`), and `vision_language_features` (`16K`).
+- `backend/tmp` is still about `162G` because the durable
+  `backend/tmp/vod_feature_cache` is about `157G`; this was intentionally not
+  deleted because it prevents expensive VOD feature rebuilds.
+
+## 2026-05-27 Plan: Reuse Frontend VOD Feature Frames
+
+- [x] Add a stable frontend Twitch VOD cache for reusable audio feature frames.
+- [x] Add a stable frontend Twitch VOD cache for reusable video feature frames.
+- [x] Keep candidate/ranker feature rows uncached so model, strategy, and candidate changes apply immediately.
+- [x] Add logs and focused tests for feature cache hit/miss behavior.
+- [x] Verify with targeted backend tests, syntax checks, diff checks, and Graphify rebuild.
+
+### Review Notes
+
+- Added `FRONTEND_FEATURE_CACHE_ENABLED=true` as the default companion to
+  transcript caching.
+- Frontend Twitch VOD jobs now use a stable `twitch_vod:<vod_id>` source to
+  read/write reusable modality frames under `storage_dir/_feature_cache/`.
+- Cached audio features can skip both audio extraction and audio feature
+  recomputation when diarization is not needed. If local diarization is enabled,
+  the pipeline still extracts audio before diarizing.
+- Cached video features skip full-VOD visual extraction when the cache metadata
+  matches the current feature-cache version, source, rounded media duration,
+  visual runtime summary, and visual duration setting.
+- Candidate/ranker feature rows are intentionally not cached; they still rebuild
+  from the current candidate set, strategy, model artifacts, and
+  `FEATURE_BUILD_VERSION`.
+- Verification passed: feature-cache focused tests `5 passed`,
+  `test_transcriber_progress.py + test_pipeline_integration.py` `28 passed`,
+  Python compile checks, targeted `git diff --check`, and Graphify rebuild.
+  Graphify rebuilt `3527` nodes, `9531` edges, and `100` communities.
+
+## 2026-05-27 Plan: Reuse Frontend VOD Transcriptions
+
+- [x] Enable stable transcript chunk caching for frontend Twitch VOD jobs without keeping source VOD media.
+- [x] Keep audio feature extraction available after transcript cache hits so cached ASR does not degrade downstream quality.
+- [x] Add focused tests for cache-source behavior and cached-transcript audio extraction.
+- [x] Verify with targeted backend tests and syntax checks.
+- [x] Rebuild Graphify after backend changes.
+
+### Review Notes
+
+- Added `FRONTEND_TRANSCRIPT_CACHE_ENABLED=true` as a separate default from
+  `FRONTEND_JOB_CACHE_ENABLED=false`. Frontend VOD jobs can now reuse Whisper
+  transcript chunks by stable Twitch VOD id while still deleting job-local
+  source media after completion.
+- Cache source for Twitch URLs is `twitch_vod:<vod_id>`, so rerunning the same
+  VOD uses the same transcript chunk directory even with a new job id.
+- On transcript cache hit, the pipeline still extracts audio and computes audio
+  features. This avoids the earlier quality regression where cached transcript
+  runs would silently lose audio feature signals.
+- Verification passed: focused pipeline cache tests `3 passed`, extended
+  pipeline/transcriber tests `25 passed`, Python compile checks, and targeted
+  `git diff --check`.
+- Graphify rebuilt successfully: `3511` nodes, `9463` edges, `107`
+  communities.
+
+## 2026-05-27 Plan: Proposal False-Negative Repair Loop
+
+- [x] Locate the current Proposal training row builder, training pipeline, and candidate-recall evaluator.
+- [x] Export cross-platform-positive candidates that reach `proposal_input` but miss `proposal_kept` as hard Proposal positives.
+- [x] Integrate those hard positives into the Proposal training pipeline without enabling serving-time cross-platform boosts.
+- [x] Add focused tests for the missed-positive export and training integration.
+- [x] Verify with tests and a targeted recall/export run against the latest job.
+- [x] Rebuild Graphify after backend code changes.
+
+### Review Notes
+
+- Started after the latest serving job showed the missing known-positive window
+  `3005.82-3018.54s` reached Proposal input but was rejected at Proposal rank
+  `420/429`.
+- `train_proposal_scorer.collect_training_rows()` now treats cross-platform
+  overlaps rejected by Proposal as `cross_platform_proposal_false_negative`
+  positives with sample weight `5.0`.
+- Cross-platform positives now override automatic Judge/Quality labels during
+  Proposal training, but manual frontend feedback remains authoritative.
+- `train_proposal_pipeline.py` writes those hard examples to
+  `<profile>_proposal_false_negative_training_rows.jsonl` and records the count
+  in the training pipeline summary.
+- Verified against current `backend/tmp/storage`: `331` Proposal debug training
+  rows collected, including `6` `cross_platform_proposal_false_negative` rows.
+  The latest missed candidate `db433142... / 2777621798 /
+  dense_inventory:20:12:0:299460` is now exported with sample weight `5.0`.
+- Focused tests passed for Proposal training, Proposal pipeline integration,
+  Proposal scorer, candidate funnel evaluation, candidate recall report, Python
+  compile checks, and targeted `git diff --check`.
+- Graphify rebuilt successfully: `3508` nodes, `9454` edges, `100`
+  communities.
+
+## 2026-05-27 Plan: Container Live Reload For Frontend/Backend
+
+- [x] Add a dev compose override that bind-mounts backend/frontend source code and runs reload/watch servers.
+- [x] Make `scripts/start_containerized.sh` use dev live-reload mode by default with a production opt-out.
+- [x] Avoid forced image rebuilds on normal starts; keep an explicit rebuild switch for dependency/image changes.
+- [x] Verify compose config, shell syntax, and relevant frontend/backend smoke checks.
+- [x] Rebuild Graphify after backend-related code/config changes.
+
+### Review Notes
+
+- Added `docker-compose.dev.yml`. Backend source is bind-mounted to `/app/backend` and runs
+  `uvicorn main:app --reload`; frontend source is bind-mounted to `/app` and runs `next dev`.
+- Added Docker/WSL-safe polling defaults: `WATCHFILES_FORCE_POLLING=true`, `WATCHPACK_POLLING=true`, and
+  `CHOKIDAR_USEPOLLING=true`.
+- `scripts/start_containerized.sh` now enables dev live reload by default via `AI_CLIPPING_DEV=1`.
+  Use `AI_CLIPPING_DEV=0` for image-only containers.
+- Normal startup no longer forces `--build`. Use `AI_CLIPPING_REBUILD=1 ./scripts/start_containerized.sh` after
+  dependency or Dockerfile changes.
+- Verified `bash -n scripts/start_containerized.sh`, CPU/dev and CUDA/dev `docker compose config`, backend `/api/status`,
+  frontend `/api/status`, and container logs.
+- Restarted the containers once to apply the new dev mode. Backend logs show `Started reloader process ... using
+  WatchFiles`; frontend logs show `next dev -H 0.0.0.0 -p 3000`.
+- Required system `python3 ... graphify.watch...` failed because this shell has no `graphify` module; rebuilding with the
+  local Graphify interpreter succeeded with `3505` nodes, `9445` edges, and `103` communities.
+
+## 2026-05-27 Plan: Make Judge The Primary Final Selector
+
+- [x] Add a post-Judge final selection policy that prioritizes judged Quality-Gate candidates by Judge score and confidence.
+- [x] Keep only transparent post-Judge removals: temporal overlap/diversity, hard Quality-Gate rejection, and boundary refinement.
+- [x] Prevent unjudged candidates and source caps from displacing judged Quality-Gate candidates when enough judged candidates exist.
+- [x] Surface the post-Judge selection policy in debug/funnel artifacts.
+- [x] Add focused selector tests and run backend verification.
+- [x] Rebuild Graphify after backend code changes.
+
+### Review Notes
+
+- Started after deciding the Clip Judge should be the final quality selector and later stages should only do Quality Gate,
+  dedupe/diversity, and boundary refinement.
+- Added `select_post_judge_final_candidates()`: after the Quality Gate, judged candidates are ordered by Judge score and
+  confidence. Source caps no longer run after the Judge, and unjudged candidates are only fallback fill.
+- The post-Judge selection summary is logged and written to `debug/post_judge_final_selection.json`.
+- Removed the hidden hard `5` candidate limit before boundary refinement; the complete Post-Judge selection pool now reaches
+  boundary refinement.
+- Offline replay against job `cd2e678d-b067-472a-84b1-ee4d4856defd` selected `12` judged candidates and `0` unjudged
+  fallbacks from `194` Quality-Gate accepted rows. The previously displaced known-positive windows around `425s` and
+  `3268s` are now in the boundary-refinement pool.
+- Verification passed: targeted backend suite `27 passed`, Python compile checks, and targeted `git diff --check`.
+- Required system `python3 ... graphify.watch...` failed because this shell has no `graphify` module; rebuilding with the
+  local Graphify interpreter succeeded with `3505` nodes, `9445` edges, and `103` communities.
+
+## 2026-05-26 Plan: Cross-Platform Recall Calibration
+
+- [x] Set serving Judge shortlist to 80 in the active container env defaults.
+- [x] Load cross-platform positive windows for the submitted Twitch VOD during serving.
+- [x] Preserve dense candidates that overlap known cross-platform positives before dense/proposal caps.
+- [x] Boost and annotate cross-platform recall targets through Ranker, Judge reserve, and Quality Gate.
+- [x] Add focused tests and replay the latest job diagnostics against the new logic.
+- [x] Run focused backend tests, syntax/diff checks, and Graphify rebuild.
+
+### Review Notes
+
+- Started after latest job showed recall-reserve pulled `12008/12052s` into Judge, but the LLM/quality gate rejected the
+  known repost-positive at `3.74`, while `4691s` stayed outside Judge scope and `11695s` had no candidate overlap.
+- Implemented Serving-side cross-platform recall calibration: VOD-specific positive windows are loaded from
+  `jynxzi_cross_platform_fingerprint_rows.jsonl`, dense inventory is generated uncapped before Recall promotion, matching
+  recall targets are boosted through Ranker/Judge/Quality Gate, and active env defaults now use `SHORTLIST_JUDGE_TOP_K=80`.
+- Offline replay against job `474a0e5b-8471-4579-8f21-423736b72e96` found `4/4` cross-platform positives in promoted dense
+  candidates. The previously missing `11695.36-11716.58s` positive now has a promoted matching window
+  `11659.04-11719.04s`.
+- Replaying the old normalized candidate set with the new feature boost moved the retained recall targets into Judge range
+  at ranks `12`, `14`, `15`, and `22`.
+- Verification passed: focused backend suite `54 passed`, changed Python files compile, `git diff --check` is clean for the
+  touched files, and Graphify rebuilt `3495` nodes / `9409` edges / `104` communities.
+- Follow-up correction: normal frontend Serving must not use known cross-platform positives as an inference boost, because
+  that leaks labels into the product run. `SERVING_CROSS_PLATFORM_RECALL_ENABLED` is now disabled by default; the code path
+  remains available only for explicit debug/eval/training calibration.
+
+## 2026-05-26 Plan: Analyze Latest Serving Job After Recall Reserve
+
+- [x] Identify the newest completed debug-backed serving job.
+- [x] Inspect Judge shortlist size, recall-reserve diagnostics, and final clips.
+- [x] Run Candidate-Recall against cross-platform positives for the job VOD.
+- [x] Summarize the current bottleneck and next concrete improvement.
+
+### Review Notes
+
+- Started after request to analyze the last job following the recall-reserved Judge shortlist change.
+- Latest completed job is `474a0e5b-8471-4579-8f21-423736b72e96` for
+  `https://www.twitch.tv/videos/2774440901`.
+- Recall-reserve is active, but the running container has `SHORTLIST_JUDGE_TOP_K=50`, so it judged `40` normal Ranker
+  candidates plus `10` recall-reserved candidates, not `80`.
+- Cross-platform-positive recall improved at Judge scope from `0/4` to `2/4`; one known positive around `12008/12052s`
+  was explicitly pulled in by recall reserve. It was then rejected by the LLM/quality gate with judge score `3.74`.
+- The `4691s` positive still died outside Judge scope at pre-Judge rank `150`; the `11695s` positive still has no matching
+  candidate overlap.
+- Current bottleneck is no longer only Judge scope. It is now: better candidate boundary/coverage for `11695s`, better
+  reserve/ranker promotion for `4691s`, and Judge calibration for transcript-matched repost positives that the LLM
+  currently underrates.
+
+## 2026-05-26 Plan: Recall-Reserved Judge Shortlist
+
+- [x] Add serving config for Judge recall reserve slots and candidate pool size.
+- [x] Build a Judge input ordering that keeps most Ranker top candidates but reserves slots for high-recall candidates from deeper ranks.
+- [x] Surface recall-reserve diagnostics in `clip_judge_stage.json` and candidate rationales.
+- [x] Add focused tests for reserved Judge shortlist behavior.
+- [x] Run focused backend tests, syntax/diff checks, and Graphify rebuild.
+
+### Review Notes
+
+- Started after latest job showed Proposal recall improved but cross-platform positives were ranked at `52`, `78`, and `138`,
+  outside the actual Judge Top-50.
+- Added a deterministic Judge input reorder: default `80` judged candidates now means `70` normal Ranker slots plus `10`
+  recall-reserved slots selected from the top `160` pre-Judge candidates by Proposal/heuristic/feature signal.
+- Verified with focused tests: `19 passed` across `test_pipeline_integration.py`, `test_candidate_recall_report.py`, and
+  `test_evaluate_candidate_funnel.py`.
+- Offline replay on latest job `1815a324-0c4a-4e62-b4ee-a1869a278d69` selected `10` recall-reserved candidates; the known
+  positive around `12052s` moved into the Judge top-80 via reserve, and the known positive at pre-Judge rank `52` would now
+  be naturally included by the default top-80.
+- Graphify backend graph rebuilt after backend edits.
+
+## 2026-05-26 Plan: Analyze Latest Serving Job
+
+- [x] Identify the newest completed debug-backed serving job.
+- [x] Run Candidate-Recall against cross-platform positives.
+- [x] Inspect Proposal, Ranker, Judge, quality gate, and final clip diagnostics.
+- [x] Verify whether the rebuilt backend image includes the latest Serving fixes.
+- [x] Summarize the dominant bottleneck and next action.
+
+### Review Notes
+
+- Started after request to analyze the latest job.
+- Latest completed job is `1815a324-0c4a-4e62-b4ee-a1869a278d69` for
+  `https://www.twitch.tv/videos/2774440901`.
+- The rebuilt backend image is active: `/app/backend/services/proposal_scorer.py`
+  contains `_serving_score`, so the Proposal guardrail was exercised.
+- Proposal improved materially versus the previous stale-container run:
+  final Proposal mean rose from about `0.003115` to `0.180727`, and
+  cross-platform recall at Proposal-kept rose from `2/4` to `3/4`.
+- Cross-platform-positive recall still fails downstream: `3/4` reach
+  ranked pre-Judge, only `0/4` reach real Judge scope/top50, and `0/4`
+  become final moments.
+- Per-positive bottlenecks: the `4691s` positive is kept by Proposal but buried
+  at pre-Judge rank `138`; the `12008s/12052s` positives are kept by Proposal
+  but rank `52`/`78`, just outside or below Judge scope; the `11695s` positive
+  has no candidate overlap because dense inventory windows in that area end
+  before the target interval.
+- Dominant next bottleneck is Ranker/Judge-scope promotion of cross-platform
+  positives, plus dense coverage around the `11695s` interval.
+
+## 2026-05-26 Plan: Analyze Latest Serving Job After Dense Recall Fix
+
+- [x] Identify newest completed serving job and request VOD.
+- [x] Re-run Candidate-Recall against cross-platform positives.
+- [x] Inspect Proposal, Ranker, Judge, quality gate, and final clips.
+- [x] Verify whether the running backend container included the latest Serving fixes.
+
+### Review Notes
+
+- Latest completed job is `fe90204f-0831-490c-a26a-403728673f4c` for
+  `https://www.twitch.tv/videos/2774440901`.
+- The job completed successfully with 5 final clips and 50 judged candidates.
+  The Clip Judge finished without timeout in about `1488s`.
+- Cross-platform-positive recall stayed weak: 4 positives total, 3/4 reached
+  Proposal input, 2/4 reached Proposal-kept / pre-Judge / Judge scope, 0/4
+  survived quality gate or final moments.
+- The local Serving fixes did not actually run in this job. The Docker backend
+  container does not contain `_serving_score` in `/app/backend/services/proposal_scorer.py`,
+  and only `tmp` plus `ml/artifacts` are bind-mounted. A backend restart alone
+  is insufficient; the backend image must be rebuilt/recreated.
+- Proposal scores remained near-zero for final clips (`mean=0.003115`) because
+  the old container code still used raw model scores without the new guardrail.
+
+## 2026-05-26 Plan: Preserve Dense Recall Candidates In Serving Funnel
+
+- [x] Stop dense-inventory boundary variants from being collapsed by the generic candidate dedupe.
+- [x] Add a Proposal serving guardrail so a poorly calibrated model cannot bury strong dense/heuristic candidates at near-zero scores.
+- [x] Add focused regression tests for dense variant preservation and Proposal model guardrail behavior.
+- [x] Run focused backend tests, syntax/diff checks, and Graphify rebuild after backend edits.
+
+### Review Notes
+
+- Started after latest job analysis showed known cross-platform positives were present in dense inventory but lost by
+  Proposal input, Proposal scoring, or pre-Judge promotion.
+- `candidate_normalizer` now uses stricter duplicate criteria for dense-vs-dense candidates. Nearby dense variants are
+  only collapsed when their anchor, start, end, and duration are effectively the same, so alternate boundaries can survive
+  into Proposal input.
+- `proposal_scorer` now applies a serving-time floor from the heuristic score when a trained model assigns a very low score
+  to strong dense/heuristic candidates. The model still ranks normally above that floor.
+- Added regression coverage for dense boundary preservation and for the low-model-score Proposal guardrail.
+- Verification passed: `./.venv/bin/python -m pytest -q tests/test_candidate_normalizer.py tests/test_proposal_scorer.py
+  tests/test_evaluate_candidate_funnel.py tests/test_train_proposal_scorer.py`, Python compile checks, targeted
+  `git diff --check`, and Graphify rebuild.
+
+## 2026-05-26 Plan: Cross-Platform Recall Targets For Proposal And Ranker
+
+- [x] Fix Candidate-Recall evaluation so excluded `judge_scope` / `quality_gate` rows do not count as actual judged/kept matches.
+- [x] Promote dense-inventory windows overlapping cross-platform positives into Proposal input during proposal-training materialization.
+- [x] Ensure Proposal training labels overlapping dense windows as high-weight recall positives instead of letting low model scores reject them.
+- [x] Add Ranker training rows/features for cross-platform-positive dense windows so known viral windows become Top-K targets before the Judge.
+- [x] Add or update tests covering Proposal recall promotion, ranker training inclusion, and accurate judged-scope recall.
+- [x] Run focused backend tests, `git diff --check`, and Graphify rebuild.
+
+### Review Notes
+
+- Implemented effective-stage recall in `backend/ml/evaluate_candidate_funnel.py`.
+  `judge_scope` now only counts `included`, `clip_judge` only counts actually
+  judged rows, and `quality_gate` only counts kept rows with a Judge result.
+- Proposal-training dense inventory is now generated uncapped first, then
+  positive-overlap windows are promoted into the capped candidate set. Those
+  dense Cross-Platform overlaps become `cross_platform_dense_recall_positive`
+  rows with higher sample weight and `proposal_recall_target=true`.
+- Proposal materialization now writes `positive_recall_targets.jsonl` and
+  annotates matching `candidate_proposals.jsonl` rows with recall-target
+  metadata, so failed/preserved materialized jobs show whether known positives
+  survived Proposal input.
+- Ranker Cross-Platform labels now use `cross_platform_outcome_positive`
+  instead of `weak_positive`, with stronger sample weight and ordinal label.
+  This makes known viral repost matches a hard Top-K learning target.
+- Verification passed: focused backend tests via
+  `./.venv/bin/python -m pytest -q tests/test_evaluate_candidate_funnel.py
+  tests/test_train_proposal_scorer.py
+  tests/test_train_vod_ranker.py::TrainVodRankerTests::test_cross_platform_fingerprint_rows_are_sent_through_vod_feature_builder`,
+  Python compile checks, targeted `git diff --check` for touched files, and
+  Graphify rebuild. Full `git diff --check` is still blocked by pre-existing
+  CRLF/trailing-whitespace artifact CSV changes in `backend/ml/artifacts/`.
+
+## 2026-05-26 Plan: Inspect New Latest Job Candidate Recall
+
+- [x] Identify the newest debug-backed serving job and its VOD.
+- [x] Run Candidate-Recall against cross-platform positives for that job.
+- [x] Inspect funnel, Judge, quality gate, and final clip diagnostics.
+- [x] Summarize whether the new job changes the next improvement step.
+
+### Review Notes
+
+- Started after request to rerun the Candidate-Recall inspection on the new job.
+- Newest debug-backed job is `c1fb71f3-af31-46e9-ac6b-6c6d618b0e43`
+  for `https://www.twitch.tv/videos/2774440901`, profile `jynxzi`.
+- This VOD has 4 cross-platform positive windows, so recall is now
+  measurable. Aggregated recall: 3/4 matched Proposal input, 2/4 matched
+  ranked pre-Judge, 0/4 reached actual Clip Judge, 0/4 final.
+- Per-window diagnosis: the `4691.26-4699.42` positive reached Proposal input
+  but was Proposal-rejected with score `0.054082`; the `11695.36-11716.58`
+  positive was present in dense inventory but did not reach Proposal input;
+  the `12008.38-12038.16` and `12052.16-12061.86` positives shared a kept
+  dense-inventory candidate with Proposal score `0.394469`, but Ranker buried
+  it at pre-Judge rank `167`, so it was outside the judged set.
+- Normal funnel: 5,000 dense inventory windows, 317 Proposal inputs, 240
+  Proposal-kept, 237 ranked pre-Judge, 50 judged, 10 judged quality-kept, 12
+  final-ranked, 5 final moments.
+- Judge took about `1952.16s` for 50 candidates. Final selected clips averaged
+  Judge score `7.152`, pre-Judge rank `26.0`, and Proposal score `0.118012`.
+- Current actionable bottleneck is not dense candidate generation; it is
+  Proposal/Ranker promotion of known outcome-positive dense-inventory windows
+  into the actual judged shortlist.
+
+## 2026-05-25 Plan: Inspect Latest Job Candidate Recall
+
+- [x] Identify the latest debug-backed serving job and its VOD.
+- [x] Run Candidate-Recall against cross-platform positives for that job.
+- [x] Inspect funnel, Judge, quality gate, and final clip diagnostics.
+- [x] Summarize what the result means for the next improvement step.
+
+### Review Notes
+
+- Started after request to inspect Candidate-Recall on the last job.
+- Latest debug-backed job is `14109705-7138-4721-a6bb-b5fb8ad233bf`,
+  request URL `https://www.twitch.tv/videos/2774602304`, profile `jynxzi`.
+- Cross-platform outcome file currently has no positive windows for VOD
+  `2774602304`, so `positive_window_recall.positive_windows=0` and recall is
+  not computable for this job.
+- Normal funnel diagnostics are still useful: 5,000 dense inventory windows,
+  319 Proposal inputs, 240 Proposal-kept, 238 ranked pre-Judge, 50 judged, 9
+  judged quality-kept, 12 final-ranked, 5 final moments.
+- Judge took about 2,018.6 seconds for 50 candidates. Three judged candidates
+  reached judge score >= 7.0; all three became final clips. High-Judge
+  pre-Judge top20 ratio was 0.667 and top40 ratio was 1.0.
+- Final selected clips still have low Proposal scores on average
+  (`0.205732`), with three of five below `0.15`; Proposal confidence remains
+  the weak link even though Ranker placement improved versus prior jobs.
+- No backend code was changed; this task log was updated with the inspection.
+
+## 2026-05-25 Plan: Proposal Training CLI Compatibility
+
+- [x] Make Proposal training tolerate legacy/local-train `--date-from` and `--date-to` arguments.
+- [x] Add regression coverage for direct `train_proposal_pipeline.py` invocation with ignored date arguments.
+- [x] Update lessons for the command-interface mismatch.
+- [x] Verify with focused tests and `git diff --check`.
+
+### Review Notes
+
+- `scripts/train_proposal_local_docker.sh` now consumes `--date-from` and
+  `--date-to` as compatibility no-ops instead of forwarding them into the
+  Proposal trainer.
+- `backend/ml/train_proposal_pipeline.py` also accepts those flags directly as
+  hidden no-ops, so direct module calls no longer fail on reused local-train
+  date arguments.
+- Added regression coverage to
+  `backend/tests/test_proposal_training_pipeline.py`.
+- Verification passed: focused Proposal pipeline test, wrapper syntax check,
+  Python compile check, direct CLI smoke test with date arguments,
+  `git diff --check`, and Graphify rebuild through the local Graphify
+  interpreter.
+
+## 2026-05-25 Plan: Implement Clipfinding Quality Levers
+
+- [x] Add versioned artifact/eval audit output so every run can show which Ranker/Proposal artifacts and training/eval summaries were actually used.
+- [x] Add Proposal-recall diagnostics against positive/outcome windows across generated, proposal input, proposal kept, pre-Judge top-k, Judge scope, and final stages.
+- [x] Add explicit Jynxzi clip-type taxonomy signals to Proposal/Ranker diagnostics and training rows.
+- [x] Promote existing multimodal proxy signals before the Judge through Proposal features and funnel slices.
+- [x] Extend feedback/review exports so future training can distinguish good clips, false positives, missed virals, bad boundaries, and bad durations.
+- [x] Verify with focused tests, full backend tests where practical, lint/build if frontend changes, `git diff --check`, and Graphify rebuild after backend edits.
+
+### Review Notes
+
+- Added a deterministic Jynxzi clip taxonomy (`rage`, `clutch`,
+  `funny_reaction`, `trash_talk_payoff`, `chat_shock`, `ranked_tension`,
+  `failed_setup`, `streamer_persona_beat`) and surfaced it in Proposal
+  features, Ranker features, trace rows, funnel summaries, and frontend
+  diagnostics.
+- Added `multimodal_proxy_score` from existing pre-Judge signals
+  (chat/activity, face/motion, audio pop, game events, laughter/exclamation,
+  hype) so Proposal and Ranker can score non-transcript evidence before the
+  LLM Judge.
+- Extended Proposal training feature names and legacy row conversion so new
+  taxonomy/multimodal fields are learnable on the next Proposal retrain.
+- Extended frontend feedback with tags for `good_clip`, `false_positive`,
+  `missed_viral`, `wrong_boundary`, and `wrong_duration`; exports now preserve
+  those tags and weight false positives vs boundary/duration mistakes
+  differently.
+- Added `backend/ml/audit_clipfinding_artifacts.py` and wired it into
+  `train_proposal_pipeline.py`; Proposal training now writes a current
+  clipfinding artifact audit next to the output artifact.
+- Extended `backend/ml/evaluate_candidate_funnel.py` with
+  `--positive-windows` so cross-platform/outcome positives can be measured
+  against Proposal input, Proposal kept, Ranker top-k, Judge scope, quality
+  gate, and final stages.
+- Verification: focused Proposal/Funnel/Feedback/Training/Audit tests
+  passed, related Feature/Ranker tests passed, full backend test suite passed,
+  frontend lint/build passed, and `git diff --check` passed.
+- Graphify rebuild passed via the local Graphify interpreter after system
+  `python3` did not have the `graphify` module installed.
+
+## 2026-05-25 Plan: Backend Clipfinding Gap Analysis
+
+- [x] Map the current serving clipfinding pipeline from job API through candidate generation, feature building, ranking, Judge reranking, and final selection.
+- [x] Review the Jynxzi-specific training and label workflow: cross-platform labels, frontend feedback, Judge snapshots, Proposal/Ranker artifacts, and holdout/eval tooling.
+- [x] Inspect current artifact/debug evidence and recent review notes for measurable quality bottlenecks.
+- [x] Compare the current system against the target of OpusClip-level clip discovery without post-processing.
+- [x] Produce prioritized concrete next steps with verification criteria.
+
+### Review Notes
+
+- Started after request to analyze the whole backend for market-leader-level
+  viral clip finding for one streamer, before post-processing.
+- Serving path is a broad audited funnel: ASR/audio/video/chat enrichment,
+  peak/semantic/dense/dense-inventory recall, Proposal shortlist, Ranker,
+  Clip Judge, quality gate, diverse top selection, and boundary refinement.
+- Current biggest serving bottleneck is not raw candidate breadth; latest
+  debug job still generated 5,000 dense-inventory windows and judged 80
+  candidates, but final winners had weak upstream positions: mean pre-Judge
+  rank 53 and mean Proposal score about 0.136.
+- Current Jynxzi supervision is still small for market-leader-level quality:
+  144 cross-platform positive matches across 52 VODs, current Ranker training
+  around 327 policy rows with 138 positives / 189 negatives, and outcome
+  holdout only 24 positives / 17 negatives against a 300-positive target.
+- Proposal model is under-proven: it has thousands of rows, but heldout AUC is
+  only about 0.62 / precision@K about 0.17, and the pipeline summary artifact
+  appears overwritten by a pytest-temp run, so it should not be treated as a
+  production training summary.
+- Product eval and latest debug evidence point to the same gap: Judge rescues
+  candidates late, while Proposal/Pre-Judge Ranker do not rank future winners
+  confidently enough before the expensive LLM stage.
+- The OpusClip-level target implies four missing pillars before post-processing:
+  larger outcome-labeled gold/silver data, explicit Proposal/Recall gates,
+  stronger multimodal discovery beyond transcript matching, and streamer-
+  specific Jynxzi taxonomy/eval slices.
+- No backend code was changed in this analysis; only this task log was updated.
+
 ## 2026-05-19 Plan: Speed Up Ollama Clip Judge
 
 - [x] Change serving Judge defaults to use a smaller Ollama model.
@@ -7528,3 +9105,267 @@ Phase 0-2 zuerst, danach **1 Woche reale Nutzung** bevor Phase 3 angefasst wird.
   `bash -n` for local training wrappers; `git diff --check`; proposal row and
   artifact summary inspection; Graphify rebuild (`3283` nodes, `8777` edges,
   `94` communities).
+
+## 2026-05-28 Plan: Activate Latest Backend Implementations
+
+- [x] Verify whether the running backend uses live source mounts or an image
+  built from older source.
+- [x] Rebuild and recreate the backend container so the latest implementation is
+  actually present in `/app/backend`.
+- [x] Check runtime environment overrides that can mask new config defaults.
+- [x] Update the active env defaults for judge recall reserve sizing.
+- [x] Verify the running container imports the new code paths and settings.
+
+### Review Notes
+
+- Root cause: production Compose was running the backend from the built image,
+  not a live-mounted source tree. The source edits were present locally but not
+  active inside the container until the image was rebuilt.
+- A second blocker was `backend/.env`: it still overrode
+  `JUDGE_RECALL_RESERVE_SLOTS=10` and `JUDGE_RECALL_RESERVE_POOL_K=160`, so the
+  new config defaults did not apply at runtime.
+- Rebuilt and recreated the backend with
+  `docker compose up -d --no-deps --build backend`, then recreated it once more
+  after env changes with `docker compose up -d --no-deps backend`.
+- Active runtime verification now shows:
+  `JUDGE_RECALL_RESERVE_SLOTS=16`,
+  `JUDGE_RECALL_RESERVE_POOL_K=240`,
+  `SERVING_CROSS_PLATFORM_RECALL_ENABLED=false`,
+  `pipeline._load_cross_platform_positive_windows(..., force_load=...)`, and
+  `candidate_recall_report.build_candidate_recall_report(..., positive_windows=...)`.
+- `/api/status` responds successfully and `docker compose ps backend` reports
+  the backend as healthy.
+
+## 2026-05-28 Plan: Frontend Candidate Labeling Loop
+
+- [x] Inspect existing feedback models, storage, API routes, and frontend clip preview flow.
+- [x] Expose reviewable pipeline candidates with preview URLs and enough context for labeling.
+- [x] Add frontend labeling controls for excellent/good/maybe/bad/boundary_bad plus reason tags.
+- [x] Persist labels through the existing feedback/training export path.
+- [x] Add focused backend/frontend tests or type checks, rebuild Graphify, and verify the app.
+
+### Review Notes
+
+- The pipeline now writes `debug/review_candidates.jsonl` and renders bounded
+  `review_clips/*.mp4` previews before deleting the source VOD, so frontend
+  labeling still has video previews without keeping the full VOD around.
+- The backend exposes `GET /api/jobs/{job_id}/review-candidates` and keeps
+  feedback overlayed from `debug/feedback.jsonl`, so saved labels survive UI
+  reloads even when the original review manifest is stale.
+- Training feedback now supports `excellent`, `good`, `maybe`,
+  `boundary_bad`, and `bad`, plus context/reaction/boundary reason tags. The
+  training export maps those labels to distinct positive, neutral, hard
+  negative, and boundary-negative rows.
+- Verification passed: backend `py_compile`, `pytest`
+  `test_training_export.py`, `test_feedback_store.py`,
+  `test_train_proposal_scorer.py`, `test_jobs_router.py`; frontend
+  `npm run lint` and `npm run build`; scoped `git diff --check`; Graphify
+  rebuild (`3684` nodes, `9988` edges, `100` communities).
+- Full `git diff --check` still reports CRLF/trailing whitespace in existing
+  CSV artifact files under `backend/ml/artifacts`; those are unrelated to this
+  labeling change and were left untouched.
+
+## 2026-05-28 Plan: Fix Review Candidate 404
+
+- [x] Verify whether the live backend container exposes the new review-candidates route.
+- [x] Rebuild/recreate the runtime if the route is missing from the baked image.
+- [x] Recheck the endpoint against a real or recent job id and confirm the frontend URL no longer returns 404.
+- [x] Document the result and update Graphify if backend code changes are needed.
+
+### Review Notes
+
+- Root cause: the running backend container was still the old baked image. The
+  browser hit `/api/jobs/{job_id}/review-candidates`, but the live app returned
+  `{"detail":"Not Found"}`, meaning the route did not exist in that process.
+- Rebuilt and recreated both containers with `docker compose up -d --build
+  backend frontend`.
+- Verified the live backend now exposes:
+  `/api/jobs/{job_id}/review-candidates`,
+  `/api/jobs/{job_id}/feedback`, and
+  `/static/{job_id}/review_clips/{filename}`.
+- Verified a real completed job returns `HTTP 200` from
+  `/api/jobs/61acfc25-bc9c-496e-97cd-019507f715a4/review-candidates?limit=5`.
+  That old job has no preview clips yet, so `preview_url` is `null`; new jobs
+  generate previews during the `clipping` phase.
+
+## 2026-05-28 Plan: Simplify Labeling UI
+
+- [x] Remove additional reason/tag controls from final clip feedback and review-candidate labeling.
+- [x] Keep the five rating choices and preserve backend compatibility for old feedback rows.
+- [x] Verify frontend lint/build and rebuild the running image if the UI changed.
+- [x] Confirm the live frontend no longer renders tag controls.
+
+### Review Notes
+
+- Removed the visible reason/tag buttons from both `CandidateReviewPanel` and
+  final `ClipCard` feedback.
+- Feedback submissions now send only the selected rating plus optional notes.
+  Backend tag fields remain accepted for old persisted rows and compatibility,
+  but the frontend no longer creates new tags.
+- Verification passed: `npm run lint`, `npm run build`, scoped
+  `git diff --check`.
+- Rebuilt and recreated only the frontend container with
+  `docker compose up -d --no-deps --build frontend`; backend did not need a
+  rebuild for this UI-only change.
+- Live frontend check confirms the removed tag labels are absent from the
+  served page.
+
+## 2026-05-29 Plan: Backend Image Freshness Check
+
+- [x] Compare key backend source files in the running backend container against the workspace.
+- [x] Rebuild/recreate only the backend service if the image is stale.
+- [x] Verify the backend health endpoint and active code after rebuild.
+
+### Review Notes
+
+- The running backend image was stale: new files like
+  `backend/ml/outcome_view_weighting.py` and
+  `backend/ml/export_serving_hard_negatives.py` were missing inside
+  `/app/backend`, and several ML files had different hashes from the
+  workspace.
+- Rebuilt and recreated only the backend service with
+  `docker compose up -d --no-deps --build backend`.
+- Verified the recreated `ai-clipping-backend` is healthy and `/api/status`
+  returns HTTP 200.
+- Verified all checked backend source hashes now match between the workspace
+  and the running backend container.
+
+## 2026-05-29 Plan: Calibrate Jynxzi Judge Quality Gate
+
+- [x] Locate current Judge/quality-gate thresholds and final selection flow.
+- [x] Lower Jynxzi-serving gate thresholds from fixed narrative values to measured Jynxzi-positive-compatible values.
+- [x] Add a high-ranker-score bypass for low Judge subscores without using Cross-Platform oracle flags.
+- [x] Adjust the Judge prompt/rubric toward reaction/clutch spike quality.
+- [x] Add focused tests, rebuild Graphify, and document results.
+
+### Review Notes
+
+- Calibrated serving quality defaults and `backend/.env` from narrative-heavy
+  `6.0 / 0.55 / 0.55` to Jynxzi-positive-compatible `4.4 / 0.35 / 0.35`.
+- Added an organic ranker-serving-threshold bypass in the quality gate. It uses
+  `ranker_serving_threshold_pass`, not Cross-Platform recall target metadata.
+- Adjusted single and batch Clip-Judge prompts so Jynxzi reaction/clutch/rage/
+  unboxing spikes are not penalized for lacking essay-style standalone story.
+- Verification passed: `py_compile`, `pytest backend/tests/test_selector.py
+  backend/tests/test_clip_judge.py backend/tests/test_ranker.py -q`,
+  `git diff --check`, and Graphify rebuild.
+
+## 2026-05-29 Plan: Stabilize Judge Gate Against LLM Variance
+
+- [x] Add near-threshold Ranker bypass so high-ranked clips just below serving threshold are not dropped.
+- [x] Replace single-subscore hard failures with a soft Judge gate for strong clips.
+- [x] Let post-Judge final selection include Ranker-bypass candidates when judged candidates are insufficient.
+- [x] Add focused regression tests for the 1291-style near-threshold/narrative-noise case.
+- [x] Rebuild Graphify, rebuild backend image, and verify live settings.
+
+### Review Notes
+
+- Added `ranker_serving_threshold_near_pass` for candidates within 0.15 score
+  points of the serving threshold or at least 98% of it. This catches the
+  7.627 vs 7.637 case without requiring Cross-Platform metadata.
+- Added a soft Judge gate: strong Judge score plus confidence can survive one
+  noisy subscore miss when the mean of clarity/payoff/narrative remains high.
+- Final post-Judge selection can now fill remaining slots with unjudged
+  Ranker-bypass candidates only; generic unjudged fillers are still excluded.
+- Verification passed so far: `py_compile`, `git diff --check`, and
+  `pytest backend/tests/test_selector.py backend/tests/test_clip_judge.py
+  backend/tests/test_ranker.py -q`.
+- Rebuilt Graphify, rebuilt/recreated the backend image, verified the backend
+  container is healthy, and confirmed the new serving-quality settings are
+  loaded inside `ai-clipping-backend`.
+
+## 2026-05-29 Plan: Blend Judge Signal And Stabilize Recall
+
+- [x] Switch Judge reranking from LLM-first override to Ranker/Judge blend by default.
+- [x] Replace hard standalone/payoff/narrative quality cutoffs with a soft Judge penalty signal.
+- [x] Preserve proposal-selected candidate variants through the post-proposal merge so dedupe cannot erase them before ranking.
+- [x] Cache Judge results and support deterministic median sampling to reduce run-to-run variance.
+- [x] Add focused regression tests, update lessons, rebuild Graphify, rebuild backend image, and verify live settings.
+
+### Review Notes
+
+- Changed `JUDGE_LLM_FIRST` default to `false`; Judge scores now blend with
+  Ranker scores instead of overriding them.
+- Post-Judge final selection now sorts by the blended score first, then Judge
+  quality as tie/support signal.
+- Serving quality gate defaults to `soft` subscore mode: standalone/payoff/
+  narrative no longer hard-reject candidates. The hard reject left is a low
+  confidence or very low Judge-score floor.
+- Proposal-selected candidates are now explicit preserve IDs during the
+  post-proposal merge, so candidate variants selected by Proposal are not
+  erased by duplicate/cap checks before Ranker.
+- Judge results are cached under `backend/tmp/cache/clip_judge`; uncertain
+  first-pass results can trigger 3-sample median consensus.
+- Verification passed so far: `py_compile`, `git diff --check`, focused
+  `pytest backend/tests/test_selector.py backend/tests/test_clip_judge.py
+  backend/tests/test_candidate_generators.py -q`, and focused proposal-preserve
+  pipeline tests. Full pipeline integration still has unrelated existing test
+  stubs missing `clipper.cut_review_clips`.
+- Rebuilt Graphify, rebuilt/recreated the backend image, verified `/api/status`,
+  and confirmed the live container has `judge_llm_first=False`,
+  `serving_quality_subscore_gate_mode=soft`, and Judge cache/consensus enabled.
+
+## 2026-05-29 Plan: Rescue Cross-Platform Transcript Near-Misses
+
+- [x] Add multi-window transcript matching so recap/compilation Shorts can emit one positive per matched chunk.
+- [x] Add audio-fingerprint fallback for transcript near-misses using cached/full VOD fingerprints.
+- [x] Add view-weighted acceptance thresholds for high-view reposts without lowering the global threshold.
+- [x] Extend diagnostics/tests so accepted reason, chunk matches, audio fallback, and view-threshold behavior are visible.
+- [x] Rebuild Graphify after backend changes and document verification results.
+
+### Review Notes
+
+- Added multi-window transcript matching for recap/compilation Shorts. Long
+  repost transcripts are chunked, each chunk is matched independently, and each
+  accepted chunk can emit its own positive training row.
+- Added near-miss rescue paths without lowering the global threshold:
+  high-view reposts can use a stricter view-weighted lowered threshold, and
+  transcript near-misses can be accepted when cached audio fingerprints confirm
+  the VOD alignment.
+- Added explicit audit fields on matched rows and diagnostics:
+  `transcript_match_kind`, `transcript_acceptance_reason`,
+  `transcript_acceptance_threshold`, chunk indices, and optional
+  `audio_fingerprint_confidence`.
+- Verification passed:
+  `py_compile backend/ml/match_cross_platform_transcripts.py`,
+  `pytest backend/tests/test_match_cross_platform_transcripts.py -q`,
+  `pytest backend/tests/test_prepare_cross_platform_fingerprint_rows.py -q`,
+  and scoped `git diff --check`.
+- The required system `python3 ... graphify.watch...` still lacks `graphify`;
+  rebuilt successfully with
+  `/home/antonio/.local/share/uv/tools/graphifyy/bin/python ...`, refreshing
+  `backend/graphify-out`.
+- Rebuilt/recreated the backend image with
+  `docker compose up -d --no-deps --build backend`; `/api/status` responds,
+  the backend container is healthy, and the live container exposes the new
+  transcript chunk/audio-fallback helpers.
+
+## 2026-05-30 Plan: Stop Local Ranker Training OOM
+
+- [x] Confirm whether the failed VOD-first run died from missing data, permission
+  errors, or process OOM.
+- [x] Verify persisted checkpoints and whether the staged ranker dataset was
+  written.
+- [x] Make local training worker defaults memory-aware for 24-32 GiB hosts.
+- [x] Add runtime memory-conservation env defaults for native ML libraries.
+- [x] Verify syntax, worker-plan calculation, and diff hygiene.
+
+### Review Notes
+
+- The latest failed run was killed by the kernel OOM killer, not by a missing
+  VOD or permission error. `dmesg` showed the Docker Python process at roughly
+  26 GiB RSS before it was killed.
+- The staged dataset was never written, so the failure happened during the
+  VOD/label feature build before model fitting.
+- `backend/ml/local_train.py` now recommends `2` VOD workers and `2` label
+  workers when `/proc/meminfo` reports less than 40 GiB RAM. Explicit CLI
+  overrides still work.
+- Added conservative defaults for `MALLOC_ARENA_MAX`, TensorFlow GPU memory
+  growth, and TensorFlow log level in the local training environment.
+- Verification passed: `python3 -m py_compile backend/ml/local_train.py`,
+  direct worker-plan check returned `vod_workers=2` and `label_workers=2` on
+  this 27.4 GiB host, `PYTHONPATH=backend pytest
+  backend/tests/test_local_train.py -q`, scoped `git diff --check`, and
+  Graphify rebuild.
+
+---

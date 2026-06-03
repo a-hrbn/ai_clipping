@@ -53,6 +53,9 @@ class CrossPlatformFingerprintTests(unittest.TestCase):
         self.assertGreaterEqual(rows[0]["window_start"], 100.0)
         self.assertGreaterEqual(rows[0]["fingerprint_confidence"], 0.7)
         self.assertEqual(rows[0]["profile_filter_version"], 7)
+        self.assertEqual(rows[0]["outcome_view_tier"], "viral")
+        self.assertEqual(rows[0]["outcome_view_sample_weight"], 2.0)
+        self.assertEqual(rows[0]["sample_weight"], 2.0)
 
     def test_match_reposts_to_vods_skips_missing_vod_media(self) -> None:
         repost_rows = [{"video_path": "/tmp/repost.mp4", "platform": "youtube"}]

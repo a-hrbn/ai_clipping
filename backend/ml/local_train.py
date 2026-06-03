@@ -21,6 +21,21 @@ class WorkerPlan:
     label_workers: int
 
 
+def _available_memory_gib() -> float | None:
+    meminfo = Path("/proc/meminfo")
+    if not meminfo.exists():
+        return None
+    for line in meminfo.read_text(encoding="utf-8", errors="ignore").splitlines():
+        if line.startswith("MemTotal:"):
+            parts = line.split()
+            if len(parts) >= 2:
+                try:
+                    return int(parts[1]) / 1024 / 1024
+                except ValueError:
+                    return None
+    return None
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run the VOD ranker training flow locally inside Docker- or workstation-friendly runtime settings.",
@@ -77,14 +92,22 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _recommended_worker_plan(cpu_count: int) -> WorkerPlan:
+def _recommended_worker_plan(cpu_count: int, memory_gib: float | None = None) -> WorkerPlan:
+    # Video feature extraction can keep large decoder/model buffers alive in the
+    # main process. On 24-32 GiB WSL/Docker hosts, 4 VOD workers can OOM before a
+    # staged training dataset is written.
+    if memory_gib is not None and memory_gib < 40:
+        return WorkerPlan(vod_workers=2, label_workers=2)
+    if cpu_count >= 12:
+        return WorkerPlan(vod_workers=4, label_workers=3)
     return WorkerPlan(vod_workers=1, label_workers=3)
 
 
 def _configure_runtime_env(args: argparse.Namespace) -> dict[str, str]:
     env = os.environ.copy()
     cpu_count = max(os.cpu_count() or 1, 1)
-    worker_plan = _recommended_worker_plan(cpu_count)
+    memory_gib = _available_memory_gib()
+    worker_plan = _recommended_worker_plan(cpu_count, memory_gib)
     vod_workers = args.training_vod_workers if args.training_vod_workers > 0 else worker_plan.vod_workers
     label_workers = args.training_label_workers if args.training_label_workers > 0 else worker_plan.label_workers
     semantic_batch_size = args.semantic_batch_size if args.semantic_batch_size > 0 else (
@@ -122,6 +145,9 @@ def _configure_runtime_env(args: argparse.Namespace) -> dict[str, str]:
             "MKL_NUM_THREADS": "1",
             "NUMEXPR_NUM_THREADS": "1",
             "VECLIB_MAXIMUM_THREADS": "1",
+            "MALLOC_ARENA_MAX": env.get("MALLOC_ARENA_MAX", "2"),
+            "TF_FORCE_GPU_ALLOW_GROWTH": env.get("TF_FORCE_GPU_ALLOW_GROWTH", "true"),
+            "TF_CPP_MIN_LOG_LEVEL": env.get("TF_CPP_MIN_LOG_LEVEL", "2"),
             "PYTORCH_CUDA_ALLOC_CONF": env.get("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True"),
         }
     )
@@ -156,6 +182,7 @@ def _build_summary(args: argparse.Namespace, env: dict[str, str], training_retur
         "artifact_only": bool(args.artifact_only),
         "hardware_profile": {
             "cpu_count": cpu_count,
+            "memory_gib": round(_available_memory_gib(), 2) if _available_memory_gib() is not None else None,
             "whisper_device": env.get("WHISPER_DEVICE", ""),
             "whisper_language": env.get("WHISPER_LANGUAGE", ""),
             "semantic_device": env.get("SEMANTIC_DEVICE", ""),

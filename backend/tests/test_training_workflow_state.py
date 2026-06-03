@@ -155,6 +155,13 @@ class TrainingWorkflowStateTests(unittest.TestCase):
                      "VOD_RANKER_USE_USER_LABELS": "1",
                      "VOD_RANKER_USE_MM_JUDGE_PROXY": "1",
                      "VOD_RANKER_MM_JUDGE_WEIGHT": "0.6",
+                     "SERVING_HARD_NEGATIVE_ENABLED": "1",
+                     "VOD_RANKER_SERVING_HARD_NEGATIVE_WEIGHT": "2.2",
+                     "SERVING_HARD_NEGATIVE_PRE_JUDGE_TOP_K": "90",
+                     "SERVING_HARD_NEGATIVE_MAX_PER_VOD": "25",
+                     "SERVING_HARD_NEGATIVE_MAX_ROWS": "350",
+                     "SERVING_HARD_NEGATIVE_POSITIVE_EXCLUSION_OVERLAP": "0.3",
+                     "SERVING_HARD_NEGATIVE_MIN_RANK_SCORE": "6.5",
                      "RANKER_MAX_FEATURES": "32",
                      "RANKER_PREFER_LIGHTGBM": "1",
                      "RANKER_LIGHTGBM_SELECTION_TOLERANCE": "0.05",
@@ -166,6 +173,10 @@ class TrainingWorkflowStateTests(unittest.TestCase):
                      "VOD_RANKER_REQUIRE_CROSS_PLATFORM_OUTCOME": "1",
                      "VOD_RANKER_MIN_CROSS_PLATFORM_TRAIN_ROWS": "320",
                      "OUTCOME_HOLDOUT_TARGET_POSITIVE_ROWS": "350",
+                     "RECENT_VOD_HOLDOUT_ENABLED": "1",
+                     "RECENT_VOD_HOLDOUT_COUNT": "10",
+                     "RECENT_VOD_HOLDOUT_POLICY_PATH": "/tmp/recent.jsonl",
+                     "TRAINING_HOLDOUT_POLICY_ROWS_PATH": "/tmp/policy.jsonl",
                      "ROLLOUT_READINESS_TARGET_NEW_VOD_GROUPS": "25",
                      "ROLLOUT_READINESS_TARGET_AVAILABLE_GROUPS": "45",
                      "ROLLOUT_READINESS_MAX_CANDIDATES_PER_VOD": "5",
@@ -226,6 +237,13 @@ class TrainingWorkflowStateTests(unittest.TestCase):
                 "ranker_gold_train_weight": "2.5",
                 "ranker_use_gold_train": "1",
                 "ranker_hard_negative_weight": "3.5",
+                "ranker_serving_hard_negative_enabled": "1",
+                "ranker_serving_hard_negative_weight": "2.2",
+                "ranker_serving_hard_negative_pre_judge_top_k": "90",
+                "ranker_serving_hard_negative_max_per_vod": "25",
+                "ranker_serving_hard_negative_max_rows": "350",
+                "ranker_serving_hard_negative_positive_exclusion_overlap": "0.3",
+                "ranker_serving_hard_negative_min_rank_score": "6.5",
                 "ranker_use_gold_hard_negatives": "0",
                 "ranker_use_user_labels": "1",
                 "ranker_rollout_review_negative_weight": "4.5",
@@ -242,6 +260,10 @@ class TrainingWorkflowStateTests(unittest.TestCase):
                 "ranker_require_cross_platform_outcome": "1",
                 "ranker_min_cross_platform_train_rows": "320",
                 "outcome_holdout_target_positive_rows": "350",
+                "recent_vod_holdout_enabled": "1",
+                "recent_vod_holdout_count": "10",
+                "recent_vod_holdout_policy_path": "/tmp/recent.jsonl",
+                "training_holdout_policy_rows_path": "/tmp/policy.jsonl",
                 "rollout_readiness_target_new_vod_groups": "25",
                 "rollout_readiness_target_available_groups": "45",
                 "rollout_readiness_max_candidates_per_vod": "5",
@@ -296,6 +318,13 @@ class TrainingWorkflowStateTests(unittest.TestCase):
             )
 
         self.assertEqual(state["ranker_hard_negative_weight"], "4.0")
+        self.assertEqual(state["ranker_serving_hard_negative_enabled"], "1")
+        self.assertEqual(state["ranker_serving_hard_negative_weight"], "2.0")
+        self.assertEqual(state["ranker_serving_hard_negative_pre_judge_top_k"], "80")
+        self.assertEqual(state["ranker_serving_hard_negative_max_per_vod"], "20")
+        self.assertEqual(state["ranker_serving_hard_negative_max_rows"], "300")
+        self.assertEqual(state["ranker_serving_hard_negative_positive_exclusion_overlap"], "0.25")
+        self.assertEqual(state["ranker_serving_hard_negative_min_rank_score"], "-999.0")
         self.assertEqual(state["ranker_rollout_review_negative_weight"], "4.0")
         self.assertEqual(state["ranker_use_user_labels"], "1")
         self.assertEqual(state["ranker_use_gold_train"], "1")
@@ -306,6 +335,10 @@ class TrainingWorkflowStateTests(unittest.TestCase):
         self.assertEqual(state["ranker_require_cross_platform_outcome"], "1")
         self.assertEqual(state["ranker_min_cross_platform_train_rows"], "70")
         self.assertEqual(state["outcome_holdout_target_positive_rows"], "300")
+        self.assertEqual(state["recent_vod_holdout_enabled"], "1")
+        self.assertEqual(state["recent_vod_holdout_count"], "10")
+        self.assertTrue(str(state["recent_vod_holdout_policy_path"]).endswith("jynxzi_recent_vod_holdout_policy.jsonl"))
+        self.assertTrue(str(state["training_holdout_policy_rows_path"]).endswith("jynxzi_training_holdout_policy_rows.jsonl"))
         self.assertEqual(state["rollout_readiness_target_new_vod_groups"], "20")
         self.assertEqual(state["rollout_readiness_target_available_groups"], "40")
         self.assertEqual(state["rollout_readiness_max_candidates_per_vod"], "3")

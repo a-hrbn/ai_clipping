@@ -63,7 +63,8 @@ def build_eval_dataset(rows: list[dict]) -> list[dict]:
         eval_row["source_bucket"] = _source_bucket(row, features)
         eval_row["content_bucket"] = _content_bucket(row, features)
         eval_row["has_outcome_feedback"] = bool(_has_outcome_feedback(row))
-        eval_row["rank_target"] = int(row.get("ordinal_label") or row.get("label") or 0)
+        eval_row["rank_target"] = _rank_target(row)
+        eval_row["outcome_view_tier"] = str(row.get("outcome_view_tier") or "").strip()
         eval_row["dataset_role"] = _dataset_role(row)
         eval_rows.append(eval_row)
     return eval_rows
@@ -82,6 +83,8 @@ def eval_dataset_summary(rows: list[dict]) -> dict[str, object]:
         "by_variant": _count_values(rows, "variant_bucket"),
         "by_source": _count_values(rows, "source_bucket"),
         "by_content_bucket": _count_values(rows, "content_bucket"),
+        "by_outcome_view_tier": _count_values(rows, "outcome_view_tier"),
+        "by_rank_target": _count_values(rows, "rank_target"),
         "gold_holdout_splits": _count_values(rows, GOLD_HOLDOUT_SPLIT_FIELD),
     }
 
@@ -120,7 +123,7 @@ def _content_bucket(row: dict, features: dict) -> str:
     source = _source_bucket(row, features)
     if source in {"quote", "hot_take", "dialogue", "controversy"}:
         return "quote_driven"
-    if source in {"reaction", "clean_reaction", "chat_sync"}:
+    if source in {"reaction", "clean_reaction", "chat_sync", "chat_velocity"}:
         return "reaction"
     if source in {"visual_reveal", "audio_burst", "hype_peak"}:
         return "visual_action"
@@ -166,6 +169,18 @@ def _dataset_role(row: dict) -> str:
     if bool(row.get("selected")):
         return "pipeline_positive_eval"
     return "pipeline_negative_eval"
+
+
+def _rank_target(row: dict) -> int:
+    for key in ("rank_target", "ordinal_label", "label"):
+        value = row.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            return max(int(value), 0)
+        except (TypeError, ValueError):
+            continue
+    return 0
 
 
 def _annotated_eval_row(row: dict) -> dict:

@@ -111,6 +111,7 @@ class TrainingExportTests(unittest.TestCase):
                     "rejected_reason": "post_processing_filtered",
                     "rejection_source": "post_processing_filtered",
                     "feedback_rating": "good",
+                    "feedback_tags": ["good_clip"],
                 }) + "\n",
                 encoding="utf-8",
             )
@@ -121,8 +122,9 @@ class TrainingExportTests(unittest.TestCase):
             self.assertEqual(count, 1)
             row = json.loads(output.read_text(encoding="utf-8").splitlines()[0])
             self.assertEqual(row["label"], 1)
-            self.assertEqual(row["label_source"], "feedback_rating")
-            self.assertGreater(row["sample_weight"], 1.0)
+            self.assertEqual(row["label_source"], "feedback_good_clip")
+            self.assertGreater(row["sample_weight"], 2.3)
+            self.assertEqual(row["feedback_tags"], ["good_clip"])
             self.assertEqual(row["supervision_tier"], "outcome_feedback")
             self.assertEqual(row["label_class"], "outcome_positive")
             self.assertEqual(row["ordinal_label"], 3)
@@ -162,6 +164,61 @@ class TrainingExportTests(unittest.TestCase):
             self.assertEqual(row["supervision_tier"], "feedback_rating_neutral")
             self.assertEqual(row["ordinal_label"], 1)
             self.assertEqual(row["feedback_rating"], "medium")
+
+    def test_export_training_rows_supports_explicit_candidate_label_scale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Path(tmp)
+            debug = storage / "job-label-scale" / "debug"
+            debug.mkdir(parents=True, exist_ok=True)
+            (debug / "candidate_features.jsonl").write_text(
+                "\n".join([
+                    json.dumps({"candidate_id": "excellent", "max_hype": 8.0, "source": "reaction"}),
+                    json.dumps({"candidate_id": "boundary", "max_hype": 7.0, "source": "reaction"}),
+                ]) + "\n",
+                encoding="utf-8",
+            )
+            (debug / "feedback.jsonl").write_text(
+                "\n".join([
+                    json.dumps({
+                        "job_id": "job-label-scale",
+                        "candidate_id": "excellent",
+                        "selected": False,
+                        "exported": False,
+                        "final_start": None,
+                        "final_end": None,
+                        "rejected_reason": None,
+                        "rejection_source": None,
+                        "feedback_rating": "excellent",
+                        "feedback_tags": ["strong_hook", "funny_reaction"],
+                    }),
+                    json.dumps({
+                        "job_id": "job-label-scale",
+                        "candidate_id": "boundary",
+                        "selected": True,
+                        "exported": False,
+                        "final_start": 5.0,
+                        "final_end": 35.0,
+                        "rejected_reason": None,
+                        "rejection_source": None,
+                        "feedback_rating": "boundary_bad",
+                        "feedback_tags": ["bad_boundary"],
+                    }),
+                ]) + "\n",
+                encoding="utf-8",
+            )
+            output = storage / "feedback" / "training_rows.jsonl"
+
+            count = export_training_rows(storage, output)
+
+            self.assertEqual(count, 2)
+            rows = {row["candidate_id"]: row for row in map(json.loads, output.read_text(encoding="utf-8").splitlines())}
+            self.assertEqual(rows["excellent"]["label"], 1)
+            self.assertEqual(rows["excellent"]["label_source"], "feedback_excellent_clip")
+            self.assertEqual(rows["excellent"]["ordinal_label"], 4)
+            self.assertGreaterEqual(rows["excellent"]["sample_weight"], 3.0)
+            self.assertEqual(rows["boundary"]["label"], 0)
+            self.assertEqual(rows["boundary"]["label_source"], "feedback_boundary_bad")
+            self.assertEqual(rows["boundary"]["label_class"], "outcome_boundary_negative")
 
     def test_export_training_rows_uses_judge_quality_feedback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

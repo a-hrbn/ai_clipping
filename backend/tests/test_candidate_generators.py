@@ -33,7 +33,7 @@ class CandidateGeneratorTests(unittest.TestCase):
         sources = {candidate.source for candidate in candidates}
 
         self.assertIn("quote", sources)
-        self.assertTrue(sources.issubset({"quote", "tension_build", "narrative_reveal", "controversy"}))
+        self.assertTrue(sources.issubset({"quote", "chat_velocity", "tension_build", "narrative_reveal", "controversy"}))
 
     def test_generate_semantic_candidates_only_uses_semantic_sources(self) -> None:
         segments = [
@@ -54,7 +54,27 @@ class CandidateGeneratorTests(unittest.TestCase):
         sources = {candidate.source for candidate in candidates}
 
         self.assertTrue(candidates)
-        self.assertTrue(sources.issubset({"quote", "tension_build", "narrative_reveal", "controversy"}))
+        self.assertTrue(sources.issubset({"quote", "chat_velocity", "tension_build", "narrative_reveal", "controversy"}))
+
+    def test_generate_semantic_candidates_includes_chat_velocity_peaks(self) -> None:
+        segments = [
+            RichSegment(start=0.0, end=2.0, text="setup", speaker="STREAMER"),
+            RichSegment(
+                start=3.0,
+                end=6.0,
+                text="chat suddenly goes crazy",
+                speaker="STREAMER",
+                chat_spike_score=0.32,
+                chat_rate_derivative=1.4,
+                chat_ema_crossing_score=0.62,
+            ),
+        ]
+
+        candidates = candidate_generators.generate_semantic_candidates(segments)
+        chat_velocity = [candidate for candidate in candidates if candidate.source == "chat_velocity"]
+
+        self.assertEqual(len(chat_velocity), 1)
+        self.assertIn("chat_velocity:0:300", chat_velocity[0].id)
 
     def test_merge_prioritized_candidates_keeps_peak_when_semantic_candidate_overlaps(self) -> None:
         peak = candidate_generators.Candidate(
@@ -85,6 +105,69 @@ class CandidateGeneratorTests(unittest.TestCase):
         merged = candidate_generators.merge_prioritized_candidates([peak], [overlapping_semantic, distant_semantic])
 
         self.assertEqual([candidate.id for candidate in merged], ["peak:0:1000", "controversy:0:5000"])
+
+    def test_merge_prioritized_candidates_can_preserve_stronger_context_variant(self) -> None:
+        short_peak = candidate_generators.Candidate(
+            id="peak:0:1200",
+            start=10.0,
+            end=20.0,
+            source="peak",
+            anchor_time=13.0,
+            score_hint=7.5,
+        )
+        setup_variant = candidate_generators.Candidate(
+            id="narrative_reveal:0:800",
+            start=2.0,
+            end=34.0,
+            source="narrative_reveal",
+            anchor_time=17.0,
+            score_hint=4.0,
+            tags=["question"],
+        )
+
+        default_merged = candidate_generators.merge_prioritized_candidates([short_peak], [setup_variant])
+        context_merged = candidate_generators.merge_prioritized_candidates(
+            [short_peak],
+            [setup_variant],
+            preserve_context_variants=True,
+            max_context_variants_per_region=3,
+        )
+
+        self.assertEqual([candidate.id for candidate in default_merged], ["peak:0:1200"])
+        self.assertEqual({candidate.id for candidate in context_merged}, {"peak:0:1200", "narrative_reveal:0:800"})
+
+    def test_merge_prioritized_candidates_keeps_source_diverse_supplemental_variants(self) -> None:
+        quote = candidate_generators.Candidate(
+            id="quote:0:1100",
+            start=9.0,
+            end=22.0,
+            source="quote",
+            anchor_time=12.5,
+            score_hint=6.0,
+        )
+        reveal = candidate_generators.Candidate(
+            id="narrative_reveal:0:950",
+            start=7.0,
+            end=25.0,
+            source="narrative_reveal",
+            anchor_time=13.0,
+            score_hint=5.5,
+        )
+        duplicate_quote = candidate_generators.Candidate(
+            id="quote:1:1150",
+            start=9.5,
+            end=22.5,
+            source="quote",
+            anchor_time=12.6,
+            score_hint=5.0,
+        )
+
+        merged = candidate_generators.merge_prioritized_candidates(
+            [],
+            [quote, reveal, duplicate_quote],
+        )
+
+        self.assertEqual([candidate.id for candidate in merged], ["narrative_reveal:0:950", "quote:0:1100"])
 
     def test_dense_window_proposals_add_recall_for_gradual_build(self) -> None:
         segments = [
@@ -160,6 +243,46 @@ class CandidateGeneratorTests(unittest.TestCase):
         self.assertEqual(len(default_merged), 3)
         self.assertEqual(len(recall_merged), 5)
 
+    def test_merge_prioritized_candidates_preserves_explicit_ids_through_duplicate_and_cap_checks(self) -> None:
+        primary = [
+            candidate_generators.Candidate(
+                id="peak:primary",
+                start=10.0,
+                end=30.0,
+                source="peak",
+                anchor_time=20.0,
+                score_hint=8.0,
+            )
+        ]
+        preserved = candidate_generators.Candidate(
+            id="dense_inventory:proposal-selected",
+            start=8.0,
+            end=32.0,
+            source="dense_inventory",
+            anchor_time=20.0,
+            score_hint=1.0,
+        )
+        cap_filler = candidate_generators.Candidate(
+            id="dense_inventory:filler",
+            start=80.0,
+            end=100.0,
+            source="dense_inventory",
+            anchor_time=90.0,
+            score_hint=1.0,
+        )
+
+        merged = candidate_generators.merge_prioritized_candidates(
+            primary,
+            [cap_filler, preserved],
+            supplemental_source_cap=1,
+            preserve_supplemental_ids={preserved.id},
+        )
+
+        self.assertEqual(
+            {candidate.id for candidate in merged},
+            {"peak:primary", "dense_inventory:filler", "dense_inventory:proposal-selected"},
+        )
+
     def test_generate_fallback_candidates_preserves_generic_recall_sources(self) -> None:
         segments = [
             RichSegment(start=0.0, end=2.0, text="setup", speaker="STREAMER", hype_score=1.0),
@@ -183,6 +306,7 @@ class CandidateGeneratorTests(unittest.TestCase):
 
         self.assertIn("hype_peak", sources)
         self.assertIn("chat_sync", sources)
+        self.assertIn("chat_velocity", {candidate.source for candidate in candidate_generators.generate_semantic_candidates(segments)})
         self.assertIn("reaction", sources)
         self.assertIn("clean_reaction", sources)
 

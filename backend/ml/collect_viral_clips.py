@@ -1165,6 +1165,7 @@ def _ordinal_label(label_class: str, label: int) -> int:
     normalized = str(label_class or "").strip().lower()
     mapping = {
         "viral_positive": 4,
+        "cross_platform_outcome_positive": 4,
         "positive": 3,
         "weak_positive": 2,
         "short_form_positive": 3,

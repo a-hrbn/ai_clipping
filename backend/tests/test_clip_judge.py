@@ -21,6 +21,9 @@ class ClipJudgeTests(unittest.TestCase):
         patches = [
             patch.object(clip_judge.settings, "anthropic_api_key", None),
             patch.object(clip_judge.settings, "clip_judge_fail_fast", False),
+            patch.object(clip_judge.settings, "clip_judge_cache_enabled", False),
+            patch.object(clip_judge.settings, "clip_judge_sample_count", 1),
+            patch.object(clip_judge.settings, "clip_judge_uncertain_sample_count", 1),
             patch.object(clip_judge.settings, "judge_provider_fallback_enabled", True),
         ]
         for patcher in patches:
@@ -135,6 +138,42 @@ class ClipJudgeTests(unittest.TestCase):
         self.assertEqual(progress[-1]["total_candidates"], 2)
         self.assertEqual(progress[-1]["attempted_candidates"], 2)
         self.assertEqual(progress[-1]["judged_candidates"], 2)
+
+    def test_cross_platform_recall_target_gets_judge_score_floor(self) -> None:
+        ranked = [
+            RankedCandidate(
+                candidate=Candidate(id="cp", start=0.0, end=18.0, source="dense_inventory", anchor_time=3.0),
+                features=CandidateFeatures(
+                    candidate_id="cp",
+                    source="dense_inventory",
+                    cross_platform_recall_target=True,
+                    cross_platform_positive_overlap_ratio=1.0,
+                ),
+                rank_score=-3.0,
+                rationale=["cross_platform_recall_target"],
+            )
+        ]
+        segments = [RichSegment(start=0.0, end=18.0, text="verified repost transcript", hype_score=2.0)]
+        judge_result = JudgeResult(
+            judge_score=3.7,
+            scroll_stop_power=0.4,
+            standalone_clarity=0.5,
+            payoff_strength=0.2,
+            narrative_completeness=0.3,
+            platform_fit_shortform=0.6,
+            judge_reason="underrated by llm",
+            judge_confidence=0.8,
+            provider="ollama",
+            llm_used=True,
+        )
+
+        with patch.object(clip_judge.settings, "serving_cross_platform_judge_score_floor", 7.2), \
+             patch.object(clip_judge, "judge_candidate", return_value=judge_result):
+            reranked = clip_judge.rerank_candidates(ranked, segments, shortlist_top_k=1)
+
+        self.assertGreaterEqual(reranked[0].rank_score, 7.15)
+        self.assertEqual(reranked[0].judge_result.judge_score, 3.7)
+        self.assertIn("cross_platform_judge_calibrated", reranked[0].rationale)
 
     def test_rerank_candidates_batches_ollama_judge(self) -> None:
         ranked = [
@@ -794,6 +833,70 @@ class ClipJudgeTests(unittest.TestCase):
         self.assertGreater(clean_result.judge_score, risky_result.judge_score)
         self.assertIn("slow opening risk", risky_result.judge_reason)
         self.assertIn("needs prior stream context", risky_result.judge_reason)
+
+    def test_judge_prompt_values_reaction_spikes_without_full_story_requirement(self) -> None:
+        self.assertIn("reaction spike", clip_judge._JUDGE_PROMPT_STATIC)
+        self.assertIn("Do not require a complete stream story", clip_judge._JUDGE_PROMPT_STATIC)
+        batch_prompt = clip_judge._batch_judge_prompt(profile="jynxzi", items=[])
+        self.assertIn("reaction spike", batch_prompt)
+        self.assertIn("do not over-penalize short reaction clips", batch_prompt)
+
+    def test_judge_candidate_uses_cache_for_repeatable_results(self) -> None:
+        ranked = RankedCandidate(
+            candidate=Candidate(id="cache-me", start=0.0, end=15.0, source="reaction", anchor_time=4.0),
+            features=CandidateFeatures(candidate_id="cache-me", hook_strength=0.8, payoff_score=6.0),
+            rank_score=6.0,
+        )
+        segments = [RichSegment(start=0.0, end=3.0, text="no way", hype_score=4.0)]
+        result = JudgeResult(
+            judge_score=8.0,
+            scroll_stop_power=0.8,
+            standalone_clarity=0.7,
+            payoff_strength=0.8,
+            narrative_completeness=0.6,
+            platform_fit_shortform=0.8,
+            judge_reason="Strong cached result.",
+            judge_confidence=0.8,
+            provider="gemini",
+            llm_used=True,
+            model="test-model",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(clip_judge.settings, "storage_dir", str(Path(tmpdir) / "storage")), \
+             patch.object(clip_judge.settings, "clip_judge_cache_enabled", True), \
+             patch.object(clip_judge, "_call_text_judge_prompt", return_value=result) as llm_mock:
+            first = clip_judge.judge_candidate(ranked, segments, provider="gemini")
+            second = clip_judge.judge_candidate(ranked, segments, provider="gemini")
+
+        self.assertEqual(first.judge_score, 8.0)
+        self.assertEqual(second.judge_score, 8.0)
+        self.assertEqual(llm_mock.call_count, 1)
+
+    def test_uncertain_judge_result_uses_median_consensus(self) -> None:
+        ranked = RankedCandidate(
+            candidate=Candidate(id="median-me", start=0.0, end=15.0, source="reaction", anchor_time=4.0),
+            features=CandidateFeatures(candidate_id="median-me", hook_strength=0.8, payoff_score=6.0),
+            rank_score=6.0,
+        )
+        segments = [RichSegment(start=0.0, end=3.0, text="no way", hype_score=4.0)]
+        samples = [
+            JudgeResult(7.0, 0.7, 0.4, 0.8, 0.4, 0.8, "low narrative", 0.8, provider="gemini", llm_used=True),
+            JudgeResult(8.0, 0.8, 0.7, 0.9, 0.7, 0.8, "strong", 0.9, provider="gemini", llm_used=True),
+            JudgeResult(6.0, 0.6, 0.6, 0.7, 0.6, 0.7, "middle", 0.7, provider="gemini", llm_used=True),
+        ]
+
+        with patch.object(clip_judge.settings, "clip_judge_cache_enabled", False), \
+             patch.object(clip_judge.settings, "clip_judge_sample_count", 1), \
+             patch.object(clip_judge.settings, "clip_judge_uncertain_sample_count", 3), \
+             patch.object(clip_judge.settings, "clip_judge_uncertain_margin", 0.08), \
+             patch.object(clip_judge, "_call_text_judge_prompt", side_effect=samples) as llm_mock:
+            result = clip_judge.judge_candidate(ranked, segments, provider="gemini")
+
+        self.assertEqual(llm_mock.call_count, 3)
+        self.assertAlmostEqual(result.standalone_clarity, 0.6)
+        self.assertAlmostEqual(result.narrative_completeness, 0.6)
+        self.assertEqual(result.provider, "gemini")
 
 
 if __name__ == "__main__":

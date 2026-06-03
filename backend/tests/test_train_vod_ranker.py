@@ -209,9 +209,10 @@ class TrainVodRankerTests(unittest.TestCase):
             if label.get("training_dataset_source") == "cross_platform_audio_fingerprint_train"
         ]
         self.assertEqual(len(cross_labels), 1)
-        self.assertEqual(cross_labels[0]["label_class"], "weak_positive")
+        self.assertEqual(cross_labels[0]["label_class"], "cross_platform_outcome_positive")
         self.assertEqual(cross_labels[0]["label_source"], "cross_platform_audio_fingerprint")
         self.assertEqual(cross_labels[0]["training_supervision_tier"], "cross_platform_outcome")
+        self.assertTrue(cross_labels[0]["cross_platform_recall_target"])
 
     def test_mm_judge_proxy_rows_merge_as_weak_training_rows(self) -> None:
         vod_rows = [
@@ -1108,6 +1109,66 @@ class TrainVodRankerTests(unittest.TestCase):
         self.assertEqual(rows[0]["sample_weight"], 0.55)
         self.assertEqual(report["filtered_by_reason"].get("gold_holdout_row", 0), 0)
 
+    def test_build_composite_dataset_weights_cross_platform_positives_by_views(self) -> None:
+        outcome_rows = [
+            {
+                "queue_id": "viral-positive",
+                "candidate_id": "viral-positive",
+                "vod_id": "vod-a",
+                "label": 1,
+                "gold_holdout_split": "train",
+                "dataset_source": "cross_platform_outcome_train",
+                "label_source": "cross_platform_transcript_match",
+                "supervision_tier": "cross_platform_outcome",
+                "views": 600000,
+                "features": {"hook_strength": 0.9},
+            },
+        ]
+        with patch("ml.train_vod_ranker.build_twitch_training_dataset.build_dataset", return_value=[]):
+            rows, _report = train_vod_ranker.build_composite_dataset_with_report(
+                labels=[],
+                profile="jynxzi",
+                work_dir=Path("/tmp/ignored"),
+                outcome_positive_rows=outcome_rows,
+                outcome_positive_weight=0.55,
+            )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["outcome_view_tier"], "breakout_viral")
+        self.assertEqual(rows[0]["label_quality_class"], "cross_platform_viral_positive")
+        self.assertEqual(rows[0]["rank_target"], 5)
+        self.assertAlmostEqual(rows[0]["sample_weight"], 1.375)
+
+    def test_build_composite_dataset_merges_serving_hard_negatives(self) -> None:
+        hard_rows = [
+            {
+                "queue_id": "serving-hard",
+                "candidate_id": "serving-hard",
+                "job_id": "job-1",
+                "vod_id": "vod-1",
+                "label": 0,
+                "gold_holdout_split": "train",
+                "sample_weight": 1.25,
+                "features": {"hook_strength": 0.4, "source_prior": 0.8},
+            }
+        ]
+        with patch("ml.train_vod_ranker.build_twitch_training_dataset.build_dataset", return_value=[]):
+            rows = train_vod_ranker.build_composite_dataset(
+                labels=[],
+                profile="jynxzi",
+                work_dir=Path("/tmp/ignored"),
+                serving_hard_negative_rows=hard_rows,
+                serving_hard_negative_weight=2.0,
+            )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["dataset_source"], "serving_trace_hard_negative_train")
+        self.assertEqual(rows[0]["label_source"], "serving_trace")
+        self.assertEqual(rows[0]["supervision_tier"], "serving_hard_negative")
+        self.assertEqual(rows[0]["label_class"], "serving_trace_hard_negative")
+        self.assertEqual(rows[0]["sample_weight"], 2.5)
+        self.assertTrue(rows[0]["feature_provenance"]["serving_trace_hard_negative"])
+
     def test_outcome_only_policy_ignores_twitch_labels_and_uses_cross_platform_labels(self) -> None:
         labels = [
             {"queue_id": "twitch-positive", "candidate_id": "twitch-positive", "label": 1, "broadcaster": "jynxzi"}
@@ -1225,6 +1286,8 @@ class TrainVodRankerTests(unittest.TestCase):
             rollout_review_negative_weight,
             hard_negative_rows,
             hard_negative_weight,
+            serving_hard_negative_rows,
+            serving_hard_negative_weight,
             outcome_positive_rows,
             outcome_positive_weight,
             auto_outcome_negative_rows,

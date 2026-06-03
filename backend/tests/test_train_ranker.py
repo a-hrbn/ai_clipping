@@ -71,6 +71,11 @@ class _FakeMlflowSession:
 
 
 class TrainRankerTests(unittest.TestCase):
+    def test_ranking_target_prefers_view_weighted_rank_target(self) -> None:
+        row = {"label": 1, "ordinal_label": 2, "rank_target": 5}
+
+        self.assertEqual(train_ranker._ranking_target(row), 5)
+
     def test_split_rows_creates_train_and_validation_sets(self) -> None:
         rows = [
             {"job_id": "job", "candidate_id": f"c{i}", "label": i % 2, "features": {"x": float(i)}}

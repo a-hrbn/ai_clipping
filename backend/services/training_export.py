@@ -52,6 +52,7 @@ def export_training_rows(storage_dir: pathlib.Path, output_path: pathlib.Path) -
                 "supervision_reason": feedback.get("rejection_source") or label_source,
                 "ordinal_label": ordinal_label,
                 "feedback_rating": feedback.get("feedback_rating"),
+                "feedback_tags": list(feedback.get("feedback_tags") or []),
                 "feedback_notes": feedback.get("feedback_notes"),
                 "judge_score": _optional_float(feedback.get("judge_score")),
                 "standalone_clarity": _optional_float(feedback.get("standalone_clarity")),
@@ -101,16 +102,35 @@ def _should_export_feedback(feedback: dict) -> bool:
 
 
 def _has_real_outcome_feedback(feedback: dict) -> bool:
-    return str(feedback.get("feedback_rating") or "").strip().lower() in {"good", "medium", "bad"}
+    return str(feedback.get("feedback_rating") or "").strip().lower() in {
+        "excellent",
+        "good",
+        "maybe",
+        "medium",
+        "bad",
+        "boundary_bad",
+    }
 
 
 def _resolved_feedback_label(feedback: dict) -> tuple[int, str, float, float, str, str, int]:
     rating = str(feedback.get("feedback_rating") or "").strip().lower()
+    tags = {str(tag).strip().lower() for tag in feedback.get("feedback_tags") or []}
+    if rating == "excellent":
+        sample_weight = 3.0 if "strong_hook" in tags or "funny_reaction" in tags else 2.8
+        return 1, "feedback_excellent_clip", 1.2, sample_weight, "outcome_positive", "outcome_feedback", 4
     if rating == "good":
-        return 1, "feedback_rating", 1.0, 2.2, "outcome_positive", "outcome_feedback", 3
+        label_source = "feedback_good_clip" if "good_clip" in tags else "feedback_rating"
+        sample_weight = 2.4 if "good_clip" in tags else 2.2
+        return 1, label_source, 1.0, sample_weight, "outcome_positive", "outcome_feedback", 3
+    if rating == "boundary_bad":
+        return 0, "feedback_boundary_bad", -0.7, 1.4, "outcome_boundary_negative", "outcome_feedback", 0
     if rating == "bad":
-        return 0, "feedback_rating", -1.0, 1.8, "outcome_negative", "outcome_feedback", 0
-    if rating == "medium":
+        if {"wrong_boundary", "wrong_duration", "bad_boundary", "too_long"} & tags:
+            return 0, "feedback_boundary_or_duration", -0.6, 1.1, "outcome_boundary_negative", "outcome_feedback", 0
+        label_source = "feedback_false_positive" if "false_positive" in tags else "feedback_rating"
+        sample_weight = 2.1 if "false_positive" in tags else 1.8
+        return 0, label_source, -1.0, sample_weight, "outcome_negative", "outcome_feedback", 0
+    if rating in {"maybe", "medium"}:
         fallback_label = 1 if bool(feedback.get("selected")) else 0
         label_class = "pipeline_positive" if fallback_label == 1 else "pipeline_negative"
         return fallback_label, "feedback_rating_neutral", 0.0, 0.7, label_class, "feedback_rating_neutral", 1

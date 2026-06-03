@@ -143,6 +143,7 @@ def _cache_metadata_payload(url: str, namespace: str, cache_path: pathlib.Path) 
         "size": int(stat.st_size),
         "cache_file": cache_path.name,
         "complete": True,
+        "cached_at": time.time(),
     }
     vod_id = _twitch_vod_id(url)
     if vod_id:
@@ -200,22 +201,23 @@ def _evict_expired_cache(cache_dir: pathlib.Path, ttl: int) -> None:
     cutoff = time.time() - ttl
     for path in cache_dir.glob("*.mp4"):
         try:
-            if path.stat().st_mtime < cutoff:
+            metadata_path = _cache_metadata_path(path)
+            reference_time = path.stat().st_mtime
+            if metadata_path.exists():
+                try:
+                    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                    if isinstance(metadata, dict):
+                        reference_time = float(metadata.get("cached_at") or reference_time)
+                except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                    pass
+            if reference_time < cutoff:
                 path.unlink(missing_ok=True)
                 _cache_metadata_path(path).unlink(missing_ok=True)
         except OSError:
             continue
 
 
-def _frontend_cache_enabled_for_job(job_id: str) -> bool:
-    if bool(getattr(settings, "frontend_job_cache_enabled", False)):
-        return True
-    return str(job_id or "").startswith(("twitch_vod", "proposal_training_", "judge_backfill_"))
-
-
 def _twitch_cache_enabled(url: str, job_id: str | None = None) -> bool:
-    if job_id is not None and not _frontend_cache_enabled_for_job(job_id):
-        return False
     return _is_twitch_url(url) and int(settings.twitch_download_cache_ttl_sec or 0) != 0
 
 
@@ -522,7 +524,6 @@ def download(url: str, job_id: str, proxy: str | None = None) -> pathlib.Path:
             if cache_path.exists() and _cache_entry_usable(cache_path, url, "twitch"):
                 if is_job_cancelled(job_id):
                     raise DownloadCancelledError(f"Download cancelled for job {job_id}")
-                cache_path.touch()
                 _link_or_copy_into_job(cache_path, output_path)
                 _cleanup_redundant_job_download_artifacts(job_dir, output_path)
                 try:

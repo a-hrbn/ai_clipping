@@ -11,6 +11,15 @@ _DENSE_MAX_HOOK_DELAY = 12.0
 _MIN_CONTEXT_BEFORE_ANCHOR = 1.5
 _MAX_EXTEND_SEC = 12.0
 _MAX_RETRACT_SEC = 8.0
+_DENSE_SOURCES = {"dense_inventory", "dense_window"}
+_RECALL_DIVERSE_SOURCES = {
+    "quote",
+    "tension_build",
+    "narrative_reveal",
+    "controversy",
+    "dense_inventory",
+    "dense_window",
+}
 _MID_THOUGHT_RE = re.compile(
     r"^(and |but |so |because |then |also |or |if |when |which |who |where |"
     r"he |she |they |it |that |this |those |these )",
@@ -87,21 +96,60 @@ def _dedupe_candidates(candidates: list[Candidate]) -> list[Candidate]:
     kept: list[Candidate] = []
     by_score = sorted(candidates, key=lambda c: (c.score_hint, -(c.end - c.start)), reverse=True)
     for candidate in by_score:
-        duplicate = False
-        for existing in kept:
-            if abs(candidate.anchor_time - existing.anchor_time) <= 4.0:
-                duplicate = True
-                break
-            overlap = min(candidate.end, existing.end) - max(candidate.start, existing.start)
-            if overlap <= 0:
-                continue
-            shorter = min(candidate.end - candidate.start, existing.end - existing.start)
-            if shorter > 0 and overlap / shorter >= 0.7:
-                duplicate = True
-                break
-        if not duplicate:
+        if not any(_is_duplicate_candidate(candidate, existing) for existing in kept):
             kept.append(candidate)
     return sorted(kept, key=lambda candidate: candidate.start)
+
+
+def _is_duplicate_candidate(candidate: Candidate, existing: Candidate) -> bool:
+    if candidate.source in _DENSE_SOURCES and existing.source in _DENSE_SOURCES:
+        return _is_duplicate_dense_candidate(candidate, existing)
+    if (
+        candidate.source != existing.source
+        and candidate.source in _RECALL_DIVERSE_SOURCES
+        and existing.source in _RECALL_DIVERSE_SOURCES
+    ):
+        return _is_effectively_identical_recall_variant(candidate, existing)
+
+    if abs(candidate.anchor_time - existing.anchor_time) <= 4.0:
+        return True
+    overlap = min(candidate.end, existing.end) - max(candidate.start, existing.start)
+    if overlap <= 0:
+        return False
+    shorter = min(candidate.end - candidate.start, existing.end - existing.start)
+    return shorter > 0 and overlap / shorter >= 0.7
+
+
+def _is_effectively_identical_recall_variant(candidate: Candidate, existing: Candidate) -> bool:
+    if abs(candidate.anchor_time - existing.anchor_time) > 2.0:
+        return False
+    overlap = min(candidate.end, existing.end) - max(candidate.start, existing.start)
+    if overlap <= 0:
+        return False
+    candidate_duration = candidate.end - candidate.start
+    existing_duration = existing.end - existing.start
+    shorter = min(candidate_duration, existing_duration)
+    duration_delta = abs(candidate_duration - existing_duration)
+    return shorter > 0 and overlap / shorter >= 0.92 and duration_delta <= 3.0
+
+
+def _is_duplicate_dense_candidate(candidate: Candidate, existing: Candidate) -> bool:
+    anchor_delta = abs(candidate.anchor_time - existing.anchor_time)
+    if (
+        anchor_delta <= 2.0
+        and abs(candidate.start - existing.start) <= 1.5
+        and abs(candidate.end - existing.end) <= 1.5
+    ):
+        return True
+
+    overlap = min(candidate.end, existing.end) - max(candidate.start, existing.start)
+    if overlap <= 0:
+        return False
+    candidate_duration = candidate.end - candidate.start
+    existing_duration = existing.end - existing.start
+    shorter = min(candidate_duration, existing_duration)
+    duration_delta = abs(candidate_duration - existing_duration)
+    return shorter > 0 and overlap / shorter >= 0.92 and duration_delta <= 3.0
 
 
 def _seg_at(segments: list[RichSegment], time: float) -> RichSegment | None:

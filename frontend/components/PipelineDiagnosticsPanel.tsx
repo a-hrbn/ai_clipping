@@ -123,6 +123,9 @@ function CandidateFunnelPanel({ funnel }: { funnel: CandidateFunnelDiagnostics |
   const quality = funnel.quality_breakdown ?? {};
   const proposal = funnel.proposal_lift ?? {};
   const ranker = funnel.ranker_lift ?? {};
+  const clipTypeEntries = Object.entries(funnel.clip_type_lift ?? {})
+    .sort((a, b) => (b[1].final_selected ?? 0) - (a[1].final_selected ?? 0) || (b[1].high_judge ?? 0) - (a[1].high_judge ?? 0))
+    .slice(0, 6);
 
   return (
     <div className="border-t border-border bg-surface/40 px-4 py-4">
@@ -179,6 +182,24 @@ function CandidateFunnelPanel({ funnel }: { funnel: CandidateFunnelDiagnostics |
             <ReasonList title="Drop-Stufen" values={funnel.drop_stage_counts} />
             <ReasonList title="Reject-Gründe" values={funnel.rejection_reason_counts} />
           </div>
+
+          {clipTypeEntries.length > 0 && (
+            <div className="border border-border px-3 py-3">
+              <div className="text-[10px] font-semibold uppercase tracking-widest text-muted">
+                Cliptypen
+              </div>
+              <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                {clipTypeEntries.map(([clipType, stats]) => (
+                  <div key={clipType} className="border border-border/70 px-2 py-2 text-xs">
+                    <div className="truncate text-tx">{clipType}</div>
+                    <div className="mt-1 font-mono text-[10px] text-muted">
+                      {stats.rows ?? 0} rows · {stats.final_selected ?? 0} final · {stats.high_judge ?? 0} high judge · P {formatScore(stats.mean_proposal_score)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="min-w-0">
@@ -204,7 +225,12 @@ function CandidateFunnelPanel({ funnel }: { funnel: CandidateFunnelDiagnostics |
                     <td className="px-3 py-2 font-mono text-muted">
                       {formatSeconds(sample.start)}-{formatSeconds(sample.end)}
                     </td>
-                    <td className="max-w-[140px] truncate px-3 py-2 text-dim">{sample.source ?? "-"}</td>
+                    <td className="max-w-[140px] truncate px-3 py-2 text-dim">
+                      {sample.source ?? "-"}
+                      {sample.clip_type && (
+                        <span className="block truncate text-[10px] text-muted">{sample.clip_type}</span>
+                      )}
+                    </td>
                     <td className="px-3 py-2 font-mono text-muted">
                       {sample.final_rank ? `F${sample.final_rank}` : sample.pre_judge_rank ? `R${sample.pre_judge_rank}` : "-"}
                     </td>

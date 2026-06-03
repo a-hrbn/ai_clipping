@@ -13,6 +13,8 @@ BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
+from ml import outcome_view_weighting
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(
@@ -442,7 +444,8 @@ def _fingerprint_similarity(left: list[int], right: list[int]) -> float:
 
 def _matched_row(repost: dict, vod: dict, start: float, end: float, confidence: float) -> dict:
     views = _safe_float(repost.get("views") or repost.get("view_count"))
-    return {
+    title = _repost_title(repost)
+    return outcome_view_weighting.annotate_cross_platform_view_weight({
         "vod_id": str(vod.get("vod_id") or ""),
         "vod_url": str(vod.get("vod_url") or ""),
         "candidate_id": str(repost.get("clip_id") or repost.get("candidate_id") or f"cross_platform:{vod.get('vod_id')}:{start:.1f}"),
@@ -457,10 +460,11 @@ def _matched_row(repost: dict, vod: dict, start: float, end: float, confidence: 
         "sample_weight": 2.0 if views >= 100_000 else 1.5,
         "platform": str(repost.get("platform") or ""),
         "source_url": str(repost.get("source_url") or ""),
+        "repost_title": title,
         "views": views,
         "fingerprint_confidence": round(confidence, 6),
         "profile_filter_version": int(_safe_float(repost.get("profile_filter_version"))),
-    }
+    })
 
 
 def _best_match_diagnostic_row(
@@ -472,6 +476,7 @@ def _best_match_diagnostic_row(
     *,
     accepted: bool,
 ) -> dict:
+    title = _repost_title(repost)
     return {
         "accepted": bool(accepted),
         "confidence": round(float(confidence), 6),
@@ -481,9 +486,18 @@ def _best_match_diagnostic_row(
         "window_end": round(max(float(end), float(start) + 1.0), 2),
         "repost_clip_id": str(repost.get("clip_id") or repost.get("candidate_id") or ""),
         "repost_source_url": str(repost.get("source_url") or ""),
+        "repost_title": title,
         "repost_platform": str(repost.get("platform") or ""),
         "repost_views": _safe_float(repost.get("views") or repost.get("view_count")),
     }
+
+
+def _repost_title(repost: dict) -> str:
+    for key in ("title", "repost_title", "short_title", "video_title"):
+        value = str(repost.get(key) or "").strip()
+        if value:
+            return value
+    return ""
 
 
 def _match_diagnostics(

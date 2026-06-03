@@ -36,6 +36,7 @@ def generate_semantic_candidates(
 def _generate_semantic_candidates_for_segments(segments: list[RichSegment], strategy: dict | None = None) -> list[Candidate]:
     candidates: list[Candidate] = []
     candidates.extend(_generate_quote_candidates(segments))
+    candidates.extend(_generate_chat_velocity_candidates(segments))
     candidates.extend(_generate_tension_build_candidates(segments))
     candidates.extend(_generate_narrative_reveal_candidates(segments))
     candidates.extend(_generate_controversy_candidates(segments))
@@ -148,29 +149,50 @@ def merge_prioritized_candidates(
     *,
     supplemental_source_cap: int = 4,
     source_cap_overrides: dict[str, int] | None = None,
+    preserve_supplemental_ids: set[str] | None = None,
+    preserve_context_variants: bool = False,
+    max_context_variants_per_region: int = 2,
     strategy: dict | None = None,
 ) -> list[Candidate]:
     normalized_strategy = clip_strategy.normalize_strategy(strategy)
     merged: list[Candidate] = []
     supplemental_counts: dict[str, int] = {}
     source_caps = clip_strategy.source_caps(normalized_strategy)
+    preserved_ids = {str(candidate_id) for candidate_id in (preserve_supplemental_ids or set())}
+    primary_ids: set[str] = set()
     for source, cap in (source_cap_overrides or {}).items():
         source_caps[str(source)] = max(int(cap), 0)
 
     for candidate in primary:
         if not clip_strategy.candidate_in_time_range(candidate.start, candidate.end, normalized_strategy):
             continue
-        if _is_duplicate_candidate(candidate, merged):
+        if _is_duplicate_candidate(
+            candidate,
+            merged,
+            preserve_context_variants=preserve_context_variants,
+            max_context_variants_per_region=max_context_variants_per_region,
+        ):
             continue
         merged.append(candidate)
+        primary_ids.add(candidate.id)
 
     for candidate in supplemental:
         if not clip_strategy.candidate_in_time_range(candidate.start, candidate.end, normalized_strategy):
             continue
+        is_preserved = candidate.id in preserved_ids
         effective_cap = source_caps.get(candidate.source, supplemental_source_cap)
-        if supplemental_counts.get(candidate.source, 0) >= effective_cap:
+        if not is_preserved and supplemental_counts.get(candidate.source, 0) >= effective_cap:
             continue
-        if _is_duplicate_candidate(candidate, merged):
+        if (
+            not is_preserved
+            and _is_duplicate_supplemental_candidate(
+                candidate,
+                merged,
+                primary_ids,
+                preserve_context_variants=preserve_context_variants,
+                max_context_variants_per_region=max_context_variants_per_region,
+            )
+        ):
             continue
         merged.append(candidate)
         supplemental_counts[candidate.source] = supplemental_counts.get(candidate.source, 0) + 1
@@ -200,6 +222,28 @@ def _generate_chat_sync_candidates(segments: list[RichSegment]) -> list[Candidat
     for idx, seg in enumerate(peaks[:12]):
         candidates.append(_window_candidate(seg, idx, "chat_sync", lead=8.0, tail=16.0))
     return candidates
+
+
+def _generate_chat_velocity_candidates(segments: list[RichSegment]) -> list[Candidate]:
+    scored = []
+    for seg in segments:
+        score = _chat_velocity_candidate_score(seg)
+        if score >= 0.38:
+            scored.append((score, seg))
+    peaks = [seg for _score, seg in sorted(scored, key=lambda item: item[0], reverse=True)]
+    candidates: list[Candidate] = []
+    for idx, seg in enumerate(peaks[:16]):
+        candidates.append(_window_candidate(seg, idx, "chat_velocity", lead=7.0, tail=18.0))
+    return candidates
+
+
+def _chat_velocity_candidate_score(seg: RichSegment) -> float:
+    derivative_score = min(max(float(seg.chat_rate_derivative or 0.0), 0.0) / 2.0, 1.0)
+    return max(
+        float(seg.chat_spike_score or 0.0),
+        float(seg.chat_ema_crossing_score or 0.0),
+        derivative_score,
+    )
 
 
 def _generate_reaction_candidates(segments: list[RichSegment]) -> list[Candidate]:
@@ -470,17 +514,156 @@ def _is_quote_like(seg: RichSegment) -> bool:
     return lower.startswith(starters)
 
 
-def _is_duplicate_candidate(candidate: Candidate, existing: list[Candidate]) -> bool:
+def _is_duplicate_candidate(
+    candidate: Candidate,
+    existing: list[Candidate],
+    *,
+    preserve_context_variants: bool = False,
+    max_context_variants_per_region: int = 2,
+) -> bool:
     for other in existing:
         if abs(candidate.anchor_time - other.anchor_time) <= 4.0:
+            if preserve_context_variants and _context_variant_should_survive(
+                candidate,
+                other,
+                existing,
+                max_context_variants_per_region=max_context_variants_per_region,
+            ):
+                continue
             return True
         overlap = min(candidate.end, other.end) - max(candidate.start, other.start)
         if overlap <= 0:
             continue
         shorter = min(candidate.end - candidate.start, other.end - other.start)
         if shorter > 0 and overlap / shorter >= 0.7:
+            if preserve_context_variants and _context_variant_should_survive(
+                candidate,
+                other,
+                existing,
+                max_context_variants_per_region=max_context_variants_per_region,
+            ):
+                continue
             return True
     return False
+
+
+def _is_duplicate_supplemental_candidate(
+    candidate: Candidate,
+    existing: list[Candidate],
+    primary_ids: set[str],
+    *,
+    preserve_context_variants: bool = False,
+    max_context_variants_per_region: int = 2,
+) -> bool:
+    for other in existing:
+        if not _candidate_windows_overlap_like_duplicates(candidate, other):
+            continue
+        if preserve_context_variants and _context_variant_should_survive(
+            candidate,
+            other,
+            existing,
+            max_context_variants_per_region=max_context_variants_per_region,
+        ):
+            continue
+        if other.id in primary_ids:
+            return True
+        if candidate.source == other.source:
+            return True
+        if _candidate_windows_are_effectively_identical(candidate, other):
+            return True
+    return False
+
+
+def _context_variant_should_survive(
+    candidate: Candidate,
+    other: Candidate,
+    existing: list[Candidate],
+    *,
+    max_context_variants_per_region: int,
+) -> bool:
+    if max_context_variants_per_region <= 0:
+        return False
+    if _candidate_windows_are_effectively_identical(candidate, other):
+        return False
+
+    overlapping = [item for item in existing if _candidate_windows_overlap_like_duplicates(candidate, item)]
+    if len(overlapping) >= max_context_variants_per_region:
+        best_existing = max((_context_variant_pre_score(item) for item in overlapping), default=0.0)
+        return _context_variant_pre_score(candidate) >= best_existing + 0.14
+
+    candidate_score = _context_variant_pre_score(candidate)
+    other_score = _context_variant_pre_score(other)
+    if candidate_score < 0.56:
+        return False
+    if candidate_score >= other_score + 0.08:
+        return True
+
+    candidate_duration = candidate.end - candidate.start
+    other_duration = other.end - other.start
+    candidate_lead = candidate.anchor_time - candidate.start
+    other_lead = other.anchor_time - other.start
+    return (
+        candidate.source != other.source
+        and candidate_duration >= min(other_duration + 8.0, other_duration * 1.45)
+        and candidate_lead >= other_lead + 4.0
+    )
+
+
+def _context_variant_pre_score(candidate: Candidate) -> float:
+    duration = max(candidate.end - candidate.start, 0.0)
+    lead = max(candidate.anchor_time - candidate.start, 0.0)
+    source_prior = {
+        "quote": 0.84,
+        "narrative_reveal": 0.82,
+        "tension_build": 0.78,
+        "controversy": 0.74,
+        "story_payoff": 0.78,
+        "goal_prompt": 0.74,
+        "chat_velocity": 0.78,
+        "dense_window": 0.52,
+        "dense_inventory": 0.44,
+    }.get(candidate.source, 0.58)
+    duration_score = min(duration / 28.0, 1.0) * 0.7 + (1.0 - min(abs(duration - 32.0) / 55.0, 1.0)) * 0.3
+    setup_score = min(lead / 10.0, 1.0)
+    signal_score = min(max(candidate.score_hint, 0.0) / 7.0, 1.0)
+    tag_score = 0.0
+    tags = set(candidate.tags or [])
+    if tags.intersection({"question", "exclamation", "audio_laughter", "laughter"}):
+        tag_score = 0.15
+    return min(
+        1.0,
+        source_prior * 0.34
+        + duration_score * 0.22
+        + setup_score * 0.22
+        + signal_score * 0.14
+        + tag_score,
+    )
+
+
+def _candidate_windows_overlap_like_duplicates(candidate: Candidate, other: Candidate) -> bool:
+    if abs(candidate.anchor_time - other.anchor_time) <= 4.0:
+        return True
+    overlap = min(candidate.end, other.end) - max(candidate.start, other.start)
+    if overlap <= 0:
+        return False
+    shorter = min(candidate.end - candidate.start, other.end - other.start)
+    return shorter > 0 and overlap / shorter >= 0.7
+
+
+def _candidate_windows_are_effectively_identical(candidate: Candidate, other: Candidate) -> bool:
+    overlap = min(candidate.end, other.end) - max(candidate.start, other.start)
+    if overlap <= 0:
+        return False
+    candidate_duration = max(candidate.end - candidate.start, 0.001)
+    other_duration = max(other.end - other.start, 0.001)
+    shorter = min(candidate_duration, other_duration)
+    duration_delta = abs(candidate_duration - other_duration)
+    return (
+        abs(candidate.anchor_time - other.anchor_time) <= 2.0
+        and shorter > 0
+        and overlap / shorter >= 0.92
+        and duration_delta <= 3.0
+    )
 
 
 def _filter_candidates(candidates: list[Candidate], strategy: dict | None) -> list[Candidate]:

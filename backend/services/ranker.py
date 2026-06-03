@@ -11,7 +11,7 @@ except ModuleNotFoundError:  # pragma: no cover - optional when only heuristic/l
     joblib = None
 
 from config import settings
-from services import clip_strategy, content_buckets, profile_config, semantic_service
+from services import clip_strategy, content_buckets, context_quality, profile_config, semantic_service
 from services.timeline_types import CandidateFeatures
 
 
@@ -120,10 +120,9 @@ class Ranker:
             score = round(self._clamp_score(raw_score), 3)
             enriched = list(rationale)
             enriched.append("heuristic_bucket_fallback" if bucket_model == "fallback_heuristic" else "ml_ranked")
-            merged.append(
-                self._apply_serving_reranker_stages(
-                    feature,
-                    {
+            reranked_item = self._apply_serving_reranker_stages(
+                feature,
+                {
                     "candidate_id": feature.candidate_id,
                     "score": score,
                     "content_bucket": bucket,
@@ -132,12 +131,12 @@ class Ranker:
                     "trained_score": round(float(trained_score), 3),
                     "blend": round(float(effective_blend), 3),
                     "serving_threshold": round(float(serving_threshold), 6),
-                    "passes_serving_threshold": score >= serving_threshold,
                     "trained_model_used": trained_used,
                     "rationale": enriched,
-                    },
-                )
+                },
             )
+            reranked_item["passes_serving_threshold"] = float(reranked_item["score"]) >= serving_threshold
+            merged.append(reranked_item)
         return merged
 
     def _apply_hook_reranker_stage(
@@ -187,8 +186,34 @@ class Ranker:
         feature: CandidateFeatures,
         item: dict[str, object],
     ) -> dict[str, object]:
+        item = self._apply_context_primary_stage(feature, item)
         item = self._apply_boundary_variant_set_stage(feature, item)
         return self._apply_hook_reranker_stage(feature, item)
+
+    def _apply_context_primary_stage(
+        self,
+        feature: CandidateFeatures,
+        item: dict[str, object],
+    ) -> dict[str, object]:
+        context_primary = context_quality.primary_score(
+            completeness=feature.context_completeness_score,
+            strength=feature.context_strength_score,
+        )
+        score = float(item["score"])
+        rationale = list(item.get("rationale") or [])
+        if context_primary >= 0.65:
+            score += 1.35
+            rationale.append("context_primary_boost")
+        elif context_primary >= 0.52:
+            score += 0.85
+            rationale.append("context_primary_signal")
+        elif context_primary < 0.22 and feature.max_hype >= 3.5:
+            score -= 0.65
+            rationale.append("context_missing_penalty")
+        item["score"] = round(self._clamp_score(score), 3)
+        item["context_primary_score"] = round(context_primary, 3)
+        item["rationale"] = rationale
+        return item
 
     def _heuristic_scores(
         self,
@@ -207,6 +232,18 @@ class Ranker:
             visual_hook_score = feature.visual_hook_score * 10.0
             audio_pop_score = feature.audio_pop_score * 10.0
             streamer_shout = feature.streamer_shout_score * 10.0
+            multimodal_proxy = feature.multimodal_proxy_score * 10.0
+            context_pattern = feature.context_pattern_confidence * 10.0
+            jynxzi_type_signal = max(
+                feature.rage_score,
+                feature.clutch_score,
+                feature.funny_reaction_score,
+                feature.trash_talk_payoff_score,
+                feature.jynxzi_chat_shock_score,
+                feature.ranked_tension_score,
+                feature.failed_setup_score,
+                feature.streamer_persona_beat_score,
+            ) * 10.0
             event_surprise_score = feature.event_surprise_score * 10.0
             nonverbal_payoff = feature.nonverbal_payoff_score * 10.0
             game_event = feature.game_event_score * 10.0
@@ -230,6 +267,13 @@ class Ranker:
             projected_hook = feature.projected_hook_score * 10.0
             projected_retention = feature.projected_retention_score * 10.0
             overlap_risk = min(feature.clip_overlap_count / 3.0, 1.0) * 10.0
+            cross_platform_recall = (
+                feature.cross_platform_positive_overlap_ratio
+                * max(feature.cross_platform_positive_similarity, 0.55)
+                * 10.0
+                if feature.cross_platform_recall_target
+                else 0.0
+            )
             semantic_score = (
                 feature.quoteability_score
                 + feature.surprise_score
@@ -242,9 +286,22 @@ class Ranker:
             context_efficiency = feature.context_efficiency * 10.0
             context_dependency_penalty = feature.context_dependency_score * 10.0
             weak_resolution_penalty = feature.weak_resolution_penalty * 10.0
+            context_primary = context_quality.primary_score(
+                completeness=feature.context_completeness_score,
+                strength=feature.context_strength_score,
+            ) * 10.0
+            context_completeness = feature.context_completeness_score * 10.0
+            context_strength = feature.context_strength_score * 10.0
+            setup_present = feature.setup_present_score * 10.0
+            payoff_present = feature.payoff_present_score * 10.0
 
             rank_score = (
-                hw["hook"]               * hook_score * profile_weights["hook_weight"] * platform_bias.get("hook", 1.0)
+                context_primary * 0.46
+                + context_completeness * 0.28
+                + context_strength * 0.18
+                + setup_present * 0.12
+                + payoff_present * 0.18
+                + hw["hook"]               * hook_score * profile_weights["hook_weight"] * platform_bias.get("hook", 1.0)
                 + hw["payoff"]           * feature.payoff_score
                 + hw.get("payoff_clarity", 0.0) * payoff_clarity
                 + hw["hype"]             * feature.max_hype
@@ -265,6 +322,9 @@ class Ranker:
                 + visual_hook_score * 0.05
                 + audio_pop_score * 0.05
                 + streamer_shout * 0.05
+                + multimodal_proxy * 0.05
+                + context_pattern * 0.18
+                + jynxzi_type_signal * 0.04
                 + event_surprise_score * 0.05
                 + nonverbal_payoff * 0.05
                 + game_event * 0.04
@@ -272,6 +332,7 @@ class Ranker:
                 + vision_language * 0.04
                 + dynamic_trend * 0.04
                 + outcome_prior * 0.05
+                + cross_platform_recall * 0.36
                 + goal_relevance * 0.06
                 + platform_relevance * 0.05
                 + projected_hook * 0.05
@@ -290,10 +351,18 @@ class Ranker:
                 rank_score = min(rank_score, _STANDALONE_HARD_FILTER_MAX_SCORE)
 
             rationale: list[str] = []
+            if context_primary >= 6.5:
+                rationale.append("context_primary")
+            if feature.context_completeness_score >= 0.55:
+                rationale.append("context_complete")
+            if feature.context_strength_score >= 0.55:
+                rationale.append("context_strong")
             if hook_score >= 7.0:
                 rationale.append("strong_hook")
             if feature.payoff_score >= 4.0:
                 rationale.append("clear_payoff")
+            if feature.cross_platform_recall_target:
+                rationale.append("cross_platform_recall_target")
             if feature.chat_peak >= 0.5:
                 rationale.append("chat_confirmed")
             if max(feature.chat_rate_derivative_score, feature.chat_ema_crossing_score) >= 0.5:
@@ -332,6 +401,13 @@ class Ranker:
                 rationale.append("projected_retention")
             if feature.streamer_shout_score >= 0.55:
                 rationale.append("streamer_shout")
+            if feature.multimodal_proxy_score >= 0.5:
+                rationale.append("multimodal_proxy_signal")
+            if feature.context_pattern_confidence >= 0.4:
+                label = feature.context_pattern_label or feature.context_pattern_id
+                rationale.append(f"context_pattern:{label}")
+            if feature.clip_type and feature.clip_type != "general" and jynxzi_type_signal >= 4.5:
+                rationale.append(f"clip_type:{feature.clip_type}")
             if feature.game_event_score >= 0.5:
                 rationale.append("game_event")
             if feature.vl_prompt_max_score >= 0.5:

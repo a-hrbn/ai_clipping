@@ -1711,6 +1711,12 @@ def _ranking_group_key(row: dict, split_unit: str) -> str:
 
 
 def _ranking_target(row: dict) -> int:
+    value = row.get("rank_target")
+    if value not in (None, ""):
+        try:
+            return max(int(value), 0)
+        except (TypeError, ValueError):
+            pass
     value = row.get("ordinal_label")
     if value not in (None, ""):
         try:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import pathlib
 from urllib.parse import urlparse
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from collections.abc import Mapping
 
@@ -32,6 +32,7 @@ class CandidateFeedback:
     rejected_reason: str | None = None   # kept for schema compatibility
     rejection_source: str | None = None  # richer label for training
     feedback_rating: str | None = None
+    feedback_tags: list[str] = field(default_factory=list)
     feedback_notes: str | None = None
     publish_platform: str | None = None
     final_variant_key: str | None = None
@@ -45,7 +46,9 @@ class CandidateFeedback:
     updated_at: int | None = None
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        payload = asdict(self)
+        payload["feedback_tags"] = list(payload.get("feedback_tags") or [])
+        return payload
 
 
 def build_pipeline_feedback(
@@ -165,6 +168,7 @@ def update_job_feedback(
         raise KeyError(payload.candidate_id)
 
     target["feedback_rating"] = payload.rating
+    target["feedback_tags"] = list(payload.feedback_tags or [])
     target["feedback_notes"] = payload.notes
     target["updated_at"] = int(datetime.now(timezone.utc).timestamp())
 
@@ -178,6 +182,7 @@ def update_job_feedback(
         candidate_id=payload.candidate_id,
         mode="training_feedback",
         rating=target.get("feedback_rating"),
+        feedback_tags=list(target.get("feedback_tags") or []),
         notes=target.get("feedback_notes"),
     )
 
@@ -256,6 +261,7 @@ def update_job_gold_eval(
         candidate_id=payload.candidate_id,
         mode="gold_eval",
         gold_grade=int(payload.gold_grade or 0),
+        feedback_tags=list(payload.feedback_tags or []),
         notes=payload.notes,
     )
 

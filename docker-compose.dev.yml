@@ -1,0 +1,51 @@
+services:
+  backend:
+    command:
+      - uvicorn
+      - main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --reload
+      - --reload-dir
+      - /app/backend
+      - --reload-exclude
+      - tmp/*
+      - --reload-exclude
+      - ml/artifacts/*
+      - --reload-exclude
+      - graphify-out/*
+      - --reload-exclude
+      - __pycache__/*
+    environment:
+      WATCHFILES_FORCE_POLLING: ${AI_CLIPPING_WATCHFILES_FORCE_POLLING:-true}
+      WATCHFILES_POLL_DELAY_MS: ${AI_CLIPPING_WATCHFILES_POLL_DELAY_MS:-1000}
+    volumes:
+      - ./backend:/app/backend
+
+  frontend:
+    command:
+      - npm
+      - run
+      - dev
+      - --
+      - -H
+      - 0.0.0.0
+      - -p
+      - "3000"
+    environment:
+      NODE_ENV: development
+      WATCHPACK_POLLING: ${AI_CLIPPING_WATCHPACK_POLLING:-true}
+      CHOKIDAR_USEPOLLING: ${AI_CLIPPING_CHOKIDAR_USEPOLLING:-true}
+      NEXT_TELEMETRY_DISABLED: "1"
+      HOSTNAME: 0.0.0.0
+      PORT: "3000"
+    volumes:
+      - ./frontend:/app
+      - ai-clipping-frontend-node-modules:/app/node_modules
+      - ai-clipping-frontend-next:/app/.next
+
+volumes:
+  ai-clipping-frontend-node-modules:
+  ai-clipping-frontend-next:

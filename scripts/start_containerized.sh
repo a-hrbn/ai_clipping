@@ -146,6 +146,8 @@ docker_gpu_available() {
 
 BACKEND_RUNTIME="${AI_CLIPPING_BACKEND_RUNTIME:-auto}"
 REMOTE_MODE="$(normalize_boolish "${AI_CLIPPING_REMOTE:-ngrok}")"
+DEV_MODE="$(normalize_boolish "${AI_CLIPPING_DEV:-1}")"
+REBUILD_MODE="$(normalize_boolish "${AI_CLIPPING_REBUILD:-0}")"
 COMPOSE_FILES=(-f docker-compose.yml)
 ENABLE_OLLAMA="${AI_CLIPPING_ENABLE_OLLAMA:-}"
 
@@ -189,6 +191,18 @@ case "$BACKEND_RUNTIME" in
     ;;
 esac
 
+case "$DEV_MODE" in
+  1|true|yes|on)
+    COMPOSE_FILES+=(-f docker-compose.dev.yml)
+    ;;
+  0|false|no|off|"")
+    ;;
+  *)
+    echo "Invalid AI_CLIPPING_DEV=$DEV_MODE. Use true/false." >&2
+    exit 1
+    ;;
+esac
+
 if [ "$BACKEND_RUNTIME" = "cuda" ]; then
   if ! docker_gpu_available; then
     if [ "${AI_CLIPPING_BACKEND_RUNTIME:-auto}" = "auto" ]; then
@@ -222,6 +236,10 @@ mkdir -p \
   backend/ml/artifacts
 
 echo "Starting AI Clipping with backend runtime: $BACKEND_RUNTIME"
+if [ "$DEV_MODE" = "1" ] || [ "$DEV_MODE" = "true" ] || [ "$DEV_MODE" = "yes" ] || [ "$DEV_MODE" = "on" ]; then
+  echo "Dev live reload: enabled"
+  echo "Set AI_CLIPPING_DEV=0 for image-only production-style containers."
+fi
 if [ "$ENABLE_OLLAMA_NORMALIZED" = "1" ] || [ "$ENABLE_OLLAMA_NORMALIZED" = "true" ] || [ "$ENABLE_OLLAMA_NORMALIZED" = "yes" ] || [ "$ENABLE_OLLAMA_NORMALIZED" = "on" ]; then
   echo "Ollama service: enabled"
 fi
@@ -229,7 +247,18 @@ if [ "$REMOTE_MODE" = "ngrok" ]; then
   echo "Remote mode: ngrok"
   echo "Set AI_CLIPPING_REMOTE=none to start without a remote tunnel."
 fi
-docker compose "${COMPOSE_FILES[@]}" up --build -d
+case "$REBUILD_MODE" in
+  1|true|yes|on)
+    docker compose "${COMPOSE_FILES[@]}" up --build -d
+    ;;
+  0|false|no|off|"")
+    docker compose "${COMPOSE_FILES[@]}" up -d
+    ;;
+  *)
+    echo "Invalid AI_CLIPPING_REBUILD=$REBUILD_MODE. Use true/false." >&2
+    exit 1
+    ;;
+esac
 
 if [ "$REMOTE_MODE" = "ngrok" ]; then
   start_ngrok_remote
@@ -250,4 +279,10 @@ Useful commands:
   docker compose logs -f backend
   docker compose logs -f frontend
   docker compose down
+
+Development defaults:
+  Backend and frontend source are bind-mounted with reload/watch enabled.
+  Normal code edits should not require a container rebuild or manual restart.
+  Use AI_CLIPPING_REBUILD=1 only after dependency or Dockerfile changes.
+  Use AI_CLIPPING_DEV=0 for image-only production-style containers.
 EOF

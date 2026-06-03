@@ -48,7 +48,7 @@ vision = [
 ]
 [tool.setuptools]
 packages = ["ml", "routers", "services"]
-py-modules = ["config", "job_manager", "main", "models", "pipeline"]
+py-modules = ["config", "job_manager", "main", "models", "pipeline", "pipeline_worker"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

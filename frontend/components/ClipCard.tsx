@@ -33,9 +33,11 @@ interface Props {
 }
 
 const FEEDBACK_OPTIONS: Array<{ rating: ClipFeedbackRating; label: string }> = [
+  { rating: "excellent", label: "Exzellent" },
   { rating: "good", label: "Gut" },
-  { rating: "medium", label: "Mittel" },
+  { rating: "maybe", label: "Vielleicht" },
   { rating: "bad", label: "Schlecht" },
+  { rating: "boundary_bad", label: "Boundary falsch" },
 ];
 
 const GOLD_EVAL_OPTIONS: Array<{ grade: 0 | 1 | 2 | 3; label: string }> = [

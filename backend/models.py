@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 JobState = Literal[
     "queued",
     "downloading",
+    "downloading_chat",
     "extracting_audio",
     "transcribing",
     "extracting_features",
@@ -107,7 +108,25 @@ class JobStatus(BaseModel):
         return value
 
 
-ClipFeedbackRating = Literal["good", "medium", "bad"]
+ClipFeedbackRating = Literal["excellent", "good", "maybe", "medium", "bad", "boundary_bad"]
+ClipFeedbackTag = Literal[
+    "good_clip",
+    "false_positive",
+    "missed_viral",
+    "wrong_boundary",
+    "wrong_duration",
+    "strong_hook",
+    "funny_reaction",
+    "shock_or_rage",
+    "fanmail_reveal",
+    "quoteable",
+    "good_context",
+    "weak_context",
+    "slow_start",
+    "no_payoff",
+    "too_long",
+    "bad_boundary",
+]
 ClipFeedbackMode = Literal["training_feedback", "gold_eval"]
 
 
@@ -116,6 +135,7 @@ class ClipFeedbackPayload(BaseModel):
     mode: ClipFeedbackMode = "training_feedback"
     rating: ClipFeedbackRating | None = None
     gold_grade: int | None = None
+    feedback_tags: list[ClipFeedbackTag] = Field(default_factory=list)
     notes: str | None = None
 
     @model_validator(mode="after")
@@ -141,4 +161,31 @@ class ClipFeedbackResponse(BaseModel):
     mode: ClipFeedbackMode = "training_feedback"
     rating: ClipFeedbackRating | None = None
     gold_grade: int | None = None
+    feedback_tags: list[ClipFeedbackTag] = Field(default_factory=list)
     notes: str | None = None
+
+
+class ReviewCandidate(BaseModel):
+    candidate_id: str
+    preview_url: str | None = None
+    source: str | None = None
+    clip_type: str | None = None
+    start_time: float
+    end_time: float
+    duration: float
+    rank_score: float | None = None
+    proposal_score: float | None = None
+    pre_judge_rank: int | None = None
+    judge_score: float | None = None
+    selected: bool = False
+    rejected_reason: str | None = None
+    rejection_source: str | None = None
+    judge_reason: str | None = None
+    feedback_rating: ClipFeedbackRating | None = None
+    feedback_tags: list[ClipFeedbackTag] = Field(default_factory=list)
+    feedback_notes: str | None = None
+
+
+class ReviewCandidateResponse(BaseModel):
+    job_id: str
+    candidates: list[ReviewCandidate] = Field(default_factory=list)

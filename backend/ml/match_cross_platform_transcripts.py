@@ -7,6 +7,7 @@ import hashlib
 import json
 import pathlib
 import re
+import shutil
 import sys
 import time
 from collections import Counter
@@ -20,6 +21,7 @@ if str(BACKEND_ROOT) not in sys.path:
 from config import settings
 from ml import build_twitch_training_dataset as vod_training
 from ml import match_cross_platform_audio_fingerprints as audio_matcher
+from ml import outcome_view_weighting
 from services import audio_extractor, transcriber
 
 
@@ -28,6 +30,8 @@ DEFAULT_VOD_CACHE_ROOT = BACKEND_ROOT / "tmp" / "vod_feature_cache"
 DEFAULT_SHORT_TRANSCRIPT_CACHE_ROOT = pathlib.Path(settings.storage_dir) / "_download_cache" / "short_form_transcripts"
 TRANSCRIPT_MATCH_SOURCE = "cross_platform_transcript_match"
 _SHORT_TRANSCRIPT_CACHE_VERSION = 1
+_MULTI_WINDOW_NEAR_DUPLICATE_MERGE_GAP_SEC = 30.0
+_CROSS_VOD_WEAK_TOKEN_RECALL_THRESHOLD = 0.55
 _TOKEN_RE = re.compile(r"[a-z0-9']+")
 _STOPWORDS = {
     "a",
@@ -72,6 +76,35 @@ class TranscriptMatch:
     vod: dict
     vod_excerpt: str
     repost_excerpt: str
+    match_kind: str = "single_window"
+    acceptance_reason: str = ""
+    acceptance_threshold: float = 0.0
+    source_score: float | None = None
+    chunk_index: int | None = None
+    chunk_count: int = 1
+    audio_confidence: float | None = None
+
+
+@dataclass(frozen=True)
+class RepostTranscriptChunk:
+    index: int
+    count: int
+    text: str
+    tokens: list[str]
+    duration: float
+
+
+@dataclass(frozen=True)
+class RepostTranscriptMatchResult:
+    best: TranscriptMatch | None
+    chunk_matches: tuple[TranscriptMatch, ...] = ()
+
+
+@dataclass(frozen=True)
+class MatchDecision:
+    accepted: bool
+    reason: str
+    threshold: float
 
 
 @dataclass
@@ -195,7 +228,7 @@ def match_reposts_to_vods_with_diagnostics(
         )
 
     best_similarity_seen = 0.0
-    match_inputs: list[tuple[int, dict, str, list[str], float]] = []
+    match_inputs: list[tuple[int, dict, str, list[str], float, tuple[RepostTranscriptChunk, ...]]] = []
     for index, repost in enumerate(repost_rows, start=1):
         repost_path = audio_matcher._resolve_media_path(str(repost.get("video_path") or ""))
         if repost_path is None:
@@ -266,7 +299,8 @@ def match_reposts_to_vods_with_diagnostics(
             skipped_repost_transcript += 1
             continue
         repost_duration = _transcript_duration(repost_transcript, fallback=_safe_float(repost.get("duration_sec")))
-        match_inputs.append((index, repost, repost_text, repost_tokens, repost_duration))
+        repost_chunks = _repost_transcript_chunks(repost_transcript, total_duration=repost_duration)
+        match_inputs.append((index, repost, repost_text, repost_tokens, repost_duration, repost_chunks))
 
     effective_workers = min(requested_workers, max(1, len(match_inputs)))
     if log_progress and match_inputs:
@@ -277,11 +311,20 @@ def match_reposts_to_vods_with_diagnostics(
             match_inputs=len(match_inputs),
         )
 
-    for index, repost, best in _iter_repost_match_results(
+    audio_vod_fps: list[tuple[dict, audio_matcher.Fingerprint]] | None = None
+    audio_fallback_attempts = 0
+    audio_fallback_matches = 0
+    view_weighted_accepts = 0
+    multi_window_chunk_matches = 0
+    multi_window_cross_vod_filtered = 0
+    multi_window_near_duplicate_merges = 0
+    accepted_rows_before_cleanup = 0
+    for index, repost, match_result in _iter_repost_match_results(
         match_inputs,
         vod_transcripts=vod_transcripts,
         workers=effective_workers,
     ):
+        best = match_result.best
         if best is None:
             if log_progress and _should_log_progress(index, len(repost_rows), repost_progress_interval):
                 _log_repost_progress(
@@ -298,10 +341,61 @@ def match_reposts_to_vods_with_diagnostics(
                 )
             continue
         best_similarity_seen = max(best_similarity_seen, best.score)
-        accepted = best.score >= threshold
-        best_match_rows.append(_best_match_diagnostic_row(repost, best, accepted=accepted))
-        if accepted:
-            output_rows.append(_matched_row(repost, best))
+        accepted_matches: list[TranscriptMatch] = []
+        single_decision = _acceptance_decision(repost, best, threshold)
+        best_for_diagnostic = _with_acceptance(best, single_decision)
+
+        chunk_accepts = 0
+        for chunk_match in match_result.chunk_matches:
+            chunk_decision = _acceptance_decision(repost, chunk_match, threshold)
+            if not chunk_decision.accepted:
+                continue
+            accepted_chunk = _with_acceptance(chunk_match, chunk_decision)
+            if _append_unique_match(accepted_matches, accepted_chunk):
+                chunk_accepts += 1
+                if chunk_decision.reason == "view_weighted_transcript_threshold":
+                    view_weighted_accepts += 1
+        if single_decision.accepted and (
+            chunk_accepts <= 0 or single_decision.reason != "view_weighted_transcript_threshold"
+        ):
+            if _append_unique_match(accepted_matches, best_for_diagnostic):
+                if single_decision.reason == "view_weighted_transcript_threshold":
+                    view_weighted_accepts += 1
+        multi_window_chunk_matches += chunk_accepts
+
+        if not single_decision.accepted and _should_try_audio_fallback(repost, best, threshold):
+            audio_fallback_attempts += 1
+            if audio_vod_fps is None:
+                audio_vod_fps = _load_audio_vod_fingerprints(vod_rows)
+            audio_match = _audio_fingerprint_fallback(repost, best, vod_fps=audio_vod_fps)
+            if audio_match is not None:
+                accepted_audio = _with_acceptance(
+                    audio_match,
+                    MatchDecision(
+                        accepted=True,
+                        reason="audio_fingerprint_fallback",
+                        threshold=_audio_fallback_confidence_threshold(repost, best),
+                    ),
+                )
+                if _append_unique_match(accepted_matches, accepted_audio):
+                    audio_fallback_matches += 1
+
+        accepted_rows_before_cleanup += len(accepted_matches)
+        accepted_matches, cleanup_stats = _clean_accepted_matches(accepted_matches)
+        multi_window_cross_vod_filtered += cleanup_stats["multi_window_cross_vod_filtered"]
+        multi_window_near_duplicate_merges += cleanup_stats["multi_window_near_duplicate_merges"]
+        best_match_rows.append(
+            _best_match_diagnostic_row(
+                repost,
+                best_for_diagnostic,
+                accepted=bool(accepted_matches),
+                accepted_rows=len(accepted_matches),
+                accepted_match_kinds=[match.match_kind for match in accepted_matches],
+                accepted_reasons=[match.acceptance_reason for match in accepted_matches],
+            )
+        )
+        for match in accepted_matches:
+            output_rows.append(_matched_row(repost, match))
         if log_progress and _should_log_progress(index, len(repost_rows), repost_progress_interval):
             _log_repost_progress(
                 index=index,
@@ -330,6 +424,13 @@ def match_reposts_to_vods_with_diagnostics(
         repost_transcript_cache_hits=repost_transcript_cache_hits,
         repost_transcript_cache_misses=repost_transcript_cache_misses,
         transcript_match_workers=effective_workers,
+        audio_fallback_attempts=audio_fallback_attempts,
+        audio_fallback_matches=audio_fallback_matches,
+        view_weighted_accepts=view_weighted_accepts,
+        multi_window_chunk_matches=multi_window_chunk_matches,
+        multi_window_cross_vod_filtered=multi_window_cross_vod_filtered,
+        multi_window_near_duplicate_merges=multi_window_near_duplicate_merges,
+        accepted_rows_before_cleanup=accepted_rows_before_cleanup,
     )
     if log_progress:
         _log_event(
@@ -347,12 +448,19 @@ def match_reposts_to_vods_with_diagnostics(
             best_similarity_seen=round(best_similarity_seen, 6),
             elapsed_sec=round(time.monotonic() - started_at, 1),
             transcript_match_workers=effective_workers,
+            audio_fallback_attempts=audio_fallback_attempts,
+            audio_fallback_matches=audio_fallback_matches,
+            view_weighted_accepts=view_weighted_accepts,
+            multi_window_chunk_matches=multi_window_chunk_matches,
+            multi_window_cross_vod_filtered=multi_window_cross_vod_filtered,
+            multi_window_near_duplicate_merges=multi_window_near_duplicate_merges,
+            accepted_rows_before_cleanup=accepted_rows_before_cleanup,
         )
     return output_rows, diagnostics
 
 
 def _iter_repost_match_results(
-    match_inputs: list[tuple[int, dict, str, list[str], float]],
+    match_inputs: list[tuple[int, dict, str, list[str], float, tuple[RepostTranscriptChunk, ...]]],
     *,
     vod_transcripts: list[VodTranscript],
     workers: int,
@@ -376,16 +484,18 @@ def _init_match_worker(vod_transcripts: list[VodTranscript]) -> None:
     _WORKER_VOD_TRANSCRIPTS = vod_transcripts
 
 
-def _match_repost_input_in_worker(match_input: tuple[int, dict, str, list[str], float]) -> tuple[int, dict, TranscriptMatch | None]:
+def _match_repost_input_in_worker(
+    match_input: tuple[int, dict, str, list[str], float, tuple[RepostTranscriptChunk, ...]]
+) -> tuple[int, dict, RepostTranscriptMatchResult]:
     return _match_repost_input(match_input, vod_transcripts=_WORKER_VOD_TRANSCRIPTS)
 
 
 def _match_repost_input(
-    match_input: tuple[int, dict, str, list[str], float],
+    match_input: tuple[int, dict, str, list[str], float, tuple[RepostTranscriptChunk, ...]],
     *,
     vod_transcripts: list[VodTranscript],
-) -> tuple[int, dict, TranscriptMatch | None]:
-    index, repost, repost_text, repost_tokens, repost_duration = match_input
+) -> tuple[int, dict, RepostTranscriptMatchResult]:
+    index, repost, repost_text, repost_tokens, repost_duration, repost_chunks = match_input
     best = _best_transcript_match(
         repost,
         repost_text=repost_text,
@@ -393,7 +503,21 @@ def _match_repost_input(
         repost_duration=repost_duration,
         vod_transcripts=vod_transcripts,
     )
-    return index, repost, best
+    chunk_matches: list[TranscriptMatch] = []
+    for chunk in repost_chunks:
+        chunk_best = _best_transcript_match(
+            repost,
+            repost_text=chunk.text,
+            repost_tokens=chunk.tokens,
+            repost_duration=chunk.duration,
+            vod_transcripts=vod_transcripts,
+            match_kind="multi_window_chunk",
+            chunk_index=chunk.index,
+            chunk_count=chunk.count,
+        )
+        if chunk_best is not None:
+            chunk_matches.append(chunk_best)
+    return index, repost, RepostTranscriptMatchResult(best=best, chunk_matches=tuple(chunk_matches))
 
 
 def _load_vod_transcript(vod: dict, *, vod_cache_root: pathlib.Path) -> VodTranscript | None:
@@ -494,6 +618,60 @@ def _repost_transcript_cache_payload(repost: dict, video_path: pathlib.Path) -> 
     }
 
 
+def _repost_transcript_chunks(transcript: list, *, total_duration: float) -> tuple[RepostTranscriptChunk, ...]:
+    segments = [segment for segment in transcript if _tokens(str(getattr(segment, "text", "") or ""))]
+    if len(segments) < 2:
+        return ()
+    all_text = _segments_text(segments)
+    all_tokens = _tokens(all_text)
+    duration = max(float(total_duration or 0.0), _transcript_duration(segments, fallback=0.0))
+    if len(all_tokens) < 14 or duration < 8.0:
+        return ()
+
+    raw_chunks: list[tuple[str, list[str], float]] = []
+    current: list = []
+    current_start: float | None = None
+    for segment in segments:
+        if current_start is None:
+            current_start = float(getattr(segment, "start", 0.0) or 0.0)
+        current.append(segment)
+        text = _segments_text(current)
+        tokens = _tokens(text)
+        chunk_end = float(getattr(segment, "end", current_start + 1.0) or current_start + 1.0)
+        chunk_duration = max(chunk_end - float(current_start), 1.0)
+        should_close = (
+            (len(tokens) >= 8 and chunk_duration >= 4.0)
+            or len(tokens) >= 28
+            or chunk_duration >= 22.0
+        )
+        if should_close:
+            raw_chunks.append((text, tokens, chunk_duration))
+            current = []
+            current_start = None
+    if current:
+        text = _segments_text(current)
+        tokens = _tokens(text)
+        if len(tokens) >= 6:
+            first_start = float(getattr(current[0], "start", 0.0) or 0.0)
+            last_end = float(getattr(current[-1], "end", first_start + 1.0) or first_start + 1.0)
+            raw_chunks.append((text, tokens, max(last_end - first_start, 1.0)))
+
+    filtered = [(text, tokens, chunk_duration) for text, tokens, chunk_duration in raw_chunks if len(tokens) >= 6]
+    if len(filtered) < 2:
+        return ()
+    count = len(filtered)
+    return tuple(
+        RepostTranscriptChunk(
+            index=index,
+            count=count,
+            text=text,
+            tokens=tokens,
+            duration=chunk_duration,
+        )
+        for index, (text, tokens, chunk_duration) in enumerate(filtered, start=1)
+    )
+
+
 def _best_transcript_match(
     repost: dict,
     *,
@@ -501,6 +679,9 @@ def _best_transcript_match(
     repost_tokens: list[str],
     repost_duration: float,
     vod_transcripts: list[VodTranscript],
+    match_kind: str = "single_window",
+    chunk_index: int | None = None,
+    chunk_count: int = 1,
 ) -> TranscriptMatch | None:
     best: TranscriptMatch | None = None
     target_duration = max(float(repost_duration or 0.0), _safe_float(repost.get("duration")), 8.0)
@@ -512,6 +693,9 @@ def _best_transcript_match(
                 repost_text=repost_text,
                 repost_tokens=repost_tokens,
                 target_duration=target_duration,
+                match_kind=match_kind,
+                chunk_index=chunk_index,
+                chunk_count=chunk_count,
             )
             if candidate is None:
                 continue
@@ -545,6 +729,9 @@ def _score_window(
     repost_text: str,
     repost_tokens: list[str],
     target_duration: float,
+    match_kind: str = "single_window",
+    chunk_index: int | None = None,
+    chunk_count: int = 1,
 ) -> TranscriptMatch | None:
     segments = vod_transcript.segments
     if start_index >= len(segments):
@@ -582,13 +769,283 @@ def _score_window(
         vod=vod_transcript.row,
         vod_excerpt=_short_text(window_text, 260),
         repost_excerpt=_short_text(repost_text, 260),
+        match_kind=match_kind,
+        source_score=round(max(0.0, min(1.0, score)), 6),
+        chunk_index=chunk_index,
+        chunk_count=max(1, int(chunk_count or 1)),
+    )
+
+
+def _acceptance_decision(repost: dict, match: TranscriptMatch, base_threshold: float) -> MatchDecision:
+    threshold = max(float(base_threshold), 0.0)
+    if match.score >= threshold:
+        return MatchDecision(True, "transcript_threshold", threshold)
+    view_threshold = _view_weighted_similarity_threshold(repost, match, threshold)
+    if view_threshold < threshold and match.score >= view_threshold:
+        return MatchDecision(True, "view_weighted_transcript_threshold", view_threshold)
+    return MatchDecision(False, "below_threshold", threshold)
+
+
+def _view_weighted_similarity_threshold(repost: dict, match: TranscriptMatch, base_threshold: float) -> float:
+    views = _safe_float(repost.get("views") or repost.get("view_count"))
+    threshold = max(float(base_threshold), 0.0)
+    if views >= 1_000_000 and match.token_recall >= 0.40:
+        return min(threshold, 0.42)
+    if views >= 500_000 and match.token_recall >= 0.42:
+        return min(threshold, 0.45)
+    if views >= 100_000 and match.token_recall >= 0.45:
+        return min(threshold, 0.48)
+    return threshold
+
+
+def _with_acceptance(match: TranscriptMatch, decision: MatchDecision) -> TranscriptMatch:
+    return TranscriptMatch(
+        score=match.score,
+        token_recall=match.token_recall,
+        bigram_recall=match.bigram_recall,
+        sequence_ratio=match.sequence_ratio,
+        start=match.start,
+        end=match.end,
+        vod=match.vod,
+        vod_excerpt=match.vod_excerpt,
+        repost_excerpt=match.repost_excerpt,
+        match_kind=match.match_kind,
+        acceptance_reason=decision.reason,
+        acceptance_threshold=round(float(decision.threshold), 6),
+        source_score=match.source_score if match.source_score is not None else match.score,
+        chunk_index=match.chunk_index,
+        chunk_count=match.chunk_count,
+        audio_confidence=match.audio_confidence,
+    )
+
+
+def _append_unique_match(matches: list[TranscriptMatch], candidate: TranscriptMatch) -> bool:
+    for existing in matches:
+        if str(existing.vod.get("vod_id") or "") != str(candidate.vod.get("vod_id") or ""):
+            continue
+        if _window_overlap_ratio(existing.start, existing.end, candidate.start, candidate.end) >= 0.70:
+            return False
+    matches.append(candidate)
+    return True
+
+
+def _clean_accepted_matches(matches: list[TranscriptMatch]) -> tuple[list[TranscriptMatch], dict[str, int]]:
+    stats = {
+        "multi_window_cross_vod_filtered": 0,
+        "multi_window_near_duplicate_merges": 0,
+    }
+    if len(matches) <= 1:
+        return list(matches), stats
+
+    filtered = _filter_multi_window_matches_to_top_vod(matches, stats)
+    cleaned = _merge_near_duplicate_accepted_matches(filtered, stats)
+    return cleaned, stats
+
+
+def _filter_multi_window_matches_to_top_vod(
+    matches: list[TranscriptMatch],
+    stats: dict[str, int],
+) -> list[TranscriptMatch]:
+    vod_ids = {_match_vod_id(match) for match in matches if _match_vod_id(match)}
+    if len(vod_ids) <= 1:
+        return list(matches)
+
+    vod_scores: dict[str, tuple[float, int, float, float]] = {}
+    for match in matches:
+        vod_id = _match_vod_id(match)
+        if not vod_id:
+            continue
+        total_score, count, max_token_recall, max_score = vod_scores.get(vod_id, (0.0, 0, 0.0, 0.0))
+        source_score = float(match.source_score if match.source_score is not None else match.score)
+        vod_scores[vod_id] = (
+            total_score + max(source_score, 0.0),
+            count + 1,
+            max(max_token_recall, float(match.token_recall)),
+            max(max_score, float(match.score)),
+        )
+    if not vod_scores:
+        return list(matches)
+
+    top_vod_id = max(vod_scores.items(), key=lambda item: (item[1][0], item[1][2], item[1][3], item[1][1], item[0]))[0]
+    filtered = [
+        match
+        for match in matches
+        if _match_vod_id(match) == top_vod_id or _is_strong_cross_vod_secondary_match(match)
+    ]
+    stats["multi_window_cross_vod_filtered"] += max(0, len(matches) - len(filtered))
+    return filtered
+
+
+def _is_strong_cross_vod_secondary_match(match: TranscriptMatch) -> bool:
+    return float(match.token_recall) >= _CROSS_VOD_WEAK_TOKEN_RECALL_THRESHOLD
+
+
+def _merge_near_duplicate_accepted_matches(
+    matches: list[TranscriptMatch],
+    stats: dict[str, int],
+) -> list[TranscriptMatch]:
+    if len(matches) <= 1:
+        return list(matches)
+
+    cleaned: list[TranscriptMatch] = []
+    for _vod_id, group in _accepted_matches_by_vod(matches).items():
+        ordered = sorted(group, key=lambda match: (float(match.start), float(match.end), -float(match.score)))
+        cluster: list[TranscriptMatch] = []
+        cluster_end = 0.0
+        for match in ordered:
+            if not cluster:
+                cluster = [match]
+                cluster_end = float(match.end)
+                continue
+            gap = float(match.start) - float(cluster_end)
+            if gap < _MULTI_WINDOW_NEAR_DUPLICATE_MERGE_GAP_SEC:
+                cluster.append(match)
+                cluster_end = max(cluster_end, float(match.end))
+                continue
+            cleaned.append(_merge_match_cluster(cluster, stats))
+            cluster = [match]
+            cluster_end = float(match.end)
+        if cluster:
+            cleaned.append(_merge_match_cluster(cluster, stats))
+    return sorted(cleaned, key=lambda match: (_match_vod_id(match), float(match.start), float(match.end)))
+
+
+def _accepted_matches_by_vod(matches: list[TranscriptMatch]) -> dict[str, list[TranscriptMatch]]:
+    grouped: dict[str, list[TranscriptMatch]] = {}
+    for match in matches:
+        grouped.setdefault(_match_vod_id(match), []).append(match)
+    return grouped
+
+
+def _merge_match_cluster(matches: list[TranscriptMatch], stats: dict[str, int]) -> TranscriptMatch:
+    if len(matches) == 1:
+        return matches[0]
+    stats["multi_window_near_duplicate_merges"] += len(matches) - 1
+    best = max(matches, key=lambda match: float(match.score))
+    return TranscriptMatch(
+        score=max(float(match.score) for match in matches),
+        token_recall=max(float(match.token_recall) for match in matches),
+        bigram_recall=max(float(match.bigram_recall) for match in matches),
+        sequence_ratio=max(float(match.sequence_ratio) for match in matches),
+        start=min(float(match.start) for match in matches),
+        end=max(float(match.end) for match in matches),
+        vod=best.vod,
+        vod_excerpt=_short_text(" | ".join(match.vod_excerpt for match in matches if match.vod_excerpt), 260),
+        repost_excerpt=_short_text(" | ".join(match.repost_excerpt for match in matches if match.repost_excerpt), 260),
+        match_kind="multi_window_merged",
+        acceptance_reason="multi_window_near_duplicate_merge",
+        acceptance_threshold=min(float(match.acceptance_threshold or 0.0) for match in matches),
+        source_score=max(float(match.source_score if match.source_score is not None else match.score) for match in matches),
+        chunk_index=None,
+        chunk_count=max(int(match.chunk_count or 1) for match in matches),
+        audio_confidence=max(
+            (float(match.audio_confidence) for match in matches if match.audio_confidence is not None),
+            default=None,
+        ),
+    )
+
+
+def _match_vod_id(match: TranscriptMatch) -> str:
+    return str(match.vod.get("vod_id") or match.vod.get("id") or match.vod.get("vod_url") or "").strip()
+
+
+def _window_overlap_ratio(left_start: float, left_end: float, right_start: float, right_end: float) -> float:
+    left_end = max(float(left_end), float(left_start) + 0.001)
+    right_end = max(float(right_end), float(right_start) + 0.001)
+    overlap = max(0.0, min(left_end, right_end) - max(float(left_start), float(right_start)))
+    shortest = max(0.001, min(left_end - float(left_start), right_end - float(right_start)))
+    return overlap / shortest
+
+
+def _should_try_audio_fallback(repost: dict, best: TranscriptMatch, base_threshold: float) -> bool:
+    if best.score >= float(base_threshold):
+        return False
+    views = _safe_float(repost.get("views") or repost.get("view_count"))
+    if best.score >= 0.35 and best.token_recall >= 0.30:
+        return True
+    return views >= 500_000 and best.score >= 0.32 and best.token_recall >= 0.25
+
+
+def _audio_fallback_confidence_threshold(repost: dict, best: TranscriptMatch) -> float:
+    views = _safe_float(repost.get("views") or repost.get("view_count"))
+    if views >= 1_000_000 and best.token_recall >= 0.40:
+        return 0.52
+    if views >= 500_000 and best.token_recall >= 0.35:
+        return 0.54
+    return 0.56
+
+
+def _load_audio_vod_fingerprints(vod_rows: list[dict]) -> list[tuple[dict, audio_matcher.Fingerprint]]:
+    fpcalc = shutil.which("fpcalc")
+    if fpcalc is None:
+        return []
+    vod_fps: list[tuple[dict, audio_matcher.Fingerprint]] = []
+    for vod in vod_rows:
+        try:
+            vod_fps.append((vod, audio_matcher._fingerprint_from_row(vod, fpcalc)))
+        except Exception:
+            continue
+    return vod_fps
+
+
+def _audio_fingerprint_fallback(
+    repost: dict,
+    transcript_best: TranscriptMatch,
+    *,
+    vod_fps: list[tuple[dict, audio_matcher.Fingerprint]],
+) -> TranscriptMatch | None:
+    if not vod_fps:
+        return None
+    fpcalc = shutil.which("fpcalc")
+    if fpcalc is None:
+        return None
+    repost_path = audio_matcher._resolve_media_path(str(repost.get("video_path") or ""))
+    if repost_path is None:
+        return None
+    try:
+        repost_fp = audio_matcher._fingerprint(repost_path, fpcalc)
+    except Exception:
+        return None
+    best_audio: tuple[float, int, dict, audio_matcher.Fingerprint] | None = None
+    for vod, vod_fp in vod_fps:
+        confidence, offset_index = audio_matcher.best_fingerprint_alignment(repost_fp.values, vod_fp.values)
+        if best_audio is None or confidence > best_audio[0]:
+            best_audio = (confidence, offset_index, vod, vod_fp)
+    if best_audio is None:
+        return None
+    confidence, offset_index, vod, vod_fp = best_audio
+    if confidence < _audio_fallback_confidence_threshold(repost, transcript_best):
+        return None
+    seconds_per_item = vod_fp.duration / max(len(vod_fp.values), 1)
+    scoped_start = max(offset_index * seconds_per_item, 0.0)
+    source_offset = _safe_float(
+        vod.get("source_start_offset")
+        or vod.get("expanded_start")
+        or vod.get("window_start_offset")
+    )
+    start = max(source_offset + scoped_start, 0.0)
+    end = start + max(repost_fp.duration, 1.0)
+    return TranscriptMatch(
+        score=transcript_best.score,
+        token_recall=transcript_best.token_recall,
+        bigram_recall=transcript_best.bigram_recall,
+        sequence_ratio=transcript_best.sequence_ratio,
+        start=start,
+        end=end,
+        vod=vod,
+        vod_excerpt=transcript_best.vod_excerpt,
+        repost_excerpt=transcript_best.repost_excerpt,
+        match_kind="audio_fingerprint_fallback",
+        source_score=transcript_best.score,
+        audio_confidence=round(float(confidence), 6),
     )
 
 
 def _matched_row(repost: dict, match: TranscriptMatch) -> dict:
     views = _safe_float(repost.get("views") or repost.get("view_count"))
     vod = match.vod
-    return {
+    title = _repost_title(repost)
+    row = {
         "vod_id": str(vod.get("vod_id") or ""),
         "vod_url": str(vod.get("vod_url") or ""),
         "candidate_id": str(repost.get("clip_id") or repost.get("candidate_id") or f"cross_platform:{vod.get('vod_id')}:{match.start:.1f}"),
@@ -603,36 +1060,81 @@ def _matched_row(repost: dict, match: TranscriptMatch) -> dict:
         "sample_weight": 2.0 if views >= 100_000 else 1.5,
         "platform": str(repost.get("platform") or ""),
         "source_url": str(repost.get("source_url") or ""),
+        "repost_title": title,
         "views": views,
         "transcript_similarity": round(match.score, 6),
         "transcript_token_recall": round(match.token_recall, 6),
         "transcript_bigram_recall": round(match.bigram_recall, 6),
         "transcript_sequence_ratio": round(match.sequence_ratio, 6),
+        "transcript_match_kind": str(match.match_kind or "single_window"),
+        "cross_platform_verification": str(match.match_kind or "single_window"),
+        "transcript_acceptance_reason": str(match.acceptance_reason or "transcript_threshold"),
+        "transcript_acceptance_threshold": round(float(match.acceptance_threshold or match.score), 6),
+        "transcript_source_score": round(float(match.source_score if match.source_score is not None else match.score), 6),
         "transcript_repost_excerpt": match.repost_excerpt,
         "transcript_vod_excerpt": match.vod_excerpt,
         "profile_filter_version": int(_safe_float(repost.get("profile_filter_version"))),
     }
+    if match.chunk_index is not None:
+        row["transcript_chunk_index"] = int(match.chunk_index)
+        row["transcript_chunk_count"] = int(match.chunk_count or 1)
+    if match.audio_confidence is not None:
+        row["fingerprint_confidence"] = round(float(match.audio_confidence), 6)
+        row["audio_fingerprint_confidence"] = round(float(match.audio_confidence), 6)
+    return outcome_view_weighting.annotate_cross_platform_view_weight(row)
 
 
-def _best_match_diagnostic_row(repost: dict, match: TranscriptMatch, *, accepted: bool) -> dict:
-    return {
+def _best_match_diagnostic_row(
+    repost: dict,
+    match: TranscriptMatch,
+    *,
+    accepted: bool,
+    accepted_rows: int = 1,
+    accepted_match_kinds: list[str] | None = None,
+    accepted_reasons: list[str] | None = None,
+) -> dict:
+    title = _repost_title(repost)
+    row = {
         "accepted": bool(accepted),
+        "accepted_rows": int(accepted_rows),
+        "accepted_match_kinds": list(accepted_match_kinds or []),
+        "accepted_reasons": list(accepted_reasons or []),
         "confidence": round(match.score, 6),
         "transcript_similarity": round(match.score, 6),
         "transcript_token_recall": round(match.token_recall, 6),
         "transcript_bigram_recall": round(match.bigram_recall, 6),
         "transcript_sequence_ratio": round(match.sequence_ratio, 6),
+        "transcript_match_kind": str(match.match_kind or "single_window"),
+        "transcript_acceptance_reason": str(match.acceptance_reason or ("transcript_threshold" if accepted else "below_threshold")),
+        "transcript_acceptance_threshold": round(float(match.acceptance_threshold or match.score), 6),
+        "transcript_source_score": round(float(match.source_score if match.source_score is not None else match.score), 6),
         "vod_id": str(match.vod.get("vod_id") or ""),
         "vod_url": str(match.vod.get("vod_url") or ""),
         "window_start": round(match.start, 2),
         "window_end": round(max(match.end, match.start + 1.0), 2),
         "repost_clip_id": str(repost.get("clip_id") or repost.get("candidate_id") or ""),
         "repost_source_url": str(repost.get("source_url") or ""),
+        "repost_title": title,
         "repost_platform": str(repost.get("platform") or ""),
         "repost_views": _safe_float(repost.get("views") or repost.get("view_count")),
         "transcript_repost_excerpt": match.repost_excerpt,
         "transcript_vod_excerpt": match.vod_excerpt,
     }
+    if match.chunk_index is not None:
+        row["transcript_chunk_index"] = int(match.chunk_index)
+        row["transcript_chunk_count"] = int(match.chunk_count or 1)
+    if match.audio_confidence is not None:
+        row["fingerprint_confidence"] = round(float(match.audio_confidence), 6)
+        row["audio_fingerprint_confidence"] = round(float(match.audio_confidence), 6)
+    return row
+
+
+def _repost_title(repost: dict) -> str:
+    for key in ("title", "repost_title", "short_title", "video_title"):
+        value = str(repost.get(key) or "").strip()
+        if value:
+            return value
+    return ""
 
 
 def _match_diagnostics(
@@ -650,6 +1152,13 @@ def _match_diagnostics(
     repost_transcript_cache_hits: int,
     repost_transcript_cache_misses: int,
     transcript_match_workers: int,
+    audio_fallback_attempts: int = 0,
+    audio_fallback_matches: int = 0,
+    view_weighted_accepts: int = 0,
+    multi_window_chunk_matches: int = 0,
+    multi_window_cross_vod_filtered: int = 0,
+    multi_window_near_duplicate_merges: int = 0,
+    accepted_rows_before_cleanup: int = 0,
 ) -> dict[str, object]:
     scores = sorted(float(row.get("transcript_similarity") or row.get("confidence") or 0.0) for row in best_match_rows)
     top_rows = sorted(
@@ -672,6 +1181,13 @@ def _match_diagnostics(
         "skipped_repost_transcript_rows": int(skipped_repost_transcript),
         "repost_transcript_cache_hits": int(repost_transcript_cache_hits),
         "repost_transcript_cache_misses": int(repost_transcript_cache_misses),
+        "audio_fallback_attempts": int(audio_fallback_attempts),
+        "audio_fallback_matches": int(audio_fallback_matches),
+        "view_weighted_accepts": int(view_weighted_accepts),
+        "multi_window_chunk_matches": int(multi_window_chunk_matches),
+        "multi_window_cross_vod_filtered": int(multi_window_cross_vod_filtered),
+        "multi_window_near_duplicate_merges": int(multi_window_near_duplicate_merges),
+        "accepted_rows_before_cleanup": int(accepted_rows_before_cleanup),
         "confidence_distribution": audio_matcher._score_distribution(scores),
         "threshold_ladder": audio_matcher._threshold_ladder(scores),
         "best_match_rows": best_match_rows,

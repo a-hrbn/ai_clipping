@@ -273,6 +273,31 @@ class CandidateFeatures:
     has_vector_similarity: bool = False
     feature_build_version: int = 1
     source: str = ""
+    clip_type: str = "general"
+    cross_platform_recall_target: bool = False
+    cross_platform_positive_overlap_ratio: float = 0.0
+    cross_platform_positive_similarity: float = 0.0
+    cross_platform_positive_views: float = 0.0
+    multimodal_proxy_score: float = 0.0
+    rage_score: float = 0.0
+    clutch_score: float = 0.0
+    funny_reaction_score: float = 0.0
+    trash_talk_payoff_score: float = 0.0
+    jynxzi_chat_shock_score: float = 0.0
+    ranked_tension_score: float = 0.0
+    failed_setup_score: float = 0.0
+    streamer_persona_beat_score: float = 0.0
+    context_pattern_score: float = 0.0
+    context_pattern_support: float = 0.0
+    context_pattern_views_prior: float = 0.0
+    context_pattern_confidence: float = 0.0
+    context_pattern_similarity_margin: float = 0.0
+    context_pattern_id: str = ""
+    context_pattern_label: str = ""
+    setup_present_score: float = 0.0
+    payoff_present_score: float = 0.0
+    context_strength_score: float = 0.0
+    context_completeness_score: float = 0.0
     # Rule-based heuristic score used as an input feature for trained rankers.
     # Populated at scoring time (services/ranker.py) from _heuristic_scores so the
     # trained model can learn how to adjust it rather than being blended post-hoc.

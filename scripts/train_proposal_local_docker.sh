@@ -8,6 +8,7 @@ TRAIN_LOCAL_DOCKER="$SCRIPT_DIR/train_local_docker.sh"
 PROFILE="${PROPOSAL_PROFILE:-${CLIP_PROFILE:-jynxzi}}"
 STORAGE_DIR="${PROPOSAL_STORAGE_DIR:-/app/backend/tmp/storage}"
 POSITIVE_ROWS="${PROPOSAL_POSITIVE_ROWS:-/app/backend/ml/artifacts/${PROFILE}_cross_platform_fingerprint_rows.jsonl}"
+HOLDOUT_POLICY_ROWS="${PROPOSAL_HOLDOUT_POLICY_ROWS:-/app/backend/ml/artifacts/${PROFILE}_training_holdout_policy_rows.jsonl}"
 TRAINING_ROWS="${PROPOSAL_TRAINING_ROWS:-/app/backend/ml/artifacts/${PROFILE}_proposal_training_rows.jsonl}"
 OUTPUT_PATH="${PROPOSAL_OUTPUT:-/app/backend/ml/artifacts/${PROFILE}_proposal_scorer.json}"
 MIN_ROWS="${PROPOSAL_MIN_ROWS:-8}"
@@ -18,6 +19,7 @@ MATERIALIZE_REFRESH="${PROPOSAL_MATERIALIZE_REFRESH:-false}"
 DURATIONS_SEC="${PROPOSAL_DURATIONS_SEC:-12,20,30,45,60}"
 STRIDE_SEC="${PROPOSAL_STRIDE_SEC:-5.0}"
 MAX_CANDIDATES_PER_VOD="${PROPOSAL_MAX_CANDIDATES_PER_VOD:-5000}"
+CONTEXT_PATTERN_SEMANTIC_CLUSTER_SIMILARITY="${PROPOSAL_CONTEXT_PATTERN_SEMANTIC_CLUSTER_SIMILARITY:-0.72}"
 
 show_help() {
   cat <<'EOF'
@@ -29,6 +31,8 @@ Options:
   --storage-dir PATH         Container storage dir with job debug folders. Default: /app/backend/tmp/storage.
   --positive-rows PATH       Optional container JSONL with cross-platform positive windows.
                              Default: /app/backend/ml/artifacts/<profile>_cross_platform_fingerprint_rows.jsonl.
+  --holdout-policy-rows PATH Optional container JSONL with holdout policy rows to exclude from training.
+                             Default: /app/backend/ml/artifacts/<profile>_training_holdout_policy_rows.jsonl.
   --training-rows PATH       Optional container JSONL from build_proposal_training_rows.py.
                              Default: /app/backend/ml/artifacts/<profile>_proposal_training_rows.jsonl.
   --output PATH              Container output artifact path.
@@ -44,13 +48,18 @@ Options:
   --durations-sec LIST       Dense proposal durations, comma separated. Default: 12,20,30,45,60.
   --stride-sec N             Dense proposal stride in seconds. Default: 5.0.
   --max-candidates-per-vod N Maximum generated proposal candidates per VOD. Default: 5000.
+  --context-pattern-semantic-cluster-similarity N
+                             Cosine threshold for semantic context-pattern clustering. Default: 0.72.
+  --date-from DATE          Accepted for compatibility with train_local_docker.sh; ignored.
+  --date-to DATE            Accepted for compatibility with train_local_docker.sh; ignored.
   -h, --help                 Show this help.
 
 Environment:
   PROPOSAL_PROFILE, PROPOSAL_STORAGE_DIR, PROPOSAL_POSITIVE_ROWS, PROPOSAL_TRAINING_ROWS,
-  PROPOSAL_OUTPUT, PROPOSAL_MIN_ROWS, PROPOSAL_VOD_CACHE_ROOT, PROPOSAL_MATERIALIZED_STORAGE_DIR,
-  PROPOSAL_MATERIALIZE_MAX_VODS, PROPOSAL_MATERIALIZE_REFRESH, PROPOSAL_DURATIONS_SEC,
-  PROPOSAL_STRIDE_SEC, PROPOSAL_MAX_CANDIDATES_PER_VOD override the defaults above.
+  PROPOSAL_HOLDOUT_POLICY_ROWS, PROPOSAL_OUTPUT, PROPOSAL_MIN_ROWS, PROPOSAL_VOD_CACHE_ROOT,
+  PROPOSAL_MATERIALIZED_STORAGE_DIR, PROPOSAL_MATERIALIZE_MAX_VODS, PROPOSAL_MATERIALIZE_REFRESH, PROPOSAL_DURATIONS_SEC,
+  PROPOSAL_STRIDE_SEC, PROPOSAL_MAX_CANDIDATES_PER_VOD,
+  PROPOSAL_CONTEXT_PATTERN_SEMANTIC_CLUSTER_SIMILARITY override the defaults above.
 
 Examples:
   scripts/train_proposal_local_docker.sh
@@ -65,6 +74,7 @@ while [[ $# -gt 0 ]]; do
     --profile)
       PROFILE="${2:?Missing value for --profile}"
       POSITIVE_ROWS="${PROPOSAL_POSITIVE_ROWS:-/app/backend/ml/artifacts/${PROFILE}_cross_platform_fingerprint_rows.jsonl}"
+      HOLDOUT_POLICY_ROWS="${PROPOSAL_HOLDOUT_POLICY_ROWS:-/app/backend/ml/artifacts/${PROFILE}_training_holdout_policy_rows.jsonl}"
       TRAINING_ROWS="${PROPOSAL_TRAINING_ROWS:-/app/backend/ml/artifacts/${PROFILE}_proposal_training_rows.jsonl}"
       OUTPUT_PATH="${PROPOSAL_OUTPUT:-/app/backend/ml/artifacts/${PROFILE}_proposal_scorer.json}"
       shift 2
@@ -72,6 +82,7 @@ while [[ $# -gt 0 ]]; do
     --profile=*)
       PROFILE="${1#*=}"
       POSITIVE_ROWS="${PROPOSAL_POSITIVE_ROWS:-/app/backend/ml/artifacts/${PROFILE}_cross_platform_fingerprint_rows.jsonl}"
+      HOLDOUT_POLICY_ROWS="${PROPOSAL_HOLDOUT_POLICY_ROWS:-/app/backend/ml/artifacts/${PROFILE}_training_holdout_policy_rows.jsonl}"
       TRAINING_ROWS="${PROPOSAL_TRAINING_ROWS:-/app/backend/ml/artifacts/${PROFILE}_proposal_training_rows.jsonl}"
       OUTPUT_PATH="${PROPOSAL_OUTPUT:-/app/backend/ml/artifacts/${PROFILE}_proposal_scorer.json}"
       shift
@@ -92,6 +103,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --positive-rows=*)
       POSITIVE_ROWS="${1#*=}"
+      shift
+      ;;
+    --holdout-policy-rows)
+      HOLDOUT_POLICY_ROWS="${2:?Missing value for --holdout-policy-rows}"
+      shift 2
+      ;;
+    --holdout-policy-rows=*)
+      HOLDOUT_POLICY_ROWS="${1#*=}"
       shift
       ;;
     --training-rows)
@@ -170,6 +189,20 @@ while [[ $# -gt 0 ]]; do
       MAX_CANDIDATES_PER_VOD="${1#*=}"
       shift
       ;;
+    --context-pattern-semantic-cluster-similarity)
+      CONTEXT_PATTERN_SEMANTIC_CLUSTER_SIMILARITY="${2:?Missing value for --context-pattern-semantic-cluster-similarity}"
+      shift 2
+      ;;
+    --context-pattern-semantic-cluster-similarity=*)
+      CONTEXT_PATTERN_SEMANTIC_CLUSTER_SIMILARITY="${1#*=}"
+      shift
+      ;;
+    --date-from|--date-to)
+      shift 2
+      ;;
+    --date-from=*|--date-to=*)
+      shift
+      ;;
     -h|--help)
       show_help
       exit 0
@@ -204,6 +237,7 @@ exec "$TRAIN_LOCAL_DOCKER" \
   --profile "$PROFILE" \
   --storage-dir "$STORAGE_DIR" \
   --positive-rows "$POSITIVE_ROWS" \
+  --holdout-policy-rows "$HOLDOUT_POLICY_ROWS" \
   --training-rows "$TRAINING_ROWS" \
   --output "$OUTPUT_PATH" \
   --min-rows "$MIN_ROWS" \
@@ -214,4 +248,5 @@ exec "$TRAIN_LOCAL_DOCKER" \
   --durations-sec "$DURATIONS_SEC" \
   --stride-sec "$STRIDE_SEC" \
   --max-candidates-per-vod "$MAX_CANDIDATES_PER_VOD" \
+  --context-pattern-semantic-cluster-similarity "$CONTEXT_PATTERN_SEMANTIC_CLUSTER_SIMILARITY" \
   "${EXTRA_ARGS[@]}"

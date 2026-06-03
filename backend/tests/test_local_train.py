@@ -30,15 +30,16 @@ class LocalTrainTests(unittest.TestCase):
             training_ffmpeg_threads=0,
             video_expression_sample_sec=6,
         )
-        with patch("ml.local_train.os.cpu_count", return_value=12):
+        with patch("ml.local_train.os.cpu_count", return_value=12), \
+             patch("ml.local_train._available_memory_gib", return_value=27.4):
             env = local_train._configure_runtime_env(args)
 
         self.assertEqual(env["WHISPER_DEVICE"], "cuda")
         self.assertEqual(env["WHISPER_LANGUAGE"], "en")
         self.assertEqual(env["SEMANTIC_DEVICE"], "cuda")
         self.assertEqual(env["TRAINING_DATASET_LLM_PROVIDER"], "none")
-        self.assertEqual(env["TRAINING_VOD_WORKERS"], "1")
-        self.assertEqual(env["TRAINING_LABEL_WORKERS"], "3")
+        self.assertEqual(env["TRAINING_VOD_WORKERS"], "2")
+        self.assertEqual(env["TRAINING_LABEL_WORKERS"], "2")
         self.assertEqual(env["TRAINING_FFMPEG_VIDEO_CODEC"], "h264_nvenc")
         self.assertEqual(env["TRAINING_FFMPEG_AUDIO_CODEC"], "aac")
         self.assertEqual(env["TRAINING_FFMPEG_PRESET"], "")
@@ -46,7 +47,15 @@ class LocalTrainTests(unittest.TestCase):
         self.assertEqual(env["VOD_RANKER_SHORT_FORM_MODE"], "off")
         self.assertEqual(env["SEMANTIC_BATCH_SIZE"], "256")
         self.assertEqual(env["OMP_NUM_THREADS"], "1")
+        self.assertEqual(env["MALLOC_ARENA_MAX"], "2")
+        self.assertEqual(env["TF_FORCE_GPU_ALLOW_GROWTH"], "true")
         self.assertEqual(env["CUDA_VISIBLE_DEVICES"], "0")
+
+    def test_recommended_worker_plan_allows_more_parallelism_on_large_memory_hosts(self) -> None:
+        plan = local_train._recommended_worker_plan(24, 64.0)
+
+        self.assertEqual(plan.vod_workers, 4)
+        self.assertEqual(plan.label_workers, 3)
 
     def test_main_writes_summary_and_invokes_training_script(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

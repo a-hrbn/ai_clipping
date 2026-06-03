@@ -19,6 +19,8 @@ DEFAULT_ARTIFACT_DIR = BACKEND_ROOT / "ml" / "artifacts"
 DEFAULT_CROSS_PLATFORM_ROWS = DEFAULT_ARTIFACT_DIR / "jynxzi_cross_platform_fingerprint_rows.jsonl"
 DEFAULT_OUTPUT = DEFAULT_ARTIFACT_DIR / "jynxzi_proposal_training_rows.jsonl"
 DEFAULT_SUMMARY = DEFAULT_ARTIFACT_DIR / "jynxzi_proposal_training_summary.json"
+_DENSE_RECALL_POSITIVE_WEIGHT = 4.0
+_CROSS_PLATFORM_POSITIVE_WEIGHT = 2.0
 DEFAULT_STORAGE_DIR = BACKEND_ROOT / "tmp" / "storage"
 _VOD_URL_RE = re.compile(r"twitch\.tv/videos/(\d+)")
 _GOLD_SOURCE_TOKENS = ("gold_eval", "gold-eval", "frontend_gold")
@@ -30,6 +32,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--profile", default="jynxzi")
     parser.add_argument("--cross-platform-rows", type=pathlib.Path, default=DEFAULT_CROSS_PLATFORM_ROWS)
+    parser.add_argument(
+        "--holdout-policy-rows",
+        type=pathlib.Path,
+        default=None,
+        help="Optional JSONL policy rows; VOD ids marked holdout are excluded from proposal training.",
+    )
     parser.add_argument("--storage-dir", type=pathlib.Path, default=DEFAULT_STORAGE_DIR)
     parser.add_argument("--segments", action="append", type=pathlib.Path, default=[])
     parser.add_argument(
@@ -53,12 +61,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-background-negatives-per-vod", type=int, default=120)
     args = parser.parse_args(argv)
 
-    positive_index = _positive_window_index(read_jsonl(args.cross_platform_rows))
+    holdout_vod_ids = _holdout_vod_ids(args.holdout_policy_rows)
+    positive_index = _positive_window_index(read_jsonl(args.cross_platform_rows), excluded_vod_ids=holdout_vod_ids)
     segment_sources = _discover_segment_sources(args.storage_dir, args.segments)
     rows: list[dict] = []
     summaries: list[dict] = []
     for source in segment_sources:
         vod_id = source["vod_id"]
+        if vod_id in holdout_vod_ids:
+            summaries.append({**source, "status": "skipped_holdout_vod"})
+            continue
         positives = positive_index.get(vod_id, [])
         if not vod_id or not positives:
             summaries.append({**source, "status": "skipped_no_cross_platform_positives"})
@@ -67,12 +79,18 @@ def main(argv: list[str] | None = None) -> int:
         if not segments:
             summaries.append({**source, "status": "skipped_empty_segments"})
             continue
-        candidates = candidate_generators.generate_dense_candidate_inventory(
+        uncapped_candidates = candidate_generators.generate_dense_candidate_inventory(
             segments,
             strategy=clip_strategy.normalize_strategy(None),
             durations=_parse_float_list(args.durations_sec),
             stride_sec=args.stride_sec,
+            max_candidates=0,
+        )
+        candidates, recall_summary = _promote_positive_recall_candidates(
+            uncapped_candidates,
+            positives,
             max_candidates=max(args.max_candidates_per_vod, 0),
+            positive_overlap_ratio=args.positive_overlap_ratio,
         )
         labelled, summary = _label_candidates(
             candidates,
@@ -87,26 +105,34 @@ def main(argv: list[str] | None = None) -> int:
             max_background_negatives_per_vod=args.max_background_negatives_per_vod,
         )
         rows.extend(labelled)
-        summaries.append(summary)
+        summaries.append({**summary, **recall_summary})
 
     existing_rows, existing_summary = build_rows_from_existing_feature_rows(
         list(args.existing_feature_rows),
         profile=args.profile,
+        excluded_vod_ids=holdout_vod_ids,
     )
     rows.extend(existing_rows)
 
     rows.sort(key=lambda row: (str(row.get("vod_id") or ""), float(row.get("window_start") or 0.0), row["candidate_id"]))
     write_jsonl(args.output, rows)
-    summary_payload = _summary(rows, summaries, existing_summary, args, positive_index)
+    summary_payload = _summary(rows, summaries, existing_summary, args, positive_index, holdout_vod_ids)
     write_json(args.summary_output, summary_payload)
     print(json.dumps({"event": "proposal_training_rows_built", **summary_payload}, ensure_ascii=True, sort_keys=True))
     return 0
 
 
-def build_rows_from_existing_feature_rows(paths: list[pathlib.Path], *, profile: str) -> tuple[list[dict], dict]:
+def build_rows_from_existing_feature_rows(
+    paths: list[pathlib.Path],
+    *,
+    profile: str,
+    excluded_vod_ids: set[str] | None = None,
+) -> tuple[list[dict], dict]:
     rows: list[dict] = []
+    excluded_vod_ids = excluded_vod_ids or set()
     input_rows = 0
     skipped_gold_rows = 0
+    skipped_holdout_rows = 0
     skipped_unusable_rows = 0
     source_counts: Counter[str] = Counter()
     for path in _dedupe_paths(paths):
@@ -114,6 +140,9 @@ def build_rows_from_existing_feature_rows(paths: list[pathlib.Path], *, profile:
             input_rows += 1
             if _is_gold_eval_row(row):
                 skipped_gold_rows += 1
+                continue
+            if str(row.get("vod_id") or "").strip() in excluded_vod_ids:
+                skipped_holdout_rows += 1
                 continue
             converted = _existing_feature_training_row(row, profile=profile, source_path=path)
             if converted is None:
@@ -128,6 +157,7 @@ def build_rows_from_existing_feature_rows(paths: list[pathlib.Path], *, profile:
         "positive_rows": sum(1 for row in rows if int(row.get("label", 0)) == 1),
         "negative_rows": sum(1 for row in rows if int(row.get("label", 0)) == 0),
         "skipped_gold_rows": skipped_gold_rows,
+        "skipped_holdout_rows": skipped_holdout_rows,
         "skipped_unusable_rows": skipped_unusable_rows,
         "label_sources": dict(sorted(source_counts.items())),
     }
@@ -195,6 +225,20 @@ def _proposal_features_from_existing_features(source_features: dict, row: dict) 
         "heuristic_hit_count": 1.0 if candidate_source else 0.0,
         "strategy_relevance": _feature(source_features, "goal_relevance_score"),
         "dense_inventory": 0.0,
+        "multimodal_proxy_score": _feature(source_features, "multimodal_proxy_score"),
+        "rage_score": _feature(source_features, "rage_score"),
+        "clutch_score": _feature(source_features, "clutch_score"),
+        "funny_reaction_score": _feature(source_features, "funny_reaction_score"),
+        "trash_talk_payoff_score": _feature(source_features, "trash_talk_payoff_score"),
+        "chat_shock_score": _feature(source_features, "chat_shock_score"),
+        "ranked_tension_score": _feature(source_features, "ranked_tension_score"),
+        "failed_setup_score": _feature(source_features, "failed_setup_score"),
+        "streamer_persona_beat_score": _feature(source_features, "streamer_persona_beat_score"),
+        "context_pattern_score": _feature(source_features, "context_pattern_score"),
+        "context_pattern_support": _feature(source_features, "context_pattern_support"),
+        "context_pattern_views_prior": _feature(source_features, "context_pattern_views_prior"),
+        "context_pattern_confidence": _feature(source_features, "context_pattern_confidence"),
+        "context_pattern_similarity_margin": _feature(source_features, "context_pattern_similarity_margin"),
     }
 
 
@@ -217,6 +261,7 @@ def _label_candidates(
     for candidate in candidates:
         match = _best_positive_match(candidate.start, candidate.end, positives)
         if match["overlap_ratio"] >= positive_overlap_ratio:
+            dense_recall_target = candidate.source == "dense_inventory"
             positive_rows.append(
                 _training_row(
                     candidate,
@@ -225,9 +270,18 @@ def _label_candidates(
                     vod_id=vod_id,
                     source=source,
                     label=1,
-                    sample_weight=2.0,
-                    label_source="cross_platform_positive_overlap",
+                    sample_weight=(
+                        _DENSE_RECALL_POSITIVE_WEIGHT
+                        if dense_recall_target
+                        else _CROSS_PLATFORM_POSITIVE_WEIGHT
+                    ),
+                    label_source=(
+                        "cross_platform_dense_recall_positive"
+                        if dense_recall_target
+                        else "cross_platform_positive_overlap"
+                    ),
                     match=match["row"],
+                    positive_overlap_ratio=match["overlap_ratio"],
                 )
             )
         elif match["distance_sec"] <= near_miss_sec:
@@ -242,6 +296,7 @@ def _label_candidates(
                     sample_weight=0.9,
                     label_source="cross_platform_near_miss",
                     match=match["row"],
+                    positive_overlap_ratio=match["overlap_ratio"],
                 )
             )
         else:
@@ -263,6 +318,7 @@ def _label_candidates(
             sample_weight=0.35,
             label_source="cross_platform_background_negative",
             match=match,
+            positive_overlap_ratio=0.0,
         )
         for _distance, candidate, match in _even_sample(background_candidates, background_limit)
     ]
@@ -279,6 +335,54 @@ def _label_candidates(
     }
 
 
+def _promote_positive_recall_candidates(
+    candidates,
+    positives: list[dict],
+    *,
+    max_candidates: int,
+    positive_overlap_ratio: float,
+) -> tuple[list, dict]:
+    if max_candidates <= 0 or len(candidates) <= max_candidates:
+        recall_targets = [
+            candidate for candidate in candidates
+            if _best_positive_match(candidate.start, candidate.end, positives)["overlap_ratio"] >= positive_overlap_ratio
+        ]
+        return list(candidates), {
+            "uncapped_candidate_windows": len(candidates),
+            "positive_recall_candidate_windows": len(recall_targets),
+            "positive_recall_candidates_promoted": 0,
+        }
+
+    recall_targets = []
+    recall_ids: set[str] = set()
+    for candidate in candidates:
+        if _best_positive_match(candidate.start, candidate.end, positives)["overlap_ratio"] < positive_overlap_ratio:
+            continue
+        recall_targets.append(candidate)
+        recall_ids.add(candidate.id)
+
+    remaining_slots = max(max_candidates - len(recall_targets), 0)
+    non_targets = [candidate for candidate in candidates if candidate.id not in recall_ids]
+    selected_non_targets = sorted(
+        non_targets,
+        key=lambda candidate: (-float(candidate.score_hint), float(candidate.start), float(candidate.end), candidate.id),
+    )[:remaining_slots]
+    selected = sorted([*recall_targets, *selected_non_targets], key=lambda candidate: (candidate.start, candidate.end, candidate.id))
+    previous_cap_ids = {
+        candidate.id
+        for candidate in sorted(
+            candidates,
+            key=lambda candidate: (-float(candidate.score_hint), float(candidate.start), float(candidate.end), candidate.id),
+        )[:max_candidates]
+    }
+    promoted = max(0, len(recall_targets) - sum(1 for candidate in recall_targets if candidate.id in previous_cap_ids))
+    return selected, {
+        "uncapped_candidate_windows": len(candidates),
+        "positive_recall_candidate_windows": len(recall_targets),
+        "positive_recall_candidates_promoted": promoted,
+    }
+
+
 def _training_row(
     candidate,
     segments: list[RichSegment],
@@ -290,8 +394,15 @@ def _training_row(
     sample_weight: float,
     label_source: str,
     match: dict | None,
+    positive_overlap_ratio: float,
 ) -> dict:
-    features = proposal_scorer.build_proposal_features(candidate, segments, clip_strategy.normalize_strategy(None)).to_dict()
+    features = proposal_scorer.build_proposal_features(
+        candidate,
+        segments,
+        clip_strategy.normalize_strategy(None),
+        profile=profile,
+    ).to_dict()
+    match = match or {}
     return {
         "queue_id": f"proposal_backfill:{vod_id}:{candidate.id}",
         "job_id": source.get("job_id") or "",
@@ -308,15 +419,32 @@ def _training_row(
         "sample_weight": sample_weight,
         "candidate_source": candidate.source,
         "features": features,
-        "matched_cross_platform_candidate_id": (match or {}).get("candidate_id") or "",
-        "matched_cross_platform_source_url": (match or {}).get("source_url") or "",
-        "matched_cross_platform_similarity": (match or {}).get("transcript_similarity"),
+        "positive_overlap_ratio": round(float(positive_overlap_ratio or 0.0), 6),
+        "proposal_recall_target": bool(label and candidate.source == "dense_inventory"),
+        "matched_cross_platform_candidate_id": match.get("candidate_id") or "",
+        "matched_cross_platform_source_url": match.get("source_url") or "",
+        "matched_cross_platform_title": _first_text(
+            match,
+            ("repost_title", "short_title", "video_title", "title"),
+        ),
+        "matched_cross_platform_similarity": match.get("transcript_similarity"),
+        "transcript_repost_excerpt": match.get("transcript_repost_excerpt") or "",
+        "transcript_vod_excerpt": match.get("transcript_vod_excerpt") or "",
         "profile": profile,
     }
 
 
-def _positive_window_index(rows: list[dict]) -> dict[str, list[dict]]:
+def _first_text(row: dict, fields: tuple[str, ...]) -> str:
+    for field in fields:
+        value = str(row.get(field) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _positive_window_index(rows: list[dict], *, excluded_vod_ids: set[str] | None = None) -> dict[str, list[dict]]:
     index: dict[str, list[dict]] = {}
+    excluded_vod_ids = excluded_vod_ids or set()
     for row in rows:
         try:
             label = int(row.get("label", 1))
@@ -325,7 +453,7 @@ def _positive_window_index(rows: list[dict]) -> dict[str, list[dict]]:
         except (TypeError, ValueError):
             continue
         vod_id = str(row.get("vod_id") or "").strip()
-        if not vod_id or label != 1 or end <= start:
+        if not vod_id or vod_id in excluded_vod_ids or label != 1 or end <= start:
             continue
         copied = dict(row)
         copied["window_start"] = start
@@ -423,6 +551,7 @@ def _summary(
     existing_feature_summary: dict,
     args,
     positive_index: dict[str, list[dict]],
+    holdout_vod_ids: set[str],
 ) -> dict:
     label_counts = Counter(int(row["label"]) for row in rows)
     label_sources = Counter(str(row.get("label_source") or "unknown") for row in rows)
@@ -435,10 +564,27 @@ def _summary(
         "label_sources": dict(sorted(label_sources.items())),
         "segment_sources": len(source_summaries),
         "labelled_segment_sources": sum(1 for item in source_summaries if item.get("status") == "labelled"),
+        "skipped_holdout_segment_sources": sum(1 for item in source_summaries if item.get("status") == "skipped_holdout_vod"),
+        "excluded_holdout_vods": sorted(holdout_vod_ids),
         "cross_platform_vods": len(positive_index),
         "existing_feature_backfill": existing_feature_summary,
         "source_summaries": source_summaries,
     }
+
+
+def _holdout_vod_ids(path: pathlib.Path | None) -> set[str]:
+    if path is None or not pathlib.Path(path).is_file():
+        return set()
+    vod_ids: set[str] = set()
+    for row in read_jsonl(path):
+        split = str(row.get("gold_holdout_split") or row.get("outcome_split") or row.get("dataset_role") or "").lower()
+        source = str(row.get("dataset_source") or row.get("supervision_tier") or "").lower()
+        if "holdout" not in split and "holdout" not in source:
+            continue
+        vod_id = str(row.get("vod_id") or "").strip()
+        if vod_id:
+            vod_ids.add(vod_id)
+    return vod_ids
 
 
 def _parse_float_list(value: str) -> tuple[float, ...]:

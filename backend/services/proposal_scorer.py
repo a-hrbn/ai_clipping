@@ -7,7 +7,7 @@ import re
 from dataclasses import asdict, dataclass
 
 from config import BACKEND_ROOT
-from services import clip_strategy
+from services import clip_strategy, clip_taxonomy, context_patterns, context_quality
 from services.timeline_types import Candidate
 from services.transcriber import RichSegment
 
@@ -59,6 +59,7 @@ _PAYOFF_WORDS = {
 class ProposalFeatures:
     candidate_id: str
     source: str
+    clip_type: str = "general"
     duration: float = 0.0
     segment_count: int = 0
     token_count: int = 0
@@ -82,6 +83,26 @@ class ProposalFeatures:
     heuristic_hit_count: int = 0
     strategy_relevance: float = 0.0
     dense_inventory: float = 0.0
+    multimodal_proxy_score: float = 0.0
+    rage_score: float = 0.0
+    clutch_score: float = 0.0
+    funny_reaction_score: float = 0.0
+    trash_talk_payoff_score: float = 0.0
+    chat_shock_score: float = 0.0
+    ranked_tension_score: float = 0.0
+    failed_setup_score: float = 0.0
+    streamer_persona_beat_score: float = 0.0
+    context_pattern_score: float = 0.0
+    context_pattern_support: float = 0.0
+    context_pattern_views_prior: float = 0.0
+    context_pattern_confidence: float = 0.0
+    context_pattern_similarity_margin: float = 0.0
+    context_pattern_id: str = ""
+    context_pattern_label: str = ""
+    setup_present_score: float = 0.0
+    payoff_present_score: float = 0.0
+    context_strength_score: float = 0.0
+    context_completeness_score: float = 0.0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -90,7 +111,7 @@ class ProposalFeatures:
         return {
             key: float(value)
             for key, value in asdict(self).items()
-            if key not in {"candidate_id", "source"}
+            if key not in {"candidate_id", "source", "clip_type"}
             if isinstance(value, int | float)
         }
 
@@ -135,10 +156,16 @@ def score_candidates(
     artifact = _load_artifact(profile, artifact_dir=artifact_dir)
     scored: list[ProposalScore] = []
     for candidate in candidates:
-        features = build_proposal_features(candidate, segments, normalized_strategy)
+        features = build_proposal_features(
+            candidate,
+            segments,
+            normalized_strategy,
+            profile=profile,
+            artifact_dir=artifact_dir,
+        )
         heuristic_score, rationale = _heuristic_score(features)
         model_score = _model_score(features, artifact) if artifact is not None else None
-        score = model_score if model_score is not None else heuristic_score
+        score = _serving_score(features, model_score, heuristic_score)
         scored.append(
             ProposalScore(
                 candidate=candidate,
@@ -203,6 +230,9 @@ def build_proposal_features(
     candidate: Candidate,
     segments: list[RichSegment],
     strategy: dict,
+    *,
+    profile: str = "general",
+    artifact_dir: pathlib.Path | str | None = None,
 ) -> ProposalFeatures:
     window = [seg for seg in segments if seg.end > candidate.start and seg.start < candidate.end]
     duration = max(candidate.end - candidate.start, 0.0)
@@ -219,11 +249,21 @@ def build_proposal_features(
     chat_peak = max((seg.chat_spike_score for seg in window), default=0.0)
     motion_peak = max((seg.max_motion_score for seg in window), default=0.0)
     face_peak = max((seg.max_face_reaction for seg in window), default=0.0)
+    taxonomy = clip_taxonomy.classify_segments(window, source=candidate.source)
+    pattern_match = context_patterns.score_text(text, profile=profile, artifact_dir=artifact_dir) if text else context_patterns.PatternMatch()
     laughter_count = sum(
         1 for seg in window if "audio_laughter" in seg.emotions or "laughter" in seg.emotions
     )
     exclamation_count = sum(1 for seg in window if "exclamation" in seg.emotions or "!" in seg.text)
     question_count = sum(1 for seg in window if "question" in seg.emotions or "?" in seg.text)
+    multimodal_proxy_score = _multimodal_proxy_score(
+        chat_peak=chat_peak,
+        motion_peak=motion_peak,
+        face_peak=face_peak,
+        laughter_count=laughter_count,
+        exclamation_count=exclamation_count,
+        max_hype=max_hype,
+    )
     speaker_turns = sum(
         1
         for left, right in zip(speakers, speakers[1:])
@@ -242,10 +282,41 @@ def build_proposal_features(
         min((laughter_count + exclamation_count) / 4.0, 1.0),
     )
     standalone_text_score = _standalone_text_score(tokens, text)
+    clip_type_signal = max(taxonomy.scores.values(), default=0.0)
+    setup_present_score = max(
+        hook_strength,
+        min(len(window) / 3.0, 1.0) * 0.45 + min(len(tokens) / 18.0, 1.0) * 0.55,
+        pattern_match.confidence * 0.55,
+    )
+    payoff_present_score = max(
+        payoff_strength,
+        late_payoff_score,
+        clip_type_signal * 0.75,
+        pattern_match.confidence * 0.45,
+    )
+    token_coverage = context_quality.token_coverage_score(len(tokens), duration)
+    context_strength_score = context_quality.strength_score(
+        pattern_confidence=pattern_match.confidence,
+        pattern_score=pattern_match.score,
+        pattern_views_prior=pattern_match.views_prior,
+        source_prior=source_prior,
+        clip_type_signal=clip_type_signal,
+        payoff_present=payoff_present_score,
+        setup_present=setup_present_score,
+    )
+    context_completeness_score = context_quality.completeness_score(
+        setup_present=setup_present_score,
+        payoff_present=payoff_present_score,
+        standalone=standalone_text_score,
+        context_efficiency=min(len(tokens) / max(duration * 1.4, 1.0), 1.0),
+        pattern_confidence=pattern_match.confidence,
+        token_coverage=token_coverage,
+    )
     hype_delta = (window[-1].hype_score - window[0].hype_score) if len(window) >= 2 else 0.0
     return ProposalFeatures(
         candidate_id=candidate.id,
         source=candidate.source,
+        clip_type=taxonomy.clip_type,
         duration=round(duration, 3),
         segment_count=len(window),
         token_count=len(tokens),
@@ -269,23 +340,64 @@ def build_proposal_features(
         heuristic_hit_count=0 if candidate.source == "dense_inventory" else 1,
         strategy_relevance=round(strategy_relevance, 6),
         dense_inventory=1.0 if candidate.source == "dense_inventory" else 0.0,
+        multimodal_proxy_score=round(multimodal_proxy_score, 6),
+        rage_score=taxonomy.scores.get("rage", 0.0),
+        clutch_score=taxonomy.scores.get("clutch", 0.0),
+        funny_reaction_score=taxonomy.scores.get("funny_reaction", 0.0),
+        trash_talk_payoff_score=taxonomy.scores.get("trash_talk_payoff", 0.0),
+        chat_shock_score=taxonomy.scores.get("chat_shock", 0.0),
+        ranked_tension_score=taxonomy.scores.get("ranked_tension", 0.0),
+        failed_setup_score=taxonomy.scores.get("failed_setup", 0.0),
+        streamer_persona_beat_score=taxonomy.scores.get("streamer_persona_beat", 0.0),
+        context_pattern_score=pattern_match.score,
+        context_pattern_support=pattern_match.support,
+        context_pattern_views_prior=pattern_match.views_prior,
+        context_pattern_confidence=pattern_match.confidence,
+        context_pattern_similarity_margin=pattern_match.similarity_margin,
+        context_pattern_id=pattern_match.pattern_id,
+        context_pattern_label=pattern_match.label,
+        setup_present_score=round(context_quality.clamp01(setup_present_score), 6),
+        payoff_present_score=round(context_quality.clamp01(payoff_present_score), 6),
+        context_strength_score=round(context_strength_score, 6),
+        context_completeness_score=round(context_completeness_score, 6),
     )
 
 
 def _heuristic_score(features: ProposalFeatures) -> tuple[float, list[str]]:
     duration_prior = _duration_prior(features.duration)
+    context_primary = context_quality.primary_score(
+        completeness=features.context_completeness_score,
+        strength=features.context_strength_score,
+    )
     signal = (
-        min(features.max_hype / 6.0, 1.0) * 0.17
-        + min(features.mean_hype / 4.0, 1.0) * 0.08
-        + min(features.arc_peak / 5.0, 1.0) * 0.12
-        + min(features.chat_peak, 1.0) * 0.11
-        + max(min(features.motion_peak, 1.0), min(features.face_peak, 1.0)) * 0.10
-        + features.hook_strength * 0.12
-        + features.payoff_strength * 0.15
-        + features.standalone_text_score * 0.07
+        context_primary * 0.34
+        + features.context_completeness_score * 0.18
+        + features.context_strength_score * 0.12
+        + features.setup_present_score * 0.08
+        + features.payoff_present_score * 0.12
+        + min(features.max_hype / 6.0, 1.0) * 0.06
+        + min(features.mean_hype / 4.0, 1.0) * 0.03
+        + min(features.arc_peak / 5.0, 1.0) * 0.05
+        + min(features.chat_peak, 1.0) * 0.05
+        + max(min(features.motion_peak, 1.0), min(features.face_peak, 1.0)) * 0.04
+        + features.hook_strength * 0.05
+        + features.payoff_strength * 0.07
+        + features.standalone_text_score * 0.06
         + duration_prior * 0.05
         + min(features.strategy_relevance, 1.0) * 0.05
         + features.source_prior * 0.08
+        + features.multimodal_proxy_score * 0.04
+        + features.context_pattern_confidence * 0.12
+        + max(
+            features.rage_score,
+            features.clutch_score,
+            features.funny_reaction_score,
+            features.trash_talk_payoff_score,
+            features.chat_shock_score,
+            features.ranked_tension_score,
+            features.failed_setup_score,
+            features.streamer_persona_beat_score,
+        ) * 0.05
     )
     if features.segment_count <= 0:
         signal -= 0.25
@@ -293,6 +405,12 @@ def _heuristic_score(features: ProposalFeatures) -> tuple[float, list[str]]:
         signal -= 0.12
     score = _clamp01(signal)
     rationale = []
+    if context_primary >= 0.55:
+        rationale.append("context_primary")
+    if features.context_completeness_score >= 0.55:
+        rationale.append("context_complete")
+    if features.context_strength_score >= 0.55:
+        rationale.append("context_strong")
     if features.hook_strength >= 0.55:
         rationale.append("hook_signal")
     if features.payoff_strength >= 0.55:
@@ -301,11 +419,51 @@ def _heuristic_score(features: ProposalFeatures) -> tuple[float, list[str]]:
         rationale.append("chat_spike")
     if features.max_hype >= 4.0:
         rationale.append("hype_peak")
+    if features.multimodal_proxy_score >= 0.45:
+        rationale.append("multimodal_proxy_signal")
+    if features.context_pattern_confidence >= 0.4:
+        rationale.append(f"context_pattern:{features.context_pattern_label or features.context_pattern_id}")
+    if features.clip_type != "general":
+        rationale.append(f"clip_type:{features.clip_type}")
     if features.source_prior >= 0.55:
         rationale.append("heuristic_source")
     if not rationale:
         rationale.append("dense_low_cost_features")
     return score, rationale
+
+
+def _serving_score(
+    features: ProposalFeatures,
+    model_score: float | None,
+    heuristic_score: float,
+) -> float:
+    if model_score is None:
+        return heuristic_score
+
+    floor = 0.0
+    if features.source in {"dense_inventory", "dense_window"}:
+        floor_scale = 0.20
+        context_primary = context_quality.primary_score(
+            completeness=features.context_completeness_score,
+            strength=features.context_strength_score,
+        )
+        if (
+            heuristic_score >= 0.50
+            or context_primary >= 0.48
+            or features.context_completeness_score >= 0.50
+            or features.hook_strength >= 0.55
+            or features.payoff_strength >= 0.55
+            or features.multimodal_proxy_score >= 0.40
+            or features.clip_type != "general"
+        ):
+            floor_scale = 0.50 if context_primary >= 0.58 else 0.40
+        floor = heuristic_score * floor_scale
+    elif features.context_completeness_score >= 0.50:
+        floor = heuristic_score * 0.45
+    elif features.source_prior >= 0.65 or features.clip_type != "general":
+        floor = heuristic_score * 0.30
+
+    return max(model_score, floor)
 
 
 def _model_score(features: ProposalFeatures, artifact: dict) -> float:
@@ -412,23 +570,25 @@ def _duration_prior(duration: float) -> float:
     return 0.25
 
 
+def _multimodal_proxy_score(
+    *,
+    chat_peak: float,
+    motion_peak: float,
+    face_peak: float,
+    laughter_count: int,
+    exclamation_count: int,
+    max_hype: float,
+) -> float:
+    return _clamp01(
+        min(chat_peak, 1.0) * 0.25
+        + max(min(motion_peak, 1.0), min(face_peak, 1.0)) * 0.30
+        + min((laughter_count + exclamation_count) / 4.0, 1.0) * 0.20
+        + min(max_hype / 6.0, 1.0) * 0.25
+    )
+
+
 def source_prior_for_candidate(source: str) -> float:
-    priors = {
-        "peak": 0.95,
-        "hype_peak": 0.85,
-        "story_payoff": 0.85,
-        "tension_build": 0.78,
-        "quote": 0.76,
-        "reaction": 0.72,
-        "chat_sync": 0.72,
-        "goal_prompt": 0.70,
-        "clean_reaction": 0.68,
-        "controversy": 0.67,
-        "narrative_reveal": 0.65,
-        "dense_window": 0.48,
-        "dense_inventory": 0.38,
-    }
-    return priors.get(source, 0.45)
+    return context_quality.source_prior(source)
 
 
 def _source_counts(candidates: list[Candidate]) -> dict[str, int]:

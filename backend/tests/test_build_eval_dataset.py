@@ -19,6 +19,9 @@ class BuildEvalDatasetTests(unittest.TestCase):
                 "features": {"source": "reaction"},
                 "retention_3s": 0.82,
                 "completion_rate": 0.56,
+                "outcome_view_tier": "viral",
+                "rank_target": 4,
+                "ordinal_label": 2,
             },
             {
                 "job_id": "job-1",
@@ -39,6 +42,8 @@ class BuildEvalDatasetTests(unittest.TestCase):
         self.assertEqual(eval_rows[0]["variant_bucket"], "aggressive_hook")
         self.assertEqual(eval_rows[0]["content_bucket"], "reaction")
         self.assertTrue(eval_rows[0]["has_outcome_feedback"])
+        self.assertEqual(eval_rows[0]["outcome_view_tier"], "viral")
+        self.assertEqual(eval_rows[0]["rank_target"], 4)
         self.assertEqual(eval_rows[1]["content_bucket"], "quote_driven")
 
     def test_eval_dataset_summary_counts_platforms_and_roles(self) -> None:
@@ -52,9 +57,11 @@ class BuildEvalDatasetTests(unittest.TestCase):
                     "label_class": "outcome_positive",
                     "supervision_tier": "outcome_feedback",
                     "publish_platform": "youtube_shorts",
-                    "candidate_source": "reaction",
-                    "features": {"source": "reaction"},
+                    "candidate_source": "chat_velocity",
+                    "features": {"source": "chat_velocity"},
                     "retention_3s": 0.8,
+                    "outcome_view_tier": "strong",
+                    "rank_target": 3,
                 },
                 {
                     "job_id": "job-2",
@@ -76,6 +83,9 @@ class BuildEvalDatasetTests(unittest.TestCase):
         self.assertEqual(summary["by_platform"]["youtube_shorts"], 1)
         self.assertEqual(summary["dataset_roles"]["outcome_eval"], 1)
         self.assertEqual(summary["dataset_roles"]["pipeline_negative_eval"], 1)
+        self.assertEqual(summary["by_content_bucket"]["reaction"], 1)
+        self.assertEqual(summary["by_outcome_view_tier"]["strong"], 1)
+        self.assertEqual(summary["by_rank_target"]["3"], 1)
 
     def test_outcome_holdout_role_is_explicit(self) -> None:
         rows = build_eval_dataset.build_eval_dataset(

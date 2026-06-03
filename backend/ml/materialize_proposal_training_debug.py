@@ -80,7 +80,12 @@ def materialize_proposal_debug(
     results: list[dict] = []
     for vod_id in selected_vods:
         debug_dir = storage_dir / f"proposal_training_{vod_id}" / "debug"
-        if not refresh and (debug_dir / "segments.jsonl").exists() and (debug_dir / "candidate_proposals.jsonl").exists():
+        if (
+            not refresh
+            and (debug_dir / "segments.jsonl").exists()
+            and (debug_dir / "candidate_proposals.jsonl").exists()
+            and (debug_dir / "positive_recall_targets.jsonl").exists()
+        ):
             results.append(
                 {
                     "vod_id": vod_id,
@@ -114,13 +119,19 @@ def materialize_proposal_debug(
         transcript = scorer.score_segments(transcript)
         chapters = chapter_segmenter.segment_chapters(transcript)
         strategy = clip_strategy.normalize_strategy(None)
-        candidates = candidate_generators.generate_dense_candidate_inventory(
+        uncapped_candidates = candidate_generators.generate_dense_candidate_inventory(
             transcript,
             chapters,
             strategy,
             durations=durations,
             stride_sec=stride_sec,
+            max_candidates=0,
+        )
+        candidates, recall_summary = _promote_positive_recall_candidates(
+            uncapped_candidates,
+            positives_by_vod.get(vod_id, []),
             max_candidates=max_candidates_per_vod,
+            positive_overlap_ratio=0.45,
         )
         proposal = proposal_scorer.select_candidates(
             candidates,
@@ -129,6 +140,12 @@ def materialize_proposal_debug(
             strategy,
             top_k=max_candidates_per_vod,
             min_score=0.0,
+        )
+        positive_recall_targets = _positive_recall_target_rows(
+            candidates,
+            proposal.audit_rows,
+            positives_by_vod.get(vod_id, []),
+            positive_overlap_ratio=0.45,
         )
         job_dir = debug_dir.parent
         debug_dir.mkdir(parents=True, exist_ok=True)
@@ -144,11 +161,14 @@ def materialize_proposal_debug(
         write_jsonl(debug_dir / "segments.jsonl", [asdict(segment) for segment in transcript])
         write_jsonl(debug_dir / "chapters.jsonl", [chapter.to_dict() for chapter in chapters])
         write_jsonl(debug_dir / "candidates_dense_inventory.jsonl", [candidate.to_dict() for candidate in candidates])
-        write_jsonl(debug_dir / "candidate_proposals.jsonl", proposal.audit_rows)
+        write_jsonl(debug_dir / "candidate_proposals.jsonl", _annotate_proposal_recall_targets(proposal.audit_rows, positive_recall_targets))
+        write_jsonl(debug_dir / "positive_recall_targets.jsonl", positive_recall_targets)
         write_json(
             debug_dir / "candidate_proposal_summary.json",
             {
                 **proposal.summary,
+                **recall_summary,
+                "positive_recall_targets": len(positive_recall_targets),
                 "vod_id": vod_id,
                 "positive_rows": len(positives_by_vod.get(vod_id, [])),
                 "transcript_path": str(transcript_path),
@@ -162,6 +182,8 @@ def materialize_proposal_debug(
                 "segments": len(transcript),
                 "candidate_windows": len(candidates),
                 "proposal_rows": len(proposal.audit_rows),
+                **recall_summary,
+                "positive_recall_targets": len(positive_recall_targets),
                 "debug_dir": str(debug_dir),
                 "transcript_path": str(transcript_path),
             }
@@ -196,6 +218,115 @@ def _positive_rows_by_vod(rows: list[dict]) -> dict[str, list[dict]]:
             continue
         grouped.setdefault(vod_id, []).append(row)
     return grouped
+
+
+def _promote_positive_recall_candidates(
+    candidates,
+    positives: list[dict],
+    *,
+    max_candidates: int,
+    positive_overlap_ratio: float,
+) -> tuple[list, dict]:
+    if max_candidates <= 0 or len(candidates) <= max_candidates:
+        recall_targets = [
+            candidate for candidate in candidates
+            if _best_positive_match(candidate.start, candidate.end, positives)["overlap_ratio"] >= positive_overlap_ratio
+        ]
+        return list(candidates), {
+            "uncapped_candidate_windows": len(candidates),
+            "positive_recall_candidate_windows": len(recall_targets),
+            "positive_recall_candidates_promoted": 0,
+        }
+    recall_targets = []
+    recall_ids: set[str] = set()
+    for candidate in candidates:
+        if _best_positive_match(candidate.start, candidate.end, positives)["overlap_ratio"] < positive_overlap_ratio:
+            continue
+        recall_targets.append(candidate)
+        recall_ids.add(candidate.id)
+    remaining_slots = max(max_candidates - len(recall_targets), 0)
+    selected_non_targets = sorted(
+        [candidate for candidate in candidates if candidate.id not in recall_ids],
+        key=lambda candidate: (-float(candidate.score_hint), float(candidate.start), float(candidate.end), candidate.id),
+    )[:remaining_slots]
+    selected = sorted([*recall_targets, *selected_non_targets], key=lambda candidate: (candidate.start, candidate.end, candidate.id))
+    previous_cap_ids = {
+        candidate.id
+        for candidate in sorted(
+            candidates,
+            key=lambda candidate: (-float(candidate.score_hint), float(candidate.start), float(candidate.end), candidate.id),
+        )[:max_candidates]
+    }
+    promoted = max(0, len(recall_targets) - sum(1 for candidate in recall_targets if candidate.id in previous_cap_ids))
+    return selected, {
+        "uncapped_candidate_windows": len(candidates),
+        "positive_recall_candidate_windows": len(recall_targets),
+        "positive_recall_candidates_promoted": promoted,
+    }
+
+
+def _positive_recall_target_rows(
+    candidates,
+    proposal_rows: list[dict],
+    positives: list[dict],
+    *,
+    positive_overlap_ratio: float,
+) -> list[dict]:
+    proposal_by_id = {str(row.get("candidate_id") or ""): row for row in proposal_rows}
+    rows: list[dict] = []
+    for candidate in candidates:
+        match = _best_positive_match(candidate.start, candidate.end, positives)
+        if match["overlap_ratio"] < positive_overlap_ratio:
+            continue
+        proposal = proposal_by_id.get(candidate.id) or {}
+        rows.append(
+            {
+                "candidate_id": candidate.id,
+                "source": candidate.source,
+                "start": round(float(candidate.start), 3),
+                "end": round(float(candidate.end), 3),
+                "score_hint": round(float(candidate.score_hint), 6),
+                "proposal_score": proposal.get("score"),
+                "proposal_accepted": bool(proposal.get("accepted") is True),
+                "positive_overlap_ratio": round(float(match["overlap_ratio"] or 0.0), 6),
+                "matched_cross_platform_candidate_id": (match["row"] or {}).get("candidate_id") or "",
+                "matched_cross_platform_source_url": (match["row"] or {}).get("source_url") or "",
+                "matched_cross_platform_views": (match["row"] or {}).get("repost_views"),
+            }
+        )
+    return rows
+
+
+def _annotate_proposal_recall_targets(proposal_rows: list[dict], recall_rows: list[dict]) -> list[dict]:
+    recall_by_id = {str(row.get("candidate_id") or ""): row for row in recall_rows}
+    annotated = []
+    for row in proposal_rows:
+        copied = dict(row)
+        recall = recall_by_id.get(str(copied.get("candidate_id") or ""))
+        if recall:
+            copied["proposal_recall_target"] = True
+            copied["positive_overlap_ratio"] = recall.get("positive_overlap_ratio")
+            copied["matched_cross_platform_candidate_id"] = recall.get("matched_cross_platform_candidate_id")
+            copied["matched_cross_platform_source_url"] = recall.get("matched_cross_platform_source_url")
+        annotated.append(copied)
+    return annotated
+
+
+def _best_positive_match(start: float, end: float, positives: list[dict]) -> dict:
+    best = {"overlap_ratio": 0.0, "row": None}
+    for row in positives:
+        try:
+            pos_start = float(row["window_start"])
+            pos_end = float(row["window_end"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        overlap = max(0.0, min(float(end), pos_end) - max(float(start), pos_start))
+        pos_duration = max(pos_end - pos_start, 1e-6)
+        candidate_duration = max(float(end) - float(start), 1e-6)
+        overlap_ratio = max(overlap / pos_duration, overlap / candidate_duration)
+        if overlap_ratio > float(best["overlap_ratio"]):
+            best = {"overlap_ratio": overlap_ratio, "row": row}
+    return best
 
 
 def _load_cached_vod_transcript(cache_dir: pathlib.Path, vod_id: str) -> tuple[pathlib.Path, list] | None:

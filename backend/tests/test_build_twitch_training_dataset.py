@@ -44,6 +44,43 @@ class BuildTwitchTrainingDatasetTests(unittest.TestCase):
 
         self.assertEqual(summary, "auto->ollama:llama-local|fallback=groq:llama-groq")
 
+    def test_training_row_carries_view_weighted_rank_target(self) -> None:
+        label = {
+            "vod_id": "123",
+            "vod_url": "https://www.twitch.tv/videos/123",
+            "label_class": "cross_platform_outcome_positive",
+            "label_source": "cross_platform_transcript_match",
+            "broadcaster": "jynxzi",
+            "views": 800000,
+        }
+        candidate = Candidate(
+            id="candidate-1",
+            start=10.0,
+            end=35.0,
+            source="chat_velocity",
+            anchor_time=14.0,
+        )
+        features = SimpleNamespace(
+            candidate_id="candidate-1",
+            to_dict=lambda: {"candidate_id": "candidate-1", "source": "chat_velocity"},
+        )
+
+        row = build_twitch_training_dataset._training_row_from_label(
+            label,
+            candidate,
+            features,
+            sample_weight_scale=0.5,
+            dataset_source="cross_platform_outcome_train",
+            supervision_reason_suffix="",
+            window_origin="matched",
+            supervision_tier="cross_platform_outcome",
+        )
+
+        self.assertEqual(row["rank_target"], 5)
+        self.assertEqual(row["ordinal_label"], 4)
+        self.assertEqual(row["outcome_view_tier"], "breakout_viral")
+        self.assertEqual(row["features"]["cross_platform_positive_views"], 800000)
+
     def test_semantic_provider_summary_reports_groq_fallback_when_unconfigured(self) -> None:
         with patch.object(settings, "groq_api_key", None), \
              patch.object(settings, "groq_model", "llama-groq"), \
@@ -719,6 +756,62 @@ class BuildTwitchTrainingDatasetTests(unittest.TestCase):
         self.assertEqual(
             [(group["expanded_start"], group["expanded_end"], len(group["items"])) for group in groups],
             [(0.0, 512.0, 2), (900.0, 1510.0, 1)],
+        )
+
+    def test_extended_window_scoped_group_uses_label_workers_and_preserves_order(self) -> None:
+        labels = [
+            {
+                "broadcaster": "jynxzi",
+                "vod_id": "123",
+                "vod_url": "https://www.twitch.tv/videos/123",
+                "window_start": start,
+                "window_end": start + 10.0,
+                "label_class": "positive",
+                "label_score": 0.8,
+                "clip_ids": [f"c{index}"],
+                "label_source": "twitch_clip_api",
+                "platform_source": "twitch_clip",
+            }
+            for index, start in enumerate((100.0, 120.0), start=1)
+        ]
+
+        def _fake_context(_vod_id: str, _label: dict, **kwargs):
+            return Path("context.mp4"), build_twitch_training_dataset.VodFeatureContext(
+                transcript=[],
+                audio_signal=[],
+                audio_sample_rate=16000,
+                cache_dir=Path("context-cache"),
+                source_start_sec=float(kwargs["scoped_window"][0]),
+                source_end_sec=float(kwargs["scoped_window"][1]),
+                source_kind=str(kwargs["source_kind"]),
+            )
+
+        def _fake_process(vod_id: str, index: int, _label: dict, **_kwargs):
+            if index == 1:
+                time.sleep(0.05)
+            return [{"vod_id": vod_id, "label": 1, "features": {"candidate_id": f"row-{index}"}}]
+
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(settings, "training_vod_extended_window_scoped", True), \
+             patch.object(settings, "training_label_workers", 2), \
+             patch("ml.build_twitch_training_dataset._load_or_build_window_scoped_feature_context", side_effect=_fake_context), \
+             patch("ml.build_twitch_training_dataset._process_vod_label", side_effect=_fake_process), \
+             patch("ml.build_twitch_training_dataset.logger.info") as info_mock:
+            rows = build_twitch_training_dataset._build_rows_for_vod_labels(
+                "123",
+                labels,
+                vod_path=None,
+                vod_dir=Path(tmp) / "job",
+                job_id="twitch_vod_123",
+                profile="jynxzi",
+                context_index={},
+            )
+
+        self.assertEqual([row["features"]["candidate_id"] for row in rows], ["row-1", "row-2"])
+        messages = [call.args[0] for call in info_mock.call_args_list]
+        self.assertIn(
+            "training_vod_label_progress vod_id=%s completed=%s/%s latest_window=%s rows=%s elapsed_sec=%.1f mode=window_scoped_parallel groups=%s label_workers=%s",
+            messages,
         )
 
     def test_extended_window_scoped_prefetches_next_group_source_only(self) -> None:

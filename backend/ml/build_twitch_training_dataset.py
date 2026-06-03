@@ -19,14 +19,14 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from config import settings
-from ml import collect_viral_clips, sample_background_negatives
+from ml import collect_viral_clips, outcome_view_weighting, sample_background_negatives
 from services import downloader, game_events as game_event_service
 from services.game_events import GameEvent
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
 logger = logging.getLogger(__name__)
 
-_POSITIVE_LABEL_CLASSES = {"viral_positive", "positive", "weak_positive"}
+_POSITIVE_LABEL_CLASSES = {"viral_positive", "positive", "weak_positive", "cross_platform_outcome_positive"}
 _SUPPLEMENTAL_CANDIDATE_LIMIT = 2
 _SUPPLEMENTAL_CANDIDATE_WEIGHT = 0.65
 _BOUNDARY_NEAR_MISS_SAMPLE_WEIGHT = 0.45
@@ -2199,11 +2199,12 @@ def _build_rows_for_extended_window_scoped_vod_labels(
     context_index: dict,
 ) -> list[dict]:
     groups = _extended_window_scoped_label_groups(ordered_labels)
+    resolved_label_workers = min(_resolved_training_label_workers(), max(1, len(ordered_labels)))
     logger.info(
         "training_vod_label_phase_start vod_id=%s labels=%s label_workers=%s",
         vod_id,
         len(ordered_labels),
-        1,
+        resolved_label_workers,
     )
     logger.info(
         "training_vod_label_window_source vod_id=%s mode=%s labels=%s groups=%s group_max_sec=%s",
@@ -2293,6 +2294,7 @@ def _build_rows_for_extended_window_scoped_vod_labels(
         for group_index, group in enumerate(groups, start=1):
             args = group_args[group_index - 1]
             group_labels = args["group_labels"]
+            group_items = list(group["items"])
             representative_label = args["representative_label"]
             scoped_job_id = f"{job_id}:window_scoped_group:{group_index}"
             scoped_window = args["scoped_window"]
@@ -2411,31 +2413,73 @@ def _build_rows_for_extended_window_scoped_vod_labels(
                 continue
 
             group_rows: list[dict] = []
-            for index, label in group["items"]:
-                label_rows = _process_vod_label(
-                    vod_id,
-                    index,
-                    label,
-                    vod_path=scoped_vod_path,
-                    vod_dir=vod_dir,
-                    vod_feature_context=scoped_context,
-                    job_id=job_id,
-                    profile=profile,
-                    context_index=context_index,
-                )
-                group_rows.extend(label_rows)
-                rows.extend(label_rows)
-                completed += 1
-                if _should_log_label_progress(completed, total_labels, progress_interval):
-                    logger.info(
-                        "training_vod_label_progress vod_id=%s completed=%s/%s rows=%s elapsed_sec=%.1f mode=window_scoped groups=%s",
+            group_worker_count = min(resolved_label_workers, max(1, len(group_items)))
+            if group_worker_count <= 1 or len(group_items) <= 1:
+                for index, label in group_items:
+                    label_rows = _process_vod_label(
                         vod_id,
-                        completed,
-                        total_labels,
-                        len(rows),
-                        time.perf_counter() - started_at,
-                        len(groups),
+                        index,
+                        label,
+                        vod_path=scoped_vod_path,
+                        vod_dir=vod_dir,
+                        vod_feature_context=scoped_context,
+                        job_id=job_id,
+                        profile=profile,
+                        context_index=context_index,
                     )
+                    group_rows.extend(label_rows)
+                    rows.extend(label_rows)
+                    completed += 1
+                    if _should_log_label_progress(completed, total_labels, progress_interval):
+                        logger.info(
+                            "training_vod_label_progress vod_id=%s completed=%s/%s rows=%s elapsed_sec=%.1f mode=window_scoped groups=%s",
+                            vod_id,
+                            completed,
+                            total_labels,
+                            len(rows),
+                            time.perf_counter() - started_at,
+                            len(groups),
+                        )
+            else:
+                futures: dict[concurrent.futures.Future[list[dict]], int] = {}
+                with concurrent.futures.ThreadPoolExecutor(max_workers=group_worker_count) as label_executor:
+                    for index, label in group_items:
+                        futures[
+                            label_executor.submit(
+                                _process_vod_label,
+                                vod_id,
+                                index,
+                                label,
+                                vod_path=scoped_vod_path,
+                                vod_dir=vod_dir,
+                                vod_feature_context=scoped_context,
+                                job_id=job_id,
+                                profile=profile,
+                                context_index=context_index,
+                            )
+                        ] = index
+
+                    row_results: dict[int, list[dict]] = {}
+                    for future in concurrent.futures.as_completed(futures):
+                        index = futures[future]
+                        row_results[index] = future.result()
+                        completed += 1
+                        if _should_log_label_progress(completed, total_labels, progress_interval):
+                            logger.info(
+                                "training_vod_label_progress vod_id=%s completed=%s/%s latest_window=%s rows=%s elapsed_sec=%.1f mode=window_scoped_parallel groups=%s label_workers=%s",
+                                vod_id,
+                                completed,
+                                total_labels,
+                                index,
+                                len(rows) + sum(len(result) for result in row_results.values()),
+                                time.perf_counter() - started_at,
+                                len(groups),
+                                group_worker_count,
+                            )
+                for index, _label in group_items:
+                    label_rows = row_results.get(index, [])
+                    group_rows.extend(label_rows)
+                    rows.extend(label_rows)
             if group_rows:
                 remaining_background_rows = max(_BACKGROUND_NEGATIVE_WINDOWS_PER_VOD - background_rows_added, 0)
                 if remaining_background_rows > 0:
@@ -3599,6 +3643,7 @@ def _write_extended_window_group_checkpoint(
 def sample_weight_for_label(label_class: str) -> float:
     return {
         "viral_positive": 2.5,
+        "cross_platform_outcome_positive": 2.5,
         "positive": 1.5,
         "weak_positive": 0.8,
         "hard_negative": 1.8,
@@ -4067,6 +4112,19 @@ def _training_row_from_label(
         label_value = int(label_value_override)
         is_positive = label_value == 1
     base_reason = str(label.get("label_source") or "twitch_clip_api")
+    views = outcome_view_weighting.view_count(label)
+    rank_target = _label_rank_target(label, label_class, label_value, views)
+    ordinal_label = max(
+        collect_viral_clips._ordinal_label(label_class, label_value),
+        min(rank_target, 4) if is_positive else 0,
+    )
+    sample_weight = (
+        sample_weight_for_label(label_class)
+        * sample_weight_scale
+        * _label_sample_weight_multiplier(label)
+    )
+    if is_positive and views > 0.0:
+        sample_weight = max(sample_weight, float(label.get("outcome_view_sample_weight") or 0.0) * sample_weight_scale)
     row = {
         "job_id": f"twitch_vod_{label['vod_id']}",
         "candidate_id": features.candidate_id,
@@ -4086,7 +4144,7 @@ def _training_row_from_label(
         "quality_bucket": str(label.get("quality_bucket", "")),
         "label_reason": base_reason,
         "viral_score": float(label.get("label_score", 0.0) or 0.0),
-        "view_count": int(label.get("view_count", 0) or 0),
+        "view_count": int(views or 0),
         "like_count": 0,
         "comment_count": 0,
         "publish_timestamp": 0,
@@ -4094,15 +4152,11 @@ def _training_row_from_label(
         "platform_source": str(label.get("platform_source", "twitch_clip")),
         "label_class": label_class,
         "label_score": float(label.get("label_score", 0.0) or 0.0),
-        "sample_weight": round(
-            sample_weight_for_label(label_class)
-            * sample_weight_scale
-            * _label_sample_weight_multiplier(label),
-            3,
-        ),
+        "sample_weight": round(sample_weight, 3),
         "supervision_tier": supervision_tier,
         "supervision_reason": f"{base_reason}{supervision_reason_suffix}",
-        "ordinal_label": collect_viral_clips._ordinal_label(label_class, label_value),
+        "ordinal_label": ordinal_label,
+        "rank_target": rank_target,
         "window_start": round(candidate.start, 2),
         "window_end": round(candidate.end, 2),
         "proxy_window_start": float(label.get("window_start") or 0.0),
@@ -4116,6 +4170,29 @@ def _training_row_from_label(
         "feature_provenance": {},
         "features": features.to_dict(),
     }
+    if is_positive and views > 0.0:
+        row["views"] = views
+        row["outcome_view_tier"] = str(
+            label.get("outcome_view_tier") or outcome_view_weighting.outcome_view_tier(views)
+        )
+        row["outcome_view_sample_weight"] = float(
+            label.get("outcome_view_sample_weight") or outcome_view_weighting.outcome_view_sample_weight(views)
+        )
+        row["outcome_view_weight_version"] = int(
+            label.get("outcome_view_weight_version") or outcome_view_weighting.VIEW_WEIGHT_VERSION
+        )
+        row["label_quality_class"] = str(
+            label.get("label_quality_class")
+            or (
+                "cross_platform_viral_positive"
+                if row["outcome_view_tier"] in {"viral", "breakout_viral", "elite_viral"}
+                else "cross_platform_clipped_positive"
+            )
+        )
+        row["features"]["cross_platform_positive_views"] = max(
+            float(row["features"].get("cross_platform_positive_views") or 0.0),
+            views,
+        )
     if reference_window is not None:
         ref_start, ref_end = reference_window
         start_error = round(candidate.start - ref_start, 2)
@@ -4135,6 +4212,20 @@ def _training_row_from_label(
             label.get("targeted_feature_backfill_source") or "targeted_backfill"
         )
     return row
+
+
+def _label_rank_target(label: dict, label_class: str, label_value: int, views: float) -> int:
+    explicit = label.get("rank_target")
+    if explicit not in (None, ""):
+        try:
+            return max(int(explicit), 0)
+        except (TypeError, ValueError):
+            pass
+    if label_value <= 0:
+        return 0
+    if views > 0.0:
+        return outcome_view_weighting.outcome_view_rank_target(views)
+    return collect_viral_clips._ordinal_label(label_class, label_value)
 
 
 def _label_sample_weight_multiplier(label: dict) -> float:

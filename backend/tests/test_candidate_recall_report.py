@@ -50,6 +50,7 @@ class CandidateRecallReportTests(unittest.TestCase):
                     "end": 30.0,
                     "score": 0.9,
                     "accepted": True,
+                    "features": {"clip_type": "rage", "rage_score": 0.8},
                 },
                 {
                     "candidate_id": "d1",
@@ -105,6 +106,59 @@ class CandidateRecallReportTests(unittest.TestCase):
         self.assertEqual(report["quality_gate"]["judged_kept_rows"], 0)
         self.assertEqual(report["quality_gate"]["unjudged_kept_rows"], 1)
 
+    def test_report_tracks_positive_window_recall_by_stage(self) -> None:
+        matched = _candidate("dense-positive", "dense_inventory", 30.0)
+        unrelated = _candidate("peak", "peak", 90.0)
+        ranked = [_ranked(unrelated, 9.0)]
+
+        report = candidate_recall_report.build_candidate_recall_report(
+            stage_candidates={
+                "peak": [unrelated],
+                "semantic": [],
+                "dense": [],
+                "dense_inventory": [matched],
+                "fallback": [],
+                "merged": [matched, unrelated],
+                "normalized": [matched, unrelated],
+            },
+            proposal_audit_rows=[
+                {
+                    "candidate_id": "dense-positive",
+                    "source": "dense_inventory",
+                    "start": 30.0,
+                    "end": 50.0,
+                    "score": 0.22,
+                    "accepted": False,
+                }
+            ],
+            pre_judge_ranked=ranked,
+            judged_ranked=[],
+            quality_gate_rows=[],
+            final_ranked=[],
+            final_moments=[],
+            judge_top_k=1,
+            positive_windows=[
+                {
+                    "candidate_id": "short-a",
+                    "repost_source_url": "https://youtube.test/shorts/a",
+                    "window_start": 31.0,
+                    "window_end": 48.0,
+                    "transcript_similarity": 0.8,
+                }
+            ],
+            positive_overlap_ratio=0.45,
+        )
+
+        recall = report["positive_window_recall"]
+        self.assertEqual(recall["positive_windows"], 1)
+        self.assertEqual(recall["recall_by_stage"]["dense_inventory"]["matched"], 1)
+        self.assertEqual(recall["recall_by_stage"]["proposal_input"]["matched"], 1)
+        self.assertEqual(recall["recall_by_stage"]["proposal_kept"]["matched"], 0)
+        detail = recall["details"][0]
+        self.assertEqual(detail["last_matched_stage"], "proposal_input")
+        self.assertEqual(detail["first_missed_stage_after_last_match"], "proposal_kept")
+        self.assertEqual(detail["best_by_stage"]["proposal_input"]["candidate_id"], "dense-positive")
+
     def test_candidate_trace_tracks_drop_stage_scores_and_final_selection(self) -> None:
         peak = _candidate("p1", "peak", 10.0)
         dense = _candidate("d1", "dense_inventory", 30.0)
@@ -122,7 +176,15 @@ class CandidateRecallReportTests(unittest.TestCase):
                 "normalized": [peak, dense],
             },
             proposal_audit_rows=[
-                {"candidate_id": "p1", "source": "peak", "start": 10.0, "end": 30.0, "score": 0.9, "accepted": True},
+                {
+                    "candidate_id": "p1",
+                    "source": "peak",
+                    "start": 10.0,
+                    "end": 30.0,
+                    "score": 0.9,
+                    "accepted": True,
+                    "features": {"clip_type": "rage", "rage_score": 0.8},
+                },
                 {"candidate_id": "d1", "source": "dense_inventory", "start": 30.0, "end": 50.0, "score": 0.8, "accepted": True},
                 {"candidate_id": "d2", "source": "dense_inventory", "start": 60.0, "end": 80.0, "score": 0.7, "accepted": False},
             ],
@@ -162,6 +224,8 @@ class CandidateRecallReportTests(unittest.TestCase):
         self.assertEqual(summary["quality_breakdown"]["unjudged_kept"], 1)
         self.assertIn("proposal_lift", summary)
         self.assertIn("ranker_lift", summary)
+        self.assertEqual(summary["clip_type_counts"]["rage"], 1)
+        self.assertIn("clip_type_lift", summary)
 
     def test_quality_split_counts_judged_and_unjudged_kept_separately(self) -> None:
         judged = _candidate("j1", "peak", 10.0)
@@ -207,6 +271,62 @@ class CandidateRecallReportTests(unittest.TestCase):
         losses = {row["transition"]: row for row in report["losses"]}
         self.assertEqual(losses["judge_scope_to_judged_quality_kept"]["retention_ratio"], 1.0)
         self.assertLessEqual(losses["judged_quality_kept_to_final_ranked"]["retention_ratio"], 1.0)
+
+    def test_judge_scope_can_use_recall_reserved_input_order(self) -> None:
+        top = _candidate("top", "peak", 10.0)
+        reserved = _candidate("reserved", "dense_inventory", 40.0)
+        dropped = _candidate("dropped", "dense_inventory", 70.0)
+        ranked = [_ranked(top, 9.0), _ranked(dropped, 8.0), _ranked(reserved, 7.0)]
+        judge_scope_ranked = [_ranked(top, 9.0), _ranked(reserved, 7.0)]
+
+        report = candidate_recall_report.build_candidate_recall_report(
+            stage_candidates={
+                "peak": [top],
+                "semantic": [],
+                "dense": [],
+                "dense_inventory": [reserved, dropped],
+                "fallback": [],
+                "merged": [top, reserved, dropped],
+                "normalized": [top, reserved, dropped],
+            },
+            proposal_audit_rows=[],
+            pre_judge_ranked=ranked,
+            judged_ranked=judge_scope_ranked,
+            quality_gate_rows=[],
+            final_ranked=[],
+            final_moments=[],
+            judge_top_k=2,
+            judge_scope_ranked=judge_scope_ranked,
+        )
+        trace = candidate_recall_report.build_candidate_trace(
+            stage_candidates={
+                "peak": [top],
+                "semantic": [],
+                "dense": [],
+                "dense_inventory": [reserved, dropped],
+                "fallback": [],
+                "merged": [top, reserved, dropped],
+                "normalized": [top, reserved, dropped],
+            },
+            proposal_audit_rows=[],
+            pre_judge_ranked=ranked,
+            judged_ranked=judge_scope_ranked,
+            quality_gate_rows=[],
+            final_ranked=[],
+            final_moments=[],
+            judge_top_k=2,
+            judge_scope_ranked=judge_scope_ranked,
+        )
+
+        self.assertEqual(report["stage_counts"]["judge_scope"], 2)
+        losses = {row["transition"]: row for row in report["losses"]}
+        self.assertEqual(losses["ranked_to_judge_scope"]["lost_count"], 1)
+        self.assertEqual(report["ranker"]["recall_reserved"][0]["candidate_id"], "reserved")
+        rows = {row["candidate_id"]: row for row in trace}
+        self.assertEqual(rows["reserved"]["stages"]["judge_scope"]["status"], "included")
+        self.assertTrue(rows["reserved"]["judge_recall_reserved"])
+        self.assertNotIn("outside_judge_scope", rows["reserved"]["rejection_reasons"])
+        self.assertEqual(rows["dropped"]["stages"]["judge_scope"]["status"], "excluded")
 
     def test_summary_reports_proposal_and_ranker_lift(self) -> None:
         trace = [

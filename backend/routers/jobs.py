@@ -12,7 +12,13 @@ import uuid
 from datetime import datetime, timezone
 from fastapi import APIRouter, Form, HTTPException, UploadFile, File
 from config import settings
-from models import JobRequest, JobStatus, ClipFeedbackPayload, ClipFeedbackResponse
+from models import (
+    JobRequest,
+    JobStatus,
+    ClipFeedbackPayload,
+    ClipFeedbackResponse,
+    ReviewCandidateResponse,
+)
 from job_manager import bind_job_session, cancel_job, create_job, get_job, touch_job_session
 from job_manager import update_job
 from services import clip_strategy, feedback_store
@@ -526,9 +532,12 @@ def _pipeline_subprocess_env() -> dict[str, str]:
         pythonpath_parts.append(existing_pythonpath)
     env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
     env.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+    env.setdefault("PYTHONFAULTHANDLER", "1")
     env.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
     env.setdefault("MESA_LOADER_DRIVER_OVERRIDE", "swrast")
     env.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "hwaccel;none")
+    env.setdefault("TORCHDYNAMO_DISABLE", "1")
+    env.setdefault("TORCH_COMPILE_DISABLE", "1")
     env["MPLCONFIGDIR"] = str(_writable_pipeline_cache_dir("matplotlib"))
     env.setdefault("WHISPER_LANGUAGE", "en")
     env.setdefault("TOKENIZERS_PARALLELISM", "false")
@@ -1330,3 +1339,94 @@ async def submit_clip_feedback(job_id: str, payload: ClipFeedbackPayload):
         raise HTTPException(status_code=404, detail="Candidate not found")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/{job_id}/review-candidates", response_model=ReviewCandidateResponse)
+async def get_review_candidates(job_id: str, limit: int = 80):
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    safe_limit = min(max(int(limit or 0), 1), 200)
+    debug_dir = pathlib.Path(settings.storage_dir) / job_id / "debug"
+    rows = _read_jsonl_rows(debug_dir / "review_candidates.jsonl")
+    if not rows:
+        rows = _review_candidates_from_feedback(debug_dir)
+    else:
+        rows = _merge_review_feedback(rows, debug_dir)
+    return {"job_id": job_id, "candidates": rows[:safe_limit]}
+
+
+def _merge_review_feedback(rows: list[dict], debug_dir: pathlib.Path) -> list[dict]:
+    feedback_by_id = {
+        str(row.get("candidate_id") or "").strip(): row
+        for row in _read_jsonl_rows(debug_dir / "feedback.jsonl")
+        if str(row.get("candidate_id") or "").strip()
+    }
+    merged: list[dict] = []
+    for row in rows:
+        candidate_id = str(row.get("candidate_id") or "").strip()
+        feedback = feedback_by_id.get(candidate_id) or {}
+        if feedback:
+            row = {
+                **row,
+                "feedback_rating": feedback.get("feedback_rating"),
+                "feedback_tags": list(feedback.get("feedback_tags") or []),
+                "feedback_notes": feedback.get("feedback_notes"),
+            }
+        merged.append(row)
+    return merged
+
+
+def _review_candidates_from_feedback(debug_dir: pathlib.Path) -> list[dict]:
+    rows: list[dict] = []
+    for row in _read_jsonl_rows(debug_dir / "feedback.jsonl"):
+        candidate_id = str(row.get("candidate_id") or "").strip()
+        start = _as_optional_float(row.get("final_start") if row.get("selected") else row.get("proposed_start"))
+        end = _as_optional_float(row.get("final_end") if row.get("selected") else row.get("proposed_end"))
+        if start is None:
+            start = _as_optional_float(row.get("proposed_start"))
+        if end is None:
+            end = _as_optional_float(row.get("proposed_end"))
+        if not candidate_id or start is None or end is None or end <= start:
+            continue
+        rows.append(
+            {
+                "candidate_id": candidate_id,
+                "preview_url": None,
+                "start_time": start,
+                "end_time": end,
+                "duration": end - start,
+                "rank_score": row.get("rank_score"),
+                "judge_score": row.get("judge_score"),
+                "selected": bool(row.get("selected")),
+                "rejected_reason": row.get("rejected_reason"),
+                "rejection_source": row.get("rejection_source"),
+                "judge_reason": row.get("judge_reason"),
+                "feedback_rating": row.get("feedback_rating"),
+                "feedback_tags": list(row.get("feedback_tags") or []),
+                "feedback_notes": row.get("feedback_notes"),
+            }
+        )
+    rows.sort(
+        key=lambda item: (
+            0 if item.get("selected") else 1,
+            -_as_float(item.get("judge_score")),
+            -_as_float(item.get("rank_score")),
+            _as_float(item.get("start_time")),
+        )
+    )
+    return rows
+
+
+def _as_optional_float(value) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_float(value) -> float:
+    parsed = _as_optional_float(value)
+    return parsed if parsed is not None else 0.0

@@ -8,6 +8,7 @@ import PipelineDiagnosticsPanel from "@/components/PipelineDiagnosticsPanel";
 const STAGES = [
   "queued",
   "downloading",
+  "downloading_chat",
   "extracting_audio",
   "transcribing",
   "extracting_features",
@@ -21,6 +22,7 @@ const STAGES = [
 const STAGE_META: Record<string, { label: string; detail: string }> = {
   queued:          { label: "Eingereiht",          detail: "Job wartet auf Verarbeitung" },
   downloading:     { label: "VOD laden",            detail: "Twitch VOD wird heruntergeladen" },
+  downloading_chat:{ label: "Chat laden",           detail: "Twitch Chat-Replay wird heruntergeladen" },
   extracting_audio:{ label: "Audio extrahieren",    detail: "Tonspur wird isoliert" },
   transcribing:    { label: "Transkribieren",        detail: "Whisper analysiert den Ton — das dauert einen Moment" },
   extracting_features:{ label: "Features extrahieren", detail: "Audio-, Video- und Chat-Signale werden ausgewertet" },
