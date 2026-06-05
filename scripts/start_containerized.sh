@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+source "$ROOT_DIR/scripts/lib_backend_container.sh"
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "Docker is not installed or not on PATH." >&2
@@ -13,10 +14,6 @@ if ! docker compose version >/dev/null 2>&1; then
   echo "Docker Compose v2 is required. Install Docker Desktop or the docker compose plugin." >&2
   exit 1
 fi
-
-normalize_boolish() {
-  printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
-}
 
 stop_pid_file() {
   local pid_file="$1"
@@ -134,22 +131,15 @@ if [ ! -f frontend/.env.local ]; then
   cp frontend/.env.example frontend/.env.local
 fi
 
-docker_gpu_available() {
-  if ! command -v nvidia-smi >/dev/null 2>&1; then
-    return 1
-  fi
-  if ! nvidia-smi >/dev/null 2>&1; then
-    return 1
-  fi
-  docker run --rm --gpus all --entrypoint /bin/sh alpine:3.20 -c true >/dev/null 2>&1
-}
-
 BACKEND_RUNTIME="${AI_CLIPPING_BACKEND_RUNTIME:-auto}"
 REMOTE_MODE="$(normalize_boolish "${AI_CLIPPING_REMOTE:-ngrok}")"
 DEV_MODE="$(normalize_boolish "${AI_CLIPPING_DEV:-1}")"
-REBUILD_MODE="$(normalize_boolish "${AI_CLIPPING_REBUILD:-0}")"
+REBUILD_MODE="$(normalize_boolish "${AI_CLIPPING_REBUILD:-auto}")"
 COMPOSE_FILES=(-f docker-compose.yml)
-ENABLE_OLLAMA="${AI_CLIPPING_ENABLE_OLLAMA:-}"
+ENABLE_OLLAMA="${AI_CLIPPING_ENABLE_OLLAMA:-1}"
+OLLAMA_CONTAINER="${AI_CLIPPING_OLLAMA_CONTAINER:-ai-clipping-ollama}"
+OLLAMA_MODEL="${AI_CLIPPING_OLLAMA_MODEL:-qwen2.5:7b}"
+OLLAMA_PULL_MODEL="$(normalize_boolish "${AI_CLIPPING_OLLAMA_PULL_MODEL:-0}")"
 
 if [ -z "$ENABLE_OLLAMA" ] && [ -f backend/.env ]; then
   if grep -Eq '^[[:space:]]*JUDGE_PROVIDER[[:space:]]*=[[:space:]]*ollama[[:space:]]*$' backend/.env; then
@@ -251,17 +241,30 @@ case "$REBUILD_MODE" in
   1|true|yes|on)
     docker compose "${COMPOSE_FILES[@]}" up --build -d
     ;;
+  auto|"")
+    ensure_backend_image_current "$ROOT_DIR" "ai-clipping-backend" "$DEV_MODE" auto "${COMPOSE_FILES[@]}"
+    docker compose "${COMPOSE_FILES[@]}" up -d
+    ;;
   0|false|no|off|"")
     docker compose "${COMPOSE_FILES[@]}" up -d
     ;;
   *)
-    echo "Invalid AI_CLIPPING_REBUILD=$REBUILD_MODE. Use true/false." >&2
+    echo "Invalid AI_CLIPPING_REBUILD=$REBUILD_MODE. Use auto/true/false." >&2
     exit 1
     ;;
 esac
 
 if [ "$REMOTE_MODE" = "ngrok" ]; then
   start_ngrok_remote
+fi
+
+if is_truthy "$ENABLE_OLLAMA_NORMALIZED"; then
+  wait_for_backend_container ai-clipping-backend 180
+  if is_truthy "$OLLAMA_PULL_MODEL"; then
+    ensure_backend_ollama_ready ai-clipping-backend "$OLLAMA_CONTAINER" "$OLLAMA_MODEL" "$OLLAMA_PULL_MODEL" 180
+  else
+    ensure_backend_ollama_ready ai-clipping-backend "$OLLAMA_CONTAINER" "" 0 180
+  fi
 fi
 
 cat <<'EOF'
@@ -283,6 +286,7 @@ Useful commands:
 Development defaults:
   Backend and frontend source are bind-mounted with reload/watch enabled.
   Normal code edits should not require a container rebuild or manual restart.
-  Use AI_CLIPPING_REBUILD=1 only after dependency or Dockerfile changes.
+  Backend image rebuild checks run automatically when needed.
+  Use AI_CLIPPING_REBUILD=1 to force rebuilds or AI_CLIPPING_REBUILD=0 to disable checks.
   Use AI_CLIPPING_DEV=0 for image-only production-style containers.
 EOF

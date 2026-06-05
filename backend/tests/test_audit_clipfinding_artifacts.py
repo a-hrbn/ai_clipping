@@ -10,7 +10,7 @@ class AuditClipfindingArtifactsTests(unittest.TestCase):
     def test_audit_reports_artifact_hashes_and_row_counts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             artifact_dir = Path(tmp)
-            (artifact_dir / "jynxzi_proposal_scorer.json").write_text(
+            (artifact_dir / "jynxzi_ranker.json").write_text(
                 json.dumps(
                     {
                         "training_summary": {
@@ -32,8 +32,8 @@ class AuditClipfindingArtifactsTests(unittest.TestCase):
 
         self.assertEqual(payload["summary"]["existing_artifacts"], 2)
         self.assertEqual(payload["summary"]["cross_platform_rows"], 2)
-        self.assertEqual(payload["summary"]["proposal_status"], "trained")
-        self.assertRegex(payload["artifacts"]["proposal_scorer"]["sha256"], r"^[a-f0-9]{64}$")
+        self.assertEqual(payload["summary"]["ranker_status"], "trained")
+        self.assertRegex(payload["artifacts"]["ranker"]["sha256"], r"^[a-f0-9]{64}$")
 
 
 if __name__ == "__main__":

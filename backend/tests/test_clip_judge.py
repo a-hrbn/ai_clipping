@@ -898,6 +898,41 @@ class ClipJudgeTests(unittest.TestCase):
         self.assertAlmostEqual(result.narrative_completeness, 0.6)
         self.assertEqual(result.provider, "gemini")
 
+    def test_configured_sample_count_uses_median_consensus_without_uncertainty_gate(self) -> None:
+        ranked = RankedCandidate(
+            candidate=Candidate(id="sample-me", start=0.0, end=15.0, source="reaction", anchor_time=4.0),
+            features=CandidateFeatures(candidate_id="sample-me", hook_strength=0.8, payoff_score=6.0),
+            rank_score=6.0,
+        )
+        segments = [RichSegment(start=0.0, end=3.0, text="no way", hype_score=4.0)]
+        samples = [
+            JudgeResult(3.0, 0.3, 0.3, 0.3, 0.3, 0.3, "too low", 0.8, provider="gemini", llm_used=True),
+            JudgeResult(8.0, 0.8, 0.7, 0.9, 0.7, 0.8, "strong", 0.9, provider="gemini", llm_used=True),
+            JudgeResult(6.0, 0.6, 0.6, 0.7, 0.6, 0.7, "middle", 0.7, provider="gemini", llm_used=True),
+        ]
+
+        with patch.object(clip_judge.settings, "clip_judge_cache_enabled", False), \
+             patch.object(clip_judge.settings, "clip_judge_sample_count", 3), \
+             patch.object(clip_judge.settings, "clip_judge_uncertain_sample_count", 3), \
+             patch.object(clip_judge, "_call_text_judge_prompt", side_effect=samples) as llm_mock:
+            result = clip_judge.judge_candidate(ranked, segments, provider="gemini")
+
+        self.assertEqual(llm_mock.call_count, 3)
+        self.assertAlmostEqual(result.scroll_stop_power, 0.6)
+        self.assertAlmostEqual(result.standalone_clarity, 0.6)
+        self.assertEqual(result.provider, "gemini")
+
+    def test_judge_cache_key_includes_sampling_configuration(self) -> None:
+        prompt = "judge this"
+        with patch.object(clip_judge.settings, "clip_judge_sample_count", 1), \
+             patch.object(clip_judge.settings, "clip_judge_uncertain_sample_count", 1):
+            single_key = clip_judge._judge_cache_key(prompt, provider="gemini", keyframes=None)
+        with patch.object(clip_judge.settings, "clip_judge_sample_count", 3), \
+             patch.object(clip_judge.settings, "clip_judge_uncertain_sample_count", 3):
+            sampled_key = clip_judge._judge_cache_key(prompt, provider="gemini", keyframes=None)
+
+        self.assertNotEqual(single_key, sampled_key)
+
 
 if __name__ == "__main__":
     unittest.main()

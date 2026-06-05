@@ -160,7 +160,7 @@ def _configure_runtime_env(args: argparse.Namespace) -> dict[str, str]:
 
 def _train_command(args: argparse.Namespace) -> list[str]:
     command = [
-        "/bin/zsh",
+        "/bin/bash",
         "ml/train_jynxzi_vod.sh",
         args.date_from,
         args.date_to,

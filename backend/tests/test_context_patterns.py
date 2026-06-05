@@ -1,4 +1,4 @@
-from services import context_patterns, proposal_scorer
+from services import context_patterns, feature_builder
 from services.timeline_types import Candidate
 from services.transcriber import RichSegment
 
@@ -104,7 +104,8 @@ def test_context_patterns_match_semantic_rewording_with_low_keyword_overlap(tmp_
     assert match.score > 0.7
 
 
-def test_proposal_features_use_dynamic_context_pattern_artifact(tmp_path) -> None:
+def test_candidate_features_use_dynamic_context_pattern_artifact(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(context_patterns, "DEFAULT_ARTIFACT_DIR", tmp_path)
     context_patterns.write_pattern_store(
         [
             {
@@ -135,14 +136,12 @@ def test_proposal_features_use_dynamic_context_pattern_artifact(tmp_path) -> Non
         RichSegment(start=10.0, end=20.0, text="this package is actually crazy"),
     ]
 
-    scored = proposal_scorer.score_candidates(
+    features = feature_builder.build_features(
         [candidate],
         segments,
         "jynxzi",
-        artifact_dir=tmp_path,
+        use_llm_semantics=False,
     )
 
-    features = scored[0].features
-    assert features.context_pattern_confidence > 0.4
-    assert features.context_pattern_id
-    assert any(reason.startswith("context_pattern:") for reason in scored[0].rationale)
+    assert features[0].context_pattern_confidence > 0.4
+    assert features[0].context_pattern_id

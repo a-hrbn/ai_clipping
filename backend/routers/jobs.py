@@ -175,14 +175,13 @@ def _job_pipeline_diagnostics(job_id: str, job: JobStatus | dict | None = None) 
         recall_status = "ok" if final_count_from_recall > 0 else ("warning" if job_status in _TERMINAL_STATES else "pending")
         recall_summary = (
             f"Recall-Funnel: {int(stage_counts.get('merged') or 0)} merged, "
-            f"{int(stage_counts.get('proposal_kept') or 0)} Proposal, "
             f"{int(stage_counts.get('ranked_pre_judge') or 0)} ranked, "
             f"{int(stage_counts.get('quality_kept') or 0)} Quality-kept, "
             f"{final_count_from_recall} final."
         )
         recall_metrics = [
             _metric("Dense Inventory", int(stage_counts.get("dense_inventory") or 0)),
-            _metric("Proposal Kept", int(stage_counts.get("proposal_kept") or 0)),
+            _metric("Merged", int(stage_counts.get("merged") or 0)),
             _metric("Ranked", int(stage_counts.get("ranked_pre_judge") or 0)),
             _metric("Judge Scope", int(stage_counts.get("judge_scope") or 0)),
             _metric("Quality Kept", int(stage_counts.get("quality_kept") or 0)),
@@ -207,37 +206,17 @@ def _job_pipeline_diagnostics(job_id: str, job: JobStatus | dict | None = None) 
             },
         }
 
-    proposal_summary = _read_json_file(debug_dir / "candidate_proposal_summary.json")
-    proposal_rows = _jsonl_count(debug_dir / "candidate_proposals.jsonl")
     dense_inventory_rows = _jsonl_count(debug_dir / "candidates_dense_inventory.jsonl")
-    proposal_status = "pending"
-    proposal_details: list[str] = []
-    proposal_metrics = [
+    dense_inventory_status = "pending"
+    dense_inventory_details: list[str] = []
+    dense_inventory_metrics = [
         _metric("Inventory", dense_inventory_rows),
-        _metric("Audit Rows", proposal_rows),
     ]
-    if isinstance(proposal_summary, dict) and proposal_summary:
-        input_candidates = int(proposal_summary.get("input_candidates") or 0)
-        kept_candidates = int(proposal_summary.get("kept_candidates") or 0)
-        model_loaded = bool(proposal_summary.get("model_artifact_loaded"))
-        proposal_status = "ok" if kept_candidates > 0 and model_loaded else "warning"
-        proposal_metrics.extend(
-            [
-                _metric("Input", input_candidates),
-                _metric("Behalten", kept_candidates),
-                _metric("Modell", "geladen" if model_loaded else "nicht geladen"),
-            ]
-        )
-        if not model_loaded:
-            proposal_details.append("Proposal-Modell wurde nicht geladen; Heuristik/Score-Fallback dominiert.")
-        if kept_candidates == 0 and input_candidates > 0:
-            proposal_details.append("Proposal hat keine Kandidaten behalten.")
-    elif dense_inventory_rows > 0 or proposal_rows > 0:
-        proposal_status = "warning"
-        proposal_details.append("Proposal-Artefakte sind unvollständig.")
+    if dense_inventory_rows > 0:
+        dense_inventory_status = "ok"
     elif job_status in _TERMINAL_STATES:
-        proposal_status = "disabled"
-        proposal_details.append("Kein Proposal-Audit gefunden; dieser Job lief ohne auswertbare Proposal-Artefakte.")
+        dense_inventory_status = "warning"
+        dense_inventory_details.append("Kein Dense-Inventory-Artefakt gefunden.")
 
     ranked_rows = _read_jsonl_rows(debug_dir / "ranked_candidates_v2.jsonl")
     if ranked_rows:
@@ -367,12 +346,12 @@ def _job_pipeline_diagnostics(job_id: str, job: JobStatus | dict | None = None) 
             recall_details,
         ),
         _diagnostic_stage(
-            "proposal",
-            "Proposal Model",
-            proposal_status,
-            "Trainierbares Proposal-Scoring über dense Inventory.",
-            proposal_metrics,
-            proposal_details,
+            "dense_inventory",
+            "Dense Inventory",
+            dense_inventory_status,
+            "Dense Inventory wird direkt in den Ranker-Pool gemerged.",
+            dense_inventory_metrics,
+            dense_inventory_details,
         ),
         _diagnostic_stage(
             "ranker",
@@ -469,9 +448,6 @@ def _candidate_funnel_payload(funnel_summary: dict | list | None, trace_rows: li
         ),
         "quality_breakdown": (
             summary.get("quality_breakdown") if isinstance(summary.get("quality_breakdown"), dict) else {}
-        ),
-        "proposal_lift": (
-            summary.get("proposal_lift") if isinstance(summary.get("proposal_lift"), dict) else {}
         ),
         "ranker_lift": (
             summary.get("ranker_lift") if isinstance(summary.get("ranker_lift"), dict) else {}
@@ -585,7 +561,7 @@ def _pipeline_subprocess_error(returncode: int) -> str:
 
 
 def _cleanup_serving_job_source_media(job_id: str) -> None:
-    if str(job_id or "").startswith(("twitch_vod", "proposal_training_", "judge_backfill_")):
+    if str(job_id or "").startswith(("twitch_vod", "judge_backfill_")):
         return
 
     job_dir = pathlib.Path(settings.storage_dir) / job_id

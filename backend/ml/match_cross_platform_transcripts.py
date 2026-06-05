@@ -850,23 +850,30 @@ def _filter_multi_window_matches_to_top_vod(
     if len(vod_ids) <= 1:
         return list(matches)
 
-    vod_scores: dict[str, tuple[float, int, float, float]] = {}
+    vod_scores: dict[str, tuple[float, float, float, float, int]] = {}
     for match in matches:
         vod_id = _match_vod_id(match)
         if not vod_id:
             continue
-        total_score, count, max_token_recall, max_score = vod_scores.get(vod_id, (0.0, 0, 0.0, 0.0))
+        strong_evidence, max_token_recall, max_score, total_score, count = vod_scores.get(
+            vod_id,
+            (0.0, 0.0, 0.0, 0.0, 0),
+        )
         source_score = float(match.source_score if match.source_score is not None else match.score)
+        token_recall = float(match.token_recall)
+        score = float(match.score)
+        strong_weight = _dominant_vod_strong_match_weight(match)
         vod_scores[vod_id] = (
+            strong_evidence + strong_weight,
+            max(max_token_recall, token_recall),
+            max(max_score, score),
             total_score + max(source_score, 0.0),
             count + 1,
-            max(max_token_recall, float(match.token_recall)),
-            max(max_score, float(match.score)),
         )
     if not vod_scores:
         return list(matches)
 
-    top_vod_id = max(vod_scores.items(), key=lambda item: (item[1][0], item[1][2], item[1][3], item[1][1], item[0]))[0]
+    top_vod_id = max(vod_scores.items(), key=lambda item: (*item[1], item[0]))[0]
     filtered = [
         match
         for match in matches
@@ -878,6 +885,17 @@ def _filter_multi_window_matches_to_top_vod(
 
 def _is_strong_cross_vod_secondary_match(match: TranscriptMatch) -> bool:
     return float(match.token_recall) >= _CROSS_VOD_WEAK_TOKEN_RECALL_THRESHOLD
+
+
+def _dominant_vod_strong_match_weight(match: TranscriptMatch) -> float:
+    token_recall = float(match.token_recall)
+    score = float(match.score)
+    if token_recall < _CROSS_VOD_WEAK_TOKEN_RECALL_THRESHOLD and score < _CROSS_VOD_WEAK_TOKEN_RECALL_THRESHOLD:
+        return 0.0
+    kind = str(match.match_kind or "")
+    if kind in {"single_window", "audio_fingerprint_fallback"}:
+        return 1.5
+    return 1.0
 
 
 def _merge_near_duplicate_accepted_matches(

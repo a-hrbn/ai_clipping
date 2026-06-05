@@ -209,6 +209,33 @@ class CrossPlatformTranscriptMatchTests(unittest.TestCase):
         self.assertEqual(cleaned[0].vod["vod_id"], "vod-a")
         self.assertEqual(stats["multi_window_cross_vod_filtered"], 1)
 
+    def test_cleanup_dominant_vod_prefers_strong_single_over_many_weak_chunks(self) -> None:
+        matches = [
+            transcript_match("vod-a", 100.0, 120.0, score=0.80, kind="single_window", chunk_index=None),
+            transcript_match("vod-b", 500.0, 508.0, score=0.49, kind="multi_window_chunk", chunk_index=1),
+            transcript_match("vod-b", 900.0, 908.0, score=0.48, kind="multi_window_chunk", chunk_index=2),
+            transcript_match("vod-b", 1200.0, 1208.0, score=0.47, kind="multi_window_chunk", chunk_index=3),
+        ]
+
+        cleaned, stats = matcher._clean_accepted_matches(matches)
+
+        self.assertEqual(len(cleaned), 1)
+        self.assertEqual(cleaned[0].vod["vod_id"], "vod-a")
+        self.assertEqual(stats["multi_window_cross_vod_filtered"], 3)
+
+    def test_cleanup_dominant_vod_prefers_strong_audio_over_weak_chunks(self) -> None:
+        matches = [
+            transcript_match("vod-a", 100.0, 120.0, score=0.56, kind="audio_fingerprint_fallback", chunk_index=None),
+            transcript_match("vod-b", 500.0, 508.0, score=0.49, kind="multi_window_chunk", chunk_index=1),
+            transcript_match("vod-b", 900.0, 908.0, score=0.48, kind="multi_window_chunk", chunk_index=2),
+        ]
+
+        cleaned, stats = matcher._clean_accepted_matches(matches)
+
+        self.assertEqual(len(cleaned), 1)
+        self.assertEqual(cleaned[0].vod["vod_id"], "vod-a")
+        self.assertEqual(stats["multi_window_cross_vod_filtered"], 2)
+
     def test_cleanup_keeps_strong_secondary_vod_match(self) -> None:
         matches = [
             transcript_match("vod-a", 100.0, 108.0, score=0.82, chunk_index=1),

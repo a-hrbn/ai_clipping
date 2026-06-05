@@ -41,6 +41,10 @@ def _identity(*args, **kwargs):
     return args[0]
 
 
+async def _noop_cleanup_later(_job_id: str) -> None:
+    return None
+
+
 @dataclass
 class _AudioFeatureFrameStub:
     second: int
@@ -71,6 +75,43 @@ class _NumpyLikeScalar:
 
 
 class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_phase_a_defaults_keep_inventory_enabled(self) -> None:
+        pipeline = _import_pipeline_with_stubs()
+
+        self.assertTrue(pipeline.settings.enable_dense_candidate_inventory)
+
+    async def test_unique_candidates_by_id_keeps_first_candidate_for_direct_ranker_pool(self) -> None:
+        pipeline = _import_pipeline_with_stubs()
+        carry = Candidate(
+            id="dense_inventory:20:0:0:0",
+            start=0.0,
+            end=20.0,
+            source="dense_inventory",
+            anchor_time=10.0,
+            score_hint=5.0,
+        )
+        duplicate = Candidate(
+            id="dense_inventory:20:0:0:0",
+            start=2.0,
+            end=22.0,
+            source="dense_inventory",
+            anchor_time=11.0,
+            score_hint=1.0,
+        )
+        semantic = Candidate(
+            id="quote:0:3000",
+            start=30.0,
+            end=50.0,
+            source="quote",
+            anchor_time=35.0,
+            score_hint=3.0,
+        )
+
+        unique = pipeline._unique_candidates_by_id([carry, duplicate, semantic])
+
+        self.assertEqual([candidate.id for candidate in unique], [carry.id, semantic.id])
+        self.assertIs(unique[0], carry)
+
     async def test_serving_source_media_cleanup_deletes_vod_but_keeps_outputs(self) -> None:
         pipeline = _import_pipeline_with_stubs()
         with tempfile.TemporaryDirectory() as tmp:
@@ -211,7 +252,7 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
 
-    async def test_context_variant_candidates_are_added_before_proposal(self) -> None:
+    async def test_context_variant_candidates_are_added_before_direct_ranker_merge(self) -> None:
         pipeline = _import_pipeline_with_stubs()
         segments = [
             RichSegment(start=0.0, end=4.0, text="Here is why this matters."),
@@ -291,13 +332,11 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         context_score = pipeline._judge_recall_reserve_score(
             RankedCandidate(context_candidate, context_features, rank_score=-1.0, heuristic_rank_score=-1.0),
-            {"score": 0.35, "heuristic_score": 0.4},
             pre_judge_rank=120,
             pool_k=240,
         )
         weak_score = pipeline._judge_recall_reserve_score(
             RankedCandidate(weak_candidate, weak_features, rank_score=1.0, heuristic_rank_score=1.0),
-            {"score": 0.45, "heuristic_score": 0.45},
             pre_judge_rank=80,
             pool_k=240,
         )
@@ -342,6 +381,39 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(frames[0].second, 3)
             self.assertEqual(frames[0].rms_db, -12.5)
 
+    async def test_audio_cache_reuses_extracted_wav_between_jobs(self) -> None:
+        pipeline = _import_pipeline_with_stubs()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            video_path = tmp_path / "video.mp4"
+            video_path.write_bytes(b"video")
+            cache_source = "twitch_vod:123"
+
+            def fake_extract(_video_path: Path, job_id: str) -> Path:
+                audio_path = tmp_path / job_id / "audio.wav"
+                audio_path.parent.mkdir(parents=True, exist_ok=True)
+                audio_path.write_bytes(b"RIFF" + (b"\0" * 128))
+                return audio_path
+
+            with patch.object(pipeline.settings, "storage_dir", str(tmp_path)), \
+                 patch.object(pipeline, "_probe_media_duration_sec", return_value=12.0), \
+                 patch.object(pipeline.audio_extractor, "extract", side_effect=fake_extract) as extract_mock:
+                first = pipeline._extract_audio_cached(
+                    video_path,
+                    "job-one",
+                    cache_source=cache_source,
+                )
+                second = pipeline._extract_audio_cached(
+                    video_path,
+                    "job-two",
+                    cache_source=cache_source,
+                )
+
+            extract_mock.assert_called_once()
+            self.assertTrue(first.exists())
+            self.assertTrue(second.exists())
+            self.assertEqual(second.read_bytes(), b"RIFF" + (b"\0" * 128))
+
     async def test_video_feature_cache_miss_writes_reusable_frames(self) -> None:
         pipeline = _import_pipeline_with_stubs()
         with tempfile.TemporaryDirectory() as tmp:
@@ -360,6 +432,60 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
             extract_mock.assert_called_once()
             self.assertEqual(first[0].motion_score, 0.7)
             self.assertEqual(second[0].motion_score, 0.7)
+
+    async def test_video_feature_cache_hit_is_used_when_long_vod_extraction_is_disabled(self) -> None:
+        pipeline = _import_pipeline_with_stubs()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            video_path = tmp_path / "video.mp4"
+            video_path.write_bytes(b"video")
+            cache_source = "twitch_vod:123"
+
+            with patch.object(pipeline.settings, "storage_dir", str(tmp_path)), \
+                 patch.object(pipeline, "_probe_media_duration_sec", return_value=100_000.0):
+                metadata = pipeline._feature_cache_metadata("video", cache_source, video_path)
+                pipeline._write_feature_frame_cache(
+                    cache_source,
+                    "video",
+                    [_VideoFeatureFrameStub(second=9, motion_score=0.42)],
+                    metadata,
+                )
+                with patch.object(
+                    pipeline.video_features,
+                    "extract",
+                    side_effect=AssertionError("video features should not be recomputed on cache hit"),
+                ):
+                    cached = pipeline._extract_video_features_cached(
+                        video_path,
+                        cache_source=cache_source,
+                        allow_extract=False,
+                    )
+
+            self.assertEqual(len(cached), 1)
+            self.assertEqual(cached[0].second, 9)
+            self.assertEqual(cached[0].motion_score, 0.42)
+
+    async def test_video_feature_cache_skip_avoids_long_vod_extraction_when_cache_missing(self) -> None:
+        pipeline = _import_pipeline_with_stubs()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            video_path = tmp_path / "video.mp4"
+            video_path.write_bytes(b"video")
+
+            with patch.object(pipeline.settings, "storage_dir", str(tmp_path)), \
+                 patch.object(pipeline, "_probe_media_duration_sec", return_value=100_000.0), \
+                 patch.object(
+                     pipeline.video_features,
+                     "extract",
+                     side_effect=AssertionError("long VOD visual extraction should be skipped"),
+                 ):
+                frames = pipeline._extract_video_features_cached(
+                    video_path,
+                    cache_source="twitch_vod:missing",
+                    allow_extract=False,
+                )
+
+            self.assertEqual(frames, [])
 
     async def test_feature_cache_write_normalizes_numpy_like_scalars(self) -> None:
         pipeline = _import_pipeline_with_stubs()
@@ -395,10 +521,9 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(cached[0].motion_score, 0.7)
             self.assertEqual(cached[0].face_count, 2)
 
-    async def test_judge_recall_reserve_promotes_deeper_proposal_candidates(self) -> None:
+    async def test_judge_recall_reserve_promotes_deeper_feature_candidates(self) -> None:
         pipeline = _import_pipeline_with_stubs()
         ranked = []
-        proposal_rows = []
         for index in range(1, 9):
             candidate_id = f"dense:{index}"
             candidate = Candidate(
@@ -423,15 +548,6 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     rationale=["ranker"],
                 )
             )
-            proposal_rows.append(
-                {
-                    "candidate_id": candidate_id,
-                    "source": "dense_inventory",
-                    "score": 0.8 if index == 6 else 0.7 if index == 7 else 0.05,
-                    "heuristic_score": 0.6,
-                    "accepted": True,
-                }
-            )
 
         with patch.object(pipeline.settings, "judge_recall_reserve_enabled", True), \
              patch.object(pipeline.settings, "judge_recall_reserve_slots", 2), \
@@ -439,7 +555,7 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
              patch.object(pipeline.settings, "judge_recall_reserve_min_score", 0.1):
             judge_input, summary = pipeline._build_judge_recall_reserved_order(
                 ranked,
-                proposal_rows,
+                [],
                 4,
             )
 
@@ -587,7 +703,7 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(summary["diagnostic_only"])
         self.assertEqual(summary["matched_rows"], 1)
 
-    async def test_cross_platform_recall_preserve_ids_bypass_proposal_merge_dedupe(self) -> None:
+    async def test_cross_platform_recall_preserve_ids_bypass_direct_merge_dedupe(self) -> None:
         pipeline = _import_pipeline_with_stubs()
         primary = [
             Candidate(
@@ -628,46 +744,6 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("dense:positive", {candidate.id for candidate in without_preserve})
         self.assertIn("dense:positive", {candidate.id for candidate in with_preserve})
 
-    async def test_proposal_recall_preservation_keeps_targets_even_beyond_top_k(self) -> None:
-        pipeline = _import_pipeline_with_stubs()
-        top = Candidate(
-            id="top",
-            start=0.0,
-            end=20.0,
-            source="peak",
-            anchor_time=10.0,
-            score_hint=10.0,
-        )
-        recall = Candidate(
-            id="dense:positive",
-            start=100.0,
-            end=130.0,
-            source="dense_inventory",
-            anchor_time=115.0,
-            score_hint=0.1,
-        )
-        result = pipeline.proposal_scorer.ProposalResult(
-            kept=[top],
-            scored=[],
-            audit_rows=[
-                {"candidate_id": "top", "score": 0.9, "accepted": True, "rationale": []},
-                {"candidate_id": "dense:positive", "score": 0.05, "accepted": False, "rationale": []},
-            ],
-            summary={"top_k": 1, "kept_candidates": 1},
-        )
-
-        preserved = pipeline._preserve_proposal_recall_candidates(
-            result,
-            [top, recall],
-            {"dense:positive"},
-        )
-
-        self.assertEqual([candidate.id for candidate in preserved.kept], ["dense:positive"])
-        recall_row = next(row for row in preserved.audit_rows if row["candidate_id"] == "dense:positive")
-        self.assertTrue(recall_row["accepted"])
-        self.assertTrue(recall_row["proposal_recall_target"])
-        self.assertIn("cross_platform_recall_target", recall_row["rationale"])
-
     async def test_clip_judge_timeout_degrades_to_pre_judge_candidates_even_when_fail_fast(self) -> None:
         pipeline = _import_pipeline_with_stubs()
         loop = asyncio.get_running_loop()
@@ -703,8 +779,6 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
             audio_path.write_bytes(b"audio")
 
             job_updates: list[dict] = []
-            cleanup_coroutines = []
-
             transcript = [
                 RichSegment(start=0.0, end=2.0, text="quiet setup", words_per_second=1.0),
                 RichSegment(
@@ -849,11 +923,6 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     for idx, moment in enumerate(moments, start=1)
                 ]
 
-            def fake_create_task(coro):
-                cleanup_coroutines.append(coro)
-                coro.close()
-                return None
-
             refine_calls: list[list[str]] = []
             feature_call_order: list[str] = []
 
@@ -877,8 +946,10 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 stack.enter_context(patch.object(pipeline.settings, "storage_dir", str(tmp_path)))
                 stack.enter_context(patch.object(pipeline.settings, "enable_chat_analysis", False))
                 stack.enter_context(patch.object(pipeline.settings, "enable_clip_judge", False))
+                stack.enter_context(patch.object(pipeline.settings, "enable_dense_candidate_inventory", False))
                 stack.enter_context(patch.object(pipeline.settings, "pipeline_overlap_feature_extraction", False))
                 stack.enter_context(patch.object(pipeline.settings, "analyzer_refine_timeout_sec", 1.0))
+                stack.enter_context(patch.object(pipeline, "_probe_media_duration_sec", return_value=6.0))
                 stack.enter_context(patch.object(pipeline, "update_job", side_effect=fake_update_job))
                 stack.enter_context(patch.object(pipeline.audio_extractor, "extract", return_value=audio_path))
                 stack.enter_context(patch.object(pipeline.transcriber, "transcribe_with_progress", side_effect=fake_transcribe_with_progress))
@@ -921,7 +992,7 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 stack.enter_context(patch.object(pipeline.post_processor, "snap_boundaries", side_effect=lambda moments, _segments: moments))
                 stack.enter_context(patch.object(pipeline.post_processor, "enforce_diversity", side_effect=lambda moments: moments))
                 stack.enter_context(patch.object(pipeline.clipper, "cut_clips", side_effect=fake_cut_clips))
-                stack.enter_context(patch.object(pipeline.asyncio, "create_task", side_effect=fake_create_task))
+                stack.enter_context(patch.object(pipeline, "_cleanup_later", side_effect=_noop_cleanup_later))
 
                 await pipeline.run_pipeline("job-peak", video_path=video_path, profile="general")
 
@@ -1064,16 +1135,16 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     }
                 ]
 
-            def fake_create_task(coro):
-                coro.close()
-                return None
-
             with ExitStack() as stack:
                 stack.enter_context(patch.object(pipeline.settings, "storage_dir", str(tmp_path)))
                 stack.enter_context(patch.object(pipeline.settings, "enable_chat_analysis", False))
                 stack.enter_context(patch.object(pipeline.settings, "enable_clip_judge", False))
+                stack.enter_context(patch.object(pipeline.settings, "enable_dense_candidate_inventory", False))
+                stack.enter_context(patch.object(pipeline.settings, "frontend_transcript_cache_enabled", False))
+                stack.enter_context(patch.object(pipeline.settings, "frontend_feature_cache_enabled", False))
                 stack.enter_context(patch.object(pipeline.settings, "hf_token", "hf_secret"))
                 stack.enter_context(patch.object(pipeline.settings, "pipeline_enable_diarization", False))
+                stack.enter_context(patch.object(pipeline, "_probe_media_duration_sec", return_value=12.0))
                 stack.enter_context(patch.object(pipeline, "update_job", side_effect=fake_update_job))
                 stack.enter_context(patch.object(pipeline.audio_extractor, "extract", return_value=audio_path))
                 transcribe_mock = stack.enter_context(
@@ -1135,7 +1206,7 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         ],
                     )
                 )
-                stack.enter_context(patch.object(pipeline.asyncio, "create_task", side_effect=fake_create_task))
+                stack.enter_context(patch.object(pipeline, "_cleanup_later", side_effect=_noop_cleanup_later))
 
                 await pipeline.run_pipeline("job-fallback", video_path=video_path, profile="general")
 
@@ -1244,16 +1315,16 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
             def fake_update_job(job_id: str, **kwargs) -> None:
                 job_updates.append({"job_id": job_id, **kwargs})
 
-            def fake_create_task(coro):
-                coro.close()
-                return None
-
             with ExitStack() as stack:
                 stack.enter_context(patch.object(pipeline.settings, "storage_dir", str(tmp_path)))
                 stack.enter_context(patch.object(pipeline.settings, "enable_chat_analysis", False))
                 stack.enter_context(patch.object(pipeline.settings, "enable_clip_judge", False))
+                stack.enter_context(patch.object(pipeline.settings, "enable_dense_candidate_inventory", False))
+                stack.enter_context(patch.object(pipeline.settings, "frontend_transcript_cache_enabled", False))
+                stack.enter_context(patch.object(pipeline.settings, "frontend_feature_cache_enabled", False))
                 stack.enter_context(patch.object(pipeline.settings, "hf_token", "hf_secret"))
                 stack.enter_context(patch.object(pipeline.settings, "pipeline_enable_diarization", False))
+                stack.enter_context(patch.object(pipeline, "_probe_media_duration_sec", return_value=12.0))
                 stack.enter_context(patch.object(pipeline, "update_job", side_effect=fake_update_job))
                 stack.enter_context(patch.object(pipeline.audio_extractor, "extract", return_value=audio_path))
                 transcribe_mock = stack.enter_context(
@@ -1316,7 +1387,7 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         ],
                     )
                 )
-                stack.enter_context(patch.object(pipeline.asyncio, "create_task", side_effect=fake_create_task))
+                stack.enter_context(patch.object(pipeline, "_cleanup_later", side_effect=_noop_cleanup_later))
 
                 await pipeline.run_pipeline(
                     "job-slow-chat",
@@ -1396,14 +1467,11 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     }
                 ]
 
-            def fake_create_task(coro):
-                coro.close()
-                return None
-
             with ExitStack() as stack:
                 stack.enter_context(patch.object(pipeline.settings, "storage_dir", str(tmp_path)))
                 stack.enter_context(patch.object(pipeline.settings, "enable_chat_analysis", False))
                 stack.enter_context(patch.object(pipeline.settings, "enable_clip_judge", False))
+                stack.enter_context(patch.object(pipeline.settings, "enable_dense_candidate_inventory", False))
                 stack.enter_context(patch.object(pipeline.settings, "frontend_job_cache_enabled", False))
                 stack.enter_context(patch.object(pipeline.settings, "frontend_transcript_cache_enabled", True))
                 stack.enter_context(patch.object(pipeline.settings, "pipeline_full_visual_feature_max_duration_sec", 7200.0))
@@ -1459,7 +1527,7 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         ],
                     )
                 )
-                stack.enter_context(patch.object(pipeline.asyncio, "create_task", side_effect=fake_create_task))
+                stack.enter_context(patch.object(pipeline, "_cleanup_later", side_effect=_noop_cleanup_later))
 
                 await pipeline.run_pipeline(
                     "job-cache",
@@ -1501,6 +1569,11 @@ def _import_pipeline_with_stubs():
     )
     _stub_module("services.audio_extractor", extract=lambda *_args, **_kwargs: None)
     _stub_module(
+        "services.transcriber",
+        RichSegment=RichSegment,
+        transcribe_with_progress=lambda *_args, **_kwargs: [],
+    )
+    _stub_module(
         "services.audio_features",
         AudioFeatureFrame=_AudioFeatureFrameStub,
         extract=lambda *_args, **_kwargs: [],
@@ -1526,7 +1599,11 @@ def _import_pipeline_with_stubs():
         refine_candidates=lambda *_args, **_kwargs: [],
         expand_variants=lambda moments, *_args, **_kwargs: moments,
     )
-    _stub_module("services.clipper", cut_clips=lambda *_args, **_kwargs: [])
+    _stub_module(
+        "services.clipper",
+        cut_clips=lambda *_args, **_kwargs: [],
+        cut_review_clips=lambda _video_path, rows, *_args, **_kwargs: rows,
+    )
     _stub_module("services.feature_builder", build_features=lambda *_args, **_kwargs: [])
     _stub_module("services.semantic_candidates", preload_model=lambda: True)
     _stub_module("services.clip_judge", rerank_candidates=lambda ranked, *_args, **_kwargs: ranked)

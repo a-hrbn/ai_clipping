@@ -29,12 +29,8 @@ def build_audit(*, profile: str, artifact_dir: Path) -> dict[str, Any]:
     artifact_dir = Path(artifact_dir)
     paths = {
         "ranker": artifact_dir / f"{profile}_ranker.json",
-        "proposal_scorer": artifact_dir / f"{profile}_proposal_scorer.json",
         "boundary_ranker": artifact_dir / f"{profile}_boundary_ranker.json",
         "cross_platform_rows": artifact_dir / f"{profile}_cross_platform_fingerprint_rows.jsonl",
-        "proposal_training_rows": artifact_dir / f"{profile}_proposal_training_rows.jsonl",
-        "proposal_training_summary": artifact_dir / f"{profile}_proposal_training_summary.json",
-        "proposal_training_pipeline_summary": artifact_dir / f"{profile}_proposal_training_pipeline_summary.json",
         "ranker_eval": artifact_dir / f"{profile}_ranker_eval_summary.json",
         "rollout_readiness": artifact_dir / f"{profile}_rollout_readiness_summary.json",
     }
@@ -51,9 +47,7 @@ def build_audit(*, profile: str, artifact_dir: Path) -> dict[str, Any]:
             "artifact_count": len(artifacts),
             "existing_artifacts": sum(1 for row in artifacts.values() if row["exists"]),
             "warnings": len(warnings),
-            "proposal_rows": artifacts["proposal_training_rows"].get("rows"),
             "cross_platform_rows": artifacts["cross_platform_rows"].get("rows"),
-            "proposal_status": artifacts["proposal_scorer"].get("training_status"),
             "ranker_status": artifacts["ranker"].get("training_status"),
         },
     }
@@ -88,16 +82,6 @@ def _artifact_snapshot(path: Path) -> dict[str, Any]:
 
 def _warnings(artifacts: dict[str, dict[str, Any]]) -> list[dict[str, str]]:
     warnings: list[dict[str, str]] = []
-    proposal = artifacts.get("proposal_scorer") or {}
-    proposal_summary = artifacts.get("proposal_training_pipeline_summary") or {}
-    if proposal.get("exists") and proposal_summary.get("exists") and proposal.get("mtime") and proposal_summary.get("mtime"):
-        if str(proposal_summary["mtime"]) < str(proposal["mtime"]):
-            warnings.append(
-                {
-                    "code": "proposal_summary_older_than_artifact",
-                    "message": "Proposal training pipeline summary is older than the proposal scorer artifact.",
-                }
-            )
     if artifacts.get("cross_platform_rows", {}).get("rows") in (0, None):
         warnings.append({"code": "cross_platform_rows_missing", "message": "No cross-platform positive rows were found."})
     return warnings

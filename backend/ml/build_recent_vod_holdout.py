@@ -27,30 +27,76 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", type=pathlib.Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--summary-output", type=pathlib.Path, default=DEFAULT_SUMMARY)
     parser.add_argument("--count", type=int, default=10)
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Recompute the latest-VOD holdout even when an existing policy file is present.",
+    )
     args = parser.parse_args(argv)
 
     inventory_rows = read_jsonl(args.vod_inventory)
-    selected = select_recent_vods(inventory_rows, count=max(int(args.count or 0), 0))
+    requested_count = max(int(args.count or 0), 0)
+    existing_rows = _read_existing_policy(args.output) if requested_count > 0 and not args.refresh else []
+    if existing_rows:
+        summary = _summary_payload(
+            event="recent_vod_holdout_policy_preserved",
+            profile=args.profile,
+            vod_inventory=args.vod_inventory,
+            output=args.output,
+            inventory_rows=inventory_rows,
+            policy_rows=existing_rows,
+            requested_count=requested_count,
+        )
+        summary["preserved_existing_output"] = True
+        summary["refresh"] = False
+        _write_json_if_changed(args.summary_output, summary)
+        print(json.dumps(summary, ensure_ascii=True, sort_keys=True))
+        return 0
+
+    selected = select_recent_vods(inventory_rows, count=requested_count)
     policy_rows = [policy_row(row, profile=args.profile, rank=index + 1) for index, row in enumerate(selected)]
     _write_jsonl_if_changed(args.output, policy_rows)
 
+    summary = _summary_payload(
+        event="recent_vod_holdout_policy_built",
+        profile=args.profile,
+        vod_inventory=args.vod_inventory,
+        output=args.output,
+        inventory_rows=inventory_rows,
+        policy_rows=policy_rows,
+        requested_count=requested_count,
+    )
+    summary["preserved_existing_output"] = False
+    summary["refresh"] = bool(args.refresh)
+    _write_json_if_changed(args.summary_output, summary)
+    print(json.dumps(summary, ensure_ascii=True, sort_keys=True))
+    return 0
+
+
+def _summary_payload(
+    *,
+    event: str,
+    profile: str,
+    vod_inventory: pathlib.Path,
+    output: pathlib.Path,
+    inventory_rows: list[dict],
+    policy_rows: list[dict],
+    requested_count: int,
+) -> dict:
     created_values = [str(row.get("created_at") or "") for row in policy_rows if str(row.get("created_at") or "")]
-    summary = {
-        "event": "recent_vod_holdout_policy_built",
-        "profile": args.profile,
-        "vod_inventory": str(args.vod_inventory),
+    return {
+        "event": event,
+        "profile": profile,
+        "vod_inventory": str(vod_inventory),
         "input_rows": len(inventory_rows),
-        "output": str(args.output),
+        "output": str(output),
         "rows": len(policy_rows),
-        "requested_count": max(int(args.count or 0), 0),
+        "requested_count": requested_count,
         "selected_vod_ids": [str(row.get("vod_id") or "") for row in policy_rows],
         "latest_created_at": created_values[0] if created_values else "",
         "oldest_created_at": created_values[-1] if created_values else "",
         "missing_created_at_rows": sum(1 for row in inventory_rows if not str(row.get("created_at") or "").strip()),
     }
-    _write_json_if_changed(args.summary_output, summary)
-    print(json.dumps(summary, ensure_ascii=True, sort_keys=True))
-    return 0
 
 
 def select_recent_vods(rows: list[dict], *, count: int) -> list[dict]:
@@ -129,6 +175,13 @@ def _optional_float(value) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _read_existing_policy(path: pathlib.Path) -> list[dict]:
+    if not path.exists():
+        return []
+    rows = read_jsonl(path)
+    return [row for row in rows if str(row.get("vod_id") or "").strip()]
 
 
 def _write_jsonl_if_changed(path: pathlib.Path, rows: list[dict]) -> None:

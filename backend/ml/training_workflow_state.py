@@ -46,13 +46,13 @@ def build_jynxzi_workflow_state(
             os.environ.get("VOD_RANKER_SERVING_HARD_NEGATIVE_WEIGHT") or "2.0"
         ).strip() or "2.0",
         "ranker_serving_hard_negative_pre_judge_top_k": (
-            os.environ.get("SERVING_HARD_NEGATIVE_PRE_JUDGE_TOP_K") or "80"
+            os.environ.get("SERVING_HARD_NEGATIVE_PRE_JUDGE_TOP_K") or "500"
         ).strip() or "80",
         "ranker_serving_hard_negative_max_per_vod": (
             os.environ.get("SERVING_HARD_NEGATIVE_MAX_PER_VOD") or "20"
         ).strip() or "20",
         "ranker_serving_hard_negative_max_rows": (
-            os.environ.get("SERVING_HARD_NEGATIVE_MAX_ROWS") or "300"
+            os.environ.get("SERVING_HARD_NEGATIVE_MAX_ROWS") or "0"
         ).strip() or "300",
         "ranker_serving_hard_negative_positive_exclusion_overlap": (
             os.environ.get("SERVING_HARD_NEGATIVE_POSITIVE_EXCLUSION_OVERLAP") or "0.25"

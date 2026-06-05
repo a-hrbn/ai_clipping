@@ -18,7 +18,7 @@ class EvaluateServingRecallHoldoutTests(unittest.TestCase):
                     "positive_windows": 2,
                     "recall_by_stage": {
                         "dense_inventory": {"matched": 2, "total": 2, "ratio": 1.0},
-                        "proposal_kept": {"matched": 1, "total": 2, "ratio": 0.5},
+                        "ranked_pre_judge": {"matched": 1, "total": 2, "ratio": 0.5},
                         "final_moments": {"matched": 0, "total": 2, "ratio": 0.0},
                     },
                     "details": [
@@ -26,7 +26,7 @@ class EvaluateServingRecallHoldoutTests(unittest.TestCase):
                             "positive_id": "short-a",
                             "start": 10.0,
                             "end": 30.0,
-                            "last_matched_stage": "proposal_kept",
+                            "last_matched_stage": "ranked_pre_judge",
                         }
                     ],
                 },
@@ -39,7 +39,7 @@ class EvaluateServingRecallHoldoutTests(unittest.TestCase):
                     "positive_windows": 1,
                     "recall_by_stage": {
                         "dense_inventory": {"matched": 1, "total": 1, "ratio": 1.0},
-                        "proposal_kept": {"matched": 1, "total": 1, "ratio": 1.0},
+                        "ranked_pre_judge": {"matched": 1, "total": 1, "ratio": 1.0},
                         "final_moments": {"matched": 1, "total": 1, "ratio": 1.0},
                     },
                     "details": [],
@@ -54,7 +54,7 @@ class EvaluateServingRecallHoldoutTests(unittest.TestCase):
         self.assertEqual(report["jobs_evaluated"], 2)
         self.assertEqual(report["aggregate"]["positive_windows"], 3)
         self.assertEqual(report["aggregate"]["recall_by_stage"]["dense_inventory"]["ratio"], 1.0)
-        self.assertEqual(report["aggregate"]["recall_by_stage"]["proposal_kept"]["matched"], 2)
+        self.assertEqual(report["aggregate"]["recall_by_stage"]["ranked_pre_judge"]["matched"], 2)
         self.assertEqual(report["aggregate"]["recall_by_stage"]["final_moments"]["ratio"], 0.333333)
 
     def test_evaluate_holdout_skips_jobs_with_recall_target_markers(self) -> None:
@@ -94,7 +94,7 @@ class EvaluateServingRecallHoldoutTests(unittest.TestCase):
                 vod_id="123",
                 recall={
                     "positive_windows": 1,
-                    "recall_by_stage": {"proposal_kept": {"matched": 1, "total": 1, "ratio": 1.0}},
+                    "recall_by_stage": {"ranked_pre_judge": {"matched": 1, "total": 1, "ratio": 1.0}},
                     "details": [],
                 },
                 diagnostics={},
@@ -147,6 +147,104 @@ class EvaluateServingRecallHoldoutTests(unittest.TestCase):
         self.assertEqual(report["jobs_skipped"], {"duplicate_vod_run": 1})
         self.assertEqual(report["jobs"][0]["job_id"], "job-new")
         self.assertEqual(report["aggregate"]["recall_by_stage"]["final_moments"]["ratio"], 1.0)
+
+    def test_evaluate_holdout_reports_product_precision_and_recall_at_k(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Path(tmp) / "storage"
+            self._write_job(
+                storage,
+                "job-a",
+                vod_id="123",
+                recall={
+                    "positive_windows": 2,
+                    "recall_by_stage": {"final_ranked": {"matched": 1, "total": 2, "ratio": 0.5}},
+                    "details": [
+                        {"positive_id": "short-a", "start": 10.0, "end": 20.0},
+                        {"positive_id": "short-b", "start": 100.0, "end": 110.0},
+                    ],
+                },
+                trace_rows=[
+                    {
+                        "candidate_id": "good",
+                        "start": 10.0,
+                        "end": 20.0,
+                        "final_rank": 1,
+                        "final_selected": True,
+                        "stages": {
+                            "final_ranked": {"status": "selected", "rank": 1},
+                            "final_moments": {"status": "selected", "index": 1},
+                        },
+                    },
+                    {
+                        "candidate_id": "miss",
+                        "start": 30.0,
+                        "end": 40.0,
+                        "final_rank": 2,
+                        "stages": {
+                            "final_ranked": {"status": "selected", "rank": 2},
+                        },
+                    },
+                ],
+            )
+
+            report = evaluate_serving_recall_holdout.evaluate_holdout(
+                storage_dir=storage,
+                positive_rows_path=None,
+                product_k_values=[1, 2],
+            )
+
+        job_metrics = report["jobs"][0]["product_selection"]["final_ranked"]
+        self.assertEqual(job_metrics["k1"]["selected_candidate_rows"], 1)
+        self.assertEqual(job_metrics["k1"]["selected_positive_candidates"], 1)
+        self.assertEqual(job_metrics["k1"]["precision"], 1.0)
+        self.assertEqual(job_metrics["k1"]["per_vod_recall"], 0.5)
+        self.assertEqual(job_metrics["k2"]["selected_candidate_rows"], 2)
+        self.assertEqual(job_metrics["k2"]["precision"], 0.5)
+        aggregate = report["aggregate"]["product_selection"]["final_ranked@k2"]
+        self.assertEqual(aggregate["precision"], 0.5)
+        self.assertEqual(aggregate["precision_at_capacity"], 0.5)
+        self.assertEqual(aggregate["per_vod_recall"], 0.5)
+
+    def test_evaluate_holdout_reports_median_metrics_for_repeat_vod_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Path(tmp) / "storage"
+            recall = {
+                "positive_windows": 1,
+                "recall_by_stage": {"final_ranked": {"matched": 1, "total": 1, "ratio": 1.0}},
+                "details": [{"positive_id": "short-a", "start": 10.0, "end": 20.0}],
+            }
+            for index, selected in enumerate([True, False, True], start=1):
+                trace_rows = []
+                if selected:
+                    trace_rows.append(
+                        {
+                            "candidate_id": f"candidate-{index}",
+                            "start": 10.0,
+                            "end": 20.0,
+                            "final_rank": 1,
+                            "stages": {"final_ranked": {"status": "selected", "rank": 1}},
+                        }
+                    )
+                self._write_job(
+                    storage,
+                    f"job-{index}",
+                    vod_id="123",
+                    recall=recall,
+                    trace_rows=trace_rows or [{"candidate_id": f"candidate-{index}"}],
+                )
+
+            report = evaluate_serving_recall_holdout.evaluate_holdout(
+                storage_dir=storage,
+                positive_rows_path=None,
+                latest_per_vod=False,
+                product_k_values=[1],
+            )
+
+        robust = report["aggregate"]["robust_product_selection"]
+        self.assertEqual(robust["vods_with_3plus_runs"], 1)
+        self.assertEqual(robust["by_vod"]["123"]["runs"], 3)
+        self.assertEqual(robust["by_metric"]["final_ranked@k1"]["median_precision"], 1.0)
+        self.assertEqual(robust["by_metric"]["final_ranked@k1"]["median_per_vod_recall"], 1.0)
 
     def _write_job(
         self,

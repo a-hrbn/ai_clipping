@@ -1,10 +1,12 @@
 import asyncio
 import json
 import logging
+import os
 import pathlib
 import re
 import shutil
 import subprocess
+import uuid
 from dataclasses import asdict, fields, is_dataclass, replace
 from types import SimpleNamespace
 from config import settings
@@ -23,7 +25,6 @@ from services import (
     candidate_generators,
     candidate_normalizer,
     feature_builder,
-    proposal_scorer,
     selector,
     feedback_store,
     peak_detector,
@@ -42,6 +43,7 @@ from services.transcriber import RichSegment
 logger = logging.getLogger(__name__)
 
 _TWITCH_VOD_RE = re.compile(r"twitch\.tv/videos/(\d+)")
+_AUDIO_CACHE_VERSION = 1
 _FEATURE_FRAME_CACHE_VERSION = 1
 _CROSS_PLATFORM_CONTEXT_TEXT_FIELDS = (
     "repost_title",
@@ -69,7 +71,7 @@ def _frontend_cache_enabled_for_job(job_id: str) -> bool:
     if bool(getattr(settings, "frontend_job_cache_enabled", False)):
         return True
     job_id = str(job_id or "")
-    return job_id.startswith(("twitch_vod", "proposal_training_", "judge_backfill_"))
+    return job_id.startswith(("twitch_vod", "judge_backfill_"))
 
 
 def _transcript_cache_enabled_for_job(job_id: str, url: str | None) -> bool:
@@ -323,9 +325,8 @@ def _cross_platform_recall_preserve_ids(
     """Pick a small set of candidate ids that must not be deduped away.
 
     The full target set can include many overlapping inventory windows for the
-    same repost. For merge/proposal preservation we only need the strongest few
-    per positive window so known-good supervision does not flood the serving
-    funnel.
+    same repost. For merge preservation we only need the strongest few per
+    positive window so known-good supervision does not flood the serving funnel.
     """
 
     if not positives or max_per_positive <= 0:
@@ -357,52 +358,6 @@ def _cross_platform_recall_preserve_ids(
         rows.sort(reverse=True)
         preserved.update(candidate_id for *_scores, candidate_id in rows[:max_per_positive])
     return preserved
-
-
-def _preserve_proposal_recall_candidates(proposal_result, proposal_input_candidates, preserve_ids: set[str]):
-    if not preserve_ids or proposal_result is None:
-        return proposal_result
-    candidate_by_id = {str(candidate.id): candidate for candidate in proposal_input_candidates}
-    kept_by_id = {str(candidate.id): candidate for candidate in proposal_result.kept}
-    missing = [
-        candidate_by_id[candidate_id]
-        for candidate_id in sorted(preserve_ids)
-        if candidate_id in candidate_by_id and candidate_id not in kept_by_id
-    ]
-    if not missing:
-        return proposal_result
-
-    score_by_id = {
-        str(row.get("candidate_id") or row.get("id") or ""): float(row.get("score") or 0.0)
-        for row in proposal_result.audit_rows
-    }
-    limit = max(int(proposal_result.summary.get("top_k") or 0), 0)
-    kept = [*proposal_result.kept, *missing]
-    if limit > 0 and len(kept) > limit:
-        target_ids = set(preserve_ids)
-        target_kept = [candidate for candidate in kept if str(candidate.id) in target_ids]
-        other_kept = [candidate for candidate in kept if str(candidate.id) not in target_ids]
-        other_kept.sort(key=lambda candidate: score_by_id.get(str(candidate.id), 0.0), reverse=True)
-        kept = [*target_kept, *other_kept[: max(limit - len(target_kept), 0)]]
-
-    kept_ids = {str(candidate.id) for candidate in kept}
-    proposal_result.kept = kept
-    for row in proposal_result.audit_rows:
-        candidate_id = str(row.get("candidate_id") or row.get("id") or "")
-        if candidate_id in preserve_ids:
-            row["cross_platform_recall_target"] = True
-            row["proposal_recall_target"] = True
-            rationale = list(row.get("rationale") or [])
-            if "cross_platform_recall_target" not in rationale:
-                rationale.append("cross_platform_recall_target")
-            row["rationale"] = rationale
-        if candidate_id in kept_ids:
-            row["accepted"] = True
-    proposal_result.summary["kept_candidates"] = len(kept)
-    proposal_result.summary["proposal_recall_preserved_candidates"] = len(
-        [candidate for candidate in kept if str(candidate.id) in preserve_ids]
-    )
-    return proposal_result
 
 
 _CONTEXT_VARIANT_SOURCES = {
@@ -670,24 +625,6 @@ def _promote_cross_platform_recall_candidates(candidates, positives: list[dict],
     return sorted(selected, key=lambda candidate: (candidate.start, candidate.end, candidate.anchor_time)), summary
 
 
-def _annotate_proposal_rows_with_cross_platform_targets(proposal_rows: list[dict], targets: dict[str, dict]) -> list[dict]:
-    if not targets:
-        return list(proposal_rows)
-    annotated: list[dict] = []
-    for row in proposal_rows:
-        copied = dict(row)
-        target = targets.get(str(copied.get("candidate_id") or ""))
-        if target:
-            copied["cross_platform_recall_target"] = True
-            copied["proposal_recall_target"] = True
-            copied.update(target)
-            rationale = list(copied.get("rationale") or [])
-            if "cross_platform_recall_target" not in rationale:
-                rationale.append("cross_platform_recall_target")
-            copied["rationale"] = rationale
-        annotated.append(copied)
-    return annotated
-
 
 def _apply_cross_platform_feature_boosts(features, targets: dict[str, dict]) -> dict:
     if not targets:
@@ -798,6 +735,17 @@ def _feature_cache_path(cache_source: str | None, kind: str) -> pathlib.Path | N
     return pathlib.Path(settings.storage_dir) / "_feature_cache" / digest / f"{safe_kind}_frames.json"
 
 
+def _audio_cache_path(cache_source: str | None) -> pathlib.Path | None:
+    digest = transcriber.stable_cache_key_for_source(cache_source)
+    if not digest:
+        return None
+    return pathlib.Path(settings.storage_dir) / "_audio_cache" / digest / "audio.wav"
+
+
+def _audio_cache_metadata_path(audio_cache_path: pathlib.Path) -> pathlib.Path:
+    return audio_cache_path.with_name("audio_metadata.json")
+
+
 def _feature_cache_metadata(kind: str, cache_source: str, video_path: pathlib.Path | None) -> dict:
     metadata: dict[str, object] = {
         "version": _FEATURE_FRAME_CACHE_VERSION,
@@ -812,6 +760,20 @@ def _feature_cache_metadata(kind: str, cache_source: str, video_path: pathlib.Pa
         metadata["full_visual_feature_max_duration_sec"] = float(
             settings.pipeline_full_visual_feature_max_duration_sec or 0.0
         )
+    return metadata
+
+
+def _audio_cache_metadata(cache_source: str, video_path: pathlib.Path | None) -> dict:
+    metadata: dict[str, object] = {
+        "version": _AUDIO_CACHE_VERSION,
+        "source": cache_source,
+        "sample_rate_hz": 16000,
+        "channels": 1,
+        "codec": "pcm_s16le",
+    }
+    if video_path is not None:
+        duration_sec = _probe_media_duration_sec(video_path)
+        metadata["duration_sec"] = round(duration_sec, 3) if duration_sec is not None else None
     return metadata
 
 
@@ -864,6 +826,107 @@ def _json_safe_cache_value(value: object) -> object:
             pass
 
     return str(value)
+
+
+def _link_or_copy_cache_file(source: pathlib.Path, target: pathlib.Path) -> pathlib.Path:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if source.resolve(strict=False) == target.resolve(strict=False):
+            return target
+    except OSError:
+        pass
+    target.unlink(missing_ok=True)
+    try:
+        os.link(source, target)
+    except OSError:
+        shutil.copy2(source, target)
+    return target
+
+
+def _job_audio_cache_target(job_id: str) -> pathlib.Path:
+    return pathlib.Path(settings.storage_dir) / job_id / "audio.wav"
+
+
+def _load_audio_cache(
+    cache_source: str | None,
+    *,
+    video_path: pathlib.Path,
+    job_id: str,
+) -> pathlib.Path | None:
+    path = _audio_cache_path(cache_source)
+    if path is None or not path.exists():
+        return None
+    metadata_path = _audio_cache_metadata_path(path)
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if path.stat().st_size <= 44:
+            return None
+    except (OSError, json.JSONDecodeError):
+        logger.warning("pipeline_audio_cache_read_failed path=%s", path, exc_info=True)
+        return None
+    expected = _audio_cache_metadata(str(cache_source), video_path)
+    if not _metadata_matches(metadata, expected):
+        logger.info("pipeline_audio_cache_stale source=%s path=%s", cache_source, path)
+        return None
+    target = _job_audio_cache_target(job_id)
+    try:
+        _link_or_copy_cache_file(path, target)
+    except OSError:
+        logger.warning("pipeline_audio_cache_link_failed source=%s path=%s", cache_source, path, exc_info=True)
+        return None
+    logger.info("pipeline_audio_cache_hit job_id=%s source=%s path=%s", job_id, cache_source, path)
+    return target
+
+
+def _write_audio_cache(
+    cache_source: str | None,
+    *,
+    video_path: pathlib.Path,
+    audio_path: pathlib.Path,
+) -> None:
+    path = _audio_cache_path(cache_source)
+    if path is None:
+        return
+    try:
+        if not audio_path.exists() or audio_path.stat().st_size <= 44:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_token = f"{os.getpid()}.{uuid.uuid4().hex}"
+        tmp_path = path.with_suffix(path.suffix + f".tmp.{write_token}")
+        _link_or_copy_cache_file(audio_path, tmp_path)
+        tmp_path.replace(path)
+        metadata = _audio_cache_metadata(str(cache_source), video_path)
+        metadata_path = _audio_cache_metadata_path(path)
+        tmp_metadata_path = metadata_path.with_suffix(metadata_path.suffix + f".tmp.{write_token}")
+        tmp_metadata_path.write_text(
+            json.dumps(_json_safe_cache_value(metadata), ensure_ascii=True),
+            encoding="utf-8",
+        )
+        tmp_metadata_path.replace(metadata_path)
+        logger.info(
+            "pipeline_audio_cache_written source=%s path=%s size_bytes=%s",
+            cache_source,
+            path,
+            path.stat().st_size,
+        )
+    except (OSError, TypeError, ValueError):
+        logger.warning("pipeline_audio_cache_write_failed source=%s path=%s", cache_source, path, exc_info=True)
+
+
+def _extract_audio_cached(
+    video_path: pathlib.Path,
+    job_id: str,
+    *,
+    cache_source: str | None,
+) -> pathlib.Path:
+    cached = _load_audio_cache(cache_source, video_path=video_path, job_id=job_id) if cache_source else None
+    if cached is not None:
+        return cached
+    logger.info("pipeline_audio_cache_miss job_id=%s source=%s", job_id, cache_source)
+    audio_path = audio_extractor.extract(video_path, job_id)
+    if cache_source:
+        _write_audio_cache(cache_source, video_path=video_path, audio_path=audio_path)
+    return audio_path
 
 
 def _load_feature_frame_cache(cache_source: str | None, kind: str, frame_cls, metadata: dict) -> list | None:
@@ -930,6 +993,7 @@ def _extract_audio_features_cached(
     audio_path: pathlib.Path | None,
     job_id: str,
     cache_source: str | None,
+    audio_cache_source: str | None = None,
 ) -> tuple[list[audio_features.AudioFeatureFrame], pathlib.Path | None]:
     metadata = _feature_cache_metadata("audio", cache_source, video_path) if cache_source else {}
     cached = (
@@ -941,7 +1005,11 @@ def _extract_audio_features_cached(
         return cached, audio_path
     logger.info("pipeline_feature_cache_miss kind=audio source=%s", cache_source)
     if audio_path is None:
-        audio_path = audio_extractor.extract(video_path, job_id)
+        audio_path = _extract_audio_cached(
+            video_path,
+            job_id,
+            cache_source=audio_cache_source if audio_cache_source is not None else cache_source,
+        )
     frames = audio_features.extract(audio_path)
     if cache_source:
         _write_feature_frame_cache(cache_source, "audio", frames, metadata)
@@ -952,6 +1020,7 @@ def _extract_video_features_cached(
     video_path: pathlib.Path,
     *,
     cache_source: str | None,
+    allow_extract: bool = True,
 ) -> list[video_features.VideoFeatureFrame]:
     metadata = _feature_cache_metadata("video", cache_source, video_path) if cache_source else {}
     cached = (
@@ -961,6 +1030,9 @@ def _extract_video_features_cached(
     )
     if cached is not None:
         return cached
+    if not allow_extract:
+        logger.info("pipeline_feature_cache_skip kind=video reason=full_visual_feature_limit source=%s", cache_source)
+        return []
     logger.info("pipeline_feature_cache_miss kind=video source=%s", cache_source)
     frames = video_features.extract(video_path)
     if cache_source:
@@ -1014,7 +1086,6 @@ def _build_review_candidate_rows(
                 "end_time": round(end, 3),
                 "duration": round(end - start, 3),
                 "rank_score": payload.get("rank_score"),
-                "proposal_score": trace.get("proposal_score"),
                 "pre_judge_rank": trace.get("pre_judge_rank"),
                 "judge_score": payload.get("judge_score"),
                 "selected": bool(payload.get("selected")),
@@ -1103,7 +1174,7 @@ async def _await_clip_judge_or_fallback(
 
 def _build_judge_recall_reserved_order(
     ranked_candidates: list[RankedCandidate],
-    proposal_audit_rows: list[dict] | tuple[dict, ...],
+    recall_signal_rows: list[dict] | tuple[dict, ...],
     judge_top_k: int,
 ) -> tuple[list[RankedCandidate], dict]:
     """Reserve some judge slots for deeper candidates with strong recall signals."""
@@ -1137,9 +1208,9 @@ def _build_judge_recall_reserved_order(
         total_candidates,
     )
     min_score = float(getattr(settings, "judge_recall_reserve_min_score", 0.12) or 0.0)
-    proposal_by_id = {
+    recall_signal_by_id = {
         _base_candidate_id(str(row.get("candidate_id") or row.get("id") or "")): row
-        for row in proposal_audit_rows
+        for row in recall_signal_rows
         if row.get("candidate_id") or row.get("id")
     }
     normal = list(ranked_candidates[:normal_slots])
@@ -1149,17 +1220,16 @@ def _build_judge_recall_reserved_order(
         candidate_id = _base_candidate_id(ranked.candidate.id)
         if candidate_id in normal_ids:
             continue
-        proposal_row = proposal_by_id.get(candidate_id, {})
-        protection = high_recall_protection.oracle_free_recall_score(ranked, proposal_row)
-        reserve_score = _judge_recall_reserve_score(ranked, proposal_row, index, pool_k, protection)
+        recall_signal = recall_signal_by_id.get(candidate_id, {})
+        protection = high_recall_protection.oracle_free_recall_score(ranked)
+        reserve_score = _judge_recall_reserve_score(ranked, index, pool_k, protection)
         if reserve_score < min_score:
             continue
-        scored.append((reserve_score, index, ranked, proposal_row))
+        scored.append((reserve_score, index, ranked, recall_signal))
 
     scored.sort(
         key=lambda item: (
             item[0],
-            _safe_float(item[3].get("score") or item[3].get("model_score")),
             _safe_float(item[2].rank_score),
         ),
         reverse=True,
@@ -1212,13 +1282,12 @@ def _build_judge_recall_reserved_order(
                     "end": round(float(ranked.candidate.end), 3),
                     "pre_judge_rank": index,
                     "pre_judge_rank_score": round(_safe_float(ranked.rank_score), 6),
-                    "proposal_score": round(_safe_float(row.get("score") or row.get("model_score")), 6),
                     "reserve_score": round(score, 6),
                     "high_recall_score": protection["score"],
                     "high_recall_reasons": list(protection["reasons"]),
                 }
                 for score, index, ranked, row in selected
-                for protection in [high_recall_protection.oracle_free_recall_score(ranked, row)]
+                for protection in [high_recall_protection.oracle_free_recall_score(ranked)]
             ],
         }
     )
@@ -1227,14 +1296,11 @@ def _build_judge_recall_reserved_order(
 
 def _judge_recall_reserve_score(
     ranked: RankedCandidate,
-    proposal_row: dict,
     pre_judge_rank: int,
     pool_k: int,
     protection: dict[str, object] | None = None,
 ) -> float:
     features = ranked.features
-    proposal_score = _safe_float(proposal_row.get("score") or proposal_row.get("model_score"))
-    proposal_heuristic = _safe_float(proposal_row.get("heuristic_score"))
     rank_score = min(max(_safe_float(ranked.rank_score) / 12.0, 0.0), 1.0)
     heuristic_score = min(max(_safe_float(ranked.heuristic_rank_score) / 12.0, 0.0), 1.0)
     score_hint = min(max(_safe_float(ranked.candidate.score_hint) / 10.0, 0.0), 1.0)
@@ -1270,9 +1336,7 @@ def _judge_recall_reserve_score(
         protection_score = min(max(_safe_float(protection.get("score")), 0.0), 1.0)
     source_bonus = 0.06 if ranked.candidate.source in {"dense_inventory", "dense_window", "dense"} else 0.0
     return (
-        1.75 * proposal_score
-        + 0.45 * proposal_heuristic
-        + 0.35 * rank_score
+        0.35 * rank_score
         + 0.20 * heuristic_score
         + 0.15 * score_hint
         + 0.08 * rank_position
@@ -1295,6 +1359,18 @@ def _candidate_overlap_ratio(left: RankedCandidate, right: RankedCandidate) -> f
 
 def _base_candidate_id(candidate_id: str) -> str:
     return candidate_id.split("::", 1)[0]
+
+
+def _unique_candidates_by_id(candidates: list[Candidate]) -> list[Candidate]:
+    unique: list[Candidate] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        candidate_id = str(candidate.id)
+        if candidate_id in seen:
+            continue
+        seen.add(candidate_id)
+        unique.append(candidate)
+    return unique
 
 
 def _safe_float(value) -> float:
@@ -1348,6 +1424,7 @@ async def run_pipeline(
             url=url,
             video_path=video_path,
         )
+        audio_cache_source = transcript_cache_source or feature_cache_source
         chat_path = None
         if settings.enable_chat_analysis:
             update_job(job_id, status="downloading_chat", progress_pct=28)
@@ -1382,7 +1459,14 @@ async def run_pipeline(
             )
         else:
             update_job(job_id, status="extracting_audio", progress_pct=20)
-            audio_path = await loop.run_in_executor(None, audio_extractor.extract, video_path, job_id)
+            audio_path = await loop.run_in_executor(
+                None,
+                lambda: _extract_audio_cached(
+                    video_path,
+                    job_id,
+                    cache_source=audio_cache_source,
+                ),
+            )
 
             # Start non-transcription tasks in the background, but keep transcription
             # as its own visible phase so long uploads do not appear stuck.
@@ -1410,14 +1494,16 @@ async def run_pipeline(
                     audio_path=audio_path,
                     job_id=job_id,
                     cache_source=feature_cache_source,
+                    audio_cache_source=audio_cache_source,
                 ),
             )
-            if extract_full_visual_features:
+            if extract_full_visual_features or feature_cache_source:
                 video_features_task = loop.run_in_executor(
                     None,
                     lambda: _extract_video_features_cached(
                         video_path,
                         cache_source=feature_cache_source,
+                        allow_extract=extract_full_visual_features,
                     ),
                 )
 
@@ -1436,16 +1522,18 @@ async def run_pipeline(
                     audio_path=audio_path,
                     job_id=job_id,
                     cache_source=feature_cache_source,
+                    audio_cache_source=audio_cache_source,
                 ),
             )
             _raise_if_cancelled(job_id)
             visual_frames = []
-            if extract_full_visual_features:
+            if extract_full_visual_features or feature_cache_source:
                 visual_frames = await loop.run_in_executor(
                     None,
                     lambda: _extract_video_features_cached(
                         video_path,
                         cache_source=feature_cache_source,
+                        allow_extract=extract_full_visual_features,
                     ),
                 )
 
@@ -1457,7 +1545,14 @@ async def run_pipeline(
         # pyannote already ran inside transcriber.transcribe() when hf_token is set
         if settings.pipeline_enable_diarization and not settings.hf_token and audio_path is None:
             update_job(job_id, status="extracting_audio", progress_pct=64)
-            audio_path = await loop.run_in_executor(None, audio_extractor.extract, video_path, job_id)
+            audio_path = await loop.run_in_executor(
+                None,
+                lambda: _extract_audio_cached(
+                    video_path,
+                    job_id,
+                    cache_source=audio_cache_source,
+                ),
+            )
         if audio_path is not None and settings.pipeline_enable_diarization and not settings.hf_token:
             update_job(job_id, status="diarizing", progress_pct=65)
             transcript = await loop.run_in_executor(
@@ -1509,170 +1604,120 @@ async def run_pipeline(
                 transcript,
                 chapters,
                 normalized_strategy,
-            )
-        heuristic_candidates = await loop.run_in_executor(
-            None,
-            lambda: candidate_generators.merge_prioritized_candidates(
-                peak_candidates or fallback_candidates,
-                [*semantic_candidates, *dense_candidates],
-                strategy=normalized_strategy,
-                source_cap_overrides={
-                    "dense_window": max(int(settings.whole_vod_dense_source_cap or 0), 0),
-                },
-                preserve_context_variants=True,
-                max_context_variants_per_region=3,
-            ),
         )
+        heuristic_merge_audit_rows: list[dict] = []
         dense_inventory_candidates = []
-        proposal_result: proposal_scorer.ProposalResult | None = None
-        context_variant_summary: dict[str, object] = {"enabled": False, "added": 0}
-        context_variant_preserve_ids: set[str] = set()
-        candidates = heuristic_candidates
-        if settings.enable_trainable_candidate_proposal:
-            proposal_inventory_cap = max(int(settings.proposal_dense_max_candidates or 0), 0)
-            dense_inventory_max_candidates = 0 if cross_platform_positive_windows else proposal_inventory_cap
+        cross_platform_dense_recall_summary: dict[str, object] = {"enabled": False, "added": 0}
+        if bool(getattr(settings, "enable_dense_candidate_inventory", True)):
+            dense_inventory_cap = max(int(settings.dense_candidate_inventory_max_candidates or 0), 0)
             dense_inventory_candidates = await loop.run_in_executor(
                 None,
                 lambda: candidate_generators.generate_dense_candidate_inventory(
                     transcript,
                     chapters,
                     normalized_strategy,
-                    durations=_parse_float_list(settings.proposal_dense_durations_sec),
-                    stride_sec=float(settings.proposal_dense_stride_sec),
-                    max_candidates=dense_inventory_max_candidates,
+                    durations=_parse_float_list(settings.dense_candidate_inventory_durations_sec),
+                    stride_sec=float(settings.dense_candidate_inventory_stride_sec),
+                    max_candidates=dense_inventory_cap,
                 ),
             )
             dense_inventory_candidates, cross_platform_dense_recall_summary = _promote_cross_platform_recall_candidates(
                 dense_inventory_candidates,
                 cross_platform_positive_windows,
-                max_candidates=proposal_inventory_cap,
+                max_candidates=dense_inventory_cap,
             )
-            dense_recall_preserve_ids = _cross_platform_recall_preserve_ids(
-                dense_inventory_candidates,
-                cross_platform_positive_windows,
-            )
-            proposal_inventory_merge_cap = proposal_inventory_cap or len(dense_inventory_candidates)
-            proposal_input_candidates = await loop.run_in_executor(
+        dense_recall_preserve_ids = _cross_platform_recall_preserve_ids(
+            dense_inventory_candidates,
+            cross_platform_positive_windows,
+        )
+        ranker_recall_pool = [
+            *semantic_candidates,
+            *dense_candidates,
+            *dense_inventory_candidates,
+        ]
+        merge_recall_carry_summary: dict[str, object] = {"enabled": False, "added": 0}
+        recall_carry_candidates: list[Candidate] = []
+        recall_carry_ids: set[str] = set()
+        if bool(getattr(settings, "merge_recall_carry_forward_enabled", True)):
+            recall_carry_candidates = await loop.run_in_executor(
                 None,
-                lambda: candidate_generators.merge_prioritized_candidates(
-                    heuristic_candidates,
-                    dense_inventory_candidates,
-                    supplemental_source_cap=proposal_inventory_merge_cap,
-                    source_cap_overrides={
-                        "dense_inventory": proposal_inventory_merge_cap,
-                    },
-                    preserve_supplemental_ids=dense_recall_preserve_ids,
-                    preserve_context_variants=True,
-                    max_context_variants_per_region=3,
-                    strategy=normalized_strategy,
-                ),
-            )
-            proposal_input_candidates = await loop.run_in_executor(
-                None,
-                candidate_normalizer.normalize_candidates,
-                proposal_input_candidates,
-                transcript,
-                settings.max_clip_duration,
-            )
-            proposal_input_candidates, context_variant_summary = await loop.run_in_executor(
-                None,
-                lambda: _add_context_variant_candidates(
-                    proposal_input_candidates,
-                    [*semantic_candidates, *dense_candidates, *dense_inventory_candidates],
-                    transcript,
-                    max_duration=settings.max_clip_duration,
-                ),
-            )
-            context_variant_preserve_ids = {
-                str(row.get("candidate_id") or "")
-                for row in context_variant_summary.get("added_candidates", [])
-                if row.get("candidate_id")
-            }
-            proposal_result = await loop.run_in_executor(
-                None,
-                lambda: proposal_scorer.select_candidates(
-                    proposal_input_candidates,
-                    transcript,
-                    effective_profile,
-                    normalized_strategy,
-                    top_k=max(int(settings.proposal_shortlist_top_k or 0), 0),
-                    min_score=float(settings.proposal_min_score or 0.0),
-                ),
-            )
-            proposal_recall_targets = _cross_platform_recall_targets(
-                proposal_input_candidates,
-                cross_platform_positive_windows,
-                profile=effective_profile,
-            )
-            proposal_result.audit_rows = _annotate_proposal_rows_with_cross_platform_targets(
-                proposal_result.audit_rows,
-                proposal_recall_targets,
-            )
-            proposal_result = _preserve_proposal_recall_candidates(
-                proposal_result,
-                proposal_input_candidates,
-                dense_recall_preserve_ids,
-            )
-            proposal_result.summary["cross_platform_recall"] = {
-                **cross_platform_positive_summary,
-                **cross_platform_dense_recall_summary,
-                "proposal_recall_targets": len(proposal_recall_targets),
-                "proposal_recall_preserve_ids": len(dense_recall_preserve_ids),
-            }
-            proposal_result.summary["context_variant_preservation"] = context_variant_summary
-            proposal_shortlist_cap = max(int(settings.proposal_shortlist_top_k or 0), 0)
-            proposal_shortlist_merge_cap = proposal_shortlist_cap or len(proposal_result.kept)
-            if settings.proposal_preserve_heuristic_candidates:
-                proposal_selected_preserve_ids = {str(candidate.id) for candidate in proposal_result.kept}
-                candidates = await loop.run_in_executor(
-                    None,
-                    lambda: candidate_generators.merge_prioritized_candidates(
-                        heuristic_candidates,
-                        proposal_result.kept,
-                        supplemental_source_cap=proposal_shortlist_merge_cap,
-                        source_cap_overrides={
-                            "dense_inventory": proposal_shortlist_merge_cap,
-                            "dense_window": proposal_shortlist_merge_cap,
-                        },
-                        preserve_supplemental_ids=(
-                            proposal_selected_preserve_ids
-                            | dense_recall_preserve_ids
-                            | context_variant_preserve_ids
-                        ),
-                        preserve_context_variants=True,
-                        max_context_variants_per_region=3,
-                        strategy=normalized_strategy,
+                lambda: candidate_generators.select_temporal_recall_candidates(
+                    ranker_recall_pool,
+                    bucket_sec=float(getattr(settings, "merge_recall_carry_bucket_sec", 60.0) or 60.0),
+                    per_source_bucket=max(
+                        int(getattr(settings, "merge_recall_carry_per_source_bucket", 1) or 0),
+                        0,
                     ),
+                    max_candidates=max(
+                        int(getattr(settings, "merge_recall_carry_max_candidates", 700) or 0),
+                        0,
+                    ),
+                ),
+            )
+            recall_carry_ids = {str(candidate.id) for candidate in recall_carry_candidates}
+            recall_carry_cap = max(len(recall_carry_candidates), 1)
+            merge_recall_carry_summary = {
+                "enabled": True,
+                "candidate_pool": len(ranker_recall_pool),
+                "selected_candidates": len(recall_carry_candidates),
+                "added": 0,
+                "output_candidates": 0,
+                "bucket_sec": float(getattr(settings, "merge_recall_carry_bucket_sec", 60.0) or 60.0),
+                "per_source_bucket": max(
+                    int(getattr(settings, "merge_recall_carry_per_source_bucket", 1) or 0),
+                    0,
+                ),
+                "max_candidates": max(
+                    int(getattr(settings, "merge_recall_carry_max_candidates", 700) or 0),
+                    0,
+                ),
+                "sample_candidate_ids": sorted(recall_carry_ids)[:25],
+            }
+        context_variant_summary: dict[str, object] = {"enabled": False, "added": 0}
+        direct_ranker_source_cap = max(
+            int(getattr(settings, "dense_candidate_inventory_source_cap", 700) or 0),
+            0,
+        )
+        source_cap_overrides = {
+            "dense_window": max(int(settings.whole_vod_dense_source_cap or 0), 0),
+            "dense_inventory": direct_ranker_source_cap,
+        }
+        if recall_carry_candidates:
+            recall_carry_cap = max(len(recall_carry_candidates), 1)
+            for source in {candidate.source for candidate in recall_carry_candidates}:
+                source_cap_overrides[source] = max(
+                    int(source_cap_overrides.get(source, 0) or 0),
+                    recall_carry_cap,
                 )
-            else:
-                candidates = proposal_result.kept
-            logger.info(
-                json.dumps(
-                    {
-                        "event": "candidate_proposal_stage_done",
-                        "job_id": job_id,
-                        "heuristic_candidates": len(heuristic_candidates),
-                        "dense_inventory_candidates": len(dense_inventory_candidates),
-                        "merged_candidates": len(candidates),
-                        "context_variant_preservation": context_variant_summary,
-                        "cross_platform_recall": proposal_result.summary.get("cross_platform_recall", {}),
-                        **proposal_result.summary,
-                    },
-                    ensure_ascii=True,
-                    sort_keys=True,
-                )
+        direct_supplemental_candidates = _unique_candidates_by_id(
+            [
+                *recall_carry_candidates,
+                *semantic_candidates,
+                *dense_candidates,
+                *dense_inventory_candidates,
+            ]
+        )
+        heuristic_candidates = await loop.run_in_executor(
+            None,
+            lambda: candidate_generators.merge_prioritized_candidates(
+                peak_candidates or fallback_candidates,
+                direct_supplemental_candidates,
+                strategy=normalized_strategy,
+                supplemental_source_cap=4,
+                source_cap_overrides=source_cap_overrides,
+                preserve_supplemental_ids=recall_carry_ids | dense_recall_preserve_ids,
+                preserve_context_variants=True,
+                max_context_variants_per_region=8 if recall_carry_candidates else 3,
+                audit_rows=heuristic_merge_audit_rows,
+                audit_stage="direct_ranker_merge",
+            ),
+        )
+        if merge_recall_carry_summary.get("enabled"):
+            merge_recall_carry_summary["added"] = sum(
+                1 for candidate in heuristic_candidates if str(candidate.id) in recall_carry_ids
             )
-            proposal_debug_dir = pathlib.Path(settings.storage_dir) / job_id / "debug"
-            proposal_debug_dir.mkdir(parents=True, exist_ok=True)
-            _write_jsonl(
-                proposal_debug_dir / "candidates_dense_inventory.jsonl",
-                [candidate.to_dict() for candidate in dense_inventory_candidates],
-            )
-            _write_jsonl(proposal_debug_dir / "candidate_proposals.jsonl", proposal_result.audit_rows)
-            (proposal_debug_dir / "candidate_proposal_summary.json").write_text(
-                json.dumps(proposal_result.summary, ensure_ascii=True, indent=2),
-                encoding="utf-8",
-            )
+            merge_recall_carry_summary["output_candidates"] = len(heuristic_candidates)
+        candidates = heuristic_candidates
         normalized_candidates = await loop.run_in_executor(
             None,
             candidate_normalizer.normalize_candidates,
@@ -1761,7 +1806,7 @@ async def run_pipeline(
         )
         judge_input_candidates, judge_recall_reserve_summary = _build_judge_recall_reserved_order(
             ranked_candidates,
-            proposal_result.audit_rows if proposal_result is not None else [],
+            [],
             judge_top_k,
         )
         job_dir = pathlib.Path(settings.storage_dir) / job_id
@@ -1783,6 +1828,9 @@ async def run_pipeline(
             "provider_request_timeout_sec": float(settings.clip_judge_timeout_sec or 0.0),
             "fail_fast": bool(getattr(settings, "clip_judge_fail_fast", False)),
             "provider_fallback_enabled": bool(getattr(settings, "judge_provider_fallback_enabled", True)),
+            "sample_count": int(getattr(settings, "clip_judge_sample_count", 1) or 1),
+            "uncertain_sample_count": int(getattr(settings, "clip_judge_uncertain_sample_count", 1) or 1),
+            "cache_enabled": bool(getattr(settings, "clip_judge_cache_enabled", True)),
             "fallback": None,
             "fallback_candidates": 0,
             "processed_candidates": 0,
@@ -1868,6 +1916,8 @@ async def run_pipeline(
                         "judge_recall_reserve": judge_recall_reserve_summary,
                         "judge_provider": judge_provider,
                         "anthropic_two_tier": use_anthropic_two_tier,
+                        "sample_count": int(getattr(settings, "clip_judge_sample_count", 1) or 1),
+                        "uncertain_sample_count": int(getattr(settings, "clip_judge_uncertain_sample_count", 1) or 1),
                         "fail_fast": bool(getattr(settings, "clip_judge_fail_fast", False)),
                         "provider_fallback_enabled": bool(getattr(settings, "judge_provider_fallback_enabled", True)),
                     },
@@ -2170,16 +2220,19 @@ async def run_pipeline(
             debug_dir / "candidates_dense_inventory.jsonl",
             [candidate.to_dict() for candidate in dense_inventory_candidates],
         )
-        _write_jsonl(
-            debug_dir / "candidate_proposals.jsonl",
-            proposal_result.audit_rows if proposal_result is not None else [],
-        )
-        (debug_dir / "candidate_proposal_summary.json").write_text(
-            json.dumps(proposal_result.summary if proposal_result is not None else {}, ensure_ascii=True, indent=2),
-            encoding="utf-8",
-        )
         _write_jsonl(debug_dir / "candidates_fallback.jsonl", [candidate.to_dict() for candidate in fallback_candidates])
         _write_jsonl(debug_dir / "candidates_merged.jsonl", [candidate.to_dict() for candidate in candidates])
+        _write_jsonl(
+            debug_dir / "candidate_merge_audit.jsonl",
+            heuristic_merge_audit_rows,
+        )
+        _write_json(
+            debug_dir / "candidate_merge_summary.json",
+            {
+                "heuristic_merge_audit_rows": len(heuristic_merge_audit_rows),
+                "merge_recall_carry_forward": merge_recall_carry_summary,
+            },
+        )
         _write_jsonl(
             debug_dir / "candidates_normalized.jsonl",
             [candidate.to_dict() for candidate in normalized_candidates],
@@ -2269,7 +2322,6 @@ async def run_pipeline(
                 "merged": candidates,
                 "normalized": normalized_candidates,
             },
-            proposal_audit_rows=proposal_result.audit_rows if proposal_result is not None else [],
             pre_judge_ranked=ranked_candidates_pre_judge,
             judged_ranked=judged_ranked_candidates,
             quality_gate_rows=quality_gate_result.audit_rows,
@@ -2290,7 +2342,6 @@ async def run_pipeline(
                 "merged": candidates,
                 "normalized": normalized_candidates,
             },
-            proposal_audit_rows=proposal_result.audit_rows if proposal_result is not None else [],
             pre_judge_ranked=ranked_candidates_pre_judge,
             judged_ranked=judged_ranked_candidates,
             quality_gate_rows=quality_gate_result.audit_rows,

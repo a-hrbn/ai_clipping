@@ -11,9 +11,16 @@ from services.transcriber import CHUNK_SECONDS
 
 
 class TranscriberChunkingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._backend_patch = patch.object(transcriber.settings, "whisper_backend", "openai")
+        self._backend_patch.start()
+
+    def tearDown(self) -> None:
+        self._backend_patch.stop()
+
     def test_non_overlapping_chunks_use_exact_chunk_offsets(self) -> None:
         offsets = [idx * CHUNK_SECONDS for idx in range(4)]
-        self.assertEqual(offsets, [0, 600, 1200, 1800])
+        self.assertEqual(offsets, [0, 180, 360, 540])
 
     def test_whisper_model_uses_project_local_cache_dir(self) -> None:
         with patch.object(transcriber, "_whisper_model", None), \
@@ -54,6 +61,32 @@ class TranscriberChunkingTests(unittest.TestCase):
         self.assertEqual(len(model.calls), 1)
         self.assertEqual(model.calls[0][1]["language"], "en")
         self.assertFalse(model.calls[0][1]["fp16"])
+        self.assertFalse(model.calls[0][1]["word_timestamps"])
+
+    def test_faster_whisper_backend_converts_segments(self) -> None:
+        class _Segment:
+            start = 0.5
+            end = 1.75
+            text = " hello "
+            words = []
+
+        class _Model:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def transcribe(self, path, **kwargs):
+                self.calls.append((path, kwargs))
+                return iter([_Segment()]), object()
+
+        model = _Model()
+        with patch.object(transcriber, "_whisper_model_backend", "faster-whisper"), \
+             patch.object(transcriber.settings, "whisper_language", "en"), \
+             patch.object(transcriber.settings, "whisper_word_timestamps", False):
+            result = transcriber._transcribe_chunk(model, Path("/tmp/chunk.wav"))
+
+        self.assertEqual(result["segments"], [{"start": 0.5, "end": 1.75, "text": "hello"}])
+        self.assertEqual(model.calls[0][1]["language"], "en")
+        self.assertFalse(model.calls[0][1]["word_timestamps"])
 
     def test_load_pyannote_pipeline_prefers_current_token_kwarg(self) -> None:
         class _Pipeline:

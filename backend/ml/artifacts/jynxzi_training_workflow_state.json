@@ -1,6 +1,6 @@
 {
   "clip_judge_fail_fast": "false",
-  "code_hash": "6db68c292f66bbd15a5d5cf8bd4a64800d770f95adfcb72d6e47c8e5ccb31e48",
+  "code_hash": "27af33f8f0d55495318a5f617d17b3f6b5e8e942f71a1c2434259409b5bf43e8",
   "cross_platform_coarse_vod_horizon_padding_sec": "900",
   "cross_platform_coarse_vod_max_tiles_per_vod": "0",
   "cross_platform_coarse_vod_max_vods": "0",
@@ -32,7 +32,7 @@
   "cross_platform_url_manifest_path": "/app/backend/ml/viral_clips.txt",
   "cross_platform_vod_manifest_path": "/app/backend/ml/artifacts/jynxzi_cross_platform_vods.jsonl",
   "dataset_llm_provider": "none",
-  "date_from": "2026-01-01",
+  "date_from": "2026-03-01",
   "date_to": "2026-05-31",
   "enable_clip_judge": "true",
   "enable_multimodal_embeddings": false,

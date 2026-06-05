@@ -75,7 +75,6 @@ export interface ReviewCandidate {
   end_time: number;
   duration: number;
   rank_score?: number | null;
-  proposal_score?: number | null;
   pre_judge_rank?: number | null;
   judge_score?: number | null;
   selected: boolean;
@@ -127,7 +126,6 @@ export interface CandidateFunnelSample {
   status?: string | null;
   dropped_stage?: string | null;
   drop_reason?: string | null;
-  proposal_score?: number | null;
   pre_judge_rank?: number | null;
   pre_judge_rank_score?: number | null;
   judge_score?: number | null;
@@ -149,23 +147,10 @@ export interface CandidateFunnelQualityBreakdown {
   unjudged_rejected?: number;
 }
 
-export interface CandidateFunnelProposalLift {
-  scored_rows?: number;
-  positive_proxy_rows?: number;
-  precision_at_positive_k?: number | null;
-  recall_at_positive_k?: number | null;
-  high_judge_proposal_kept_ratio?: number | null;
-  final_selected_proposal_score?: NumericDistribution;
-  high_judge_proposal_score?: NumericDistribution;
-  source_breakdown?: Record<string, { rows?: number; final_selected?: number; high_judge?: number }>;
-}
-
 export interface CandidateFunnelClipTypeLift {
   rows?: number;
   final_selected?: number;
   high_judge?: number;
-  proposal_kept?: number;
-  mean_proposal_score?: number | null;
 }
 
 export interface CandidateFunnelRankerLift {
@@ -191,7 +176,6 @@ export interface CandidateFunnelDiagnostics {
   clip_type_counts?: Record<string, number>;
   final_clip_type_counts?: Record<string, number>;
   quality_breakdown?: CandidateFunnelQualityBreakdown;
-  proposal_lift?: CandidateFunnelProposalLift;
   ranker_lift?: CandidateFunnelRankerLift;
   clip_type_lift?: Record<string, CandidateFunnelClipTypeLift>;
   samples?: CandidateFunnelSample[];

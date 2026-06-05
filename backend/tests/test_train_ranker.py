@@ -910,16 +910,36 @@ class TrainRankerTests(unittest.TestCase):
         self.assertIn("judge_score", report["priority_feature_names"])
         self.assertEqual(report["method"], "supervised_univariate_effect_size_with_judge_teacher_priority")
 
+    def test_feature_selection_prioritizes_active_chat_velocity_features(self) -> None:
+        rows = [
+            {"label": 1, "features": {"strong": 10.0, "another": 9.0, "chat_velocity_score": 0.9}},
+            {"label": 1, "features": {"strong": 9.0, "another": 8.0, "chat_velocity_score": 0.8}},
+            {"label": 0, "features": {"strong": 0.0, "another": 0.0, "chat_velocity_score": 0.1}},
+            {"label": 0, "features": {"strong": 1.0, "another": 1.0, "chat_velocity_score": 0.0}},
+        ]
+
+        selected, report = train_ranker._select_training_feature_names(
+            rows,
+            ["another", "chat_velocity_score", "strong"],
+            max_features=2,
+        )
+
+        self.assertEqual(len(selected), 2)
+        self.assertIn("chat_velocity_score", selected)
+        self.assertIn("chat_velocity_score", report["priority_feature_names"])
+
     def test_apply_sign_constraints_clips_positive_signal_negative_weights(self) -> None:
         weights = train_ranker._apply_sign_constraints(
             {
                 "hook_strength": -0.4,
+                "chat_velocity_score": -0.3,
                 "payoff_score": 0.2,
                 "context_cost": -0.1,
             }
         )
 
         self.assertEqual(weights["hook_strength"], 0.0)
+        self.assertEqual(weights["chat_velocity_score"], 0.0)
         self.assertEqual(weights["payoff_score"], 0.2)
         self.assertEqual(weights["context_cost"], -0.1)
 
@@ -1213,6 +1233,16 @@ class TrainRankerTests(unittest.TestCase):
         assert _FakeLGBMRanker.last_fit_kwargs is not None
         self.assertEqual(_FakeLGBMRanker.last_fit_kwargs["eval_at"], [3, 5, 10])
         self.assertEqual(_FakeLGBMRanker.last_fit_kwargs["callbacks"], [("early_stopping", 10, False)])
+
+    def test_lightgbm_params_upweight_chat_velocity_features(self) -> None:
+        params = train_ranker._resolve_lightgbm_params(
+            {},
+            feature_names=["signal", "chat_velocity_score", "chat_rate_derivative_score"],
+            random_state=7,
+        )
+
+        self.assertEqual(params["monotone_constraints"], [0, 1, 1])
+        self.assertEqual(params["feature_contri"], [1.0, 1.4, 1.4])
 
     def test_train_from_rows_loads_hpo_artifact_for_lightgbm_candidate(self) -> None:
         rows = [

@@ -45,6 +45,88 @@ def test_recent_vod_holdout_selects_latest_unique_vods(tmp_path) -> None:
     assert "1000" not in payload["selected_vod_ids"]
 
 
+def test_recent_vod_holdout_preserves_existing_policy_by_default(tmp_path) -> None:
+    inventory = tmp_path / "inventory.jsonl"
+    inventory.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "vod_id": str(2000 + index),
+                    "created_at": f"2026-06-{index + 1:02d}T12:00:00+00:00",
+                    "title": f"new vod {index}",
+                }
+            )
+            for index in range(3)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "recent_holdout.jsonl"
+    summary = tmp_path / "recent_holdout.json"
+    existing = {
+        "dataset_source": "recent_vod_holdout_policy",
+        "gold_holdout_split": "holdout",
+        "vod_id": "1234",
+        "created_at": "2026-05-01T12:00:00+00:00",
+    }
+    output.write_text(json.dumps(existing) + "\n", encoding="utf-8")
+
+    rc = build_recent_vod_holdout.main(
+        [
+            "--vod-inventory",
+            str(inventory),
+            "--output",
+            str(output),
+            "--summary-output",
+            str(summary),
+            "--count",
+            "2",
+        ]
+    )
+
+    assert rc == 0
+    exported = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+    payload = json.loads(summary.read_text(encoding="utf-8"))
+    assert [row["vod_id"] for row in exported] == ["1234"]
+    assert payload["event"] == "recent_vod_holdout_policy_preserved"
+    assert payload["preserved_existing_output"] is True
+    assert payload["selected_vod_ids"] == ["1234"]
+
+
+def test_recent_vod_holdout_refresh_replaces_existing_policy(tmp_path) -> None:
+    inventory = tmp_path / "inventory.jsonl"
+    rows = [
+        {"vod_id": "2001", "created_at": "2026-06-01T12:00:00+00:00", "title": "newer"},
+        {"vod_id": "2000", "created_at": "2026-05-31T12:00:00+00:00", "title": "older"},
+    ]
+    inventory.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+    output = tmp_path / "recent_holdout.jsonl"
+    summary = tmp_path / "recent_holdout.json"
+    output.write_text(json.dumps({"vod_id": "1234", "gold_holdout_split": "holdout"}) + "\n", encoding="utf-8")
+
+    rc = build_recent_vod_holdout.main(
+        [
+            "--vod-inventory",
+            str(inventory),
+            "--output",
+            str(output),
+            "--summary-output",
+            str(summary),
+            "--count",
+            "1",
+            "--refresh",
+        ]
+    )
+
+    assert rc == 0
+    exported = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+    payload = json.loads(summary.read_text(encoding="utf-8"))
+    assert [row["vod_id"] for row in exported] == ["2001"]
+    assert payload["event"] == "recent_vod_holdout_policy_built"
+    assert payload["preserved_existing_output"] is False
+    assert payload["refresh"] is True
+
+
 def test_training_holdout_policy_merges_vod_and_window_rows(tmp_path) -> None:
     recent = tmp_path / "recent.jsonl"
     outcome = tmp_path / "outcome.jsonl"

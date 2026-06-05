@@ -112,6 +112,11 @@ class Settings(BaseSettings):
     whisper_model: str = "base"
     whisper_device: str = "auto"
     whisper_language: str = ""
+    whisper_backend: str = "auto"
+    whisper_compute_type: str = ""
+    whisper_word_timestamps: bool = False
+    transcription_chunk_seconds: int = 180
+    transcription_worker_batch_size: int = 12
     # Comma-separated list in env (ALLOWED_ORIGINS="https://app.example.com,https://staging.example.com").
     # Defaults cover the common local dev frontend ports.
     allowed_origins: list[str] = [
@@ -154,17 +159,16 @@ class Settings(BaseSettings):
     groq_api_key: str | None = None  # Groq API key for fast semantic scoring (free tier)
     groq_model: str = "llama-3.3-70b-versatile"
     gemini_api_key: str | None = None  # Google Gemini API key for clip boundary refinement (free tier)
-    gemini_model: str = "gemini-2.0-flash"
+    gemini_model: str = "gemini-2.5-flash-lite"
     twitch_client_id: str | None = None
     twitch_client_secret: str | None = None
     enable_chat_analysis: bool = True
     chat_download_timeout_sec: int = 30
-    chat_join_timeout_sec: float = 1.0
     frontend_job_cache_enabled: bool = False
     frontend_transcript_cache_enabled: bool = True
     frontend_feature_cache_enabled: bool = True
     frontend_review_preview_limit: int = Field(
-        default=40,
+        default=0,
         validation_alias=AliasChoices("FRONTEND_REVIEW_PREVIEW_LIMIT"),
     )
     twitch_download_cache_ttl_sec: int = 86400
@@ -249,16 +253,17 @@ class Settings(BaseSettings):
     judge_keyframe_width: int = 640
     enable_whole_vod_dense_candidates: bool = True
     whole_vod_dense_source_cap: int = 48
-    enable_trainable_candidate_proposal: bool = True
-    proposal_dense_durations_sec: str = "12,20,30,45,60"
-    proposal_dense_stride_sec: float = 5.0
-    proposal_dense_max_candidates: int = 5000
-    proposal_shortlist_top_k: int = 240
-    proposal_min_score: float = 0.0
-    proposal_preserve_heuristic_candidates: bool = True
+    merge_recall_carry_forward_enabled: bool = True
+    merge_recall_carry_bucket_sec: float = 60.0
+    merge_recall_carry_per_source_bucket: int = 1
+    merge_recall_carry_max_candidates: int = 700
+    enable_dense_candidate_inventory: bool = True
+    dense_candidate_inventory_source_cap: int = 700
+    dense_candidate_inventory_durations_sec: str = "12,20,30,45,60"
+    dense_candidate_inventory_stride_sec: float = 5.0
+    dense_candidate_inventory_max_candidates: int = 5000
     enable_hook_subclassifier: bool = False
     enable_multimodal_embeddings: bool = False
-    enable_post_publish_labels: bool = False
     enable_trend_prior: bool = True
     # Trained ranker is gated behind quality checks in ranker.py (training rows,
     # positive/negative balance, validation accuracy/NDCG). Enabling by default
@@ -268,7 +273,6 @@ class Settings(BaseSettings):
     trend_prior_data_path: str | None = None
     enable_boundary_refinement_v2: bool = True
     enable_boundary_llm_pair_rerank: bool = True
-    enable_word_level_boundaries: bool = False
     enable_boundary_ranker: bool = False
     enable_legacy_boundary_refinement_llm: bool = False
     ranker_hpo_trials: int = 60

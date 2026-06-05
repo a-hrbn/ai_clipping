@@ -1,5 +1,53 @@
 # Lessons
 
+- When the product goal is discovering viral-worthy moments, non-matching
+  Clipper reposts are not false positives. Use repost matches as recall-floor
+  hints and regression guards, then judge top moments with human precision or
+  outcome data.
+- Re-ranking evals must fail closed on missing scores. Filling unscored
+  candidates with base scores can make a broken run look measurable and can
+  degrade top-k metrics for reasons unrelated to model quality.
+- LLM re-ranking prompts should request compact machine outputs for every
+  candidate, not long rationales by default. If score JSON truncates, fallback
+  scoring can distort top-k selection exactly where the evaluation matters.
+- For clip-finding experiments, separate generation recall from selection
+  quality. A high recall over nearly the full candidate list is not a product
+  win unless recall improves at the operating points that actually ship, such
+  as top-12, top-20, and pre-judge top-80.
+- Long LLM JSON outputs can be semantically useful even when the enclosing JSON
+  is malformed or truncated. Persist raw responses, then salvage complete
+  balanced items from known arrays before declaring the whole evaluation failed.
+- Persist raw LLM provider responses before parsing structured output. JSON
+  mode/schema hints reduce malformed output but do not replace raw-response
+  artifacts and conservative repair paths, especially in long full-VOD calls.
+- For broad LLM recall sweeps, choose the provider/model around throughput
+  limits first, not only model quality. If Sonnet/Haiku token-per-minute limits
+  make full-VOD passes impractical, default the broad finder to the higher-
+  throughput configured model and reserve stronger models for small refinement
+  calls.
+- Large offline LLM eval jobs must not use short interactive HTTP timeouts.
+  For full-VOD prompts with large output caps, set realistic read timeouts,
+  retry transient API timeouts, and persist per-item failure artifacts so a
+  batch failure is diagnosable and resumable.
+- Do not turn a one-VOD LLM moment-finder spike into a strategy verdict when
+  the run is under-covered or localization-confounded. First remove obvious
+  confounders: raise moment/token caps, filter transcript filler noise, measure
+  center-contained matches, and aggregate across at least 2-3 train VODs.
+- Wenn eine Eval-Metrik durch eine nicht-deterministische Stufe verrauscht
+  wird, zuerst pruefen, ob diese Stufe fuer die aktuelle Diagnose ausgeschaltet
+  werden kann. Fuer Serving-Holdout ist Judge-off als Standardmesspfad
+  sauberer und billiger als Mehrfach-Sampling oder mehrere Vollpipeline-Laeufe.
+- Wenn ein Eval-/Pipeline-Skript dauerhaft mit denselben Safety-/Progress-Flags
+  empfohlen wird, diese Werte als Runner-Defaults setzen und eine explizite
+  Opt-out-Flag anbieten. Beispiel: Serving-Holdout `fail_fast=True` und
+  `progress_interval_sec=3`.
+- Bei containerisierten Statusfragen nicht nur Host-Prozesse und letzte
+  Artefakt-Summaries prüfen. Immer auch `docker ps`, `docker top` und aktuelle
+  Job-Verzeichnisse/`jobs.json` betrachten, weil der eigentliche Wrapper als
+  Prozess im Backend-Container laufen kann.
+- Wenn der User eine Planphase ausdrücklich als abgeschlossen markiert, diese
+  Phase nicht erneut breit implementieren. Den Planstand akzeptieren, die
+  naechste Phase isoliert umsetzen und nur die benoetigten Artefakte pruefen.
 - Per-repost transcript match cleanup must score the dominant VOD across all
   accepted match kinds, not only `multi_window_chunk`. A strong single-window
   or audio match can otherwise coexist with a weak chunk match on the wrong
@@ -415,3 +463,27 @@
   feature extraction with face detection can OOM a 24-32 GiB WSL/Docker host
   before the staged dataset is written; default worker planning must account for
   available RAM and keep explicit high-parallelism overrides opt-in.
+- For human clip-quality review, do not stop at CSV/JSON labels. Include raw
+  cut review clips or explicit missing-source statuses in the review artifact so
+  the user can judge the actual moment, boundary, and payoff without manually
+  reconstructing timestamps.
+- For LLM moment-finder experiments that will require raw clip review, preflight
+  and cache every selected Full-VOD before sending paid provider requests. If a
+  selected VOD is unavailable, fail before the LLM call instead of producing
+  moments that cannot be reviewed as video.
+- Review clip artifacts should use run-specific output directories by default.
+  A flat clip directory silently overwrites repeated review runs and leaves
+  stale files mixed with current candidates.
+- Do not reuse filename helpers with non-empty fallbacks for optional run IDs.
+  Empty run IDs must stay empty until the timestamp/default-run-id layer handles
+  them, or every default run can collapse into the same fallback directory.
+- When the user changes a scripted collection date range, update every default
+  surface in one pass: Python runner constants, wrapper help text, and the
+  current task-plan review. Historical run notes should stay historical.
+- If a pipeline stage falls back to an external LLM because Ollama is
+  unreachable, fix the container startup path instead of only explaining the
+  fallback. Compose scripts that run pipeline jobs should include the Ollama
+  override and verify backend-to-Ollama connectivity before launching work.
+- Do not assume the backend Docker image has zsh. Training launchers that run
+  inside `ai-clipping-backend` / `ai-clipping-backend-cuda` should use
+  `/bin/bash` or explicitly verify the shell exists in the image.

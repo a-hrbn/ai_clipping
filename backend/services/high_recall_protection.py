@@ -3,7 +3,7 @@ from __future__ import annotations
 from services.timeline_types import RankedCandidate
 
 
-def oracle_free_recall_score(item: RankedCandidate, proposal_row: dict | None = None) -> dict[str, object]:
+def oracle_free_recall_score(item: RankedCandidate) -> dict[str, object]:
     """Score label-free recall signals shared by Judge reserve and gate audit.
 
     This deliberately excludes cross-platform recall targets. Cross-platform
@@ -12,19 +12,9 @@ def oracle_free_recall_score(item: RankedCandidate, proposal_row: dict | None = 
     signals.
     """
 
-    proposal_row = proposal_row or {}
     features = item.features
     reasons: list[str] = []
     score = 0.0
-
-    proposal_score = _clamp01(_num(proposal_row.get("score") or proposal_row.get("model_score")))
-    proposal_heuristic = _clamp01(_num(proposal_row.get("heuristic_score")))
-    if proposal_score >= 0.30:
-        reasons.append("proposal_score")
-    if proposal_heuristic >= 0.45:
-        reasons.append("proposal_heuristic")
-    score += proposal_score * 0.18
-    score += proposal_heuristic * 0.08
 
     rank_score = _clamp01(_num(item.rank_score) / 12.0)
     heuristic_rank = _clamp01(_num(item.heuristic_rank_score) / 12.0)

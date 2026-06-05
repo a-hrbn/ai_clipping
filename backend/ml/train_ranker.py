@@ -65,12 +65,20 @@ _CONFOUND_TRAINING_FEATURE_NAMES: frozenset[str] = frozenset({
     # disambiguate slow starts from long/high-density clips.
     "slow_open_penalty",
 })
+_CHAT_VELOCITY_FEATURE_NAMES: frozenset[str] = frozenset({
+    "chat_delta",
+    "chat_spike_coverage",
+    "chat_activity_coverage",
+    "chat_velocity_score",
+    "chat_rate_derivative_score",
+    "chat_ema_crossing_score",
+})
 _POSITIVE_SIGN_FEATURES: frozenset[str] = frozenset({
     "arc_payoff_match",
     "chat_spike_coverage",
     "hook_strength",
     "payoff_score",
-})
+}) | _CHAT_VELOCITY_FEATURE_NAMES
 _TOP_CHAT_INTERACTION_FEATURES = content_buckets.TOP_CHAT_INTERACTION_FEATURES
 _CONTENT_BUCKET_FEATURE_PREFIX = content_buckets.CONTENT_BUCKET_FEATURE_PREFIX
 _CONTENT_BUCKET_CHAT_INTERACTION_PREFIX = content_buckets.CONTENT_BUCKET_CHAT_INTERACTION_PREFIX
@@ -1150,6 +1158,11 @@ def _select_training_feature_names(
         for name in sorted(_JUDGE_TEACHER_FEATURE_NAMES & set(feature_names))
         if scored_by_name.get(name, 0.0) > 0.0
     ]
+    preferred.extend([
+        name
+        for name in sorted(_CHAT_VELOCITY_FEATURE_NAMES & set(feature_names))
+        if name not in preferred and scored_by_name.get(name, 0.0) > 0.0
+    ])
     if len(preferred) > max_features:
         preferred = [
             name
@@ -2550,8 +2563,8 @@ def _resolve_lightgbm_params(
     *,
     feature_names: list[str] | None = None,
     random_state: int,
-) -> dict[str, float | int | str | list[int]]:
-    params: dict[str, float | int | str] = {
+) -> dict[str, float | int | str | list[float | int]]:
+    params: dict[str, float | int | str | list[float | int]] = {
         "objective": "lambdarank",
         "verbosity": -1,
         "random_state": int(random_state),
@@ -2570,6 +2583,10 @@ def _resolve_lightgbm_params(
     if feature_names:
         params["monotone_constraints"] = [
             1 if name in _POSITIVE_SIGN_FEATURES else 0
+            for name in feature_names
+        ]
+        params["feature_contri"] = [
+            1.4 if name in _CHAT_VELOCITY_FEATURE_NAMES else 1.0
             for name in feature_names
         ]
     return params

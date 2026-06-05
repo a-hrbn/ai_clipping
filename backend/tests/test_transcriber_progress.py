@@ -16,6 +16,13 @@ from services import transcriber
 
 
 class TranscriberProgressTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._backend_patch = patch.object(transcriber.settings, "whisper_backend", "openai")
+        self._backend_patch.start()
+
+    def tearDown(self) -> None:
+        self._backend_patch.stop()
+
     def test_progress_callback_receives_chunk_updates(self) -> None:
         updates = []
 
@@ -168,6 +175,33 @@ class TranscriberProgressTests(unittest.TestCase):
         self.assertEqual([segment.text for segment in result], ["chunk_000", "chunk_001"])
         self.assertEqual(isolated_mock.call_count, 1)
         self.assertEqual([chunk.name for _idx, chunk in isolated_mock.call_args.args[0]], ["chunk_000.wav", "chunk_001.wav"])
+
+    def test_isolated_chunk_transcription_splits_worker_batches(self) -> None:
+        fake_chunks = [pathlib.Path(f"/tmp/chunk_{idx:03d}.wav") for idx in range(3)]
+        seen_batches = []
+
+        def fake_isolated(chunks):
+            seen_batches.append([chunk.name for _idx, chunk in chunks])
+            for chunk_idx, chunk_file in chunks:
+                yield chunk_idx, {"segments": [{"start": 0.0, "end": 1.0, "text": chunk_file.stem}]}
+
+        with patch("services.transcriber.subprocess.run") as run_mock, \
+             patch.object(transcriber, "_whisper_model", None), \
+             patch.object(transcriber, "_whisper_runtime_logged", False), \
+             patch("services.transcriber.whisper.load_model", side_effect=AssertionError("parent model should not load")), \
+             patch("services.transcriber._transcribe_chunks_isolated", side_effect=fake_isolated), \
+             patch.object(transcriber.settings, "transcription_worker_batch_size", 1), \
+             patch("services.transcriber.settings.hf_token", None), \
+             patch("pathlib.Path.glob", return_value=fake_chunks), \
+             patch("services.transcriber._chunk_frame_count", return_value=16000):
+            run_mock.return_value = None
+            result = transcriber.transcribe_with_progress(
+                pathlib.Path("/tmp/audio.wav"),
+                isolate_chunks=True,
+            )
+
+        self.assertEqual([segment.text for segment in result], ["chunk_000", "chunk_001", "chunk_002"])
+        self.assertEqual(seen_batches, [["chunk_000.wav"], ["chunk_001.wav"], ["chunk_002.wav"]])
 
     def test_isolated_chunk_worker_writes_segments(self) -> None:
         class _Model:

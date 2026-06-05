@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/bin/bash
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -121,9 +121,9 @@ AUTO_OUTCOME_NEGATIVE_POSITIVE_EXCLUSION_SEC="${AUTO_OUTCOME_NEGATIVE_POSITIVE_E
 AUTO_OUTCOME_NEGATIVE_HARD_SCORE_THRESHOLD="${AUTO_OUTCOME_NEGATIVE_HARD_SCORE_THRESHOLD:-7.5}"
 AUTO_OUTCOME_NEGATIVE_MAX_ROWS="${AUTO_OUTCOME_NEGATIVE_MAX_ROWS:-2000}"
 SERVING_HARD_NEGATIVE_ENABLED="${SERVING_HARD_NEGATIVE_ENABLED:-1}"
-SERVING_HARD_NEGATIVE_PRE_JUDGE_TOP_K="${SERVING_HARD_NEGATIVE_PRE_JUDGE_TOP_K:-80}"
+SERVING_HARD_NEGATIVE_PRE_JUDGE_TOP_K="${SERVING_HARD_NEGATIVE_PRE_JUDGE_TOP_K:-500}"
 SERVING_HARD_NEGATIVE_MAX_PER_VOD="${SERVING_HARD_NEGATIVE_MAX_PER_VOD:-20}"
-SERVING_HARD_NEGATIVE_MAX_ROWS="${SERVING_HARD_NEGATIVE_MAX_ROWS:-300}"
+SERVING_HARD_NEGATIVE_MAX_ROWS="${SERVING_HARD_NEGATIVE_MAX_ROWS:-0}"
 SERVING_HARD_NEGATIVE_POSITIVE_EXCLUSION_OVERLAP="${SERVING_HARD_NEGATIVE_POSITIVE_EXCLUSION_OVERLAP:-0.25}"
 SERVING_HARD_NEGATIVE_MIN_RANK_SCORE="${SERVING_HARD_NEGATIVE_MIN_RANK_SCORE:--999.0}"
 ROLLOUT_REVIEW_THRESHOLD="${ROLLOUT_REVIEW_THRESHOLD:-3.0}"
@@ -142,6 +142,7 @@ PERSISTED_SHORT_FORM_BACKFILL_ARTIFACT_HEALTH_PATH="$ARTIFACT_DIR/jynxzi_short_f
 OUTCOME_HOLDOUT_TARGET_POSITIVE_ROWS="${OUTCOME_HOLDOUT_TARGET_POSITIVE_ROWS:-300}"
 RECENT_VOD_HOLDOUT_ENABLED="${RECENT_VOD_HOLDOUT_ENABLED:-1}"
 RECENT_VOD_HOLDOUT_COUNT="${RECENT_VOD_HOLDOUT_COUNT:-10}"
+RECENT_VOD_HOLDOUT_REFRESH="${RECENT_VOD_HOLDOUT_REFRESH:-0}"
 ROLLOUT_READINESS_TARGET_NEW_VOD_GROUPS="${ROLLOUT_READINESS_TARGET_NEW_VOD_GROUPS:-20}"
 ROLLOUT_READINESS_TARGET_AVAILABLE_GROUPS="${ROLLOUT_READINESS_TARGET_AVAILABLE_GROUPS:-40}"
 ROLLOUT_READINESS_MAX_CANDIDATES_PER_VOD="${ROLLOUT_READINESS_MAX_CANDIDATES_PER_VOD:-3}"
@@ -316,6 +317,7 @@ export SERVING_HARD_NEGATIVE_MIN_RANK_SCORE
 export OUTCOME_HOLDOUT_TARGET_POSITIVE_ROWS
 export RECENT_VOD_HOLDOUT_ENABLED
 export RECENT_VOD_HOLDOUT_COUNT
+export RECENT_VOD_HOLDOUT_REFRESH
 export RECENT_VOD_HOLDOUT_POLICY_PATH
 export RECENT_VOD_HOLDOUT_SUMMARY_PATH
 export TRAINING_HOLDOUT_POLICY_ROWS_PATH
@@ -503,6 +505,16 @@ promote_staged_vod_dataset() {
   mv "$STAGED_DATASET_PATH" "$DATASET_PATH"
 }
 
+log_cross_platform_match_delta() {
+  local phase="$1"
+  local before_path="$2"
+  "$PYTHON_BIN" -m ml.cross_platform_match_delta \
+    --phase "$phase" \
+    --before "$before_path" \
+    --after "$CROSS_PLATFORM_FINGERPRINT_ROWS_PATH" \
+    --summary "$CROSS_PLATFORM_FINGERPRINT_SUMMARY_PATH"
+}
+
 prepare_cross_platform_fingerprint_rows() {
   if [[ "$CROSS_PLATFORM_FINGERPRINT_ENABLED" != "1" ]]; then
     echo "Cross-platform fingerprint preparation disabled."
@@ -512,6 +524,19 @@ prepare_cross_platform_fingerprint_rows() {
   local min_matched_vods="${2:-$CROSS_PLATFORM_MIN_MATCHED_VODS}"
   local refresh_vods="${3:-$CROSS_PLATFORM_REFRESH_VODS}"
   local reuse_existing="${4:-$CROSS_PLATFORM_REUSE_EXISTING_ROWS}"
+  local phase="initial"
+  if [[ "$refresh_vods" == "1" ]]; then
+    phase="post_vod_backfill"
+  elif [[ "$reuse_existing" == "1" ]]; then
+    phase="reuse_existing"
+  fi
+  local before_path="$WORK_DIR/cross_platform_fingerprint_rows.before.${phase}.$$.jsonl"
+  mkdir -p "$WORK_DIR"
+  if [[ -f "$CROSS_PLATFORM_FINGERPRINT_ROWS_PATH" ]]; then
+    cp "$CROSS_PLATFORM_FINGERPRINT_ROWS_PATH" "$before_path"
+  else
+    : > "$before_path"
+  fi
   "$PYTHON_BIN" -m ml.prepare_cross_platform_fingerprint_rows \
     --vods "$CROSS_PLATFORM_VOD_MANIFEST_PATH" \
     --reposts "$CROSS_PLATFORM_REPOST_MANIFEST_PATH" \
@@ -551,6 +576,8 @@ prepare_cross_platform_fingerprint_rows() {
     --fail-on-insufficient \
     "$([[ "$CROSS_PLATFORM_DISCOVER_REPOSTS" == "1" ]] && echo --discover-reposts || echo --no-discover-reposts)" \
     "$([[ "$CROSS_PLATFORM_DOWNLOAD_REPOSTS" == "1" ]] && echo --download-reposts || echo --no-download-reposts)"
+  log_cross_platform_match_delta "$phase" "$before_path"
+  rm -f "$before_path"
 }
 
 import_mm_judge_proxy_rows() {
@@ -1018,6 +1045,7 @@ export_serving_hard_negative_rows() {
   "$PYTHON_BIN" ml/export_serving_hard_negatives.py \
     --storage-dir "$BACKEND_DIR/tmp/storage" \
     --positive-rows "$CROSS_PLATFORM_FINGERPRINT_ROWS_PATH" \
+    --holdout-policy-rows "$TRAINING_HOLDOUT_POLICY_ROWS_PATH" \
     --rows-out "$SERVING_HARD_NEGATIVE_ROWS_PATH" \
     --summary-out "$SERVING_HARD_NEGATIVE_SUMMARY_PATH" \
     --profile jynxzi \
@@ -1162,12 +1190,17 @@ build_outcome_holdout_dataset() {
 }
 
 build_recent_vod_holdout_policy() {
+  local refresh_args=()
+  if [[ "$RECENT_VOD_HOLDOUT_REFRESH" == "1" ]]; then
+    refresh_args+=(--refresh)
+  fi
   "$PYTHON_BIN" -m ml.build_recent_vod_holdout \
     --profile jynxzi \
     --vod-inventory "$VOD_INVENTORY_PATH" \
     --output "$RECENT_VOD_HOLDOUT_POLICY_PATH" \
     --summary-output "$RECENT_VOD_HOLDOUT_SUMMARY_PATH" \
-    --count "$([[ "$RECENT_VOD_HOLDOUT_ENABLED" == "1" ]] && echo "$RECENT_VOD_HOLDOUT_COUNT" || echo 0)"
+    --count "$([[ "$RECENT_VOD_HOLDOUT_ENABLED" == "1" ]] && echo "$RECENT_VOD_HOLDOUT_COUNT" || echo 0)" \
+    "${refresh_args[@]}"
 }
 
 build_training_holdout_policy_rows() {
@@ -1268,7 +1301,7 @@ echo "Using cross-platform second pass after VOD build: $CROSS_PLATFORM_SECOND_P
 echo "Using cross-platform full-VOD audio fingerprints: $CROSS_PLATFORM_FULL_VOD_AUDIO_FINGERPRINTS max_vods=${CROSS_PLATFORM_FULL_VOD_AUDIO_MAX_VODS} workers=${CROSS_PLATFORM_FULL_VOD_AUDIO_WORKERS} keep_audio=${CROSS_PLATFORM_KEEP_FULL_VOD_AUDIO}"
 echo "Using cross-platform coarse VOD tiling: $CROSS_PLATFORM_COARSE_VOD_TILING tile=${CROSS_PLATFORM_COARSE_VOD_TILE_SEC}s stride=${CROSS_PLATFORM_COARSE_VOD_STRIDE_SEC}s max_tiles=${CROSS_PLATFORM_COARSE_VOD_MAX_TILES_PER_VOD}"
 echo "Using targeted backfill require-all-vods: $TARGETED_BACKFILL_REQUIRE_ALL_VODS"
-echo "Using recent VOD holdout: enabled=$RECENT_VOD_HOLDOUT_ENABLED count=$RECENT_VOD_HOLDOUT_COUNT"
+echo "Using recent VOD holdout: enabled=$RECENT_VOD_HOLDOUT_ENABLED count=$RECENT_VOD_HOLDOUT_COUNT refresh=$RECENT_VOD_HOLDOUT_REFRESH"
 echo "Using VOD ranker MM-judge proxy: $VOD_RANKER_USE_MM_JUDGE_PROXY weight=$VOD_RANKER_MM_JUDGE_WEIGHT"
 echo "Using VOD ranker rollout-review-negative weight: $VOD_RANKER_ROLLOUT_REVIEW_NEGATIVE_WEIGHT"
 echo "Using rollout threshold recall target: $VOD_RANKER_ROLLOUT_THRESHOLD_MIN_RECALL"

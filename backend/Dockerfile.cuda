@@ -54,6 +54,7 @@ COPY . .
 
 RUN python -m pip install --upgrade pip setuptools wheel \
     && python -m pip install ".[ml,vision]" \
+    && python -m pip install --force-reinstall --no-deps "mediapipe==0.10.21" \
     && mkdir -p \
         /app/backend/tmp/storage \
         /app/backend/tmp/cache \

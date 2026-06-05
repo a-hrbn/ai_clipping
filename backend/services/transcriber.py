@@ -12,23 +12,57 @@ import threading
 import wave
 from dataclasses import dataclass, field
 from hashlib import sha256
+from typing import Iterator
 
 import torch
 import whisper
 from config import settings
 
+try:
+    from faster_whisper import WhisperModel as FasterWhisperModel
+except ImportError:  # pragma: no cover - optional runtime acceleration
+    FasterWhisperModel = None
+
 logger = logging.getLogger(__name__)
 
-# Chunk length in seconds.
-# These chunks are non-overlapping; timestamp offsets must match that exactly.
-CHUNK_SECONDS = 600  # 10 minutes
+CHUNK_SECONDS = 180  # legacy export; runtime uses _chunk_seconds()
 _TRANSCRIPT_CHUNK_CACHE_VERSION = 1
 
 # Module-level Whisper singleton — loaded once on first use, reused across jobs.
-_whisper_model: whisper.Whisper | None = None
+_whisper_model: object | None = None
+_whisper_model_backend: str | None = None
 _whisper_runtime_logged = False
 _whisper_lock = threading.Lock()
 _whisper_inference_lock = threading.Lock()
+
+
+def _chunk_seconds() -> int:
+    value = int(getattr(settings, "transcription_chunk_seconds", CHUNK_SECONDS) or CHUNK_SECONDS)
+    return max(value, 30)
+
+
+def _worker_batch_size() -> int:
+    value = int(getattr(settings, "transcription_worker_batch_size", 12) or 12)
+    return max(value, 1)
+
+
+def _word_timestamps_enabled() -> bool:
+    return bool(getattr(settings, "whisper_word_timestamps", False))
+
+
+def _resolved_whisper_backend() -> str:
+    requested = str(getattr(settings, "whisper_backend", "auto") or "auto").strip().lower()
+    requested = requested.replace("_", "-")
+    if requested in {"faster", "faster-whisper", "ctranslate2"}:
+        if FasterWhisperModel is None:
+            logger.warning("transcriber_faster_whisper_unavailable_fallback resolved_backend=openai")
+            return "openai"
+        return "faster-whisper"
+    if requested == "openai":
+        return "openai"
+    if requested == "auto" and FasterWhisperModel is not None:
+        return "faster-whisper"
+    return "openai"
 
 
 def _resolved_whisper_device() -> str:
@@ -45,6 +79,13 @@ def _resolved_precision(device: str) -> str:
     return "fp16" if device == "cuda" else "fp32"
 
 
+def _resolved_compute_type(device: str) -> str:
+    configured = str(getattr(settings, "whisper_compute_type", "") or "").strip().lower()
+    if configured:
+        return configured
+    return "float16" if device == "cuda" else "float32"
+
+
 def _model_device_name(model: whisper.Whisper) -> str:
     try:
         parameter = next(model.parameters())
@@ -56,47 +97,78 @@ def _model_device_name(model: whisper.Whisper) -> str:
 
 def runtime_summary() -> dict[str, object]:
     configured_language = str(settings.whisper_language or "").strip().lower()
+    backend = _resolved_whisper_backend() if _whisper_model_backend is None else _whisper_model_backend
     if _whisper_model is None:
         device = _resolved_whisper_device()
         return {
+            "backend": backend,
             "whisper_model": settings.whisper_model,
             "device": device,
-            "precision": _resolved_precision(device),
+            "precision": _resolved_compute_type(device) if backend == "faster-whisper" else _resolved_precision(device),
             "language": configured_language,
+            "chunk_seconds": _chunk_seconds(),
+            "worker_batch_size": _worker_batch_size(),
+            "word_timestamps": _word_timestamps_enabled(),
         }
+    device = _resolved_whisper_device() if backend == "faster-whisper" else _model_device_name(_whisper_model)
     return {
+        "backend": backend,
         "whisper_model": settings.whisper_model,
-        "device": _model_device_name(_whisper_model),
-        "precision": _resolved_precision(_model_device_name(_whisper_model)),
+        "device": device,
+        "precision": _resolved_compute_type(device) if backend == "faster-whisper" else _resolved_precision(device),
         "language": configured_language,
+        "chunk_seconds": _chunk_seconds(),
+        "worker_batch_size": _worker_batch_size(),
+        "word_timestamps": _word_timestamps_enabled(),
     }
 
 
-def _get_model() -> whisper.Whisper:
-    global _whisper_model, _whisper_runtime_logged
+def _get_model() -> object:
+    global _whisper_model, _whisper_model_backend, _whisper_runtime_logged
     # Double-checked locking: the load is a multi-second disk op; without
     # the lock two concurrent first-transcriptions would each download and load
     # the model into memory, then silently race to bind _whisper_model.
-    if _whisper_model is None:
+    resolved_backend = _resolved_whisper_backend()
+    if _whisper_model is None or _whisper_model_backend != resolved_backend:
         with _whisper_lock:
-            if _whisper_model is None:
-                logger.info("transcriber_init whisper_model=%s", settings.whisper_model)
+            if _whisper_model is None or _whisper_model_backend != resolved_backend:
+                logger.info(
+                    "transcriber_init backend=%s whisper_model=%s",
+                    resolved_backend,
+                    settings.whisper_model,
+                )
                 whisper_cache_dir = pathlib.Path(settings.storage_dir).parent / "cache" / "whisper"
                 whisper_cache_dir.mkdir(parents=True, exist_ok=True)
                 resolved_device = _resolved_whisper_device()
-                _whisper_model = whisper.load_model(
-                    settings.whisper_model,
-                    download_root=str(whisper_cache_dir),
-                    device=resolved_device,
-                )
+                if resolved_backend == "faster-whisper":
+                    if FasterWhisperModel is None:
+                        raise RuntimeError("faster-whisper backend requested but package is not installed")
+                    _whisper_model = FasterWhisperModel(
+                        settings.whisper_model,
+                        device=resolved_device,
+                        compute_type=_resolved_compute_type(resolved_device),
+                        download_root=str(whisper_cache_dir),
+                    )
+                else:
+                    _whisper_model = whisper.load_model(
+                        settings.whisper_model,
+                        download_root=str(whisper_cache_dir),
+                        device=resolved_device,
+                    )
+                _whisper_model_backend = resolved_backend
+                _whisper_runtime_logged = False
     if not _whisper_runtime_logged:
         summary = runtime_summary()
         logger.info(
-            "transcriber_runtime whisper_model=%s device=%s precision=%s language=%s",
+            "transcriber_runtime backend=%s whisper_model=%s device=%s precision=%s language=%s chunk_seconds=%s worker_batch_size=%s word_timestamps=%s",
+            summary["backend"],
             summary["whisper_model"],
             summary["device"],
             summary["precision"],
             summary["language"] or "auto",
+            summary["chunk_seconds"],
+            summary["worker_batch_size"],
+            summary["word_timestamps"],
         )
         _whisper_runtime_logged = True
     return _whisper_model
@@ -182,11 +254,12 @@ def transcribe_with_progress(
     # write correct WAV headers when stream-copying, which produces truncated
     # or malformed chunks that cause "Broken pipe" when Whisper reads them.
     chunk_pattern = str(chunks_dir / "chunk_%03d.wav")
+    chunk_seconds = _chunk_seconds()
     subprocess.run(
         [
             "ffmpeg", "-y", "-i", str(audio_path),
             "-f", "segment",
-            "-segment_time", str(CHUNK_SECONDS),
+            "-segment_time", str(chunk_seconds),
             "-acodec", "pcm_s16le",
             "-ar", "16000",
             "-ac", "1",
@@ -215,14 +288,18 @@ def transcribe_with_progress(
         pending_chunks.append((chunk_idx, chunk_file))
 
     if isolate_chunks:
-        for chunk_idx, result in _transcribe_chunks_isolated(pending_chunks):
-            chunk_file = _chunk_file_for_index(pending_chunks, chunk_idx)
-            chunk_segments = _rich_segments_from_result(result, chunk_idx=chunk_idx, chunk_file=chunk_file)
-            segments_by_chunk[chunk_idx] = chunk_segments
-            _write_chunk_cache(chunk_cache_dir, chunk_idx, chunk_segments)
+        for chunk_batch in _chunk_batches(pending_chunks, _worker_batch_size()):
+            chunk_by_idx = {int(chunk_idx): chunk_file for chunk_idx, chunk_file in chunk_batch}
+            for chunk_idx, result in _transcribe_chunks_isolated(chunk_batch):
+                chunk_file = chunk_by_idx.get(int(chunk_idx))
+                if chunk_file is None:
+                    raise RuntimeError(f"isolated Whisper worker returned unknown chunk index {chunk_idx}")
+                chunk_segments = _rich_segments_from_result(result, chunk_idx=chunk_idx, chunk_file=chunk_file)
+                segments_by_chunk[chunk_idx] = chunk_segments
+                _write_chunk_cache(chunk_cache_dir, chunk_idx, chunk_segments)
 
-            if progress_cb is not None and total_chunks > 0:
-                progress_cb(progress_index_by_chunk[chunk_idx], total_chunks, chunk_file)
+                if progress_cb is not None and total_chunks > 0:
+                    progress_cb(progress_index_by_chunk[chunk_idx], total_chunks, chunk_file)
     else:
         for chunk_idx, chunk_file in pending_chunks:
             try:
@@ -272,7 +349,7 @@ def load_cached_transcript(
 ) -> list[RichSegment] | None:
     if expected_duration_sec is None or expected_duration_sec <= 0:
         return None
-    expected_chunks = max(int(math.ceil(float(expected_duration_sec) / CHUNK_SECONDS)), 1)
+    expected_chunks = max(int(math.ceil(float(expected_duration_sec) / _chunk_seconds())), 1)
     cache_dir = _chunk_cache_dir(cache_key)
     if cache_dir is None:
         return None
@@ -299,13 +376,22 @@ def _chunk_file_for_index(
     raise RuntimeError(f"isolated Whisper worker returned unknown chunk index {chunk_idx}")
 
 
+def _chunk_batches(
+    chunk_files: list[tuple[int, pathlib.Path]],
+    batch_size: int,
+) -> Iterator[list[tuple[int, pathlib.Path]]]:
+    size = max(int(batch_size), 1)
+    for start in range(0, len(chunk_files), size):
+        yield chunk_files[start : start + size]
+
+
 def _rich_segments_from_result(
     result: dict,
     *,
     chunk_idx: int,
     chunk_file: pathlib.Path,
 ) -> list[RichSegment]:
-    time_offset = int(chunk_idx) * CHUNK_SECONDS
+    time_offset = int(chunk_idx) * _chunk_seconds()
     chunk_segments: list[RichSegment] = []
     raw_segments_payload = _validated_segments_payload(result, chunk_file=chunk_file)
     for seg_idx, raw_seg in enumerate(raw_segments_payload):
@@ -386,9 +472,9 @@ def _transcribe_chunk_isolated(chunk_file: pathlib.Path) -> dict:
                 pass
 
 
-def _transcribe_chunks_isolated(chunk_files: list[tuple[int, pathlib.Path]]) -> list[tuple[int, dict]]:
+def _transcribe_chunks_isolated(chunk_files: list[tuple[int, pathlib.Path]]) -> Iterator[tuple[int, dict]]:
     if not chunk_files:
-        return []
+        return
 
     manifest_path: pathlib.Path | None = None
     common_dir = pathlib.Path(chunk_files[0][1]).parent
@@ -445,8 +531,8 @@ def _transcribe_chunks_isolated(chunk_files: list[tuple[int, pathlib.Path]]) -> 
         stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
         stderr_thread.start()
 
-        results: list[tuple[int, dict]] = []
         seen_chunks: set[int] = set()
+        result_count = 0
         assert process.stdout is not None
         for line in process.stdout:
             line = line.strip()
@@ -463,7 +549,13 @@ def _transcribe_chunks_isolated(chunk_files: list[tuple[int, pathlib.Path]]) -> 
             if not isinstance(segments, list):
                 raise RuntimeError(f"isolated Whisper worker omitted segments for chunk {chunk_idx}")
             seen_chunks.add(chunk_idx)
-            results.append((chunk_idx, {"segments": segments}))
+            result_count += 1
+            logger.info(
+                "transcriber_chunk_worker_result chunk_index=%s segments=%s",
+                chunk_idx,
+                len(segments),
+            )
+            yield chunk_idx, {"segments": segments}
 
         returncode = process.wait()
         stderr_thread.join(timeout=1.0)
@@ -480,8 +572,7 @@ def _transcribe_chunks_isolated(chunk_files: list[tuple[int, pathlib.Path]]) -> 
                 f"isolated Whisper chunk worker completed without results for chunks {missing_chunks}"
             )
 
-        logger.info("transcriber_chunk_worker_done chunks=%s", len(results))
-        return results
+        logger.info("transcriber_chunk_worker_done chunks=%s", result_count)
     finally:
         if manifest_path is not None:
             try:
@@ -603,9 +694,11 @@ def _chunk_cache_metadata(chunk_idx: int) -> dict[str, object]:
     return {
         "version": _TRANSCRIPT_CHUNK_CACHE_VERSION,
         "chunk_index": int(chunk_idx),
-        "chunk_seconds": CHUNK_SECONDS,
+        "chunk_seconds": _chunk_seconds(),
+        "backend": _resolved_whisper_backend(),
         "whisper_model": str(settings.whisper_model or ""),
         "language": str(settings.whisper_language or "").strip().lower(),
+        "word_timestamps": _word_timestamps_enabled(),
     }
 
 
@@ -746,11 +839,17 @@ def _calc_tempo(seg: dict, time_offset: float) -> float:
     return round(word_count / segment_duration, 2) if segment_duration > 0 else 0.0
 
 
-def _transcribe_chunk(model: whisper.Whisper, chunk_file: pathlib.Path) -> dict:
+def _transcribe_chunk(model: object, chunk_file: pathlib.Path) -> dict:
+    if _whisper_model_backend == "faster-whisper":
+        return _transcribe_chunk_faster(model, chunk_file)
+    return _transcribe_chunk_openai(model, chunk_file)
+
+
+def _transcribe_chunk_openai(model: whisper.Whisper, chunk_file: pathlib.Path) -> dict:
     with _whisper_inference_lock:
         use_fp16 = str(_model_device_name(model)).startswith("cuda")
         transcribe_kwargs: dict[str, object] = {
-            "word_timestamps": True,
+            "word_timestamps": _word_timestamps_enabled(),
             "verbose": False,
             "fp16": use_fp16,
         }
@@ -761,6 +860,36 @@ def _transcribe_chunk(model: whisper.Whisper, chunk_file: pathlib.Path) -> dict:
             str(chunk_file),
             **transcribe_kwargs,
         )
+
+
+def _transcribe_chunk_faster(model: object, chunk_file: pathlib.Path) -> dict:
+    with _whisper_inference_lock:
+        configured_language = str(settings.whisper_language or "").strip().lower()
+        transcribe_kwargs: dict[str, object] = {
+            "word_timestamps": _word_timestamps_enabled(),
+        }
+        if configured_language:
+            transcribe_kwargs["language"] = configured_language
+        segments_iter, _info = model.transcribe(str(chunk_file), **transcribe_kwargs)
+        segments = []
+        for segment in segments_iter:
+            payload: dict[str, object] = {
+                "start": float(segment.start),
+                "end": float(segment.end),
+                "text": str(segment.text or "").strip(),
+            }
+            words = getattr(segment, "words", None)
+            if words:
+                payload["words"] = [
+                    {
+                        "start": float(getattr(word, "start", 0.0) or 0.0),
+                        "end": float(getattr(word, "end", 0.0) or 0.0),
+                        "word": str(getattr(word, "word", "") or ""),
+                    }
+                    for word in words
+                ]
+            segments.append(payload)
+        return {"segments": segments}
 
 
 def _validated_segments_payload(

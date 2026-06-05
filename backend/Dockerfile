@@ -31,6 +31,7 @@ RUN apt-get update \
         curl \
         ffmpeg \
         git \
+        libchromaprint-tools \
         libegl1 \
         libgl1 \
         libgles2 \

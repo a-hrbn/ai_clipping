@@ -169,7 +169,7 @@ class CandidateGeneratorTests(unittest.TestCase):
 
         self.assertEqual([candidate.id for candidate in merged], ["narrative_reveal:0:950", "quote:0:1100"])
 
-    def test_dense_window_proposals_add_recall_for_gradual_build(self) -> None:
+    def test_dense_window_candidates_add_recall_for_gradual_build(self) -> None:
         segments = [
             RichSegment(start=0.0, end=4.0, text="setup", hype_score=1.2, arc_score=0.6),
             RichSegment(start=4.0, end=8.0, text="getting tense", hype_score=2.3, arc_score=1.5),
@@ -243,6 +243,128 @@ class CandidateGeneratorTests(unittest.TestCase):
         self.assertEqual(len(default_merged), 3)
         self.assertEqual(len(recall_merged), 5)
 
+    def test_merge_prioritized_candidates_caps_supplemental_by_quality_not_chronology(self) -> None:
+        dense = [
+            candidate_generators.Candidate(
+                id=f"dense_window:low:{index}",
+                start=float(index * 20),
+                end=float(index * 20 + 20),
+                source="dense_window",
+                anchor_time=float(index * 20 + 10),
+                score_hint=1.0,
+            )
+            for index in range(3)
+        ]
+        late_strong = candidate_generators.Candidate(
+            id="dense_window:late_strong",
+            start=120.0,
+            end=148.0,
+            source="dense_window",
+            anchor_time=132.0,
+            score_hint=7.5,
+            tags=["exclamation"],
+        )
+
+        merged = candidate_generators.merge_prioritized_candidates(
+            [],
+            [*dense, late_strong],
+            source_cap_overrides={"dense_window": 3},
+        )
+
+        merged_ids = {candidate.id for candidate in merged}
+        self.assertIn("dense_window:late_strong", merged_ids)
+        self.assertEqual(len([candidate for candidate in merged if candidate.source == "dense_window"]), 3)
+
+    def test_merge_prioritized_candidates_audits_duplicate_and_source_cap_drops(self) -> None:
+        kept = candidate_generators.Candidate(
+            id="quote:kept",
+            start=10.0,
+            end=35.0,
+            source="quote",
+            anchor_time=20.0,
+            score_hint=7.0,
+        )
+        duplicate = candidate_generators.Candidate(
+            id="quote:duplicate",
+            start=11.0,
+            end=34.0,
+            source="quote",
+            anchor_time=20.5,
+            score_hint=4.0,
+        )
+        dense_kept = candidate_generators.Candidate(
+            id="dense_window:kept",
+            start=80.0,
+            end=105.0,
+            source="dense_window",
+            anchor_time=92.0,
+            score_hint=5.0,
+        )
+        capped = candidate_generators.Candidate(
+            id="dense_window:capped",
+            start=130.0,
+            end=155.0,
+            source="dense_window",
+            anchor_time=142.0,
+            score_hint=2.0,
+        )
+        audit_rows: list[dict] = []
+
+        merged = candidate_generators.merge_prioritized_candidates(
+            [],
+            [kept, duplicate, dense_kept, capped],
+            source_cap_overrides={"quote": 4, "dense_window": 1},
+            audit_rows=audit_rows,
+            audit_stage="test_merge",
+        )
+
+        self.assertEqual([candidate.id for candidate in merged], ["quote:kept", "dense_window:kept"])
+        duplicate_row = next(row for row in audit_rows if row["candidate_id"] == "quote:duplicate")
+        capped_row = next(row for row in audit_rows if row["candidate_id"] == "dense_window:capped")
+        self.assertEqual(duplicate_row["decision"], "dropped")
+        self.assertEqual(duplicate_row["reason"], "duplicate")
+        self.assertEqual(duplicate_row["duplicate_of"], "quote:kept")
+        self.assertEqual(capped_row["decision"], "dropped")
+        self.assertEqual(capped_row["reason"], "source_cap")
+
+    def test_select_temporal_recall_candidates_keeps_time_coverage_before_global_score(self) -> None:
+        early_strong = candidate_generators.Candidate(
+            id="quote:early_strong",
+            start=5.0,
+            end=25.0,
+            source="quote",
+            anchor_time=12.0,
+            score_hint=8.0,
+        )
+        early_weak = candidate_generators.Candidate(
+            id="quote:early_weak",
+            start=30.0,
+            end=50.0,
+            source="quote",
+            anchor_time=40.0,
+            score_hint=1.0,
+        )
+        late_weaker = candidate_generators.Candidate(
+            id="quote:late_weaker",
+            start=360.0,
+            end=385.0,
+            source="quote",
+            anchor_time=372.0,
+            score_hint=2.0,
+        )
+
+        selected = candidate_generators.select_temporal_recall_candidates(
+            [early_weak, early_strong, late_weaker],
+            bucket_sec=60.0,
+            per_source_bucket=1,
+            max_candidates=10,
+        )
+
+        selected_ids = {candidate.id for candidate in selected}
+        self.assertIn("quote:early_strong", selected_ids)
+        self.assertIn("quote:late_weaker", selected_ids)
+        self.assertNotIn("quote:early_weak", selected_ids)
+
     def test_merge_prioritized_candidates_preserves_explicit_ids_through_duplicate_and_cap_checks(self) -> None:
         primary = [
             candidate_generators.Candidate(
@@ -255,7 +377,7 @@ class CandidateGeneratorTests(unittest.TestCase):
             )
         ]
         preserved = candidate_generators.Candidate(
-            id="dense_inventory:proposal-selected",
+            id="dense_inventory:preserved-selected",
             start=8.0,
             end=32.0,
             source="dense_inventory",
@@ -280,7 +402,7 @@ class CandidateGeneratorTests(unittest.TestCase):
 
         self.assertEqual(
             {candidate.id for candidate in merged},
-            {"peak:primary", "dense_inventory:filler", "dense_inventory:proposal-selected"},
+            {"peak:primary", "dense_inventory:filler", "dense_inventory:preserved-selected"},
         )
 
     def test_generate_fallback_candidates_preserves_generic_recall_sources(self) -> None:

@@ -153,6 +153,8 @@ def merge_prioritized_candidates(
     preserve_context_variants: bool = False,
     max_context_variants_per_region: int = 2,
     strategy: dict | None = None,
+    audit_rows: list[dict] | None = None,
+    audit_stage: str = "merge",
 ) -> list[Candidate]:
     normalized_strategy = clip_strategy.normalize_strategy(strategy)
     merged: list[Candidate] = []
@@ -163,41 +165,109 @@ def merge_prioritized_candidates(
     for source, cap in (source_cap_overrides or {}).items():
         source_caps[str(source)] = max(int(cap), 0)
 
-    for candidate in primary:
+    for candidate in _ordered_merge_candidates(primary):
         if not clip_strategy.candidate_in_time_range(candidate.start, candidate.end, normalized_strategy):
+            _append_merge_audit(audit_rows, audit_stage, candidate, "dropped", "outside_time_range")
             continue
-        if _is_duplicate_candidate(
+        duplicate = _duplicate_candidate(
             candidate,
             merged,
             preserve_context_variants=preserve_context_variants,
             max_context_variants_per_region=max_context_variants_per_region,
-        ):
+        )
+        if duplicate is not None:
+            _append_merge_audit(
+                audit_rows,
+                audit_stage,
+                candidate,
+                "dropped",
+                "duplicate",
+                duplicate_of=duplicate,
+            )
             continue
         merged.append(candidate)
         primary_ids.add(candidate.id)
+        _append_merge_audit(audit_rows, audit_stage, candidate, "kept", "primary")
 
-    for candidate in supplemental:
+    for candidate in _ordered_merge_candidates(supplemental):
         if not clip_strategy.candidate_in_time_range(candidate.start, candidate.end, normalized_strategy):
+            _append_merge_audit(audit_rows, audit_stage, candidate, "dropped", "outside_time_range")
             continue
         is_preserved = candidate.id in preserved_ids
         effective_cap = source_caps.get(candidate.source, supplemental_source_cap)
         if not is_preserved and supplemental_counts.get(candidate.source, 0) >= effective_cap:
+            _append_merge_audit(
+                audit_rows,
+                audit_stage,
+                candidate,
+                "dropped",
+                "source_cap",
+                source_cap=effective_cap,
+            )
             continue
+        duplicate = _duplicate_supplemental_candidate(
+            candidate,
+            merged,
+            primary_ids,
+            preserve_context_variants=preserve_context_variants,
+            max_context_variants_per_region=max_context_variants_per_region,
+        )
         if (
             not is_preserved
-            and _is_duplicate_supplemental_candidate(
-                candidate,
-                merged,
-                primary_ids,
-                preserve_context_variants=preserve_context_variants,
-                max_context_variants_per_region=max_context_variants_per_region,
-            )
+            and duplicate is not None
         ):
+            _append_merge_audit(
+                audit_rows,
+                audit_stage,
+                candidate,
+                "dropped",
+                "duplicate",
+                duplicate_of=duplicate,
+            )
             continue
         merged.append(candidate)
-        supplemental_counts[candidate.source] = supplemental_counts.get(candidate.source, 0) + 1
+        if not is_preserved:
+            supplemental_counts[candidate.source] = supplemental_counts.get(candidate.source, 0) + 1
+        _append_merge_audit(
+            audit_rows,
+            audit_stage,
+            candidate,
+            "kept",
+            "preserved" if is_preserved else "supplemental",
+            source_cap=effective_cap,
+        )
 
     return sorted(merged, key=lambda candidate: (candidate.start, candidate.anchor_time))
+
+
+def select_temporal_recall_candidates(
+    candidates: list[Candidate],
+    *,
+    bucket_sec: float = 60.0,
+    per_source_bucket: int = 1,
+    max_candidates: int = 700,
+) -> list[Candidate]:
+    """Select a bounded, time-covered recall carry set before merge caps.
+
+    Global source caps tend to keep only the earliest or globally strongest
+    windows in long VODs. This keeps the best candidate per source/time bucket
+    so downstream dedup still controls compute while long-VOD coverage survives.
+    """
+    if not candidates or max_candidates <= 0 or per_source_bucket <= 0:
+        return []
+    bucket_size = max(float(bucket_sec or 60.0), 1.0)
+    grouped: dict[tuple[str, int], list[Candidate]] = {}
+    for candidate in candidates:
+        bucket = int(max(float(candidate.anchor_time or 0.0), 0.0) // bucket_size)
+        grouped.setdefault((candidate.source, bucket), []).append(candidate)
+
+    selected_by_id: dict[str, Candidate] = {}
+    for group in grouped.values():
+        for candidate in _ordered_merge_candidates(group)[:per_source_bucket]:
+            selected_by_id.setdefault(candidate.id, candidate)
+
+    selected = _ordered_merge_candidates(list(selected_by_id.values()))
+    return selected[:max_candidates]
 
 
 def _generate_hype_peak_candidates(segments: list[RichSegment]) -> list[Candidate]:
@@ -514,13 +584,98 @@ def _is_quote_like(seg: RichSegment) -> bool:
     return lower.startswith(starters)
 
 
-def _is_duplicate_candidate(
+def _ordered_merge_candidates(candidates: list[Candidate]) -> list[Candidate]:
+    return sorted(
+        candidates,
+        key=lambda candidate: (
+            -_merge_selection_score(candidate),
+            candidate.start,
+            candidate.anchor_time,
+            candidate.id,
+        ),
+    )
+
+
+def _merge_selection_score(candidate: Candidate) -> float:
+    source_prior = {
+        "hype_peak": 0.92,
+        "chat_sync": 0.86,
+        "chat_velocity": 0.86,
+        "quote": 0.84,
+        "narrative_reveal": 0.82,
+        "tension_build": 0.8,
+        "story_payoff": 0.8,
+        "reaction": 0.78,
+        "clean_reaction": 0.78,
+        "controversy": 0.76,
+        "visual_reveal": 0.72,
+        "audio_burst": 0.7,
+        "goal_prompt": 0.68,
+        "dense_window": 0.56,
+        "dense_inventory": 0.44,
+    }.get(candidate.source, 0.58)
+    duration = max(candidate.end - candidate.start, 0.0)
+    lead = max(candidate.anchor_time - candidate.start, 0.0)
+    duration_fit = 1.0 - min(abs(duration - 28.0) / 48.0, 1.0)
+    setup_fit = min(lead / 10.0, 1.0)
+    signal = min(max(float(candidate.score_hint or 0.0), 0.0) / 8.0, 1.0)
+    tag_bonus = 0.0
+    tags = set(candidate.tags or [])
+    if tags.intersection({"question", "exclamation", "audio_laughter", "laughter"}):
+        tag_bonus = 0.08
+    return min(
+        1.0,
+        source_prior * 0.28
+        + _context_variant_pre_score(candidate) * 0.34
+        + signal * 0.20
+        + duration_fit * 0.10
+        + setup_fit * 0.08
+        + tag_bonus,
+    )
+
+
+def _append_merge_audit(
+    audit_rows: list[dict] | None,
+    stage: str,
+    candidate: Candidate,
+    decision: str,
+    reason: str,
+    *,
+    duplicate_of: Candidate | None = None,
+    source_cap: int | None = None,
+) -> None:
+    if audit_rows is None:
+        return
+    row = {
+        "stage": stage,
+        "candidate_id": candidate.id,
+        "source": candidate.source,
+        "start": round(float(candidate.start), 3),
+        "end": round(float(candidate.end), 3),
+        "anchor_time": round(float(candidate.anchor_time), 3),
+        "score_hint": round(float(candidate.score_hint or 0.0), 6),
+        "merge_selection_score": round(_merge_selection_score(candidate), 6),
+        "decision": decision,
+        "reason": reason,
+    }
+    if duplicate_of is not None:
+        row["duplicate_of"] = duplicate_of.id
+        row["duplicate_of_source"] = duplicate_of.source
+        row["duplicate_of_start"] = round(float(duplicate_of.start), 3)
+        row["duplicate_of_end"] = round(float(duplicate_of.end), 3)
+        row["duplicate_of_merge_selection_score"] = round(_merge_selection_score(duplicate_of), 6)
+    if source_cap is not None:
+        row["source_cap"] = int(source_cap)
+    audit_rows.append(row)
+
+
+def _duplicate_candidate(
     candidate: Candidate,
     existing: list[Candidate],
     *,
     preserve_context_variants: bool = False,
     max_context_variants_per_region: int = 2,
-) -> bool:
+) -> Candidate | None:
     for other in existing:
         if abs(candidate.anchor_time - other.anchor_time) <= 4.0:
             if preserve_context_variants and _context_variant_should_survive(
@@ -530,7 +685,7 @@ def _is_duplicate_candidate(
                 max_context_variants_per_region=max_context_variants_per_region,
             ):
                 continue
-            return True
+            return other
         overlap = min(candidate.end, other.end) - max(candidate.start, other.start)
         if overlap <= 0:
             continue
@@ -543,18 +698,33 @@ def _is_duplicate_candidate(
                 max_context_variants_per_region=max_context_variants_per_region,
             ):
                 continue
-            return True
-    return False
+            return other
+    return None
 
 
-def _is_duplicate_supplemental_candidate(
+def _is_duplicate_candidate(
+    candidate: Candidate,
+    existing: list[Candidate],
+    *,
+    preserve_context_variants: bool = False,
+    max_context_variants_per_region: int = 2,
+) -> bool:
+    return _duplicate_candidate(
+        candidate,
+        existing,
+        preserve_context_variants=preserve_context_variants,
+        max_context_variants_per_region=max_context_variants_per_region,
+    ) is not None
+
+
+def _duplicate_supplemental_candidate(
     candidate: Candidate,
     existing: list[Candidate],
     primary_ids: set[str],
     *,
     preserve_context_variants: bool = False,
     max_context_variants_per_region: int = 2,
-) -> bool:
+) -> Candidate | None:
     for other in existing:
         if not _candidate_windows_overlap_like_duplicates(candidate, other):
             continue
@@ -566,12 +736,29 @@ def _is_duplicate_supplemental_candidate(
         ):
             continue
         if other.id in primary_ids:
-            return True
+            return other
         if candidate.source == other.source:
-            return True
+            return other
         if _candidate_windows_are_effectively_identical(candidate, other):
-            return True
-    return False
+            return other
+    return None
+
+
+def _is_duplicate_supplemental_candidate(
+    candidate: Candidate,
+    existing: list[Candidate],
+    primary_ids: set[str],
+    *,
+    preserve_context_variants: bool = False,
+    max_context_variants_per_region: int = 2,
+) -> bool:
+    return _duplicate_supplemental_candidate(
+        candidate,
+        existing,
+        primary_ids,
+        preserve_context_variants=preserve_context_variants,
+        max_context_variants_per_region=max_context_variants_per_region,
+    ) is not None
 
 
 def _context_variant_should_survive(
@@ -767,9 +954,9 @@ def _generate_dense_window_candidates(segments: list[RichSegment]) -> list[Candi
     candidates: list[Candidate] = []
     used_ranges: list[tuple[float, float]] = []
     for target_duration in _DENSE_TARGET_DURATIONS:
-        proposals = _dense_window_proposals(segments, target_duration)
-        for rank, proposal in enumerate(proposals[:_DENSE_PER_DURATION]):
-            start, end, anchor, coarse_score, tags = proposal
+        windows = _dense_window_candidates(segments, target_duration)
+        for rank, window in enumerate(windows[:_DENSE_PER_DURATION]):
+            start, end, anchor, coarse_score, tags = window
             if _range_overlaps_dense_candidate(start, end, used_ranges):
                 continue
             candidates.append(
@@ -843,11 +1030,11 @@ def _dense_inventory_candidate(
     )
 
 
-def _dense_window_proposals(
+def _dense_window_candidates(
     segments: list[RichSegment],
     target_duration: float,
 ) -> list[tuple[float, float, RichSegment, float, list[str]]]:
-    proposals: list[tuple[float, float, RichSegment, float, list[str]]] = []
+    candidates: list[tuple[float, float, RichSegment, float, list[str]]] = []
     step_sec = max(target_duration * 0.35, 4.0)
     last_start = max(segments[-1].end - target_duration, segments[0].start)
     cursor = segments[0].start
@@ -859,11 +1046,11 @@ def _dense_window_proposals(
             coarse_score = _dense_coarse_score(window, target_duration)
             if coarse_score >= 2.2:
                 tags = sorted({emotion for seg in window for emotion in seg.emotions})
-                proposals.append((cursor, end, anchor, coarse_score, tags))
+                candidates.append((cursor, end, anchor, coarse_score, tags))
         cursor += step_sec
 
-    proposals.sort(key=lambda item: item[3], reverse=True)
-    return proposals
+    candidates.sort(key=lambda item: item[3], reverse=True)
+    return candidates
 
 
 def _dense_coarse_score(window: list[RichSegment], target_duration: float) -> float:

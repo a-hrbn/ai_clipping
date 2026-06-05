@@ -181,7 +181,6 @@ export default function CandidateReviewPanel({ jobId }: { jobId: string }) {
 
                     <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-dim sm:grid-cols-4">
                       <span>Rank: {fmtMetric(candidate.rank_score)}</span>
-                      <span>Proposal: {fmtMetric(candidate.proposal_score, 3)}</span>
                       <span>Pre-Judge: {candidate.pre_judge_rank ?? "-"}</span>
                       <span>Judge: {fmtMetric(candidate.judge_score)}</span>
                     </div>

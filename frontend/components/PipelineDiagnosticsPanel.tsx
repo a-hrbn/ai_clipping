@@ -121,7 +121,6 @@ function CandidateFunnelPanel({ funnel }: { funnel: CandidateFunnelDiagnostics |
   const largestLosses = funnel.largest_losses ?? [];
   const samples = funnel.samples ?? [];
   const quality = funnel.quality_breakdown ?? {};
-  const proposal = funnel.proposal_lift ?? {};
   const ranker = funnel.ranker_lift ?? {};
   const clipTypeEntries = Object.entries(funnel.clip_type_lift ?? {})
     .sort((a, b) => (b[1].final_selected ?? 0) - (a[1].final_selected ?? 0) || (b[1].high_judge ?? 0) - (a[1].high_judge ?? 0))
@@ -152,13 +151,7 @@ function CandidateFunnelPanel({ funnel }: { funnel: CandidateFunnelDiagnostics |
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
             <FunnelMetricCard label="Judge behalten" value={quality.judged_kept ?? 0} detail={`${quality.judged_rejected ?? 0} judged rejected`} />
             <FunnelMetricCard label="Ungejudged behalten" value={quality.unjudged_kept ?? 0} detail={`${quality.unjudged_rejected ?? 0} ungejudged rejected`} />
-            <FunnelMetricCard label="Proposal P@K" value={formatPercent(proposal.precision_at_positive_k)} detail={`Final mean ${formatMean(proposal.final_selected_proposal_score)}`} />
             <FunnelMetricCard label="Ranker Top20" value={formatPercent(ranker.high_judge_pre_judge_top20_ratio)} detail={`${ranker.high_judge_rows ?? 0} High-Judge Kandidaten`} />
-          </div>
-
-          <div className="grid gap-2 sm:grid-cols-3">
-            <FunnelMetricCard label="Proposal Recall@K" value={formatPercent(proposal.recall_at_positive_k)} detail={`${proposal.positive_proxy_rows ?? 0} positive Proxy Rows`} />
-            <FunnelMetricCard label="High-Judge Proposal" value={formatPercent(proposal.high_judge_proposal_kept_ratio)} detail={`Mean ${formatMean(proposal.high_judge_proposal_score)}`} />
             <FunnelMetricCard label="Final Rank Mean" value={formatMean(ranker.final_selected_pre_judge_rank)} detail={`Judge mean ${formatMean(ranker.final_selected_judge_score)}`} />
           </div>
 
@@ -193,7 +186,7 @@ function CandidateFunnelPanel({ funnel }: { funnel: CandidateFunnelDiagnostics |
                   <div key={clipType} className="border border-border/70 px-2 py-2 text-xs">
                     <div className="truncate text-tx">{clipType}</div>
                     <div className="mt-1 font-mono text-[10px] text-muted">
-                      {stats.rows ?? 0} rows · {stats.final_selected ?? 0} final · {stats.high_judge ?? 0} high judge · P {formatScore(stats.mean_proposal_score)}
+                      {stats.rows ?? 0} rows · {stats.final_selected ?? 0} final · {stats.high_judge ?? 0} high judge
                     </div>
                   </div>
                 ))}
@@ -235,7 +228,7 @@ function CandidateFunnelPanel({ funnel }: { funnel: CandidateFunnelDiagnostics |
                       {sample.final_rank ? `F${sample.final_rank}` : sample.pre_judge_rank ? `R${sample.pre_judge_rank}` : "-"}
                     </td>
                     <td className="px-3 py-2 font-mono text-muted">
-                      P {formatScore(sample.proposal_score)} / R {formatScore(sample.pre_judge_rank_score)} / J {formatScore(sample.judge_score)}
+                      R {formatScore(sample.pre_judge_rank_score)} / J {formatScore(sample.judge_score)}
                     </td>
                     <td className="max-w-[220px] px-3 py-2 text-warn">
                       {sample.drop_reason ?? sample.dropped_stage ?? "-"}

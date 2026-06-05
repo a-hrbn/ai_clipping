@@ -52,14 +52,12 @@ def summarize_debug_dir(debug_dir: Path) -> dict[str, Any]:
         "high_judge_rows": len(high_judge_rows),
         "stage_counts": funnel.get("stage_counts") or {},
         "quality_breakdown": funnel.get("quality_breakdown") or {},
-        "proposal_lift": funnel.get("proposal_lift") or {},
         "ranker_lift": funnel.get("ranker_lift") or {},
         "final_selected": _candidate_summary(final_rows),
         "high_judge_not_final": _candidate_summary(
             [row for row in high_judge_rows if not row.get("final_selected")][:10]
         ),
         "score_summary": {
-            "final_proposal_mean": _mean(row.get("proposal_score") for row in final_rows),
             "final_pre_judge_rank_mean": _mean(row.get("pre_judge_rank") for row in final_rows),
             "final_judge_score_mean": _mean(row.get("judge_score") for row in final_rows),
             "high_judge_pre_judge_top20_ratio": (funnel.get("ranker_lift") or {}).get(
@@ -73,8 +71,7 @@ def positive_window_recall(debug_dir: Path, positive_rows_path: Path, *, overlap
     positives = _positive_windows(positive_rows_path, debug_dir)
     trace_rows = _read_jsonl(debug_dir / "candidate_trace.jsonl")
     stages = [
-        "proposal_input",
-        "proposal_kept",
+        "dense_inventory",
         "ranked_pre_judge",
         "judge_scope",
         "clip_judge",
@@ -122,7 +119,6 @@ def _candidate_summary(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "source": row.get("source"),
             "start": row.get("start"),
             "end": row.get("end"),
-            "proposal_score": row.get("proposal_score"),
             "pre_judge_rank": row.get("pre_judge_rank"),
             "pre_judge_rank_score": row.get("pre_judge_rank_score"),
             "judge_score": row.get("judge_score"),
@@ -212,10 +208,8 @@ def _row_has_effective_stage(row: dict[str, Any], stage: str) -> bool:
     stages = row.get("stages") if isinstance(row.get("stages"), dict) else {}
     stage_row = stages.get(stage)
     status = str(stage_row.get("status") or "").strip().lower() if isinstance(stage_row, dict) else ""
-    if stage in {"proposal_input", "ranked_pre_judge"}:
+    if stage in {"dense_inventory", "ranked_pre_judge"}:
         return True
-    if stage == "proposal_kept":
-        return status == "kept" or bool(row.get("proposal_accepted"))
     if stage == "judge_scope":
         return status == "included"
     if stage == "clip_judge":

@@ -6,8 +6,10 @@ import os
 import pathlib
 import subprocess
 import sys
+import threading
 import time
 from collections import Counter
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from typing import Any
 
@@ -26,6 +28,17 @@ DEFAULT_HOLDOUT_POLICY = DEFAULT_ARTIFACT_DIR / "jynxzi_recent_vod_holdout_polic
 DEFAULT_POSITIVE_ROWS = DEFAULT_ARTIFACT_DIR / "jynxzi_cross_platform_fingerprint_rows.jsonl"
 DEFAULT_OUTPUT = DEFAULT_ARTIFACT_DIR / "jynxzi_serving_recall_holdout_eval.json"
 DEFAULT_RUN_SUMMARY = DEFAULT_ARTIFACT_DIR / "jynxzi_serving_recall_holdout_run_summary.json"
+MAX_WORKERS = 2
+DEFAULT_PROGRESS_INTERVAL_SEC = 3.0
+DEFAULT_HOLDOUT_JUDGE_SAMPLE_COUNT = 3
+DEFAULT_ENABLE_JUDGE = False
+DEFAULT_HOLDOUT_TWITCH_DOWNLOAD_CACHE_TTL_SEC = -1
+PHASE_A_PIPELINE_ENV = {
+    "ENABLE_DENSE_CANDIDATE_INVENTORY": "true",
+    "DENSE_CANDIDATE_INVENTORY_SOURCE_CAP": "700",
+}
+
+_PROGRESS_LOCK = threading.Lock()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -44,11 +57,36 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--run-id", default="")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--skip-existing", action="store_true")
-    parser.add_argument("--fail-fast", action="store_true")
+    parser.add_argument(
+        "--fail-fast",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Stop submitting new VOD jobs after the first failure. Enabled by default; use --no-fail-fast to disable.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--positive-overlap-ratio", type=float, default=0.45)
-    parser.add_argument("--progress-interval-sec", type=float, default=10.0)
+    parser.add_argument("--progress-interval-sec", type=float, default=DEFAULT_PROGRESS_INTERVAL_SEC)
     parser.add_argument("--strategy-json", default="{}")
+    parser.add_argument(
+        "--enable-judge",
+        action="store_true",
+        help=(
+            "Run the non-deterministic Clip Judge during holdout evaluation. "
+            "Default is judge-off so merge/final-selection experiments are deterministic."
+        ),
+    )
+    parser.add_argument(
+        "--judge-sample-count",
+        type=int,
+        default=DEFAULT_HOLDOUT_JUDGE_SAMPLE_COUNT,
+        help="Judge samples per candidate when --enable-judge is used. Default: 3.",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=MAX_WORKERS,
+        help="Number of VOD pipeline jobs to run in parallel. Capped at 2 for resource safety.",
+    )
     args = parser.parse_args(argv)
 
     run_id = args.run_id.strip() or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -56,9 +94,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.limit and args.limit > 0:
         holdout_vods = holdout_vods[: args.limit]
 
+    workers = _bounded_workers(args.workers)
     strategy = _load_json_object(args.strategy_json, label="strategy-json")
     started_at = time.time()
-    run_rows: list[dict[str, Any]] = []
+    ordered_rows: dict[int, dict[str, Any]] = {}
+    pending_jobs: list[dict[str, Any]] = []
     skipped: Counter[str] = Counter()
     failed = False
     emit_progress(
@@ -66,6 +106,13 @@ def main(argv: list[str] | None = None) -> int:
         profile=args.profile,
         run_id=run_id,
         total_vods=len(holdout_vods),
+        workers=workers,
+        fail_fast=bool(args.fail_fast),
+        progress_interval_sec=float(args.progress_interval_sec),
+        enable_clip_judge=bool(args.enable_judge),
+        judge_sample_count=_bounded_judge_sample_count(args.judge_sample_count),
+        phase_a_pipeline_env=phase_a_pipeline_env(),
+        twitch_download_cache_ttl_sec=DEFAULT_HOLDOUT_TWITCH_DOWNLOAD_CACHE_TTL_SEC,
         holdout_policy_rows=str(args.holdout_policy_rows),
         positive_rows=str(args.positive_rows),
         dry_run=bool(args.dry_run),
@@ -94,15 +141,13 @@ def main(argv: list[str] | None = None) -> int:
                 job_id=existing.name,
                 debug_dir=str(existing / "debug"),
             )
-            run_rows.append(
-                {
-                    "vod_id": vod_id,
-                    "url": url,
-                    "job_id": existing.name,
-                    "status": "reused_existing",
-                    "debug_dir": str(existing / "debug"),
-                }
-            )
+            ordered_rows[vod_index] = {
+                "vod_id": vod_id,
+                "url": url,
+                "job_id": existing.name,
+                "status": "reused_existing",
+                "debug_dir": str(existing / "debug"),
+            }
             continue
         if args.dry_run:
             emit_progress(
@@ -113,26 +158,49 @@ def main(argv: list[str] | None = None) -> int:
                 url=url,
                 job_id=planned_job_id(run_id, vod_id),
             )
-            run_rows.append({"vod_id": vod_id, "url": url, "job_id": planned_job_id(run_id, vod_id), "status": "dry_run"})
+            ordered_rows[vod_index] = {
+                "vod_id": vod_id,
+                "url": url,
+                "job_id": planned_job_id(run_id, vod_id),
+                "status": "dry_run",
+            }
             continue
 
         job_id = planned_job_id(run_id, vod_id)
-        row = run_pipeline_job(
-            job_id=job_id,
-            url=url,
-            profile=args.profile,
-            strategy=strategy,
-            storage_dir=args.storage_dir,
-            positive_rows=args.positive_rows,
-            vod_index=vod_index,
-            total_vods=len(holdout_vods),
-            progress_interval_sec=max(float(args.progress_interval_sec or 0.0), 0.5),
+        pending_jobs.append(
+            {
+                "job_id": job_id,
+                "url": url,
+                "profile": args.profile,
+                "strategy": strategy,
+                "storage_dir": args.storage_dir,
+                "positive_rows": args.positive_rows,
+                "enable_clip_judge": bool(args.enable_judge),
+                "judge_sample_count": _bounded_judge_sample_count(args.judge_sample_count),
+                "vod_index": vod_index,
+                "total_vods": len(holdout_vods),
+                "progress_interval_sec": max(float(args.progress_interval_sec or 0.0), 0.5),
+            }
         )
-        run_rows.append(row)
-        if row.get("status") != "done":
-            failed = True
-            if args.fail_fast:
-                break
+
+    if pending_jobs:
+        emit_progress(
+            "holdout_pipeline_jobs_started",
+            run_id=run_id,
+            workers=workers,
+            jobs=len(pending_jobs),
+            fail_fast=bool(args.fail_fast),
+            enable_clip_judge=bool(args.enable_judge),
+        )
+        job_rows, job_failed = run_pending_pipeline_jobs(
+            pending_jobs,
+            workers=workers,
+            fail_fast=bool(args.fail_fast),
+        )
+        ordered_rows.update(job_rows)
+        failed = failed or job_failed
+
+    run_rows = [ordered_rows[index] for index in sorted(ordered_rows)]
 
     eval_report: dict[str, Any] = {}
     if not args.dry_run:
@@ -168,11 +236,22 @@ def main(argv: list[str] | None = None) -> int:
         "profile": args.profile,
         "run_id": run_id,
         "dry_run": bool(args.dry_run),
+        "fail_fast": bool(args.fail_fast),
+        "progress_interval_sec": float(args.progress_interval_sec),
+        "enable_clip_judge": bool(args.enable_judge),
+        "judge_sample_count": _bounded_judge_sample_count(args.judge_sample_count),
+        "judge_policy": {
+            "default": "judge_off",
+            "reason": "deterministic holdout eval for merge/final-selection tuning",
+            "reference_flag": "--enable-judge",
+        },
+        "phase_a_pipeline_env": phase_a_pipeline_env(),
         "holdout_policy_rows": str(args.holdout_policy_rows),
         "positive_rows": str(args.positive_rows),
         "storage_dir": str(args.storage_dir),
         "output": str(args.output),
         "requested_vods": len(holdout_vods),
+        "workers": workers,
         "jobs": run_rows,
         "jobs_by_status": dict(sorted(Counter(str(row.get("status") or "unknown") for row in run_rows).items())),
         "skipped": dict(sorted(skipped.items())),
@@ -192,6 +271,80 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(json.dumps(summary, ensure_ascii=True, indent=2, sort_keys=True))
     return 1 if failed and args.fail_fast else 0
+
+
+def run_pending_pipeline_jobs(
+    pending_jobs: list[dict[str, Any]],
+    *,
+    workers: int,
+    fail_fast: bool,
+) -> tuple[dict[int, dict[str, Any]], bool]:
+    worker_count = min(_bounded_workers(workers), len(pending_jobs))
+    ordered_rows: dict[int, dict[str, Any]] = {}
+    failed = False
+    next_index = 0
+    active: dict[Future[dict[str, Any]], dict[str, Any]] = {}
+
+    def submit_next(executor: ThreadPoolExecutor) -> None:
+        nonlocal next_index
+        if next_index >= len(pending_jobs):
+            return
+        job = pending_jobs[next_index]
+        next_index += 1
+        active[executor.submit(run_pipeline_job, **job)] = job
+
+    with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="holdout-vod") as executor:
+        for _ in range(worker_count):
+            submit_next(executor)
+        while active:
+            done, _ = wait(active, return_when=FIRST_COMPLETED)
+            for future in done:
+                job = active.pop(future)
+                row = _pipeline_future_row(future, job)
+                ordered_rows[int(job["vod_index"])] = row
+                if row.get("status") != "done":
+                    failed = True
+                if not (failed and fail_fast):
+                    submit_next(executor)
+            if failed and fail_fast:
+                emit_progress(
+                    "holdout_fail_fast_waiting_for_inflight",
+                    active_jobs=len(active),
+                    completed_jobs=len(ordered_rows),
+                )
+    return ordered_rows, failed
+
+
+def _pipeline_future_row(future: Future[dict[str, Any]], job: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return future.result()
+    except Exception as exc:  # pragma: no cover - defensive around subprocess orchestration
+        return {
+            "vod_id": _vod_id_from_url(str(job.get("url") or "")),
+            "url": str(job.get("url") or ""),
+            "job_id": str(job.get("job_id") or ""),
+            "status": "failed",
+            "returncode": None,
+            "elapsed_sec": None,
+            "debug_dir": str(pathlib.Path(job.get("storage_dir") or DEFAULT_STORAGE_DIR) / str(job.get("job_id") or "") / "debug"),
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+def _bounded_workers(raw_workers: int) -> int:
+    try:
+        workers = int(raw_workers)
+    except (TypeError, ValueError):
+        workers = 1
+    return max(1, min(workers, MAX_WORKERS))
+
+
+def _bounded_judge_sample_count(raw_count: int) -> int:
+    try:
+        sample_count = int(raw_count)
+    except (TypeError, ValueError):
+        sample_count = DEFAULT_HOLDOUT_JUDGE_SAMPLE_COUNT
+    return max(1, min(sample_count, 5))
 
 
 def load_holdout_vods(path: pathlib.Path) -> list[dict[str, Any]]:
@@ -225,9 +378,13 @@ def run_pipeline_job(
     strategy: dict[str, Any],
     storage_dir: pathlib.Path,
     positive_rows: pathlib.Path,
+    enable_clip_judge: bool,
+    judge_sample_count: int,
     vod_index: int,
     total_vods: int,
     progress_interval_sec: float,
+    runner_name: str = "serving_recall_holdout",
+    event_prefix: str = "holdout",
 ) -> dict[str, Any]:
     storage_dir.mkdir(parents=True, exist_ok=True)
     job_dir = storage_dir / job_id
@@ -237,7 +394,7 @@ def run_pipeline_job(
         "url": url,
         "profile": profile,
         "strategy": strategy,
-        "runner": "serving_recall_holdout",
+        "runner": runner_name,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     (job_dir / "request.json").write_text(json.dumps(request_payload, ensure_ascii=True, indent=2), encoding="utf-8")
@@ -255,14 +412,22 @@ def run_pipeline_job(
     ]
     started_at = time.time()
     emit_progress(
-        "holdout_vod_started",
+        f"{event_prefix}_vod_started",
         vod_index=vod_index,
         total_vods=total_vods,
         vod_id=_vod_id_from_url(url),
         url=url,
         job_id=job_id,
     )
-    process = subprocess.Popen(cmd, cwd=str(BACKEND_ROOT), env=pipeline_env(positive_rows))
+    process = subprocess.Popen(
+        cmd,
+        cwd=str(BACKEND_ROOT),
+        env=pipeline_env(
+            positive_rows,
+            enable_clip_judge=enable_clip_judge,
+            judge_sample_count=judge_sample_count,
+        ),
+    )
     last_snapshot: tuple[str, int, str, bool, int | None] | None = None
     last_emit = 0.0
     while True:
@@ -273,7 +438,7 @@ def run_pipeline_job(
         should_emit = snapshot != last_snapshot or now - last_emit >= progress_interval_sec
         if should_emit:
             emit_progress(
-                "holdout_vod_progress",
+                f"{event_prefix}_vod_progress",
                 vod_index=vod_index,
                 total_vods=total_vods,
                 vod_id=_vod_id_from_url(url),
@@ -304,7 +469,7 @@ def run_pipeline_job(
         "error": str(getattr(job, "error", "") or ""),
     }
     emit_progress(
-        "holdout_vod_done",
+        f"{event_prefix}_vod_done",
         vod_index=vod_index,
         total_vods=total_vods,
         vod_id=row["vod_id"],
@@ -355,27 +520,40 @@ def stage_label(status: str) -> str:
 
 
 def emit_progress(event: str, **payload: Any) -> None:
-    print(
-        json.dumps(
-            {
-                "event": event,
-                "ts": datetime.now(timezone.utc).isoformat(),
-                **payload,
-            },
-            ensure_ascii=True,
-            sort_keys=True,
-        ),
-        flush=True,
-    )
+    with _PROGRESS_LOCK:
+        print(
+            json.dumps(
+                {
+                    "event": event,
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    **payload,
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+            ),
+            flush=True,
+        )
 
 
-def pipeline_env(positive_rows: pathlib.Path) -> dict[str, str]:
+def pipeline_env(
+    positive_rows: pathlib.Path,
+    *,
+    enable_clip_judge: bool = DEFAULT_ENABLE_JUDGE,
+    judge_sample_count: int = DEFAULT_HOLDOUT_JUDGE_SAMPLE_COUNT,
+) -> dict[str, str]:
     env = dict(os.environ)
     existing_pythonpath = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = os.pathsep.join([str(BACKEND_ROOT), existing_pythonpath]) if existing_pythonpath else str(BACKEND_ROOT)
     env["SERVING_CROSS_PLATFORM_RECALL_ENABLED"] = "false"
     env["SERVING_CROSS_PLATFORM_FEATURE_BOOSTS_ENABLED"] = "false"
     env["SERVING_CROSS_PLATFORM_POSITIVE_ROWS_PATH"] = str(positive_rows)
+    env["TWITCH_DOWNLOAD_CACHE_TTL_SEC"] = str(DEFAULT_HOLDOUT_TWITCH_DOWNLOAD_CACHE_TTL_SEC)
+    env["ENABLE_CLIP_JUDGE"] = "true" if enable_clip_judge else "false"
+    env.update(phase_a_pipeline_env())
+    if enable_clip_judge:
+        sample_count = _bounded_judge_sample_count(judge_sample_count)
+        env["CLIP_JUDGE_SAMPLE_COUNT"] = str(sample_count)
+        env["CLIP_JUDGE_UNCERTAIN_SAMPLE_COUNT"] = str(sample_count)
     env.setdefault("PYTHONFAULTHANDLER", "1")
     env.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
     env.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
@@ -390,6 +568,10 @@ def pipeline_env(positive_rows: pathlib.Path) -> dict[str, str]:
     env.setdefault("NUMEXPR_NUM_THREADS", "1")
     env.setdefault("VECLIB_MAXIMUM_THREADS", "1")
     return env
+
+
+def phase_a_pipeline_env() -> dict[str, str]:
+    return dict(PHASE_A_PIPELINE_ENV)
 
 
 def find_existing_holdout_job(storage_dir: pathlib.Path, vod_id: str) -> pathlib.Path | None:

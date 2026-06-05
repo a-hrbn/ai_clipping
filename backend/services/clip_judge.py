@@ -118,6 +118,9 @@ def rerank_candidates(
         fail_fast=bool(getattr(settings, "clip_judge_fail_fast", False)),
         provider_fallback_enabled=bool(getattr(settings, "judge_provider_fallback_enabled", True)),
         batch_size=batch_size,
+        sample_count=_clip_judge_sample_count(),
+        uncertain_sample_count=_clip_judge_uncertain_sample_count(),
+        cache_enabled=bool(getattr(settings, "clip_judge_cache_enabled", True)),
     )
 
     def emit_progress(index: int, ranked: RankedCandidate | None = None) -> None:
@@ -720,10 +723,15 @@ def _judge_cache_key(
             }
         )
     payload = {
-        "version": 2,
+        "version": 3,
         "provider": provider or "auto",
         "prompt": prompt,
         "keyframes": keyframe_payload,
+        "sampling": {
+            "sample_count": _clip_judge_sample_count(),
+            "uncertain_sample_count": _clip_judge_uncertain_sample_count(),
+            "uncertain_margin": float(getattr(settings, "clip_judge_uncertain_margin", 0.08) or 0.0),
+        },
         "models": {
             "gemini": settings.gemini_model,
             "ollama": settings.ollama_model,

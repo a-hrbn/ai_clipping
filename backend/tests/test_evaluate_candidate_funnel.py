@@ -19,7 +19,6 @@ class EvaluateCandidateFunnelTests(unittest.TestCase):
                                 "candidate_id": "winner",
                                 "source": "peak",
                                 "final_selected": True,
-                                "proposal_score": 0.8,
                                 "pre_judge_rank": 3,
                                 "judge_score": 8.0,
                             }
@@ -29,7 +28,6 @@ class EvaluateCandidateFunnelTests(unittest.TestCase):
                                 "candidate_id": "missed",
                                 "source": "dense_inventory",
                                 "final_selected": False,
-                                "proposal_score": 0.2,
                                 "pre_judge_rank": 42,
                                 "judge_score": 7.5,
                             }
@@ -44,7 +42,6 @@ class EvaluateCandidateFunnelTests(unittest.TestCase):
                     {
                         "stage_counts": {"final_moments": 1},
                         "quality_breakdown": {"judged_kept": 1},
-                        "proposal_lift": {"precision_at_positive_k": 0.5},
                         "ranker_lift": {"high_judge_pre_judge_top20_ratio": 0.5},
                     }
                 ),
@@ -57,7 +54,6 @@ class EvaluateCandidateFunnelTests(unittest.TestCase):
         self.assertEqual(summary["final_selected_rows"], 1)
         self.assertEqual(summary["high_judge_rows"], 2)
         self.assertEqual(summary["quality_breakdown"], {"judged_kept": 1})
-        self.assertEqual(summary["proposal_lift"]["precision_at_positive_k"], 0.5)
         self.assertEqual(summary["score_summary"]["final_pre_judge_rank_mean"], 3.0)
         self.assertEqual(summary["high_judge_not_final"][0]["candidate_id"], "missed")
 
@@ -101,8 +97,7 @@ class EvaluateCandidateFunnelTests(unittest.TestCase):
                                 "end": 30.0,
                                 "pre_judge_rank": 12,
                                 "stages": {
-                                    "proposal_input": {"status": "seen"},
-                                    "proposal_kept": {"status": "kept"},
+                                    "dense_inventory": {"status": "seen"},
                                     "ranked_pre_judge": {"status": "ranked"},
                                 },
                             }
@@ -113,7 +108,7 @@ class EvaluateCandidateFunnelTests(unittest.TestCase):
                                 "start": 100.0,
                                 "end": 120.0,
                                 "pre_judge_rank": 2,
-                                "stages": {"proposal_input": {"status": "seen"}},
+                                "stages": {"dense_inventory": {"status": "seen"}},
                             }
                         ),
                     ]
@@ -136,7 +131,7 @@ class EvaluateCandidateFunnelTests(unittest.TestCase):
             recall = evaluate_candidate_funnel.positive_window_recall(debug_dir, positives)
 
         self.assertEqual(recall["positive_windows"], 1)
-        self.assertEqual(recall["recall_by_stage"]["proposal_kept"]["matched_positive_windows"], 1)
+        self.assertEqual(recall["recall_by_stage"]["ranked_pre_judge"]["matched_positive_windows"], 1)
         self.assertEqual(recall["top_k_recall"]["pre_judge_top20"]["recall"], 1.0)
 
     def test_positive_window_recall_does_not_count_excluded_judge_scope(self) -> None:
@@ -158,8 +153,7 @@ class EvaluateCandidateFunnelTests(unittest.TestCase):
                         "quality_accepted": True,
                         "quality_has_judge_result": False,
                         "stages": {
-                            "proposal_input": {"status": "seen"},
-                            "proposal_kept": {"status": "kept"},
+                            "dense_inventory": {"status": "seen"},
                             "ranked_pre_judge": {"status": "ranked"},
                             "judge_scope": {"status": "excluded", "rank": 167},
                             "quality_gate": {"status": "kept"},

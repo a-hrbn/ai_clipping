@@ -437,17 +437,6 @@ class JobsRouterTests(unittest.TestCase):
                 '{"id":"d1"}\n{"id":"d2"}\n',
                 encoding="utf-8",
             )
-            (debug_dir / "candidate_proposals.jsonl").write_text('{"candidate_id":"d1"}\n', encoding="utf-8")
-            (debug_dir / "candidate_proposal_summary.json").write_text(
-                jobs.json.dumps(
-                    {
-                        "input_candidates": 4,
-                        "kept_candidates": 2,
-                        "model_artifact_loaded": True,
-                    }
-                ),
-                encoding="utf-8",
-            )
             (debug_dir / "ranked_candidates_v2.jsonl").write_text(
                 "\n".join(
                     [
@@ -484,7 +473,6 @@ class JobsRouterTests(unittest.TestCase):
                         "stage_counts": {
                             "dense_inventory": 2,
                             "merged": 2,
-                            "proposal_kept": 2,
                             "ranked_pre_judge": 2,
                             "judge_scope": 1,
                             "quality_kept": 1,
@@ -526,11 +514,6 @@ class JobsRouterTests(unittest.TestCase):
                             "judged_rejected": 0,
                             "unjudged_rejected": 1,
                         },
-                        "proposal_lift": {
-                            "scored_rows": 2,
-                            "positive_proxy_rows": 1,
-                            "precision_at_positive_k": 0.5,
-                        },
                         "ranker_lift": {
                             "high_judge_rows": 1,
                             "high_judge_pre_judge_top20_ratio": 1.0,
@@ -566,7 +549,7 @@ class JobsRouterTests(unittest.TestCase):
         self.assertEqual(stages["candidate_generation"]["status"], "ok")
         self.assertEqual(stages["candidate_recall"]["status"], "ok")
         self.assertIn("Recall-Funnel", stages["candidate_recall"]["summary"])
-        self.assertEqual(stages["proposal"]["status"], "ok")
+        self.assertEqual(stages["dense_inventory"]["status"], "ok")
         self.assertEqual(stages["ranker"]["status"], "ok")
         self.assertEqual(stages["clip_judge"]["status"], "ok")
         self.assertEqual(stages["quality_gate"]["status"], "ok")
@@ -576,7 +559,6 @@ class JobsRouterTests(unittest.TestCase):
         self.assertEqual(result["candidate_funnel"]["rows"], 2)
         self.assertEqual(result["candidate_funnel"]["drop_stage_counts"], {"judge_scope": 1})
         self.assertEqual(result["candidate_funnel"]["quality_breakdown"]["judged_kept"], 1)
-        self.assertEqual(result["candidate_funnel"]["proposal_lift"]["positive_proxy_rows"], 1)
         self.assertEqual(result["candidate_funnel"]["ranker_lift"]["high_judge_rows"], 1)
         self.assertEqual(result["candidate_funnel"]["samples"][0]["candidate_id"], "p1")
 

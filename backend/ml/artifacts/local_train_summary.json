@@ -1,6 +1,6 @@
 {
   "streamer": "jynxzi",
-  "date_from": "2026-01-01",
+  "date_from": "2026-03-01",
   "date_to": "2026-05-31",
   "training_return_code": 0,
   "artifact_only": false,

@@ -4,7 +4,6 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from services import clip_taxonomy
 from services.timeline_types import Candidate, RankedCandidate
 
 _SAMPLE_LIMIT = 8
@@ -17,8 +16,6 @@ _STAGE_ORDER = [
     "fallback",
     "merged",
     "normalized",
-    "proposal_input",
-    "proposal_kept",
     "ranked_pre_judge",
     "judge_scope",
     "clip_judge",
@@ -34,7 +31,6 @@ _STAGE_ORDER = [
 def build_candidate_recall_report(
     *,
     stage_candidates: Mapping[str, Sequence[Candidate]],
-    proposal_audit_rows: Sequence[Mapping[str, Any]],
     pre_judge_ranked: Sequence[RankedCandidate],
     judged_ranked: Sequence[RankedCandidate],
     quality_gate_rows: Sequence[Mapping[str, Any]],
@@ -54,8 +50,6 @@ def build_candidate_recall_report(
         "dense_inventory",
         "merged",
         "normalized",
-        "proposal_input",
-        "proposal_kept",
         "ranked_pre_judge",
         "judge_scope",
         "judged_quality_kept",
@@ -68,16 +62,6 @@ def build_candidate_recall_report(
     candidate_sets: dict[str, set[str]] = {
         stage: _candidate_ids(candidates)
         for stage, candidates in stage_candidates.items()
-    }
-    proposal_input = {
-        _row_candidate_id(row)
-        for row in proposal_audit_rows
-        if _row_candidate_id(row)
-    }
-    proposal_kept = {
-        _row_candidate_id(row)
-        for row in proposal_audit_rows
-        if row.get("accepted") is True and _row_candidate_id(row)
     }
     pre_judge_ids = {item.candidate.id for item in pre_judge_ranked}
     judge_scope_source = judge_scope_ranked if judge_scope_ranked is not None else pre_judge_ranked
@@ -108,8 +92,6 @@ def build_candidate_recall_report(
 
     candidate_sets.update(
         {
-            "proposal_input": proposal_input,
-            "proposal_kept": proposal_kept,
             "ranked_pre_judge": pre_judge_ids,
             "judge_scope": judge_scope_ids,
             "judged_quality_kept": judged_quality_kept_ids,
@@ -124,11 +106,6 @@ def build_candidate_recall_report(
     for stage, candidates in stage_candidates.items():
         for candidate in candidates:
             candidate_lookup.setdefault(candidate.id, _candidate_sample(candidate, stage=stage))
-    for row in proposal_audit_rows:
-        candidate_id = _row_candidate_id(row)
-        if not candidate_id:
-            continue
-        candidate_lookup.setdefault(candidate_id, _proposal_row_sample(row, stage="proposal"))
     for ranked in pre_judge_ranked:
         sample = candidate_lookup.setdefault(
             ranked.candidate.id,
@@ -152,7 +129,6 @@ def build_candidate_recall_report(
 
     transitions = [
         ("merged_to_normalized", "merged", "normalized"),
-        ("proposal_input_to_kept", "proposal_input", "proposal_kept"),
         ("normalized_to_ranked", "normalized", "ranked_pre_judge"),
         ("ranked_to_judge_scope", "ranked_pre_judge", "judge_scope"),
         ("judge_scope_to_judged_quality_kept", "judge_scope", "judged_quality_kept"),
@@ -165,15 +141,6 @@ def build_candidate_recall_report(
         for name, source, target in transitions
     ]
 
-    proposal_rejected = [
-        row for row in proposal_audit_rows
-        if row.get("accepted") is not True and _row_candidate_id(row)
-    ]
-    proposal_rejected = sorted(
-        proposal_rejected,
-        key=lambda row: float(row.get("score") or row.get("model_score") or row.get("heuristic_score") or 0.0),
-        reverse=True,
-    )
     quality_rejected = [
         row for row in quality_gate_rows
         if not (row.get("accepted") is True or row.get("kept") is True or row.get("status") == "kept")
@@ -196,7 +163,6 @@ def build_candidate_recall_report(
     positive_window_recall = _positive_window_recall_summary(
         positive_windows or [],
         stage_candidates=stage_candidates,
-        proposal_audit_rows=proposal_audit_rows,
         pre_judge_ranked=pre_judge_ranked,
         judged_ranked=judged_ranked,
         quality_gate_rows=quality_gate_rows,
@@ -222,12 +188,6 @@ def build_candidate_recall_report(
         ],
         "losses": loss_rows,
         "largest_losses": sorted(loss_rows, key=lambda row: int(row["lost_count"]), reverse=True)[:5],
-        "proposal": {
-            "input_rows": len(proposal_audit_rows),
-            "kept_rows": len(proposal_kept),
-            "rejected_rows": len(proposal_rejected),
-            "top_rejected": [_proposal_row_sample(row, stage="proposal_rejected") for row in proposal_rejected[:_SAMPLE_LIMIT]],
-        },
         "ranker": {
             "ranked_rows": len(pre_judge_ranked),
             "judge_top_k": judge_scope_limit,
@@ -259,7 +219,6 @@ def build_candidate_recall_report(
 def build_candidate_trace(
     *,
     stage_candidates: Mapping[str, Sequence[Candidate]],
-    proposal_audit_rows: Sequence[Mapping[str, Any]],
     pre_judge_ranked: Sequence[RankedCandidate],
     judged_ranked: Sequence[RankedCandidate],
     quality_gate_rows: Sequence[Mapping[str, Any]],
@@ -302,37 +261,6 @@ def build_candidate_trace(
             row = row_for(candidate.id)
             _merge_candidate_identity(row, candidate)
             mark_stage(candidate.id, stage, "seen", score_hint=_round_optional(candidate.score_hint))
-
-    for row in proposal_audit_rows:
-        candidate_id = _row_candidate_id(row)
-        if not candidate_id:
-            continue
-        trace_row = row_for(candidate_id)
-        sample = _proposal_row_sample(row, stage="proposal")
-        _merge_sample_identity(trace_row, sample)
-        accepted = bool(row.get("accepted") is True)
-        mark_stage(
-            candidate_id,
-            "proposal_input",
-            "seen",
-            score=sample.get("score"),
-            model_score=sample.get("model_score"),
-            heuristic_score=sample.get("heuristic_score"),
-        )
-        mark_stage(
-            candidate_id,
-            "proposal_kept",
-            "kept" if accepted else "rejected",
-            score=sample.get("score"),
-            model_score=sample.get("model_score"),
-            heuristic_score=sample.get("heuristic_score"),
-        )
-        trace_row["proposal_score"] = sample.get("score")
-        trace_row["proposal_model_score"] = sample.get("model_score")
-        trace_row["proposal_heuristic_score"] = sample.get("heuristic_score")
-        trace_row["proposal_accepted"] = accepted
-        if not accepted:
-            trace_row["rejection_reasons"].append("proposal_rejected")
 
     judge_scope_limit = max(int(judge_top_k or 0), 0)
     judge_scope_source = judge_scope_ranked if judge_scope_ranked is not None else pre_judge_ranked
@@ -476,7 +404,6 @@ def build_candidate_funnel_summary(
         reason_counts.update(str(reason) for reason in reasons)
 
     score_fields = [
-        "proposal_score",
         "pre_judge_rank_score",
         "judged_rank_score",
         "judge_score",
@@ -499,7 +426,6 @@ def build_candidate_funnel_summary(
             for field in score_fields
         },
         "quality_breakdown": _quality_breakdown(trace_rows),
-        "proposal_lift": _proposal_lift_summary(trace_rows),
         "ranker_lift": _ranker_lift_summary(trace_rows),
         "clip_type_lift": _clip_type_quality_breakdown(trace_rows),
         "positive_window_recall": dict(report.get("positive_window_recall") or {}),
@@ -511,7 +437,6 @@ def _positive_window_recall_summary(
     positive_windows: Sequence[Mapping[str, Any]],
     *,
     stage_candidates: Mapping[str, Sequence[Candidate]],
-    proposal_audit_rows: Sequence[Mapping[str, Any]],
     pre_judge_ranked: Sequence[RankedCandidate],
     judged_ranked: Sequence[RankedCandidate],
     quality_gate_rows: Sequence[Mapping[str, Any]],
@@ -524,7 +449,6 @@ def _positive_window_recall_summary(
     threshold = max(min(float(overlap_ratio or 0.0), 1.0), 0.0)
     stage_samples = _positive_recall_stage_samples(
         stage_candidates=stage_candidates,
-        proposal_audit_rows=proposal_audit_rows,
         pre_judge_ranked=pre_judge_ranked,
         judged_ranked=judged_ranked,
         quality_gate_rows=quality_gate_rows,
@@ -592,7 +516,6 @@ def _positive_window_recall_summary(
 def _positive_recall_stage_samples(
     *,
     stage_candidates: Mapping[str, Sequence[Candidate]],
-    proposal_audit_rows: Sequence[Mapping[str, Any]],
     pre_judge_ranked: Sequence[RankedCandidate],
     judged_ranked: Sequence[RankedCandidate],
     quality_gate_rows: Sequence[Mapping[str, Any]],
@@ -605,16 +528,6 @@ def _positive_recall_stage_samples(
         stage: [_candidate_sample(candidate, stage=stage) for candidate in candidates]
         for stage, candidates in stage_candidates.items()
     }
-    samples["proposal_input"] = [
-        _proposal_row_sample(row, stage="proposal_input")
-        for row in proposal_audit_rows
-        if _row_candidate_id(row)
-    ]
-    samples["proposal_kept"] = [
-        _proposal_row_sample(row, stage="proposal_kept")
-        for row in proposal_audit_rows
-        if row.get("accepted") is True and _row_candidate_id(row)
-    ]
     samples["ranked_pre_judge"] = [
         {**_ranked_sample(ranked, stage="ranked_pre_judge"), "pre_judge_rank": index}
         for index, ranked in enumerate(pre_judge_ranked, start=1)
@@ -843,23 +756,6 @@ def _ranked_sample(ranked: RankedCandidate, *, stage: str) -> dict[str, Any]:
     return sample
 
 
-def _proposal_row_sample(row: Mapping[str, Any], *, stage: str) -> dict[str, Any]:
-    candidate = row.get("candidate") if isinstance(row.get("candidate"), Mapping) else {}
-    return {
-        "candidate_id": _row_candidate_id(row),
-        "stage": stage,
-        "source": str(row.get("source") or candidate.get("source") or ""),
-        "start": _round_optional(row.get("start") if row.get("start") is not None else candidate.get("start")),
-        "end": _round_optional(row.get("end") if row.get("end") is not None else candidate.get("end")),
-        "score": _round_optional(row.get("score")),
-        "model_score": _round_optional(row.get("model_score")),
-        "heuristic_score": _round_optional(row.get("heuristic_score")),
-        "accepted": bool(row.get("accepted") is True),
-        "rationale": list(row.get("rationale") or []),
-        "clip_type": _clip_type_from_row(row),
-    }
-
-
 def _quality_row_sample(row: Mapping[str, Any], *, stage: str) -> dict[str, Any]:
     return {
         "candidate_id": _row_candidate_id(row),
@@ -933,10 +829,6 @@ def _finalize_trace_row(row: dict[str, Any]) -> None:
         row["status"] = "rejected"
         row["dropped_stage"] = "judge_scope"
         row["drop_reason"] = "outside_judge_scope"
-    elif stages.get("proposal_kept", {}).get("status") == "rejected":
-        row["status"] = "rejected"
-        row["dropped_stage"] = "proposal"
-        row["drop_reason"] = "proposal_rejected"
     elif "ranked_pre_judge" not in stages and "normalized" in stages:
         row["status"] = "rejected"
         row["dropped_stage"] = "ranker"
@@ -1019,7 +911,6 @@ def _compact_trace_sample(row: Mapping[str, Any]) -> dict[str, Any]:
         "clip_type": row.get("clip_type"),
         "dropped_stage": row.get("dropped_stage"),
         "drop_reason": row.get("drop_reason"),
-        "proposal_score": row.get("proposal_score"),
         "pre_judge_rank": row.get("pre_judge_rank"),
         "pre_judge_rank_score": row.get("pre_judge_rank_score"),
         "judge_score": row.get("judge_score"),
@@ -1057,36 +948,6 @@ def _quality_breakdown(trace_rows: Sequence[Mapping[str, Any]]) -> dict[str, int
     }
 
 
-def _proposal_lift_summary(trace_rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    scored = [row for row in trace_rows if row.get("proposal_score") is not None]
-    positives = [
-        row for row in scored
-        if bool(row.get("final_selected")) or _optional_float(row.get("judge_score"), 0.0) >= 7.0
-    ]
-    top_k = max(len(positives), 1) if scored else 0
-    top_rows = sorted(scored, key=lambda row: float(row.get("proposal_score") or 0.0), reverse=True)[:top_k]
-    top_positive_ids = {str(row.get("candidate_id") or "") for row in positives}
-    hits = sum(1 for row in top_rows if str(row.get("candidate_id") or "") in top_positive_ids)
-    final_rows = [row for row in trace_rows if row.get("final_selected")]
-    high_judge_rows = [
-        row for row in trace_rows
-        if _optional_float(row.get("judge_score"), 0.0) >= 7.0
-    ]
-    return {
-        "scored_rows": len(scored),
-        "positive_proxy_rows": len(positives),
-        "precision_at_positive_k": round(hits / top_k, 6) if top_k else None,
-        "recall_at_positive_k": round(hits / max(len(positives), 1), 6) if positives else None,
-        "final_selected_proposal_score": _distribution([row.get("proposal_score") for row in final_rows]),
-        "high_judge_proposal_score": _distribution([row.get("proposal_score") for row in high_judge_rows]),
-        "high_judge_proposal_kept_ratio": _ratio(
-            sum(1 for row in high_judge_rows if bool(row.get("proposal_accepted"))),
-            len(high_judge_rows),
-        ),
-        "source_breakdown": _source_quality_breakdown(scored),
-    }
-
-
 def _ranker_lift_summary(trace_rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     high_judge_rows = [
         row for row in trace_rows
@@ -1111,19 +972,6 @@ def _ranker_lift_summary(trace_rows: Sequence[Mapping[str, Any]]) -> dict[str, A
     }
 
 
-def _source_quality_breakdown(rows: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, int]]:
-    by_source: dict[str, dict[str, int]] = {}
-    for row in rows:
-        source = str(row.get("source") or "unknown")
-        bucket = by_source.setdefault(source, {"rows": 0, "final_selected": 0, "high_judge": 0})
-        bucket["rows"] += 1
-        if row.get("final_selected"):
-            bucket["final_selected"] += 1
-        if _optional_float(row.get("judge_score"), 0.0) >= 7.0:
-            bucket["high_judge"] += 1
-    return dict(sorted(by_source.items()))
-
-
 def _clip_type_quality_breakdown(rows: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, int | float | None]]:
     by_type: dict[str, dict[str, int | float | None]] = {}
     for row in rows:
@@ -1134,8 +982,6 @@ def _clip_type_quality_breakdown(rows: Sequence[Mapping[str, Any]]) -> dict[str,
                 "rows": 0,
                 "final_selected": 0,
                 "high_judge": 0,
-                "proposal_kept": 0,
-                "mean_proposal_score": None,
             },
         )
         bucket["rows"] = int(bucket["rows"] or 0) + 1
@@ -1143,23 +989,7 @@ def _clip_type_quality_breakdown(rows: Sequence[Mapping[str, Any]]) -> dict[str,
             bucket["final_selected"] = int(bucket["final_selected"] or 0) + 1
         if _optional_float(row.get("judge_score"), 0.0) >= 7.0:
             bucket["high_judge"] = int(bucket["high_judge"] or 0) + 1
-        if bool(row.get("proposal_accepted")):
-            bucket["proposal_kept"] = int(bucket["proposal_kept"] or 0) + 1
-    for clip_type, bucket in by_type.items():
-        scores = [
-            _optional_float(row.get("proposal_score"), 0.0)
-            for row in rows
-            if str(row.get("clip_type") or "general") == clip_type and row.get("proposal_score") is not None
-        ]
-        bucket["mean_proposal_score"] = round(sum(scores) / len(scores), 6) if scores else None
     return dict(sorted(by_type.items()))
-
-
-def _clip_type_from_row(row: Mapping[str, Any]) -> str:
-    features = row.get("features")
-    if isinstance(features, Mapping):
-        return clip_taxonomy.best_type_from_feature_row(features)
-    return str(row.get("clip_type") or "general")
 
 
 def _ratio(numerator: int, denominator: int) -> float | None:

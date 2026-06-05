@@ -34,7 +34,8 @@ WORKDIR /app/backend
 
 COPY backend/ /app/backend/
 RUN /usr/local/bin/pip install --upgrade pip setuptools wheel \
-  && /usr/local/bin/pip install -e ".[ml,vision]"
+  && /usr/local/bin/pip install -e ".[ml,vision]" \
+  && /usr/local/bin/pip install --force-reinstall --no-deps "mediapipe==0.10.21"
 
 RUN mkdir -p /app/backend/.venv/bin /app/backend/tmp/storage /app/backend/tmp/training_runs /app/backend/ml/artifacts \
   /app/backend/tmp/cache/huggingface /app/backend/tmp/cache/torch /app/backend/tmp/matplotlib \

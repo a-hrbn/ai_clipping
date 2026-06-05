@@ -174,7 +174,6 @@ class ReviewCandidate(BaseModel):
     end_time: float
     duration: float
     rank_score: float | None = None
-    proposal_score: float | None = None
     pre_judge_rank: int | None = None
     judge_score: float | None = None
     selected: bool = False
