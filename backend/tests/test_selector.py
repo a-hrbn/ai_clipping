@@ -129,75 +129,6 @@ def test_quality_gate_keeps_calibrated_jynxzi_reaction_scores() -> None:
     assert [item.candidate.id for item in result.kept] == ["jynxzi-reaction"]
     assert result.audit_rows[0]["accepted"] is True
 
-
-def test_quality_gate_allows_organic_ranker_threshold_pass_without_cross_platform_target() -> None:
-    ranked = _ranked(
-        "ranker-pass",
-        rank_score=5.1,
-        judge_result=_judge(score=5.1, clarity=0.3, payoff=0.3, narrative=0.5, confidence=0.8),
-        rationale=["ranker_serving_threshold_pass"],
-    )
-    ranked.base_rank_score = 8.8
-
-    with patch.object(selector.settings, "serving_quality_gate_enabled", True), \
-         patch.object(selector.settings, "serving_quality_ranker_bypass_enabled", True), \
-         patch.object(selector.settings, "serving_quality_ranker_bypass_min_base_score", 7.5):
-        result = selector.apply_serving_quality_gate([ranked])
-
-    assert [item.candidate.id for item in result.kept] == ["ranker-pass"]
-    assert result.audit_rows[0]["accepted"] is True
-    assert result.audit_rows[0]["ranker_quality_bypass"] is True
-    assert result.audit_rows[0]["cross_platform_recall_target"] is False
-
-
-def test_rank_candidates_marks_near_serving_threshold_for_ranker_bypass() -> None:
-    class FakeRanker:
-        def score_details(self, features, profile, strategy=None):
-            return [
-                {
-                    "candidate_id": "near",
-                    "score": 7.627,
-                    "heuristic_score": 7.1,
-                    "trained_score": 7.9,
-                    "blend": 0.65,
-                    "serving_threshold": 7.637,
-                    "passes_serving_threshold": False,
-                    "trained_model_used": True,
-                    "rationale": ["ml_ranked"],
-                }
-            ]
-
-    candidate = Candidate(id="near", start=0.0, end=20.0, source="peak", anchor_time=10.0)
-    feature = CandidateFeatures(candidate_id="near", source="peak")
-
-    with patch.object(selector, "Ranker", return_value=FakeRanker()), \
-         patch.object(selector.settings, "serving_quality_ranker_bypass_threshold_margin", 0.15), \
-         patch.object(selector.settings, "serving_quality_ranker_bypass_threshold_ratio", 0.98):
-        ranked = selector.rank_candidates([candidate], [feature], profile="jynxzi")
-
-    assert ranked[0].candidate.id == "near"
-    assert "ranker_serving_threshold_near_pass" in ranked[0].rationale
-
-
-def test_quality_gate_allows_near_threshold_ranker_bypass() -> None:
-    ranked = _ranked(
-        "near-ranker-pass",
-        rank_score=7.627,
-        judge_result=_judge(score=5.8, clarity=0.3, payoff=0.3, narrative=0.4, confidence=0.9),
-        rationale=["ranker_serving_threshold_near_pass"],
-    )
-
-    with patch.object(selector.settings, "serving_quality_gate_enabled", True), \
-         patch.object(selector.settings, "serving_quality_ranker_bypass_enabled", True):
-        result = selector.apply_serving_quality_gate([ranked])
-
-    assert [item.candidate.id for item in result.kept] == ["near-ranker-pass"]
-    assert result.audit_rows[0]["accepted"] is True
-    assert result.audit_rows[0]["ranker_quality_bypass"] is True
-    assert result.audit_rows[0]["ranker_quality_bypass_signal"] is True
-
-
-def test_quality_gate_soft_accepts_single_narrative_miss_for_strong_judge() -> None:
     candidate = _ranked(
         "single-narrative-miss",
         judge_result=_judge(score=7.62, clarity=0.7, payoff=0.9, narrative=0.4, confidence=0.9),
@@ -303,47 +234,6 @@ def test_post_judge_final_selection_sorts_by_blended_rank_score_before_judge_sco
 
     assert [item.candidate.id for item in result.selected] == ["ranker-favored", "judge-favored"]
     assert result.summary["policy"] == "blended_ranker_judge_temporal_diversity"
-
-
-def test_post_judge_final_selection_uses_ranker_bypass_unjudged_candidates() -> None:
-    judged = _ranked(
-        "judged",
-        rank_score=7.2,
-        judge_result=_judge(score=7.2, confidence=0.8),
-        start=0.0,
-        end=20.0,
-        source="dense_inventory",
-    )
-    unjudged_ranker = _ranked(
-        "unjudged-ranker",
-        rank_score=7.6,
-        judge_result=None,
-        rationale=["ranker_serving_threshold_near_pass"],
-        start=120.0,
-        end=140.0,
-        source="peak",
-    )
-    unjudged_filler = _ranked(
-        "unjudged-filler",
-        rank_score=99.0,
-        judge_result=None,
-        start=240.0,
-        end=260.0,
-        source="peak",
-    )
-
-    with patch.object(selector.settings, "serving_quality_ranker_bypass_enabled", True):
-        result = selector.select_post_judge_final_candidates(
-            [unjudged_filler, unjudged_ranker, judged],
-            top_k=2,
-        )
-
-    assert [item.candidate.id for item in result.selected] == ["judged", "unjudged-ranker"]
-    assert result.summary["selected_unjudged_candidates"] == 1
-    assert result.summary["ranker_bypass_unjudged_candidates"] == 1
-    assert result.summary["ranker_bypass_unjudged_selected"] == 1
-    assert "post_judge_final_ranker_bypass" in result.selected[1].rationale
-
 
 def test_post_judge_final_selection_returns_fewer_clips_instead_of_unjudged_fillers() -> None:
     judged = _ranked(

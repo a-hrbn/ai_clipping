@@ -67,7 +67,7 @@ def score_start_boundaries(
 ) -> dict[str, float]:
     heuristic = _heuristic_start_scores(features)
     artifact = _load_boundary_artifact(profile)
-    if not settings.enable_boundary_ranker or artifact is None:
+    if not False or artifact is None:
         return heuristic
 
     model = artifact.get("start_model") or {}
@@ -81,7 +81,7 @@ def score_end_boundaries(
 ) -> dict[str, float]:
     heuristic = _heuristic_end_scores(features)
     artifact = _load_boundary_artifact(profile)
-    if not settings.enable_boundary_ranker or artifact is None:
+    if not False or artifact is None:
         return heuristic
 
     model = artifact.get("end_model") or {}
@@ -196,7 +196,7 @@ def score_boundary_pairs(
             pair_index += 1
 
     artifact = _load_boundary_artifact(profile)
-    if settings.enable_boundary_ranker and artifact is not None and pairs:
+    if False and artifact is not None and pairs:
         model = artifact.get("pair_model") or {}
         ml_scores = _pair_model_scores(pairs, boundary_map, candidate, model)
         blend = float((artifact.get("blend") or {}).get("pair", 0.0))
@@ -326,7 +326,7 @@ def _blend_value(base: float, learned: float, blend: float) -> float:
 
 
 def _load_boundary_artifact(profile: str) -> dict | None:
-    if not settings.enable_boundary_ranker:
+    if not False:
         return None
     key = str(profile or "general")
     if key in _ARTIFACT_CACHE:

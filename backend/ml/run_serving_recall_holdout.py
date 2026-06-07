@@ -37,6 +37,11 @@ PHASE_A_PIPELINE_ENV = {
     "ENABLE_DENSE_CANDIDATE_INVENTORY": "true",
     "DENSE_CANDIDATE_INVENTORY_SOURCE_CAP": "700",
 }
+DEFAULT_MOMENT_FINDER_PROVIDER = "gemini"
+DEFAULT_MOMENT_FINDER_MODEL = "gemini-2.5-flash-lite"
+DEFAULT_MOMENT_FINDER_MAX_MOMENTS = 180
+DEFAULT_MOMENT_FINDER_MAX_TOKENS = 16000
+DEFAULT_MOMENT_FINDER_MULTIMODAL_CONFIRM_TOP_N = 12
 
 _PROGRESS_LOCK = threading.Lock()
 
@@ -87,6 +92,21 @@ def main(argv: list[str] | None = None) -> int:
         default=MAX_WORKERS,
         help="Number of VOD pipeline jobs to run in parallel. Capped at 2 for resource safety.",
     )
+    parser.add_argument(
+        "--enable-llm-moment-finder",
+        action="store_true",
+        help="Use the additive LLM Moment-Finder path for the serving holdout instead of the legacy ranker path.",
+    )
+    parser.add_argument("--moment-finder-provider", default=DEFAULT_MOMENT_FINDER_PROVIDER)
+    parser.add_argument("--moment-finder-model", default=DEFAULT_MOMENT_FINDER_MODEL)
+    parser.add_argument("--moment-finder-max-moments", type=int, default=DEFAULT_MOMENT_FINDER_MAX_MOMENTS)
+    parser.add_argument("--moment-finder-max-tokens", type=int, default=DEFAULT_MOMENT_FINDER_MAX_TOKENS)
+    parser.add_argument(
+        "--moment-finder-confirm-top-n",
+        type=int,
+        default=DEFAULT_MOMENT_FINDER_MULTIMODAL_CONFIRM_TOP_N,
+        help="Number of LLM-ranked moments to pass to multimodal confirmation when Judge is enabled.",
+    )
     args = parser.parse_args(argv)
 
     run_id = args.run_id.strip() or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -112,6 +132,7 @@ def main(argv: list[str] | None = None) -> int:
         enable_clip_judge=bool(args.enable_judge),
         judge_sample_count=_bounded_judge_sample_count(args.judge_sample_count),
         phase_a_pipeline_env=phase_a_pipeline_env(),
+        llm_moment_finder=llm_moment_finder_config(args),
         twitch_download_cache_ttl_sec=DEFAULT_HOLDOUT_TWITCH_DOWNLOAD_CACHE_TTL_SEC,
         holdout_policy_rows=str(args.holdout_policy_rows),
         positive_rows=str(args.positive_rows),
@@ -177,6 +198,7 @@ def main(argv: list[str] | None = None) -> int:
                 "positive_rows": args.positive_rows,
                 "enable_clip_judge": bool(args.enable_judge),
                 "judge_sample_count": _bounded_judge_sample_count(args.judge_sample_count),
+                "llm_moment_finder": llm_moment_finder_config(args),
                 "vod_index": vod_index,
                 "total_vods": len(holdout_vods),
                 "progress_interval_sec": max(float(args.progress_interval_sec or 0.0), 0.5),
@@ -191,6 +213,7 @@ def main(argv: list[str] | None = None) -> int:
             jobs=len(pending_jobs),
             fail_fast=bool(args.fail_fast),
             enable_clip_judge=bool(args.enable_judge),
+            enable_llm_moment_finder=bool(args.enable_llm_moment_finder),
         )
         job_rows, job_failed = run_pending_pipeline_jobs(
             pending_jobs,
@@ -246,6 +269,7 @@ def main(argv: list[str] | None = None) -> int:
             "reference_flag": "--enable-judge",
         },
         "phase_a_pipeline_env": phase_a_pipeline_env(),
+        "llm_moment_finder": llm_moment_finder_config(args),
         "holdout_policy_rows": str(args.holdout_policy_rows),
         "positive_rows": str(args.positive_rows),
         "storage_dir": str(args.storage_dir),
@@ -347,6 +371,43 @@ def _bounded_judge_sample_count(raw_count: int) -> int:
     return max(1, min(sample_count, 5))
 
 
+def llm_moment_finder_config(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "enabled": bool(getattr(args, "enable_llm_moment_finder", False)),
+        "provider": str(getattr(args, "moment_finder_provider", DEFAULT_MOMENT_FINDER_PROVIDER) or DEFAULT_MOMENT_FINDER_PROVIDER),
+        "model": str(getattr(args, "moment_finder_model", DEFAULT_MOMENT_FINDER_MODEL) or DEFAULT_MOMENT_FINDER_MODEL),
+        "max_moments": max(int(getattr(args, "moment_finder_max_moments", DEFAULT_MOMENT_FINDER_MAX_MOMENTS) or 0), 1),
+        "max_tokens": max(int(getattr(args, "moment_finder_max_tokens", DEFAULT_MOMENT_FINDER_MAX_TOKENS) or 0), 512),
+        "multimodal_confirm_top_n": max(
+            int(getattr(args, "moment_finder_confirm_top_n", DEFAULT_MOMENT_FINDER_MULTIMODAL_CONFIRM_TOP_N) or 0),
+            0,
+        ),
+    }
+
+
+def llm_moment_finder_config_from_mapping(config: dict[str, Any] | None) -> dict[str, Any]:
+    if not config:
+        return {
+            "enabled": False,
+            "provider": DEFAULT_MOMENT_FINDER_PROVIDER,
+            "model": DEFAULT_MOMENT_FINDER_MODEL,
+            "max_moments": DEFAULT_MOMENT_FINDER_MAX_MOMENTS,
+            "max_tokens": DEFAULT_MOMENT_FINDER_MAX_TOKENS,
+            "multimodal_confirm_top_n": DEFAULT_MOMENT_FINDER_MULTIMODAL_CONFIRM_TOP_N,
+        }
+    return {
+        "enabled": bool(config.get("enabled")),
+        "provider": str(config.get("provider") or DEFAULT_MOMENT_FINDER_PROVIDER),
+        "model": str(config.get("model") or DEFAULT_MOMENT_FINDER_MODEL),
+        "max_moments": max(int(config.get("max_moments") or DEFAULT_MOMENT_FINDER_MAX_MOMENTS), 1),
+        "max_tokens": max(int(config.get("max_tokens") or DEFAULT_MOMENT_FINDER_MAX_TOKENS), 512),
+        "multimodal_confirm_top_n": max(
+            int(config.get("multimodal_confirm_top_n") or DEFAULT_MOMENT_FINDER_MULTIMODAL_CONFIRM_TOP_N),
+            0,
+        ),
+    }
+
+
 def load_holdout_vods(path: pathlib.Path) -> list[dict[str, Any]]:
     rows = []
     for row in read_jsonl(path):
@@ -380,6 +441,7 @@ def run_pipeline_job(
     positive_rows: pathlib.Path,
     enable_clip_judge: bool,
     judge_sample_count: int,
+    llm_moment_finder: dict[str, Any] | None,
     vod_index: int,
     total_vods: int,
     progress_interval_sec: float,
@@ -395,6 +457,7 @@ def run_pipeline_job(
         "profile": profile,
         "strategy": strategy,
         "runner": runner_name,
+        "llm_moment_finder": llm_moment_finder_config_from_mapping(llm_moment_finder),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     (job_dir / "request.json").write_text(json.dumps(request_payload, ensure_ascii=True, indent=2), encoding="utf-8")
@@ -426,6 +489,7 @@ def run_pipeline_job(
             positive_rows,
             enable_clip_judge=enable_clip_judge,
             judge_sample_count=judge_sample_count,
+            llm_moment_finder=llm_moment_finder,
         ),
     )
     last_snapshot: tuple[str, int, str, bool, int | None] | None = None
@@ -540,6 +604,7 @@ def pipeline_env(
     *,
     enable_clip_judge: bool = DEFAULT_ENABLE_JUDGE,
     judge_sample_count: int = DEFAULT_HOLDOUT_JUDGE_SAMPLE_COUNT,
+    llm_moment_finder: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     env = dict(os.environ)
     existing_pythonpath = env.get("PYTHONPATH", "")
@@ -550,6 +615,14 @@ def pipeline_env(
     env["TWITCH_DOWNLOAD_CACHE_TTL_SEC"] = str(DEFAULT_HOLDOUT_TWITCH_DOWNLOAD_CACHE_TTL_SEC)
     env["ENABLE_CLIP_JUDGE"] = "true" if enable_clip_judge else "false"
     env.update(phase_a_pipeline_env())
+    moment_config = llm_moment_finder_config_from_mapping(llm_moment_finder)
+    env["ENABLE_LLM_MOMENT_FINDER"] = "true" if moment_config["enabled"] else "false"
+    if moment_config["enabled"]:
+        env["MOMENT_FINDER_PROVIDER"] = str(moment_config["provider"])
+        env["MOMENT_FINDER_MODEL"] = str(moment_config["model"])
+        env["MOMENT_FINDER_MAX_MOMENTS"] = str(moment_config["max_moments"])
+        env["MOMENT_FINDER_MAX_TOKENS"] = str(moment_config["max_tokens"])
+        env["MOMENT_FINDER_MULTIMODAL_CONFIRM_TOP_N"] = str(moment_config["multimodal_confirm_top_n"])
     if enable_clip_judge:
         sample_count = _bounded_judge_sample_count(judge_sample_count)
         env["CLIP_JUDGE_SAMPLE_COUNT"] = str(sample_count)

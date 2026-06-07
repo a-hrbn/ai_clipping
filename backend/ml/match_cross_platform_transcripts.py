@@ -19,10 +19,48 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from config import settings
-from ml import build_twitch_training_dataset as vod_training
 from ml import match_cross_platform_audio_fingerprints as audio_matcher
 from ml import outcome_view_weighting
 from services import audio_extractor, transcriber
+from services.transcriber import RichSegment
+
+
+def _serialize_rich_segment(segment) -> dict:
+    fields = ("start", "end", "text", "words_per_second", "hype_score", "speaker_id", "word_count")
+    return {f: getattr(segment, f, None) for f in fields if getattr(segment, f, None) is not None}
+
+
+def _deserialize_rich_segment(item: dict):
+    try:
+        return RichSegment(**{k: v for k, v in item.items() if k in RichSegment.__dataclass_fields__})
+    except Exception:
+        import types
+        return types.SimpleNamespace(**item)
+
+
+_VOD_TRANSCRIPT_CACHE_VERSION = 1
+
+
+def _load_compatible_transcript_cache(cache_dir: pathlib.Path, vod_id: str) -> tuple[pathlib.Path, list] | None:
+    for p in sorted(cache_dir.glob("*.json")):
+        try:
+            payload = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        meta = payload.get("metadata") or {}
+        if int(meta.get("version") or 0) != _VOD_TRANSCRIPT_CACHE_VERSION:
+            continue
+        raw = payload.get("transcript")
+        if not isinstance(raw, list):
+            continue
+        try:
+            segments = [_deserialize_rich_segment(item) for item in raw]
+        except Exception:
+            continue
+        return p, segments
+    return None
 
 
 DEFAULT_OUTPUT = BACKEND_ROOT / "ml" / "artifacts" / "jynxzi_cross_platform_fingerprint_rows.jsonl"
@@ -524,7 +562,7 @@ def _load_vod_transcript(vod: dict, *, vod_cache_root: pathlib.Path) -> VodTrans
     vod_id = str(vod.get("vod_id") or "").strip()
     if not vod_id:
         return None
-    loaded = vod_training._load_compatible_transcript_cache(vod_cache_root / vod_id, vod_id)
+    loaded = _load_compatible_transcript_cache(vod_cache_root / vod_id, vod_id)
     if loaded is None:
         return None
     _path, transcript = loaded
@@ -565,7 +603,7 @@ def _load_or_build_repost_transcript(
             pass
     payload = {
         "metadata": _repost_transcript_cache_payload(repost, video_path),
-        "transcript": [vod_training._serialize_rich_segment(segment) for segment in transcript],
+        "transcript": [_serialize_rich_segment(segment) for segment in transcript],
     }
     cache_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
     return list(transcript), False
@@ -586,7 +624,7 @@ def _load_repost_transcript_cache(path: pathlib.Path) -> list | None:
     if str(metadata.get("whisper_language") or "").strip().lower() != str(settings.whisper_language or "").strip().lower():
         return None
     try:
-        return [vod_training._deserialize_rich_segment(item) for item in list(payload.get("transcript") or [])]
+        return [_deserialize_rich_segment(item) for item in list(payload.get("transcript") or [])]
     except (TypeError, ValueError):
         return None
 

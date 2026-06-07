@@ -9,6 +9,7 @@ import ClipGrid from "@/components/ClipGrid";
 import AIStatus from "@/components/AIStatus";
 import PipelineDiagnosticsPanel from "@/components/PipelineDiagnosticsPanel";
 import CandidateReviewPanel from "@/components/CandidateReviewPanel";
+import LlmMomentReviewWorkbench from "@/components/LlmMomentReviewWorkbench";
 
 type AppState = "idle" | "submitting" | "uploading" | "polling" | "done" | "error";
 
@@ -217,6 +218,10 @@ export default function Home() {
       {/* AI provider status — below the title */}
       <div className="w-full max-w-3xl pb-5 animate-fade-up delay-100">
         <AIStatus />
+      </div>
+
+      <div className="w-full pb-8 animate-fade-up delay-100">
+        <LlmMomentReviewWorkbench />
       </div>
 
       {/* Divider */}

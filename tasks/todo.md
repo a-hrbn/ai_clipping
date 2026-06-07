@@ -1,5 +1,143 @@
 # Task Plan
 
+## 2026-06-05 Plan (KONKRET): LLM-Moment-Finder produktiv — Lokalisierung → Integration → Entscheidungs-Gate
+
+**Leit-Entscheidung (begründet):** LLM-Pfad ist die einzige ungetestete Stellschraube, die zum Produktziel ("virale Jynxzi-Momente finden") passt; Ranker-Reparatur ist empirisch erschöpft. ABER: kein bewiesener Gewinner — die **tragende, noch unmessene Metrik ist Top-N-Precision auf `known_repost_match=false`**. Erst additiv bauen → in Phase 2 messen → DANN Ranker löschen. Exact-Pick-@top-12 (~8 %, für beide Pfade) ist NICHT mehr die Zielmetrik.
+
+### Schritt 0 — Lokalisierungs-Bug fixen (BLOCKER, zuerst) — konfundiert jede spätere Messung
+- [x] **0.1** In `ml/run_llm_moment_finder_d0.py` nach `parse_moments`/vor Eval die Momente durch eine Längen-Disziplin schicken: harte Kappung auf `max_duration_sec` (90s) + Drop/Split von Blobs >120s statt sie als „Treffer" zählen zu lassen. Aktuell wird nur nach `virality` sortiert (Z. 891–897) — keine Längen-Enforcement.
+- [x] **0.2** Eval härten: Ein Positiv-Treffer durch ein >max_duration-Fenster zählt NICHT (sonst „trifft" ein 67-min-Blob jedes Positiv). `evaluate_moments`/`evaluate_operating_points` so anpassen, dass überlange Momente vor dem Matching verworfen werden — Recall wird dann lokalisierungs-ehrlich.
+- [x] **0.3** Re-run gegen die 3 bestehenden D0.6b-Moment-Artefakte via `--reuse-responses` (KEIN neuer API-Call) → prüfen wie viel echter Recall nach ehrlicher Lokalisierung übrig bleibt. Das ist die reale Generation-Baseline.
+- [x] **0.4** Tests in `test_run_llm_moment_finder_d0.py` für Längen-Enforcement + ehrliches Matching.
+
+#### Schritt-0 Review Notes
+- Längen-Policy implementiert: `<=90s` bleibt, `90-120s` wird auf 90s ab `start` gekappt, `>120s` wird als Blob verworfen.
+- Eval ist jetzt lokalisierungs-ehrlich: `evaluate_moments` und `evaluate_operating_points` ignorieren überlange Momente vor dem Matching und reporten `ignored_long_moment_count`.
+- Re-run ohne API-Call: `--reuse-responses --output-prefix backend/ml/artifacts/jynxzi_llm_moment_finder_d0_step0_localized`.
+- Ergebnis: D0.6b lokalisiert `8/36 = 22.2222%` Recall@Top-180, Gate 15% bestanden. Per VOD: `2757793134=1/12`, `2763470626=5/12`, `2787027855=2/12`.
+- Blob-/Cap-Befund: `2757793134` 2 Drops/3 Caps, `2763470626` 0 Drops/1 Cap, `2787027855` 74 Drops/35 Caps. Die alte 67%-Generierungszahl war damit durch überlange Fenster deutlich konfundiert.
+
+### Phase 1 — `services/moment_finder.py` additiv + Pipeline-Rewire (Flag default AUS, kein Delete)
+- [x] **1.1** `services/moment_finder.py`: Kern aus `ml/run_llm_moment_finder_d0.py` **teilen, nicht duplizieren** (`build_moment_finder_prompt`, `call_moment_finder_provider`, `parse_moments`, `LlmMoment`, `format_transcript_for_prompt`, `transcript_noise_reason`, `normalize_transcript_text`). Eingang: Live-`list[RichSegment]` aus der Pipeline (Adapter `RichSegment → TranscriptSegment`). Ausgang: `list[LlmMoment]`, bereits durch `post_processor.snap_boundaries` + `enforce_diversity` lokalisiert.
+- [x] **1.2** Schema-Brücke `post_processor`: D0-Momente (`start/end/virality`) auf das `post_processor`-Dict-Schema (`start_time/end_time/viral_score/rank`) mappen, damit `snap_boundaries` (90s-Cap, Satzgrenzen) + `enforce_diversity` (min_gap) wiederverwendet werden. Reuse statt Neubau.
+- [x] **1.3** Adapter `LlmMoment → RankedCandidate` (`virality`→`rank_score`; `hook/flow/value/trend`+`rationale` in Reasons). So konsumieren Judge/Selektion/Quality-Gate/Boundary/Cutter den Output unverändert.
+- [x] **1.4** `pipeline.py` rewire hinter Flag `enable_llm_moment_finder` (default AUS): Block `pipeline.py:1723–1799` (`normalize_candidates`→`feature_builder.build_features`→`selector.rank_candidates` inkl. zweitem Rank) durch `moment_finder.find_moments(transcript)`→Adapter→`ranked_candidates` ersetzen. Ab `1800` (`ranked_candidates_pre_judge`) + Judge auf **Multimodal-Confirm-only** + Select/Cut-Tail UNVERÄNDERT.
+- [x] **1.5** Config-Flags in `config.py`: `enable_llm_moment_finder` (False), `moment_finder_provider` (gemini), `moment_finder_model`, `moment_finder_max_moments`, `moment_finder_multimodal_confirm_top_n`. **Fail-open** bei Provider-Fehler (Serving-Lesson): Job sauber degradieren, Backend nicht crashen.
+- [x] **1.6** `test_moment_finder.py`: gemockter Provider, RichSegment-Adapter, post_processor-Brücke, RankedCandidate-Adapter, Noise-Filter, Fail-open.
+
+#### Phase-1 Review Notes
+- Neuer additiver Service `backend/services/moment_finder.py` nutzt die D0-Bausteine direkt: Prompt-Build, Provider-Call, JSON-Parsing, Noise-Filter und Längen-Policy werden nicht dupliziert.
+- Pipeline-Branch ist hinter `enable_llm_moment_finder=False` default-aus. Wenn der LLM-Pfad erfolgreich ist, ersetzt er nur den Ranker-Block und liefert `RankedCandidate`s an Judge/Quality-Gate/Analyzer/Cutter weiter.
+- Fail-open ist implementiert: `MomentFinderError` schreibt `debug/llm_moment_finder_stage.json` mit `fallback=ranker_pipeline` und nutzt danach den bisherigen Ranker-Pfad.
+- Debug-Artefakte bei Flag AN: `llm_moment_finder_stage.json`, `llm_moment_finder_prompt.txt`, `llm_moment_finder_response.txt`, `llm_moment_finder_usage.json`, `llm_moment_finder_moments.jsonl`.
+- Verification mit gemocktem Provider/Pipeline: `test_moment_finder.py`, D0-Tests, Precision-Review-Tests, Workflow-Router-Tests und Pipeline-Integration (`71 passed`).
+- Echter Docker/GPU-Serving-Smoke mit Flag AN: `llm_phase1_verify_docker_20260605T214307Z`, VOD `2785392475`, Judge AUS, `status=done`, `clips=10`, elapsed `181.43s`.
+- Smoke-Artefakt bestaetigt LLM-Pfad statt Ranker: `debug/llm_moment_finder_stage.json` mit `status=ok`, `provider=gemini`, `model=gemini-2.5-flash-lite`, `raw_moment_count=65`, `post_processed_moment_count=11`, `ranked_candidate_count=11`, `dropped_long_moment_count=0`.
+- Beim Smoke gefunden und gefixt: Pipeline setzte kurz `status=finding_moments`, aber `JobState` kennt diesen Wert nicht. Jetzt nutzt die Moment-Finder-Phase den bestehenden Status `analyzing` bei `progress_pct=73`; Regressionstest deckt das ab.
+- Qualitaetsbefund aus diesem einen Holdout-VOD bleibt rot gegen alte Repost-Metrik: `final_moments@k10=0/18`, `pre_judge_top80=0/18`. Das ist technische Integration OK, aber KEIN Phase-2-Gate-Gruen.
+
+### Phase 2 — ENTSCHEIDUNGS-GATE (misst, ob der Pfad trägt)
+- [x] **2.1** `run_serving_recall_holdout.py` mit `enable_llm_moment_finder=True` → `evaluate_serving_recall_holdout.py`: **Recall-Floor** des LLM-Pfads gegen die 111 Repost-Holdout-Fenster. Erwartung ≫ `final_ranked` 2,7 %.
+- [ ] **2.2** **DIE tragende Messung: Top-N-Precision auf `known_repost_match=false`.** `build_llm_moment_precision_review` + Workbench nutzen: menschliches viral-j/n-Rating der Top-N-Momente, die NICHT Clipper-Picks sind. Das beantwortet: sind die LLM-Top-N viral-würdig, wenn sie nicht der exakte Repost sind?
+- [ ] **2.3 GATE:** (a) Recall-Floor klar > 2,7 % UND (b) Top-N-Precision auf Nicht-Reposts akzeptabel → Phase 3. Sonst STOPPEN, Ranker NICHT löschen, zurückmelden (dann ist es „anderer Ranker, gleiches Problem").
+
+#### Phase-2 Umsetzung jetzt
+- [x] Holdout-Runner bekommt expliziten `--enable-llm-moment-finder` Modus inkl. Provider/Model/Token/Top-N Env und Summary-Metadaten.
+- [x] Precision-Review kann eine Non-Repost-Queue bauen: `known_repost_match=true` wird aus der Human-Precision-Queue ausgeschlossen und aus tieferen LLM-Raengen aufgefuellt.
+- [x] Workflow-API aggregiert Human-Labels zu `phase2_gate`: Non-Repost Label-Coverage, yes/no Precision, strict Precision und Gate-Readiness.
+- [x] Frontend-Workbench zeigt Phase-2-Gate-Status und Non-Repost-Fokus direkt im Review.
+- [x] Focused Tests, `import pipeline`, `git diff --check`, Graphify-Rebuild.
+
+#### Phase-2 Implementierungs-Review Notes
+- `ml.run_serving_recall_holdout` hat jetzt `--enable-llm-moment-finder` plus `--moment-finder-provider`, `--moment-finder-model`, `--moment-finder-max-moments`, `--moment-finder-max-tokens` und `--moment-finder-confirm-top-n`. Worker-Env setzt `ENABLE_LLM_MOMENT_FINDER=false` ohne Flag und alle Moment-Finder-Env-Werte mit Flag.
+- `scripts/run_serving_recall_holdout.sh --wrapper-help` dokumentiert den Phase-2-Recall-Floor-Lauf.
+- `ml.build_llm_moment_precision_review` hat `--exclude-known-reposts`. In diesem Modus werden bekannte Repost-Matches aus der Human-Precision-Queue ausgeschlossen und aus tieferen LLM-Raengen aufgefuellt; Summary reportet `non_repost_rows_in_queue`, `excluded_known_repost_count`, `scanned_moment_count` und `max_source_rank_in_queue`.
+- Workflow-API startet Precision-Reviews standardmaessig mit `exclude_known_reposts=true`, aggregiert Labels zu `label_summary`, baut `phase2_gate` und kann per `POST /api/llm-moment-review/workflows/{workflow_id}/recall-floor/latest` den neuesten LLM-Holdout-Summary als Recall-Floor anhaengen.
+- Frontend-Workbench sendet `exclude_known_reposts=true`, zeigt Non-Repost-Label-Coverage, Human Precision, Strict Precision, Recall-Floor und Blocking Reasons.
+- Frontend-Workbench ist auf den Phase-2-Holdout-Review voreingestellt: 10 Holdout-VODs, `VOD Limit=10`, `exclude_known_reposts=true` und `allow_holdout=true`, damit diagnostische Holdout-Reviews nicht am D0-Holdout-Schutz scheitern.
+- Gate-Checkboxes 2.1-2.3 blieben nach der Implementierung zunaechst offen: Der echte LLM-Holdout-Lauf und die menschlichen Labels waren zu diesem Zeitpunkt noch nicht ausgefuehrt.
+- Verification: `23 passed` fuer Runner/Review/Router/Moment-Finder/Pipeline-Smoke, groessere relevante Backend-Suite `80 passed`, `npm --prefix frontend run lint`, `npm --prefix frontend run build`, `import pipeline`, `git diff --check`, Graphify-Rebuild.
+
+#### Phase-2 Recall-Floor Review Notes
+- Erster echter LLM-Holdout `phase2_llm_recall_20260605T220245Z` fand einen Analyzer-Fallback-Bug: `_fallback_moment` crashte bei LLM-Candidates ausserhalb der Boundary-Snap-Toleranz (`KeyError: timestamp outside allowed tolerance`) auf VOD `2778362653`.
+- Bugfix: Analyzer-Fallback snappt weiter strikt, clamp't aber bei Fallback-Momenten auf erlaubte Boundary-Spanne statt den Serving-Job zu crashen. Regressionstest in `backend/tests/test_analyzer.py`.
+- Sauberer Re-Run: `phase2_llm_recall_fixed_20260605T222634Z`, `enable_llm_moment_finder=true`, `provider=gemini`, `model=gemini-2.5-flash-lite`, `max_moments=180`, `max_tokens=16000`, `jobs_by_status={"done": 10}`.
+- Recall-Floor Ergebnis: `final_moments@k12 = 7/110 = 6.3636%`, `final_ranked@k12 = 7/110 = 6.3636%`, `pre_judge_top80 = 10/110 = 9.0909%`, `ranked_pre_judge = 10/110 = 9.0909%`.
+- Interpretation: 2.1 ist technisch abgeschlossen und liegt ueber dem alten finalen Ranker-Floor von 2.7%. Phase 2 insgesamt ist noch NICHT abgeschlossen, weil 2.2/2.3 die menschliche Top-N-Precision auf `known_repost_match=false` brauchen.
+- Verification nach Bugfix: relevante Backend-Suite `110 passed`.
+
+#### Phase-2 Precision-Review Fix Notes
+- Beim ersten Human-Review fiel ein Rationale/Clip-Mismatch auf: `2777621798` Rank 1 beschrieb Pokemon-Fanmail, der geschnittene Clip startete aber erst im Aftermath (`5114-5204`).
+- Root Cause: Ein passenderes, aber 210s breites LLM-Fenster (`5006-5216`) wurde durch die alte Blob-Policy komplett verworfen (`>120s`). Uebrig blieb ein kuerzeres, spaeteres Fenster mit stale Rationale. Zusaetzlich enthielt das VOD massive Duplicate-Momente.
+- Fix: Moderate lange Momente werden jetzt bis 300s als verwertbar behandelt und auf 90s gekappt; echte Marathon-Blobs bleiben Drop. Moment-Finder und Precision-Review deduplizieren identische/ueberlappende bzw. lange nahe Fenster vor Top-N-Auswahl.
+- Frontend-Review zeigt den Transcript-Excerpt jetzt vor der LLM-Rationale und markiert die Beschreibung explizit als `LLM Rationale`, damit sie nicht wie Ground Truth wirkt.
+- Bestehender Workflow `20260605T230019201558Z` wurde ohne neuen LLM-Call aus gespeicherten Responses regeneriert und die Review-Clips neu geschnitten. Beispielclip ist jetzt `2777621798_rank01_005006_005096.mp4` mit passendem Pokemon/20,000-Transcript.
+- Verification: relevante Backend-Suite `113 passed`, Frontend Lint/Build gruen, `import pipeline`, `git diff --check`, Graphify-Rebuild.
+- Zweiter Human-Review-Fund: Airsoft-Shotgun-Rationale war semantisch richtig, aber an falsche LLM-Timestamps (`1913-2003`, ca. `31:53-33:23`) gebunden; passende Transcript-Evidence lag bei ca. `19:46-21:24`.
+- Fix: Precision-Review zeigt die LLM-Rationale nur noch als Beschreibung und nutzt sie nicht zur Timestamp-Reparatur. Zeitfenster werden rein numerisch repariert, wenn sie wie kompakte Clock-Werte (`MMSS`/`HHMMSS`) aussehen.
+- Bestehender Workflow `20260605T230019201558Z` wurde erneut ohne neuen LLM-Call regeneriert. Airsoft ist nach rein numerischer Clock-Reparatur jetzt `2777621798_rank02_001153_001203.mp4` (`19:13-20:03`) aus dem alten LLM-Fenster `1913-2003`.
+- Rebuild-Summary nach Nutzerkorrektur: `queue_rows=120`, `non_repost_rows_in_queue=120`, `known_repost_matches_in_queue=0`, `timestamp_repaired_rows_in_queue=57`, `clip_ready=120`, `all_clips_ready=true`.
+- Stale-Clip-Cleanup ergaenzt: Pro Review-Run-Ordner werden nicht mehr referenzierte `.mp4` entfernt. Bestehender Run-Ordner wurde beim letzten Rebuild auf `120` MP4s bereinigt.
+- Root-Cause-Deep-Dive danach: Das Transcript war korrekt; der Prompt zeigte aber nur display clocks wie `[19:44 - 19:46]`, waehrend das JSON-Schema Sekunden verlangte. Gemini kodierte mehrfach `MM:SS` ohne Doppelpunkt (`19:38` -> `1938`) statt Sekunden (`1178`).
+- Kernfix: Transcript-Prompt-Zeilen enthalten jetzt absolute Sekunden als autoritative Werte (`[t=1184s - t=1186s | clock=19:44 - 19:46]`), die Prompt-Regeln verbieten explizit `19:44 -> 1944`, und D0/Serving/Precision-Review reparieren clock-encoded Outputs rein numerisch. Alte Airsoft-Response repariert im Verify-Run von `1913-2027` auf `1153-1227`.
+- Nutzerkorrektur: Rationale-/Transcript-Evidence-basierte Timestamp-Reparatur wurde entfernt. Der Timestamp-Repair benutzt keine Rationale-Terme, keine Stopwords und keine Support-Scores mehr.
+
+### Phase 3 — Erst nach grünem Gate: Ranker offiziell raus
+- [ ] **3.1** Flag default AN; alten Ranker-Zweig (`pipeline.py:1723–1799`) entfernen.
+- [ ] **3.2** Löschen gemäß RAUS/BLEIBT-Liste in `~/.claude/plans/cozy-sniffing-mango.md` (services/ranker, feature_builder, candidate_generators/normalizer, boundary_*, scorer; ml/ train_*/evaluate_*/hpo/calibrate/audit; ~25 Tests). BLEIBT: Repost-Match-Erzeuger, Holdout-Builder, serving-recall-Eval, `build_llm_moment_precision_review` + Workbench, `post_processor`, `clip_judge` (Multimodal), `selector` (Selektion/Quality-Gate), `timeline_types`.
+- [ ] **3.3** Referenzen säubern (routers/jobs, analyzer, high_recall_protection, profile_config, feedback_store, training_workflow_state); Frontend-Funnel-Diagnostik auf Moment-Finder umstellen/entfernen.
+
+### Verifikation (jede Phase)
+- [ ] `pytest` grün; `import pipeline`; nach Phase 1 ein echter Serving-Lauf Flag AN (Clips geschnitten, debug zeigt Moment-Finder-Stage); Recall-Floor + Top-N-Precision dokumentiert; nach Phase 3 `grep` ohne Ranker-Reste außerhalb der Validierungs-Eval; Graphify-Rebuild.
+
+### Risiken / Ehrlichkeit
+- Phase-2-Gate kann ROT werden (LLM-Top-N nur ~8 % Exact-Pick — Nicht-Repost-Precision unbekannt). Dann Ranker NICHT löschen. Das Gate ist genau dafür da.
+- Lokalisierung (Schritt 0) muss VOR Phase 2 sitzen, sonst ist „Recall" bedeutungslos.
+- `feature_builder` breit referenziert → Konsumenten vor Delete prüfen (Phase 3).
+
+---
+
+
+
+## 2026-06-05 Plan: Frontend-Workflow fuer LLM-Moment-Finder + Precision Review
+
+**Ziel:** Der bisher manuelle Ablauf `ml.run_llm_moment_finder_d0` ->
+`ml.build_llm_moment_precision_review --cut-clips` soll aus dem Frontend
+bedienbar sein. Ein Klick startet den kompletten Workflow, die UI pollt den
+Status und zeigt die geschnittenen Rohclips direkt zum menschlichen Review an.
+
+- [x] Backend-Workflow-API bauen: Start, Status/List, Label speichern und
+  sichere Clip-Auslieferung fuer Workflow-Artefakte.
+- [x] Workflow-Artefakte pro Run in eigenem Ordner ablegen: Moment-Finder,
+  Review-CSV/JSONL/Summary, Clips und Status/Labels.
+- [x] Frontend-API-Typen und Client-Funktionen ergaenzen.
+- [x] Frontend-Review-Workbench bauen: Konfiguration, Startbutton, Polling,
+  Clip-Review-Karten und Label-Speicherung.
+- [x] In die bestehende Startseite integrieren, ohne die normale Clip-Pipeline
+  zu blockieren.
+- [x] Verifizieren: Backend-Tests, Frontend-Typecheck/Build, Graphify-Rebuild
+  und Plan-Review.
+
+### Review Notes
+
+- Neuer Backend-Router `routers/llm_moment_review.py` stellt den Workflow unter
+  `/api/llm-moment-review/workflows` bereit. Ein Start erzeugt einen eigenen
+  Ordner unter `backend/ml/artifacts/llm_moment_review_workflows/<workflow_id>/`.
+- Der Workflow ruft im Hintergrund den bestehenden D0-Moment-Finder auf, legt
+  dessen Artefakte unter `moment_finder/` ab und baut danach automatisch die
+  Precision-Review mit Rohclips unter `review/`.
+- Die UI kann Workflows starten, laufende Runs pollen, fertige Review-Rows mit
+  Videos anzeigen und menschliche Labels in `review/review_labels.json` sowie
+  `review/review_label_events.jsonl` speichern.
+- Die normale URL-/Upload-Clip-Pipeline bleibt unveraendert; die neue Workbench
+  ist eine zusaetzliche Review-Flaeche auf der Startseite.
+- Verification bisher: `backend/tests/test_llm_moment_review_router.py`,
+  `backend/tests/test_build_llm_moment_precision_review.py`,
+  `backend/tests/test_run_llm_moment_finder_d0.py` (`39 passed`),
+  Frontend-Lint fuer die beruehrten Dateien, `npx tsc --noEmit`,
+  `npm run build`, `git diff --check` und Graphify-Rebuild via installiertem
+  Graphify-Interpreter (`4073 nodes`, `11183 edges`, `109 communities`).
+
 ## 2026-06-05 Plan: Umstieg auf OpusClip-Pattern (LLM-Moment-Finder statt Ranker-Gate)
 
 **Strategischer Kontext:** Phase A hat bewiesen, dass der Engpass die **Ranking-Diskrimination** ist

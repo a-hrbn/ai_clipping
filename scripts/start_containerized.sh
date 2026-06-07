@@ -89,7 +89,7 @@ start_ngrok_remote() {
   wait_for_http http://127.0.0.1:3000 frontend
   wait_for_http http://127.0.0.1:3000/api/status "frontend API rewrite"
 
-  setsid "$ngrok_bin" http 3000 --log=stdout --log-format=json \
+  setsid "$ngrok_bin" http 3000 --authtoken=3El1UbJidwhXM0HCnZeTEG5F1RV_2sCREn9WeKQ47RnnA8g9i --log=stdout --log-format=json \
     > backend/tmp/ngrok/ngrok.log 2>&1 < /dev/null &
   echo "$!" > backend/tmp/ngrok/ngrok.pid
 

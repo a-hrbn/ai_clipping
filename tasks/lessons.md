@@ -1,5 +1,9 @@
 # Lessons
 
+- Human precision review queues must dedupe identical or heavily overlapping
+  LLM moment windows before selecting Top-N. Repeated windows can make a
+  hallucinated or stale rationale look like multiple strong candidates and
+  waste review capacity on the same bad clip.
 - When the product goal is discovering viral-worthy moments, non-matching
   Clipper reposts are not false positives. Use repost matches as recall-floor
   hints and regression guards, then judge top moments with human precision or
@@ -477,6 +481,17 @@
 - Do not reuse filename helpers with non-empty fallbacks for optional run IDs.
   Empty run IDs must stay empty until the timestamp/default-run-id layer handles
   them, or every default run can collapse into the same fallback directory.
+- Treat an LLM rationale as a claim, not timestamp evidence. Before cutting
+  review clips, verify that the rationale's distinctive terms are present in
+  the local transcript window; if not, re-localize to transcript evidence or
+  drop the candidate instead of showing a plausible description on the wrong
+  video segment.
+- Do not ask an LLM for numeric seconds while showing only `MM:SS` transcript
+  clocks. Models may strip the colon (`19:38` -> `1938`) instead of converting
+  to seconds (`1178`). Prompt transcripts must expose absolute `t=...s` values
+  as the authoritative timestamp. Defensive repair should be numeric-only:
+  convert valid compact clock-shaped windows (`MMSS`/`HHMMSS`) to seconds, and
+  do not use rationale text as timestamp evidence.
 - When the user changes a scripted collection date range, update every default
   surface in one pass: Python runner constants, wrapper help text, and the
   current task-plan review. Historical run notes should stay historical.

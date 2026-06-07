@@ -71,6 +71,14 @@ def test_main_dry_run_plans_holdout_jobs_and_skips_pipeline(tmp_path) -> None:
         "DENSE_CANDIDATE_INVENTORY_SOURCE_CAP": "700",
         "ENABLE_DENSE_CANDIDATE_INVENTORY": "true",
     }
+    assert payload["llm_moment_finder"] == {
+        "enabled": False,
+        "max_moments": 180,
+        "max_tokens": 16000,
+        "model": "gemini-2.5-flash-lite",
+        "multimodal_confirm_top_n": 12,
+        "provider": "gemini",
+    }
     assert payload["requested_vods"] == 2
     assert payload["jobs_by_status"] == {"dry_run": 2}
     assert [row["job_id"] for row in payload["jobs"]] == [
@@ -93,6 +101,7 @@ def test_pipeline_env_disables_oracle_pushes(tmp_path, monkeypatch) -> None:
     assert env["SERVING_CROSS_PLATFORM_POSITIVE_ROWS_PATH"] == str(positives)
     assert env["TWITCH_DOWNLOAD_CACHE_TTL_SEC"] == "-1"
     assert env["ENABLE_CLIP_JUDGE"] == "false"
+    assert env["ENABLE_LLM_MOMENT_FINDER"] == "false"
     assert env["ENABLE_DENSE_CANDIDATE_INVENTORY"] == "true"
     assert env["DENSE_CANDIDATE_INVENTORY_SOURCE_CAP"] == "700"
     assert sorted(key for key in env if key.startswith("DENSE_CANDIDATE_INVENTORY")) == [
@@ -100,6 +109,28 @@ def test_pipeline_env_disables_oracle_pushes(tmp_path, monkeypatch) -> None:
     ]
     assert "CLIP_JUDGE_SAMPLE_COUNT" not in env
     assert "CLIP_JUDGE_UNCERTAIN_SAMPLE_COUNT" not in env
+
+
+def test_pipeline_env_can_enable_llm_moment_finder(tmp_path) -> None:
+    positives = tmp_path / "positive_rows.jsonl"
+    env = run_serving_recall_holdout.pipeline_env(
+        positives,
+        llm_moment_finder={
+            "enabled": True,
+            "provider": "gemini",
+            "model": "gemini-2.5-pro",
+            "max_moments": 220,
+            "max_tokens": 24000,
+            "multimodal_confirm_top_n": 20,
+        },
+    )
+
+    assert env["ENABLE_LLM_MOMENT_FINDER"] == "true"
+    assert env["MOMENT_FINDER_PROVIDER"] == "gemini"
+    assert env["MOMENT_FINDER_MODEL"] == "gemini-2.5-pro"
+    assert env["MOMENT_FINDER_MAX_MOMENTS"] == "220"
+    assert env["MOMENT_FINDER_MAX_TOKENS"] == "24000"
+    assert env["MOMENT_FINDER_MULTIMODAL_CONFIRM_TOP_N"] == "20"
 
 
 def test_pipeline_env_can_enable_judge_reference_mode(tmp_path) -> None:

@@ -71,6 +71,7 @@ Runner options are forwarded to ml.run_serving_recall_holdout, for example:
 Runner defaults: --fail-fast, --progress-interval-sec 3, --workers 2, judge-off.
 Phase-A defaults are forced for this holdout: dense inventory on, source cap 700.
 Use --enable-judge for a Judge-on reference run.
+Use --enable-llm-moment-finder for the Phase-2 LLM Moment-Finder recall-floor run.
 Use --no-fail-fast, --progress-interval-sec N, or --workers 1 to override.
 
 Set AI_CLIPPING_BACKEND_CONTAINER to override the default container name.

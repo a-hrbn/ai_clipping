@@ -377,6 +377,22 @@ class AnalyzerHelperTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             analyzer._snap_time(20.0, [0.0, 5.0], tolerance=3.0)
 
+    def test_fallback_moment_clamps_when_candidate_time_is_outside_boundary_tolerance(self) -> None:
+        candidate = Candidate(
+            id="llm",
+            start=12.0,
+            end=55.0,
+            source="llm_moment_finder",
+            anchor_time=30.0,
+            score_hint=8.0,
+        )
+        ranked = RankedCandidate(candidate=candidate, features=None, rank_score=8.0, rationale=["llm"])
+
+        moment = analyzer._fallback_moment(ranked, [0.0, 20.0, 40.0], "jynxzi")
+
+        self.assertEqual(moment["start_time"], 20.0)
+        self.assertEqual(moment["end_time"], 40.0)
+
     def test_allowed_boundaries_dedupes_and_sorts(self) -> None:
         segments = [
             RichSegment(start=0.0, end=2.0, text="a"),

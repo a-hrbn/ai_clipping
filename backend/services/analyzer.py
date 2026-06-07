@@ -211,7 +211,12 @@ def refine_candidates(
         moment = _enforce_story_shape(moment, ranked.candidate, candidate_segments)
         moment["selection_reasons"] = _selection_reasons(ranked, moment)
         moment["rank"] = index
-        moment["ranking_mode"] = "ml_blended" if ranked.trained_model_used else "heuristic"
+        if ranked.trained_model_used:
+            moment["ranking_mode"] = "ml_blended"
+        elif ranked.candidate.source == "llm_moment_finder":
+            moment["ranking_mode"] = "llm_moment_finder"
+        else:
+            moment["ranking_mode"] = "heuristic"
         moment["candidate_id"] = ranked.candidate.id
         moment["platform"] = normalized_strategy["platform"]
         moment["variant_key"] = normalized_strategy["clip_style"]
@@ -757,12 +762,27 @@ def _snap_time(value: float, boundaries: list[float], tolerance: float = 3.0) ->
     return nearest
 
 
+def _snap_time_or_clamped_value(value: float, boundaries: list[float], tolerance: float = 10.0) -> float:
+    try:
+        return _snap_time(value, boundaries, tolerance=tolerance)
+    except KeyError:
+        if not boundaries:
+            return round(value, 2)
+        return round(max(boundaries[0], min(value, boundaries[-1])), 2)
+
+
 def _fallback_moment(ranked: RankedCandidate, boundaries: list[float], profile: str) -> Moment:
-    start_time = _snap_time(ranked.candidate.start, boundaries, tolerance=10.0)
-    end_time = _snap_time(ranked.candidate.end, boundaries, tolerance=10.0)
+    start_time = _snap_time_or_clamped_value(ranked.candidate.start, boundaries, tolerance=10.0)
+    end_time = _snap_time_or_clamped_value(ranked.candidate.end, boundaries, tolerance=10.0)
     if end_time <= start_time and len(boundaries) > 1:
         later = [boundary for boundary in boundaries if boundary > start_time]
-        end_time = later[0] if later else boundaries[-1]
+        if later:
+            end_time = later[0]
+        else:
+            start_time = boundaries[-2]
+            end_time = boundaries[-1]
+    if end_time <= start_time:
+        end_time = start_time + max(1.0, ranked.candidate.end - ranked.candidate.start)
     return {
         "rank": 1,
         "candidate_id": ranked.candidate.id,

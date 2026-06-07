@@ -5,8 +5,7 @@ from dataclasses import dataclass
 
 from config import settings
 from services import clip_strategy, high_recall_protection
-from services.timeline_types import Candidate, CandidateFeatures, RankedCandidate
-from services.ranker import Ranker
+from services.timeline_types import RankedCandidate
 
 
 @dataclass
@@ -20,60 +19,6 @@ class QualityGateResult:
 class FinalSelectionResult:
     selected: list[RankedCandidate]
     summary: dict[str, object]
-
-
-def rank_candidates(
-    candidates: list[Candidate],
-    features: list[CandidateFeatures],
-    profile: str = "gaming",
-    strategy: dict | None = None,
-) -> list[RankedCandidate]:
-    feature_map = {feature.candidate_id: feature for feature in features}
-    scores = {
-        str(item["candidate_id"]): item
-        for item in Ranker().score_details(features, profile=profile, strategy=strategy)
-    }
-    ranked: list[RankedCandidate] = []
-    for candidate in candidates:
-        feature = feature_map.get(candidate.id)
-        score_info = scores.get(candidate.id)
-        if feature is None or score_info is None:
-            continue
-        rationale = list(score_info["rationale"])
-        if bool(score_info.get("passes_serving_threshold", False)):
-            rationale.append("ranker_serving_threshold_pass")
-        elif _ranker_score_near_serving_threshold(score_info):
-            rationale.append("ranker_serving_threshold_near_pass")
-        ranked.append(
-            RankedCandidate(
-                candidate=candidate,
-                features=feature,
-                rank_score=float(score_info["score"]),
-                rationale=rationale,
-                heuristic_rank_score=float(score_info["heuristic_score"]),
-                trained_rank_score=(
-                    float(score_info["trained_score"])
-                    if score_info.get("trained_score") is not None
-                    else None
-                ),
-                model_blend=float(score_info.get("blend", 0.0)),
-                trained_model_used=bool(score_info.get("trained_model_used", False)),
-            )
-        )
-
-    ranked.sort(key=lambda item: item.rank_score, reverse=True)
-    return ranked
-
-
-def select_top_candidates(
-    candidates: list[Candidate],
-    features: list[CandidateFeatures],
-    top_k: int,
-    profile: str = "gaming",
-    strategy: dict | None = None,
-) -> list[RankedCandidate]:
-    ranked = rank_candidates(candidates, features, profile=profile, strategy=strategy)
-    return select_diverse_ranked_candidates(ranked, top_k=top_k, strategy=strategy)
 
 
 def select_diverse_ranked_candidates(
@@ -347,32 +292,7 @@ def _passes_unjudged_ranker_final_bypass(item: RankedCandidate) -> bool:
 
 
 def _has_ranker_quality_bypass_signal(item: RankedCandidate) -> bool:
-    if not bool(getattr(settings, "serving_quality_ranker_bypass_enabled", True)):
-        return False
-    if "judge_recall_filtered" in item.rationale:
-        return False
-    if (
-        "ranker_serving_threshold_pass" not in item.rationale
-        and "ranker_serving_threshold_near_pass" not in item.rationale
-    ):
-        return False
-    base_score = item.base_rank_score if item.base_rank_score is not None else item.rank_score
-    min_score = float(getattr(settings, "serving_quality_ranker_bypass_min_base_score", 0.0) or 0.0)
-    return float(base_score) >= min_score
-
-
-def _ranker_score_near_serving_threshold(score_info: dict[str, object]) -> bool:
-    try:
-        score = float(score_info.get("score") or 0.0)
-        threshold = float(score_info.get("serving_threshold") or 0.0)
-    except (TypeError, ValueError):
-        return False
-    if threshold <= 0.0:
-        return False
-    margin = max(float(getattr(settings, "serving_quality_ranker_bypass_threshold_margin", 0.15) or 0.0), 0.0)
-    ratio = float(getattr(settings, "serving_quality_ranker_bypass_threshold_ratio", 0.98) or 0.0)
-    ratio = max(0.0, min(ratio, 1.0))
-    return score >= threshold - margin or score >= threshold * ratio
+    return False
 
 
 def _passes_soft_judge_quality_gate(

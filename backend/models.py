@@ -78,7 +78,7 @@ class ClipResult(BaseModel):
     viral_score: float
     reason: str
     selection_reasons: list[str] = Field(default_factory=list)
-    ranking_mode: Literal["heuristic", "ml_blended"] = "heuristic"
+    ranking_mode: Literal["heuristic", "ml_blended", "llm_moment_finder"] = "llm_moment_finder"
     platform: ClipPlatform = "general"
     variant_key: str = "balanced"
     variant_label: str | None = None

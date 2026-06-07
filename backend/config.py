@@ -239,10 +239,6 @@ class Settings(BaseSettings):
     serving_quality_min_judge_confidence: float = 0.45
     serving_quality_subscore_gate_mode: str = "soft"
     serving_quality_hard_min_judge_score: float = 3.0
-    serving_quality_ranker_bypass_enabled: bool = True
-    serving_quality_ranker_bypass_min_base_score: float = 0.0
-    serving_quality_ranker_bypass_threshold_margin: float = 0.15
-    serving_quality_ranker_bypass_threshold_ratio: float = 0.98
     serving_quality_soft_single_subscore_miss_enabled: bool = True
     serving_quality_soft_single_subscore_min_judge_score: float = 6.0
     serving_quality_soft_single_subscore_min_axis_mean: float = 0.55
@@ -265,18 +261,21 @@ class Settings(BaseSettings):
     enable_hook_subclassifier: bool = False
     enable_multimodal_embeddings: bool = False
     enable_trend_prior: bool = True
-    # Trained ranker is gated behind quality checks in ranker.py (training rows,
-    # positive/negative balance, validation accuracy/NDCG). Enabling by default
-    # lets the feedback/training loop actually reach the scoring path — a bad
-    # artifact still falls back to the heuristic via those gates.
-    enable_trained_ranker_v2: bool = True
     trend_prior_data_path: str | None = None
     enable_boundary_refinement_v2: bool = True
     enable_boundary_llm_pair_rerank: bool = True
-    enable_boundary_ranker: bool = False
     enable_legacy_boundary_refinement_llm: bool = False
-    ranker_hpo_trials: int = 60
-    ranker_hpo_seed: int = 0
+    moment_finder_provider: str = "gemini"
+    moment_finder_model: str = "gemini-2.5-flash-lite"
+    moment_finder_max_moments: int = 180
+    moment_finder_min_duration_sec: float = 8.0
+    moment_finder_max_duration_sec: float = 90.0
+    moment_finder_max_tokens: int = 16000
+    moment_finder_timeout_sec: float = 900.0
+    moment_finder_api_retries: int = 2
+    moment_finder_retry_backoff_sec: float = 20.0
+    moment_finder_filter_transcript_noise: bool = True
+    moment_finder_multimodal_confirm_top_n: int = 12
 
     @field_validator("allowed_origins", mode="before")
     @classmethod

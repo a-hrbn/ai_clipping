@@ -19,23 +19,17 @@ from services import (
     clipper,
     audio_features,
     video_features,
-    scorer,
     post_processor,
     chat_analyzer,
-    candidate_generators,
-    candidate_normalizer,
-    feature_builder,
     selector,
     feedback_store,
-    peak_detector,
     clip_judge,
     keyframe_sampler,
-    chapter_segmenter,
     clip_strategy,
-    candidate_recall_report,
     clip_taxonomy,
     context_patterns,
     high_recall_protection,
+    moment_finder,
 )
 from services.timeline_types import Candidate, RankedCandidate
 from services.transcriber import RichSegment
@@ -316,252 +310,6 @@ def _first_nonempty_text(row: dict, keys: tuple[str, ...]) -> str:
     return ""
 
 
-def _cross_platform_recall_preserve_ids(
-    candidates,
-    positives: list[dict],
-    *,
-    max_per_positive: int = 3,
-) -> set[str]:
-    """Pick a small set of candidate ids that must not be deduped away.
-
-    The full target set can include many overlapping inventory windows for the
-    same repost. For merge preservation we only need the strongest few per
-    positive window so known-good supervision does not flood the serving funnel.
-    """
-
-    if not positives or max_per_positive <= 0:
-        return set()
-    min_overlap = float(getattr(settings, "serving_cross_platform_recall_overlap_ratio", 0.45) or 0.45)
-    grouped: dict[tuple[str, str, str], list[tuple[float, float, float, str]]] = {}
-    for candidate in candidates:
-        match = _best_cross_platform_positive_match(candidate.start, candidate.end, positives)
-        overlap = float(match["overlap_ratio"] or 0.0)
-        if overlap < min_overlap:
-            continue
-        row = match["row"] or {}
-        key = (
-            str(row.get("repost_source_url") or row.get("source_url") or ""),
-            str(row.get("window_start") or ""),
-            str(row.get("window_end") or ""),
-        )
-        duration = max(float(candidate.end) - float(candidate.start), 0.001)
-        grouped.setdefault(key, []).append(
-            (
-                overlap,
-                float(getattr(candidate, "score_hint", 0.0) or 0.0),
-                -duration,
-                str(candidate.id),
-            )
-        )
-    preserved: set[str] = set()
-    for rows in grouped.values():
-        rows.sort(reverse=True)
-        preserved.update(candidate_id for *_scores, candidate_id in rows[:max_per_positive])
-    return preserved
-
-
-_CONTEXT_VARIANT_SOURCES = {
-    "quote",
-    "narrative_reveal",
-    "tension_build",
-    "controversy",
-    "story_payoff",
-    "goal_prompt",
-    "chat_velocity",
-    "dense_window",
-    "dense_inventory",
-}
-_CONTEXT_SETUP_TERMS = (
-    "because",
-    "listen",
-    "let me",
-    "here's",
-    "heres",
-    "this is",
-    "what happened",
-    "finds out",
-    "reacts",
-    "sent",
-    "asked",
-    "told",
-    "first",
-)
-_CONTEXT_PAYOFF_TERMS = (
-    "what",
-    "wait",
-    "no way",
-    "oh my",
-    "bro",
-    "laugh",
-    "hilarious",
-    "insane",
-    "crazy",
-    "banned",
-    "cheated",
-    "won",
-    "lost",
-    "revealed",
-    "finally",
-)
-
-
-def _add_context_variant_candidates(
-    base_candidates: list[Candidate],
-    variant_candidates: list[Candidate],
-    segments: list[RichSegment],
-    *,
-    max_duration: float,
-    max_new_candidates: int = 96,
-    max_variants_per_region: int = 3,
-) -> tuple[list[Candidate], dict[str, object]]:
-    """Add the best setup/payoff variants that were lost during generic merge.
-
-    This is label-free: it only inspects candidate shape and local transcript
-    text. It exists because a short dense window can suppress a better semantic
-    setup window for the same moment before Proposal/Judge ever sees it.
-    """
-
-    if not variant_candidates or not segments:
-        return base_candidates, {"enabled": True, "added": 0, "candidate_pool": 0}
-
-    existing_ids = {candidate.id for candidate in base_candidates}
-    pool = [
-        candidate
-        for candidate in variant_candidates
-        if candidate.id not in existing_ids and candidate.source in _CONTEXT_VARIANT_SOURCES
-    ]
-    if not pool:
-        return base_candidates, {"enabled": True, "added": 0, "candidate_pool": 0}
-
-    normalized_pool = candidate_normalizer.normalize_candidates(pool, segments, max_duration)
-    scored = [
-        (_context_variant_score(candidate, segments), candidate)
-        for candidate in normalized_pool
-        if candidate.id not in existing_ids
-    ]
-    scored = [(score, candidate) for score, candidate in scored if score >= 0.58]
-    scored.sort(key=lambda item: (item[0], item[1].score_hint, item[1].end - item[1].start), reverse=True)
-
-    represented_candidates = list(base_candidates)
-    overlapping_best_by_bucket: dict[int, tuple[float, Candidate]] = {}
-    novel_best_by_bucket: dict[int, tuple[float, Candidate]] = {}
-    for score, candidate in scored:
-        bucket = int(float(candidate.anchor_time) // 120.0)
-        overlaps = [
-            existing
-            for existing in represented_candidates
-            if _candidate_region_overlap(candidate, existing) >= 0.48
-        ]
-        if overlaps:
-            existing = overlapping_best_by_bucket.get(bucket)
-            if existing is None or score > existing[0]:
-                overlapping_best_by_bucket[bucket] = (score, candidate)
-            continue
-        existing = novel_best_by_bucket.get(bucket)
-        if existing is None or score > existing[0]:
-            novel_best_by_bucket[bucket] = (score, candidate)
-
-    overlap_budget = max(max_new_candidates // 2, 1)
-    overlap_ordered = sorted(overlapping_best_by_bucket.values(), key=lambda item: int(float(item[1].anchor_time) // 120.0))
-    novel_ordered = sorted(novel_best_by_bucket.values(), key=lambda item: int(float(item[1].anchor_time) // 120.0))
-    ordered_scored = [
-        *overlap_ordered[:overlap_budget],
-        *novel_ordered,
-        *overlap_ordered[overlap_budget:],
-    ]
-
-    result = list(base_candidates)
-    added: list[dict[str, object]] = []
-    for score, candidate in ordered_scored:
-        if len(added) >= max_new_candidates:
-            break
-        overlaps = [existing for existing in result if _candidate_region_overlap(candidate, existing) >= 0.48]
-        if any(_candidate_effectively_identical(candidate, existing) for existing in overlaps):
-            continue
-        if overlaps:
-            region_scores = [_context_variant_score(existing, segments) for existing in overlaps]
-            region_count = len(overlaps)
-            best_region_score = max(region_scores or [0.0])
-            if region_count >= max_variants_per_region and score < best_region_score + 0.12:
-                continue
-            if score < best_region_score + 0.04 and not _candidate_has_more_setup(candidate, overlaps):
-                continue
-        elif score < 0.68:
-            continue
-        result.append(candidate)
-        added.append(
-            {
-                "candidate_id": candidate.id,
-                "source": candidate.source,
-                "start": round(float(candidate.start), 3),
-                "end": round(float(candidate.end), 3),
-                "score": round(float(score), 6),
-                "overlap_candidates": len(overlaps),
-            }
-        )
-        existing_ids.add(candidate.id)
-
-    return sorted(result, key=lambda candidate: (candidate.start, candidate.anchor_time)), {
-        "enabled": True,
-        "candidate_pool": len(pool),
-        "normalized_pool": len(normalized_pool),
-        "scored_pool": len(scored),
-        "added": len(added),
-        "added_candidates": added[:25],
-    }
-
-
-def _context_variant_score(candidate: Candidate, segments: list[RichSegment]) -> float:
-    duration = max(float(candidate.end) - float(candidate.start), 0.0)
-    lead = max(float(candidate.anchor_time) - float(candidate.start), 0.0)
-    tail = max(float(candidate.end) - float(candidate.anchor_time), 0.0)
-    window_segments = _segments_overlapping(segments, candidate.start, candidate.end)
-    text = " ".join(str(getattr(segment, "text", "") or "") for segment in window_segments).lower()
-    words = re.findall(r"[a-z0-9']+", text)
-    token_score = min(len(words) / 42.0, 1.0)
-    source_score = {
-        "quote": 0.78,
-        "narrative_reveal": 0.84,
-        "tension_build": 0.80,
-        "controversy": 0.76,
-        "story_payoff": 0.82,
-        "goal_prompt": 0.76,
-        "chat_velocity": 0.82,
-        "dense_window": 0.48,
-        "dense_inventory": 0.42,
-    }.get(candidate.source, 0.52)
-    setup_score = min(lead / 12.0, 1.0)
-    payoff_capture = min(tail / 10.0, 1.0)
-    duration_score = 1.0 - min(abs(duration - 32.0) / 54.0, 1.0)
-    setup_term_score = 1.0 if any(term in text for term in _CONTEXT_SETUP_TERMS) else 0.0
-    payoff_term_score = 1.0 if any(term in text for term in _CONTEXT_PAYOFF_TERMS) else 0.0
-    question_score = 1.0 if "?" in text else 0.0
-    signal_score = min(max(float(candidate.score_hint or 0.0), 0.0) / 8.0, 1.0)
-    return max(
-        0.0,
-        min(
-            1.0,
-            source_score * 0.22
-            + setup_score * 0.18
-            + payoff_capture * 0.14
-            + duration_score * 0.12
-            + token_score * 0.12
-            + setup_term_score * 0.08
-            + payoff_term_score * 0.08
-            + question_score * 0.03
-            + signal_score * 0.03,
-        ),
-    )
-
-
-def _segments_overlapping(segments: list[RichSegment], start: float, end: float) -> list[RichSegment]:
-    return [
-        segment
-        for segment in segments
-        if min(float(getattr(segment, "end", 0.0)), end) - max(float(getattr(segment, "start", 0.0)), start) > 0
-    ]
-
-
 def _candidate_region_overlap(left: Candidate, right: Candidate) -> float:
     start = max(float(left.start), float(right.start))
     end = min(float(left.end), float(right.end))
@@ -571,101 +319,6 @@ def _candidate_region_overlap(left: Candidate, right: Candidate) -> float:
     left_duration = max(float(left.end) - float(left.start), 0.001)
     right_duration = max(float(right.end) - float(right.start), 0.001)
     return max(overlap / left_duration, overlap / right_duration)
-
-
-def _candidate_effectively_identical(left: Candidate, right: Candidate) -> bool:
-    return (
-        abs(float(left.anchor_time) - float(right.anchor_time)) <= 2.0
-        and abs(float(left.start) - float(right.start)) <= 1.5
-        and abs(float(left.end) - float(right.end)) <= 1.5
-    )
-
-
-def _candidate_has_more_setup(candidate: Candidate, existing: list[Candidate]) -> bool:
-    candidate_lead = float(candidate.anchor_time) - float(candidate.start)
-    candidate_duration = float(candidate.end) - float(candidate.start)
-    for other in existing:
-        other_lead = float(other.anchor_time) - float(other.start)
-        other_duration = float(other.end) - float(other.start)
-        if candidate_lead >= other_lead + 4.0 and candidate_duration >= other_duration + 8.0:
-            return True
-    return False
-
-
-def _promote_cross_platform_recall_candidates(candidates, positives: list[dict], *, max_candidates: int) -> tuple[list, dict]:
-    targets = _cross_platform_recall_targets(candidates, positives)
-    summary = {
-        "enabled": bool(positives),
-        "uncapped_candidate_windows": len(candidates),
-        "positive_recall_candidate_windows": len(targets),
-        "positive_recall_candidates_promoted": 0,
-        "max_candidates": max_candidates,
-    }
-    if not positives or max_candidates <= 0 or len(candidates) <= max_candidates:
-        return list(candidates), summary
-
-    target_ids = set(targets)
-    recall_candidates = [candidate for candidate in candidates if candidate.id in target_ids]
-    remaining_slots = max(max_candidates - len(recall_candidates), 0)
-    selected_non_targets = [
-        candidate for candidate in sorted(
-            [candidate for candidate in candidates if candidate.id not in target_ids],
-            key=lambda candidate: (-float(candidate.score_hint), float(candidate.start), float(candidate.end), candidate.id),
-        )[:remaining_slots]
-    ]
-    previous_cap_ids = {
-        candidate.id for candidate in sorted(
-            candidates,
-            key=lambda candidate: (-float(candidate.score_hint), float(candidate.start), float(candidate.end), candidate.id),
-        )[:max_candidates]
-    }
-    promoted = max(0, len([candidate for candidate in recall_candidates if candidate.id not in previous_cap_ids]))
-    summary["positive_recall_candidates_promoted"] = promoted
-    selected = [*recall_candidates, *selected_non_targets]
-    return sorted(selected, key=lambda candidate: (candidate.start, candidate.end, candidate.anchor_time)), summary
-
-
-
-def _apply_cross_platform_feature_boosts(features, targets: dict[str, dict]) -> dict:
-    if not targets:
-        return {"targets": 0, "boosted_features": 0}
-    if not bool(getattr(settings, "serving_cross_platform_feature_boosts_enabled", False)):
-        return {
-            "targets": len(targets),
-            "boosted_features": 0,
-            "status": "disabled_oracle_feature_boosts",
-        }
-    boosted = 0
-    for feature in features:
-        target = targets.get(feature.candidate_id)
-        if not target:
-            continue
-        boosted += 1
-        overlap = float(target.get("positive_overlap_ratio") or 0.0)
-        similarity = float(target.get("matched_cross_platform_similarity") or 0.0)
-        views = float(target.get("matched_cross_platform_views") or 0.0)
-        feature.cross_platform_recall_target = True
-        feature.cross_platform_positive_overlap_ratio = max(feature.cross_platform_positive_overlap_ratio, overlap)
-        feature.cross_platform_positive_similarity = max(feature.cross_platform_positive_similarity, similarity)
-        feature.cross_platform_positive_views = max(feature.cross_platform_positive_views, views)
-        feature.outcome_prior_score = max(float(feature.outcome_prior_score), min(1.0, 0.55 + overlap * 0.35))
-        feature.projected_retention_score = max(float(feature.projected_retention_score), min(1.0, 0.55 + overlap * 0.25))
-        feature.platform_relevance_score = max(float(feature.platform_relevance_score), 0.65)
-        clip_type = str(target.get("matched_cross_platform_clip_type") or "").strip()
-        if clip_type and clip_type != "general":
-            feature.clip_type = clip_type
-        pattern = target.get("matched_cross_platform_pattern") or {}
-        pattern_confidence = float(pattern.get("confidence") or 0.0)
-        if pattern_confidence > 0.0:
-            feature.context_pattern_score = max(float(feature.context_pattern_score), float(pattern.get("score") or 0.0))
-            feature.context_pattern_support = max(float(feature.context_pattern_support), float(pattern.get("support") or 0.0))
-            feature.context_pattern_views_prior = max(float(feature.context_pattern_views_prior), float(pattern.get("views_prior") or 0.0))
-            feature.context_pattern_confidence = max(float(feature.context_pattern_confidence), pattern_confidence)
-            feature.context_pattern_similarity_margin = max(float(feature.context_pattern_similarity_margin), float(pattern.get("similarity_margin") or 0.0))
-            if pattern_confidence >= 0.25:
-                feature.context_pattern_id = str(pattern.get("pattern_id") or feature.context_pattern_id or "")
-                feature.context_pattern_label = str(pattern.get("label") or feature.context_pattern_label or "")
-    return {"targets": len(targets), "boosted_features": boosted}
 
 
 def _probe_media_duration_sec(video_path: pathlib.Path) -> float | None:
@@ -1361,18 +1014,6 @@ def _base_candidate_id(candidate_id: str) -> str:
     return candidate_id.split("::", 1)[0]
 
 
-def _unique_candidates_by_id(candidates: list[Candidate]) -> list[Candidate]:
-    unique: list[Candidate] = []
-    seen: set[str] = set()
-    for candidate in candidates:
-        candidate_id = str(candidate.id)
-        if candidate_id in seen:
-            continue
-        seen.add(candidate_id)
-        unique.append(candidate)
-    return unique
-
-
 def _safe_float(value) -> float:
     try:
         return float(value)
@@ -1562,256 +1203,113 @@ async def run_pipeline(
         # Chat-replay enrichment (best-effort — no-op when chat_path is None)
         transcript = chat_analyzer.enrich_segments(transcript, chat_path)
 
-        # Attach composite hype scores before saving or analyzing
-        _raise_if_cancelled(job_id)
-        transcript = scorer.score_segments(transcript)
-        chapters = await loop.run_in_executor(
-            None,
-            chapter_segmenter.segment_chapters,
-            transcript,
-        )
-        score_timeline = scorer.build_score_timeline(transcript)
-        detected_peaks = await loop.run_in_executor(None, peak_detector.detect_peaks, score_timeline)
-        peak_candidates = await loop.run_in_executor(
-            None,
-            peak_detector.build_peak_candidates,
-            detected_peaks,
-            transcript,
-        )
-
-        update_job(job_id, status="analyzing", progress_pct=72)
-        semantic_candidates = await loop.run_in_executor(
-            None,
-            candidate_generators.generate_semantic_candidates,
-            transcript,
-            chapters,
-            normalized_strategy,
-        )
-        dense_candidates = []
-        if settings.enable_whole_vod_dense_candidates:
-            dense_candidates = await loop.run_in_executor(
-                None,
-                candidate_generators.generate_dense_window_candidates,
-                transcript,
-                chapters,
-                normalized_strategy,
-            )
-        fallback_candidates = []
-        if not peak_candidates:
-            fallback_candidates = await loop.run_in_executor(
-                None,
-                candidate_generators.generate_fallback_candidates,
-                transcript,
-                chapters,
-                normalized_strategy,
-        )
-        heuristic_merge_audit_rows: list[dict] = []
-        dense_inventory_candidates = []
-        cross_platform_dense_recall_summary: dict[str, object] = {"enabled": False, "added": 0}
-        if bool(getattr(settings, "enable_dense_candidate_inventory", True)):
-            dense_inventory_cap = max(int(settings.dense_candidate_inventory_max_candidates or 0), 0)
-            dense_inventory_candidates = await loop.run_in_executor(
-                None,
-                lambda: candidate_generators.generate_dense_candidate_inventory(
-                    transcript,
-                    chapters,
-                    normalized_strategy,
-                    durations=_parse_float_list(settings.dense_candidate_inventory_durations_sec),
-                    stride_sec=float(settings.dense_candidate_inventory_stride_sec),
-                    max_candidates=dense_inventory_cap,
-                ),
-            )
-            dense_inventory_candidates, cross_platform_dense_recall_summary = _promote_cross_platform_recall_candidates(
-                dense_inventory_candidates,
-                cross_platform_positive_windows,
-                max_candidates=dense_inventory_cap,
-            )
-        dense_recall_preserve_ids = _cross_platform_recall_preserve_ids(
-            dense_inventory_candidates,
-            cross_platform_positive_windows,
-        )
-        ranker_recall_pool = [
-            *semantic_candidates,
-            *dense_candidates,
-            *dense_inventory_candidates,
-        ]
-        merge_recall_carry_summary: dict[str, object] = {"enabled": False, "added": 0}
-        recall_carry_candidates: list[Candidate] = []
-        recall_carry_ids: set[str] = set()
-        if bool(getattr(settings, "merge_recall_carry_forward_enabled", True)):
-            recall_carry_candidates = await loop.run_in_executor(
-                None,
-                lambda: candidate_generators.select_temporal_recall_candidates(
-                    ranker_recall_pool,
-                    bucket_sec=float(getattr(settings, "merge_recall_carry_bucket_sec", 60.0) or 60.0),
-                    per_source_bucket=max(
-                        int(getattr(settings, "merge_recall_carry_per_source_bucket", 1) or 0),
-                        0,
-                    ),
-                    max_candidates=max(
-                        int(getattr(settings, "merge_recall_carry_max_candidates", 700) or 0),
-                        0,
-                    ),
-                ),
-            )
-            recall_carry_ids = {str(candidate.id) for candidate in recall_carry_candidates}
-            recall_carry_cap = max(len(recall_carry_candidates), 1)
-            merge_recall_carry_summary = {
-                "enabled": True,
-                "candidate_pool": len(ranker_recall_pool),
-                "selected_candidates": len(recall_carry_candidates),
-                "added": 0,
-                "output_candidates": 0,
-                "bucket_sec": float(getattr(settings, "merge_recall_carry_bucket_sec", 60.0) or 60.0),
-                "per_source_bucket": max(
-                    int(getattr(settings, "merge_recall_carry_per_source_bucket", 1) or 0),
-                    0,
-                ),
-                "max_candidates": max(
-                    int(getattr(settings, "merge_recall_carry_max_candidates", 700) or 0),
-                    0,
-                ),
-                "sample_candidate_ids": sorted(recall_carry_ids)[:25],
-            }
-        context_variant_summary: dict[str, object] = {"enabled": False, "added": 0}
-        direct_ranker_source_cap = max(
-            int(getattr(settings, "dense_candidate_inventory_source_cap", 700) or 0),
-            0,
-        )
-        source_cap_overrides = {
-            "dense_window": max(int(settings.whole_vod_dense_source_cap or 0), 0),
-            "dense_inventory": direct_ranker_source_cap,
+        job_dir = pathlib.Path(settings.storage_dir) / job_id
+        debug_dir = job_dir / "debug"
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        llm_moment_finder_stage: dict[str, object] = {
+            "attempted": True,
+            "status": "pending",
+            "reason": None,
+            "error_type": None,
+            "error": None,
+            "ranked_candidate_count": 0,
         }
-        if recall_carry_candidates:
-            recall_carry_cap = max(len(recall_carry_candidates), 1)
-            for source in {candidate.source for candidate in recall_carry_candidates}:
-                source_cap_overrides[source] = max(
-                    int(source_cap_overrides.get(source, 0) or 0),
-                    recall_carry_cap,
-                )
-        direct_supplemental_candidates = _unique_candidates_by_id(
-            [
-                *recall_carry_candidates,
-                *semantic_candidates,
-                *dense_candidates,
-                *dense_inventory_candidates,
-            ]
+        normalized_candidates: list[Candidate] = []
+        candidate_features = []
+        normalized_recall_targets: dict[str, dict[str, object]] = {}
+        cross_platform_feature_boost_summary: dict[str, object] = {"enabled": False}
+        ranked_candidates: list[RankedCandidate] = []
+        llm_moment_finder_stage.update(
+            {
+                "status": "running",
+                "provider": str(getattr(settings, "moment_finder_provider", "gemini") or "gemini"),
+                "model": str(getattr(settings, "moment_finder_model", "") or ""),
+                "max_moments": int(getattr(settings, "moment_finder_max_moments", 180) or 180),
+            }
         )
-        heuristic_candidates = await loop.run_in_executor(
-            None,
-            lambda: candidate_generators.merge_prioritized_candidates(
-                peak_candidates or fallback_candidates,
-                direct_supplemental_candidates,
-                strategy=normalized_strategy,
-                supplemental_source_cap=4,
-                source_cap_overrides=source_cap_overrides,
-                preserve_supplemental_ids=recall_carry_ids | dense_recall_preserve_ids,
-                preserve_context_variants=True,
-                max_context_variants_per_region=8 if recall_carry_candidates else 3,
-                audit_rows=heuristic_merge_audit_rows,
-                audit_stage="direct_ranker_merge",
-            ),
-        )
-        if merge_recall_carry_summary.get("enabled"):
-            merge_recall_carry_summary["added"] = sum(
-                1 for candidate in heuristic_candidates if str(candidate.id) in recall_carry_ids
-            )
-            merge_recall_carry_summary["output_candidates"] = len(heuristic_candidates)
-        candidates = heuristic_candidates
-        normalized_candidates = await loop.run_in_executor(
-            None,
-            candidate_normalizer.normalize_candidates,
-            candidates,
-            transcript,
-            settings.max_clip_duration,
-        )
-        candidate_features = await loop.run_in_executor(
-            None,
-            lambda: feature_builder.build_features(
-                normalized_candidates,
-                transcript,
-                effective_profile,
-                False,
+        _write_json(debug_dir / "llm_moment_finder_stage.json", llm_moment_finder_stage)
+        update_job(job_id, status="analyzing", progress_pct=73)
+        try:
+            llm_result = await loop.run_in_executor(
                 None,
-                None,
-                chapters,
-                normalized_strategy,
-                video_path=video_path,
-            ),
-        )
-        normalized_recall_targets = _cross_platform_recall_targets(
-            normalized_candidates,
-            cross_platform_positive_windows,
-            profile=effective_profile,
-        )
-        cross_platform_feature_boost_summary = _apply_cross_platform_feature_boosts(
-            candidate_features,
-            normalized_recall_targets,
-        )
-        ranked_candidates = await loop.run_in_executor(
-            None,
-            selector.rank_candidates,
-            normalized_candidates,
-            candidate_features,
-            effective_profile,
-            normalized_strategy,
-        )
-        shortlist_top_k = min(max(settings.shortlist_face_reaction_top_k, 0), len(ranked_candidates))
-        llm_top_k = min(max(settings.shortlist_llm_top_k, 0), len(ranked_candidates))
-        if shortlist_top_k > 0:
-            transcript = await loop.run_in_executor(
-                None,
-                video_features.refine_face_reactions,
-                transcript,
-                video_path,
-                [ranked.candidate for ranked in ranked_candidates[:shortlist_top_k]],
-                settings.shortlist_face_reaction_sample_sec,
-            )
-        if shortlist_top_k > 0 or llm_top_k > 0:
-            llm_candidate_ids = {
-                ranked.candidate.id for ranked in ranked_candidates[:llm_top_k]
-            } if llm_top_k > 0 else set()
-            candidate_features = await loop.run_in_executor(
-                None,
-                lambda: feature_builder.build_features(
-                    normalized_candidates,
+                lambda: moment_finder.find_moments(
                     transcript,
-                    effective_profile,
-                    True,
-                    llm_candidate_ids,
-                    None,
-                    chapters,
-                    normalized_strategy,
-                    video_path=video_path,
+                    profile=effective_profile,
+                    vod_id=_source_twitch_vod_id(url) or job_id,
+                    provider=str(getattr(settings, "moment_finder_provider", "gemini") or "gemini"),
+                    model=str(getattr(settings, "moment_finder_model", "") or ""),
+                    max_moments=int(getattr(settings, "moment_finder_max_moments", 180) or 180),
+                    min_duration_sec=float(getattr(settings, "moment_finder_min_duration_sec", 8.0) or 8.0),
+                    max_duration_sec=float(getattr(settings, "moment_finder_max_duration_sec", 90.0) or 90.0),
+                    max_tokens=int(getattr(settings, "moment_finder_max_tokens", 16000) or 16000),
+                    temperature=0.0,
+                    timeout_sec=float(getattr(settings, "moment_finder_timeout_sec", 900.0) or 900.0),
+                    api_retries=int(getattr(settings, "moment_finder_api_retries", 2) or 0),
+                    retry_backoff_sec=float(getattr(settings, "moment_finder_retry_backoff_sec", 20.0) or 20.0),
+                    filter_transcript_noise=bool(getattr(settings, "moment_finder_filter_transcript_noise", True)),
                 ),
             )
-            cross_platform_feature_boost_summary = _apply_cross_platform_feature_boosts(
-                candidate_features,
-                normalized_recall_targets,
-            )
-            ranked_candidates = await loop.run_in_executor(
-                None,
-                selector.rank_candidates,
+            ranked_candidates = list(llm_result.ranked_candidates)
+            if not ranked_candidates:
+                raise moment_finder.MomentFinderError("LLM moment finder returned no ranked candidates.")
+            normalized_candidates = [ranked.candidate for ranked in ranked_candidates]
+            candidate_features = [
+                ranked.features
+                for ranked in ranked_candidates
+                if ranked.features is not None
+            ]
+            normalized_recall_targets = _cross_platform_recall_targets(
                 normalized_candidates,
-                candidate_features,
-                effective_profile,
-                normalized_strategy,
+                cross_platform_positive_windows,
+                profile=effective_profile,
             )
+            llm_moment_finder_stage.update(
+                {
+                    "status": "ok",
+                    "ranked_candidate_count": len(ranked_candidates),
+                    "normalized_candidate_count": len(normalized_candidates),
+                    "feature_count": len(candidate_features),
+                    **llm_result.summary,
+                }
+            )
+            (debug_dir / "llm_moment_finder_prompt.txt").write_text(llm_result.prompt, encoding="utf-8")
+            (debug_dir / "llm_moment_finder_response.txt").write_text(llm_result.response_text, encoding="utf-8")
+            _write_json(debug_dir / "llm_moment_finder_stage.json", llm_moment_finder_stage)
+            _write_json(debug_dir / "llm_moment_finder_usage.json", llm_result.usage)
+            _write_jsonl(debug_dir / "llm_moment_finder_moments.jsonl", llm_result.post_processed_moments)
+        except moment_finder.MomentFinderError as exc:
+            llm_moment_finder_stage.update(
+                {
+                    "status": "failed",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                }
+            )
+            _write_json(debug_dir / "llm_moment_finder_stage.json", llm_moment_finder_stage)
+            logger.error(
+                json.dumps(
+                    {
+                        "event": "llm_moment_finder_failed",
+                        "job_id": job_id,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    },
+                    ensure_ascii=True,
+                    sort_keys=True,
+                )
+            )
+            raise
         ranked_candidates_pre_judge = list(ranked_candidates)
         judged_ranked_candidates = list(ranked_candidates)
-        judge_top_k = (
-            len(ranked_candidates)
-            if settings.judge_all_candidates
-            else min(max(settings.shortlist_judge_top_k, 0), len(ranked_candidates))
+        judge_top_k = min(
+            max(int(getattr(settings, "moment_finder_multimodal_confirm_top_n", 12) or 0), 0),
+            len(ranked_candidates),
         )
         judge_input_candidates, judge_recall_reserve_summary = _build_judge_recall_reserved_order(
             ranked_candidates,
             [],
             judge_top_k,
         )
-        job_dir = pathlib.Path(settings.storage_dir) / job_id
-        debug_dir = job_dir / "debug"
-        debug_dir.mkdir(parents=True, exist_ok=True)
         sampled_keyframes: dict[str, list[keyframe_sampler.SampledKeyframe]] = {}
         judge_provider = (getattr(settings, "judge_provider", None) or "auto").strip().lower()
         clip_judge_stage_status = {
@@ -1845,6 +1343,7 @@ async def run_pipeline(
                 "normalized_recall_targets": len(normalized_recall_targets),
                 **cross_platform_feature_boost_summary,
             },
+            "llm_moment_finder": dict(llm_moment_finder_stage),
         }
 
         def _clip_judge_progress(progress: dict[str, object]) -> None:
@@ -2210,29 +1709,7 @@ async def run_pipeline(
             transcriber.format_jsonl(transcript), encoding="utf-8"
         )
         _write_jsonl(debug_dir / "segments.jsonl", _segment_records(transcript))
-        _write_jsonl(debug_dir / "chapters.jsonl", [chapter.to_dict() for chapter in chapters])
-        _write_jsonl(debug_dir / "segment_scores.jsonl", _score_records(score_timeline))
-        _write_jsonl(debug_dir / "detected_peaks.jsonl", [peak.to_dict() for peak in detected_peaks])
-        _write_jsonl(debug_dir / "candidates_peak.jsonl", [candidate.to_dict() for candidate in peak_candidates])
-        _write_jsonl(debug_dir / "candidates_semantic.jsonl", [candidate.to_dict() for candidate in semantic_candidates])
-        _write_jsonl(debug_dir / "candidates_dense.jsonl", [candidate.to_dict() for candidate in dense_candidates])
-        _write_jsonl(
-            debug_dir / "candidates_dense_inventory.jsonl",
-            [candidate.to_dict() for candidate in dense_inventory_candidates],
-        )
-        _write_jsonl(debug_dir / "candidates_fallback.jsonl", [candidate.to_dict() for candidate in fallback_candidates])
-        _write_jsonl(debug_dir / "candidates_merged.jsonl", [candidate.to_dict() for candidate in candidates])
-        _write_jsonl(
-            debug_dir / "candidate_merge_audit.jsonl",
-            heuristic_merge_audit_rows,
-        )
-        _write_json(
-            debug_dir / "candidate_merge_summary.json",
-            {
-                "heuristic_merge_audit_rows": len(heuristic_merge_audit_rows),
-                "merge_recall_carry_forward": merge_recall_carry_summary,
-            },
-        )
+        _write_json(debug_dir / "llm_moment_finder_stage_final.json", dict(llm_moment_finder_stage))
         _write_jsonl(
             debug_dir / "candidates_normalized.jsonl",
             [candidate.to_dict() for candidate in normalized_candidates],
@@ -2312,55 +1789,9 @@ async def run_pipeline(
             json.dumps(moments, ensure_ascii=True, indent=2),
             encoding="utf-8",
         )
-        recall_report = candidate_recall_report.build_candidate_recall_report(
-            stage_candidates={
-                "peak": peak_candidates,
-                "semantic": semantic_candidates,
-                "dense": dense_candidates,
-                "dense_inventory": dense_inventory_candidates,
-                "fallback": fallback_candidates,
-                "merged": candidates,
-                "normalized": normalized_candidates,
-            },
-            pre_judge_ranked=ranked_candidates_pre_judge,
-            judged_ranked=judged_ranked_candidates,
-            quality_gate_rows=quality_gate_result.audit_rows,
-            final_ranked=ranked_candidates,
-            final_moments=moments,
-            judge_top_k=judge_top_k,
-            judge_scope_ranked=judge_input_candidates,
-            positive_windows=diagnostic_positive_windows,
-            positive_overlap_ratio=float(getattr(settings, "serving_cross_platform_recall_overlap_ratio", 0.45) or 0.45),
-        )
-        candidate_trace_rows = candidate_recall_report.build_candidate_trace(
-            stage_candidates={
-                "peak": peak_candidates,
-                "semantic": semantic_candidates,
-                "dense": dense_candidates,
-                "dense_inventory": dense_inventory_candidates,
-                "fallback": fallback_candidates,
-                "merged": candidates,
-                "normalized": normalized_candidates,
-            },
-            pre_judge_ranked=ranked_candidates_pre_judge,
-            judged_ranked=judged_ranked_candidates,
-            quality_gate_rows=quality_gate_result.audit_rows,
-            final_ranked=ranked_candidates,
-            final_moments=moments,
-            judge_top_k=judge_top_k,
-            judge_scope_ranked=judge_input_candidates,
-        )
-        candidate_funnel_summary = candidate_recall_report.build_candidate_funnel_summary(
-            recall_report,
-            candidate_trace_rows,
-        )
-        candidate_funnel_summary["cross_platform_positive_diagnostics"] = diagnostic_positive_summary
-        _write_json(debug_dir / "candidate_recall_report.json", recall_report)
-        _write_jsonl(debug_dir / "candidate_trace.jsonl", candidate_trace_rows)
-        _write_json(debug_dir / "candidate_funnel_summary.json", candidate_funnel_summary)
         review_candidate_rows = _build_review_candidate_rows(
             feedback_events,
-            candidate_trace_rows,
+            [],
             limit=int(getattr(settings, "frontend_review_preview_limit", 40) or 0),
         )
         if review_candidate_rows:
@@ -2378,13 +1809,9 @@ async def run_pipeline(
         logger.info(
             json.dumps(
                 {
-                    "event": "candidate_recall_report_built",
+                    "event": "pipeline_debug_done",
                     "job_id": job_id,
-                    "stage_counts": recall_report.get("stage_counts", {}),
-                    "trace_rows": len(candidate_trace_rows),
-                    "drop_stage_counts": candidate_funnel_summary.get("drop_stage_counts", {}),
-                    "largest_losses": recall_report.get("largest_losses", [])[:3],
-                    "positive_window_recall": recall_report.get("positive_window_recall", {}),
+                    "moments": len(moments),
                     "cross_platform_positive_diagnostics": diagnostic_positive_summary,
                     "review_candidate_rows": len(review_candidate_rows),
                 },
@@ -2434,31 +1861,9 @@ def _write_jsonl(path: pathlib.Path, rows: list[dict]) -> None:
     )
 
 
-def _parse_float_list(value: str | list[float] | tuple[float, ...] | None) -> tuple[float, ...]:
-    if value is None:
-        return ()
-    if isinstance(value, str):
-        raw_items = value.split(",")
-    else:
-        raw_items = list(value)
-    parsed: list[float] = []
-    for item in raw_items:
-        try:
-            parsed_value = float(str(item).strip())
-        except ValueError:
-            continue
-        if parsed_value > 0:
-            parsed.append(parsed_value)
-    return tuple(parsed)
-
-
 def _segment_records(transcript) -> list[dict]:
     lines = transcriber.format_jsonl(transcript).splitlines()
     return [json.loads(line) for line in lines if line.strip()]
-
-
-def _score_records(score_timeline) -> list[dict]:
-    return [item.to_dict() for item in score_timeline]
 
 
 def _ranked_score_records(

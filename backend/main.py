@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from config import settings
 from routers.jobs import router as jobs_router, status_router
+from routers.llm_moment_review import router as llm_moment_review_router
 
 # Ensure storage directory exists
 pathlib.Path(settings.storage_dir).mkdir(parents=True, exist_ok=True)
@@ -29,6 +30,7 @@ app.add_middleware(
 
 app.include_router(jobs_router)
 app.include_router(status_router)
+app.include_router(llm_moment_review_router)
 
 # Only generated clip files are publicly addressable. The broader storage dir
 # contains debug JSONL dumps, transcripts, chat replays, and jobs.json — none of

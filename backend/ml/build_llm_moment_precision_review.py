@@ -63,6 +63,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--require-clips", action="store_true", help="Exit non-zero when requested clips cannot all be created. Implied by --cut-clips.")
     parser.add_argument("--top-n-per-vod", type=int, default=DEFAULT_TOP_N_PER_VOD)
     parser.add_argument("--max-duration-sec", type=float, default=DEFAULT_MAX_DURATION_SEC)
+    parser.add_argument(
+        "--exclude-known-reposts",
+        action="store_true",
+        help="Build the human precision queue only from moments that do not match known repost positives.",
+    )
     parser.add_argument("--excerpt-pad-sec", type=float, default=DEFAULT_EXCERPT_PAD_SEC)
     parser.add_argument("--excerpt-max-chars", type=int, default=DEFAULT_EXCERPT_MAX_CHARS)
     parser.add_argument("--overlap-ratio", type=float, default=DEFAULT_OVERLAP_RATIO)
@@ -81,6 +86,7 @@ def main(argv: list[str] | None = None) -> int:
             out_base=args.out,
             top_n_per_vod=max(int(args.top_n_per_vod or 0), 1),
             max_duration_sec=max(float(args.max_duration_sec or 0.0), 1.0),
+            exclude_known_reposts=bool(args.exclude_known_reposts),
             excerpt_pad_sec=max(float(args.excerpt_pad_sec or 0.0), 0.0),
             excerpt_max_chars=max(int(args.excerpt_max_chars or 0), 120),
             overlap_ratio=float(args.overlap_ratio),
@@ -132,6 +138,7 @@ def build_review_queue(
     excerpt_max_chars: int,
     overlap_ratio: float,
     match_mode: str,
+    exclude_known_reposts: bool = False,
     moment_run_dir: pathlib.Path | None = None,
     cut_clips: bool = False,
     download_missing_vods: bool = False,
@@ -155,15 +162,33 @@ def build_review_queue(
             max_duration_sec=max_duration_sec,
         )
         kept_moments.sort(key=lambda row: int(d0.int_or_none(row.get("rank")) or 1_000_000))
-        top_rows = kept_moments[:top_n_per_vod]
+        deduped_moments, duplicate_moments = dedupe_moment_rows_by_overlap(kept_moments)
         transcript_segments = load_transcript_or_empty(vod_cache_root, vod_id)
         positive_windows = positives_by_vod.get(vod_id, [])
-        vod_rows = [
-            review_row(
+        vod_rows: list[dict[str, Any]] = []
+        excluded_known_repost_count = 0
+        timestamp_repaired_count = 0
+        duplicate_after_timestamp_repair_count = 0
+        scanned_moment_count = 0
+        for row in deduped_moments:
+            scanned_moment_count += 1
+            repaired_row = repair_clock_encoded_moment_row(row)
+            if repaired_row != row:
+                timestamp_repaired_count += 1
+            base_match = best_positive_match(
+                moment_from_row(repaired_row),
+                positive_windows,
+                overlap_ratio=overlap_ratio,
+                match_mode=match_mode,
+            )
+            if exclude_known_reposts and base_match:
+                excluded_known_repost_count += 1
+                continue
+            candidate_row = review_row(
                 profile=profile,
                 vod_id=vod_id,
-                row=row,
-                review_rank=index,
+                row=repaired_row,
+                review_rank=len(vod_rows) + 1,
                 transcript_segments=transcript_segments,
                 positive_windows=positive_windows,
                 excerpt_pad_sec=excerpt_pad_sec,
@@ -171,15 +196,34 @@ def build_review_queue(
                 overlap_ratio=overlap_ratio,
                 match_mode=match_mode,
             )
-            for index, row in enumerate(top_rows, start=1)
-        ]
+            if any(
+                moment_row_is_duplicate(
+                    candidate_row,
+                    existing_row,
+                    threshold=0.8,
+                    min_gap_sec=30.0,
+                    min_gap_dedupe_duration_sec=60.0,
+                )
+                for existing_row in vod_rows
+            ):
+                duplicate_after_timestamp_repair_count += 1
+                continue
+            vod_rows.append(candidate_row)
+            if len(vod_rows) >= top_n_per_vod:
+                break
         rows.extend(vod_rows)
         by_vod[vod_id] = {
             "input_moment_count": len(all_moments),
             "kept_moment_count": len(kept_moments),
             "dropped_long_moment_count": len(dropped_long),
+            "duplicate_moment_count": len(duplicate_moments),
+            "timestamp_repaired_count": timestamp_repaired_count,
+            "duplicate_after_timestamp_repair_count": duplicate_after_timestamp_repair_count,
+            "scanned_moment_count": scanned_moment_count,
+            "excluded_known_repost_count": excluded_known_repost_count,
             "queue_rows": len(vod_rows),
             "known_repost_matches_in_queue": sum(1 for row in vod_rows if row["known_repost_match"]),
+            "max_source_rank_in_queue": max((int(row.get("source_rank") or 0) for row in vod_rows), default=0),
         }
 
     out_base.parent.mkdir(parents=True, exist_ok=True)
@@ -224,6 +268,7 @@ def build_review_queue(
         "queue_rows": len(rows),
         "top_n_per_vod": int(top_n_per_vod),
         "max_duration_sec": float(max_duration_sec),
+        "exclude_known_reposts": bool(exclude_known_reposts),
         "excerpt_pad_sec": float(excerpt_pad_sec),
         "excerpt_max_chars": int(excerpt_max_chars),
         "cut_clips": bool(cut_clips),
@@ -242,6 +287,13 @@ def build_review_queue(
         "match_mode": d0.normalize_match_mode(match_mode),
         "overlap_ratio": d0.bounded_ratio(overlap_ratio),
         "known_repost_matches_in_queue": sum(1 for row in rows if row["known_repost_match"]),
+        "non_repost_rows_in_queue": sum(1 for row in rows if not row["known_repost_match"]),
+        "excluded_known_repost_count": sum(int(row.get("excluded_known_repost_count") or 0) for row in by_vod.values()),
+        "timestamp_repaired_count": sum(int(row.get("timestamp_repaired_count") or 0) for row in by_vod.values()),
+        "timestamp_repaired_rows_in_queue": sum(1 for row in rows if row.get("timestamp_repaired") is True),
+        "duplicate_after_timestamp_repair_count": sum(
+            int(row.get("duplicate_after_timestamp_repair_count") or 0) for row in by_vod.values()
+        ),
         "review_required": True,
         "auto_publish_allowed": False,
         "human_label_fields": ["human_viral_label", "human_boundary_label", "human_notes"],
@@ -323,6 +375,95 @@ def load_transcript_or_empty(vod_cache_root: pathlib.Path, vod_id: str) -> list[
     return d0.load_transcript_segments(transcript_path)
 
 
+def dedupe_moment_rows_by_overlap(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    overlap_ratio: float = 0.8,
+    min_gap_sec: float = 30.0,
+    min_gap_dedupe_duration_sec: float = 60.0,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    threshold = d0.bounded_ratio(overlap_ratio)
+    min_gap = max(float(min_gap_sec), 0.0)
+    min_gap_dedupe_duration = max(float(min_gap_dedupe_duration_sec), 0.0)
+    kept: list[dict[str, Any]] = []
+    duplicates: list[dict[str, Any]] = []
+    for raw in rows:
+        row = dict(raw)
+        start = d0.float_or_none(row.get("start"))
+        end = d0.float_or_none(row.get("end"))
+        if start is None or end is None or end <= start:
+            duplicates.append(row)
+            continue
+        is_duplicate = any(
+            moment_row_is_duplicate(
+                row,
+                kept_row,
+                threshold=threshold,
+                min_gap_sec=min_gap,
+                min_gap_dedupe_duration_sec=min_gap_dedupe_duration,
+            )
+            for kept_row in kept
+        )
+        if is_duplicate:
+            duplicates.append(row)
+            continue
+        kept.append(row)
+    return kept, duplicates
+
+
+def moment_row_is_duplicate(
+    row: Mapping[str, Any],
+    other: Mapping[str, Any],
+    *,
+    threshold: float,
+    min_gap_sec: float,
+    min_gap_dedupe_duration_sec: float,
+) -> bool:
+    start = float(d0.float_or_none(row.get("start")) or 0.0)
+    end = float(d0.float_or_none(row.get("end")) or start)
+    other_start = float(d0.float_or_none(other.get("start")) or 0.0)
+    other_end = float(d0.float_or_none(other.get("end")) or other_start)
+    if d0.window_overlap_ratio(start, end, other_start, other_end) >= threshold:
+        return True
+    if min(end - start, other_end - other_start) < min_gap_dedupe_duration_sec:
+        return False
+    gap = max(max(start, other_start) - min(end, other_end), 0.0)
+    return gap <= min_gap_sec
+
+
+def repair_clock_encoded_moment_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    moment = moment_from_row(row)
+    repaired = d0.repair_clock_encoded_moment(moment)
+    updated = dict(row)
+    if repaired == moment:
+        updated["timestamp_repaired"] = False
+        updated.setdefault("original_start", "")
+        updated.setdefault("original_end", "")
+        return updated
+    updated["original_start"] = round(moment.start, 3)
+    updated["original_end"] = round(moment.end, 3)
+    updated["start"] = round(repaired.start, 3)
+    updated["end"] = round(repaired.end, 3)
+    updated["duration"] = round(repaired.duration, 3)
+    updated["timestamp_repaired"] = True
+    return updated
+
+
+def moment_from_row(row: Mapping[str, Any]) -> d0.LlmMoment:
+    start = float(d0.float_or_none(row.get("start")) or 0.0)
+    end = float(d0.float_or_none(row.get("end")) or start)
+    return d0.LlmMoment(
+        start=start,
+        end=end,
+        hook=d0.score01(row.get("hook")),
+        flow=d0.score01(row.get("flow")),
+        value=d0.score01(row.get("value")),
+        trend=d0.score01(row.get("trend")),
+        virality=d0.score01(row.get("virality")),
+        rationale=str(row.get("rationale") or ""),
+    )
+
+
 def review_row(
     *,
     profile: str,
@@ -339,16 +480,7 @@ def review_row(
     start = float(d0.float_or_none(row.get("start")) or 0.0)
     end = float(d0.float_or_none(row.get("end")) or start)
     rank = int(d0.int_or_none(row.get("rank")) or review_rank)
-    moment = d0.LlmMoment(
-        start=start,
-        end=end,
-        hook=d0.score01(row.get("hook")),
-        flow=d0.score01(row.get("flow")),
-        value=d0.score01(row.get("value")),
-        trend=d0.score01(row.get("trend")),
-        virality=d0.score01(row.get("virality")),
-        rationale=str(row.get("rationale") or ""),
-    )
+    moment = moment_from_row(row)
     best = best_positive_match(moment, positive_windows, overlap_ratio=overlap_ratio, match_mode=match_mode)
     return {
         "review_id": f"llm_precision:{vod_id}:rank{review_rank:02d}",
@@ -365,6 +497,9 @@ def review_row(
         "trend": d0.score01(row.get("trend")),
         "virality": d0.score01(row.get("virality")),
         "rationale": str(row.get("rationale") or ""),
+        "timestamp_repaired": bool(row.get("timestamp_repaired", False)),
+        "original_start": row.get("original_start", ""),
+        "original_end": row.get("original_end", ""),
         "transcript_excerpt": d0.transcript_excerpt(
             transcript_segments,
             start,
@@ -450,6 +585,7 @@ def cut_review_clips(
 ) -> dict[str, Any]:
     initialize_clip_fields(rows)
     output_dir.mkdir(parents=True, exist_ok=True)
+    pruned_clip_count = prune_stale_clip_files(output_dir, rows)
     ffmpeg_path = resolve_ffmpeg_binary(ffmpeg_bin)
     missing_vods: set[str] = set()
     ready_count = 0
@@ -495,7 +631,19 @@ def cut_review_clips(
         "missing_source_vods": sorted(vod for vod in missing_vods if vod),
         "output_dir": str(output_dir),
         "ffmpeg_bin": str(ffmpeg_path),
+        "pruned_stale_clip_count": pruned_clip_count,
     }
+
+
+def prune_stale_clip_files(output_dir: pathlib.Path, rows: Sequence[Mapping[str, Any]]) -> int:
+    expected = {clip_filename(row) for row in rows}
+    pruned = 0
+    for path in output_dir.glob("*.mp4"):
+        if path.name in expected:
+            continue
+        path.unlink()
+        pruned += 1
+    return pruned
 
 
 def source_video_path(video_source_root: pathlib.Path, vod_id: str) -> pathlib.Path | None:
@@ -623,6 +771,9 @@ def write_csv(path: pathlib.Path, rows: Sequence[Mapping[str, Any]]) -> None:
         "value",
         "trend",
         "rationale",
+        "timestamp_repaired",
+        "original_start",
+        "original_end",
         "transcript_excerpt",
         "clip_status",
         "clip_path",

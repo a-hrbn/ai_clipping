@@ -68,12 +68,288 @@ def test_build_review_queue_writes_human_precision_artifacts(tmp_path: Path) -> 
     assert out.with_suffix(".summary.json").exists()
 
 
+def test_build_review_queue_can_exclude_known_reposts_and_fill_from_deeper_ranks(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    cache_root = tmp_path / "vod_feature_cache"
+    moment_prefix = artifacts / "jynxzi_llm_moment_finder_d0"
+    positives = artifacts / "positives.jsonl"
+    out = artifacts / "precision_review"
+    _write_moments(
+        moment_prefix.parent / "jynxzi_llm_moment_finder_d0_vod-a.moments.json",
+        [
+            {"rank": 1, "start": 100.0, "end": 120.0, "virality": 0.99, "rationale": "known repost"},
+            {"rank": 2, "start": 200.0, "end": 220.0, "virality": 0.9, "rationale": "fresh one"},
+            {"rank": 3, "start": 300.0, "end": 320.0, "virality": 0.8, "rationale": "fresh two"},
+        ],
+    )
+    _write_transcript(cache_root, "vod-a")
+    _write_jsonl(
+        positives,
+        [
+            {
+                "vod_id": "vod-a",
+                "candidate_id": "known",
+                "window_start": 105.0,
+                "window_end": 115.0,
+                "label": 1,
+                "repost_title": "Known viral",
+            }
+        ],
+    )
+
+    summary = review.build_review_queue(
+        profile="jynxzi",
+        vod_ids=["vod-a"],
+        moment_prefix=moment_prefix,
+        positive_rows_path=positives,
+        vod_cache_root=cache_root,
+        out_base=out,
+        top_n_per_vod=2,
+        max_duration_sec=120.0,
+        exclude_known_reposts=True,
+        excerpt_pad_sec=1.0,
+        excerpt_max_chars=400,
+        overlap_ratio=0.45,
+        match_mode="center_or_overlap",
+    )
+
+    jsonl_rows = [json.loads(line) for line in out.with_suffix(".jsonl").read_text(encoding="utf-8").splitlines()]
+    assert summary["queue_rows"] == 2
+    assert summary["exclude_known_reposts"] is True
+    assert summary["known_repost_matches_in_queue"] == 0
+    assert summary["non_repost_rows_in_queue"] == 2
+    assert summary["excluded_known_repost_count"] == 1
+    assert summary["by_vod"]["vod-a"]["scanned_moment_count"] == 3
+    assert summary["by_vod"]["vod-a"]["max_source_rank_in_queue"] == 3
+    assert [row["source_rank"] for row in jsonl_rows] == [2, 3]
+    assert all(row["known_repost_match"] is False for row in jsonl_rows)
+
+
+def test_build_review_queue_dedupes_repeated_moments_and_fills_from_deeper_ranks(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    cache_root = tmp_path / "vod_feature_cache"
+    moment_prefix = artifacts / "jynxzi_llm_moment_finder_d0"
+    positives = artifacts / "positives.jsonl"
+    out = artifacts / "precision_review"
+    _write_moments(
+        moment_prefix.parent / "jynxzi_llm_moment_finder_d0_vod-a.moments.json",
+        [
+            {"rank": 1, "start": 100.0, "end": 190.0, "virality": 0.99, "rationale": "duplicate cluster"},
+            {"rank": 2, "start": 100.0, "end": 190.0, "virality": 0.98, "rationale": "duplicate cluster"},
+            {"rank": 3, "start": 112.0, "end": 190.0, "virality": 0.97, "rationale": "overlapping duplicate"},
+            {"rank": 4, "start": 300.0, "end": 330.0, "virality": 0.8, "rationale": "first distinct"},
+            {"rank": 5, "start": 400.0, "end": 430.0, "virality": 0.7, "rationale": "second distinct"},
+        ],
+    )
+    _write_transcript(cache_root, "vod-a")
+    _write_jsonl(positives, [])
+
+    summary = review.build_review_queue(
+        profile="jynxzi",
+        vod_ids=["vod-a"],
+        moment_prefix=moment_prefix,
+        positive_rows_path=positives,
+        vod_cache_root=cache_root,
+        out_base=out,
+        top_n_per_vod=3,
+        max_duration_sec=120.0,
+        exclude_known_reposts=True,
+        excerpt_pad_sec=1.0,
+        excerpt_max_chars=400,
+        overlap_ratio=0.45,
+        match_mode="center_or_overlap",
+    )
+
+    jsonl_rows = [json.loads(line) for line in out.with_suffix(".jsonl").read_text(encoding="utf-8").splitlines()]
+    assert summary["queue_rows"] == 3
+    assert summary["by_vod"]["vod-a"]["duplicate_moment_count"] == 2
+    assert summary["by_vod"]["vod-a"]["scanned_moment_count"] == 3
+    assert [row["source_rank"] for row in jsonl_rows] == [1, 4, 5]
+    assert [(row["start"], row["end"]) for row in jsonl_rows] == [(100.0, 190.0), (300.0, 330.0), (400.0, 430.0)]
+
+
+def test_build_review_queue_repairs_compact_clock_timestamps_without_rationale_matching(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    cache_root = tmp_path / "vod_feature_cache"
+    moment_prefix = artifacts / "jynxzi_llm_moment_finder_d0"
+    positives = artifacts / "positives.jsonl"
+    out = artifacts / "precision_review"
+    _write_moments(
+        moment_prefix.parent / "jynxzi_llm_moment_finder_d0_vod-a.moments.json",
+        [
+            {
+                "rank": 1,
+                "start": 1913.0,
+                "end": 2003.0,
+                "virality": 0.9,
+                "rationale": "Streamer receives an airsoft shotgun as fan mail, initially mistaking it for a real firearm.",
+            }
+        ],
+    )
+    transcript_path = cache_root / "vod-a" / "transcript_fixture.json"
+    transcript_path.parent.mkdir(parents=True)
+    transcript_path.write_text(
+        json.dumps(
+            {
+                "transcript": [
+                    {"start": 1184.0, "end": 1186.0, "text": "Is this even legal?"},
+                    {"start": 1191.0, "end": 1193.0, "text": "Bro, I thought this guy sent a real gun."},
+                    {"start": 1221.0, "end": 1227.0, "text": "It's airsoft. It's airsoft. It's a shotgun."},
+                    {"start": 1913.0, "end": 1916.0, "text": "GTA 6 or Rocket League diamond?"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_jsonl(positives, [])
+
+    summary = review.build_review_queue(
+        profile="jynxzi",
+        vod_ids=["vod-a"],
+        moment_prefix=moment_prefix,
+        positive_rows_path=positives,
+        vod_cache_root=cache_root,
+        out_base=out,
+        top_n_per_vod=1,
+        max_duration_sec=120.0,
+        exclude_known_reposts=True,
+        excerpt_pad_sec=1.0,
+        excerpt_max_chars=500,
+        overlap_ratio=0.45,
+        match_mode="center_or_overlap",
+    )
+
+    jsonl_rows = [json.loads(line) for line in out.with_suffix(".jsonl").read_text(encoding="utf-8").splitlines()]
+    assert summary["queue_rows"] == 1
+    assert summary["timestamp_repaired_rows_in_queue"] == 1
+    assert jsonl_rows[0]["timestamp_repaired"] is True
+    assert jsonl_rows[0]["original_start"] == 1913.0
+    assert jsonl_rows[0]["start"] == 1153.0
+    assert jsonl_rows[0]["end"] == 1203.0
+    assert "real gun" in jsonl_rows[0]["transcript_excerpt"].lower()
+
+
+def test_build_review_queue_excludes_known_repost_after_timestamp_repair(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    cache_root = tmp_path / "vod_feature_cache"
+    moment_prefix = artifacts / "jynxzi_llm_moment_finder_d0"
+    positives = artifacts / "positives.jsonl"
+    out = artifacts / "precision_review"
+    _write_moments(
+        moment_prefix.parent / "jynxzi_llm_moment_finder_d0_vod-a.moments.json",
+        [
+            {
+                "rank": 1,
+                "start": 1913.0,
+                "end": 2003.0,
+                "virality": 0.9,
+                "rationale": "Streamer receives an airsoft shotgun and mistakes it for a real firearm.",
+            },
+            {"rank": 2, "start": 300.0, "end": 330.0, "virality": 0.8, "rationale": "short funny reaction"},
+        ],
+    )
+    transcript_path = cache_root / "vod-a" / "transcript_fixture.json"
+    transcript_path.parent.mkdir(parents=True)
+    transcript_path.write_text(
+        json.dumps(
+            {
+                "transcript": [
+                    {"start": 1184.0, "end": 1186.0, "text": "Is this even legal?"},
+                    {"start": 1191.0, "end": 1193.0, "text": "Bro, I thought this guy sent a real gun."},
+                    {"start": 1221.0, "end": 1227.0, "text": "It's airsoft. It's airsoft. It's a shotgun."},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_jsonl(
+        positives,
+        [
+            {
+                "vod_id": "vod-a",
+                "candidate_id": "known-airsoft",
+                "window_start": 1160.0,
+                "window_end": 1190.0,
+                "label": 1,
+            }
+        ],
+    )
+
+    summary = review.build_review_queue(
+        profile="jynxzi",
+        vod_ids=["vod-a"],
+        moment_prefix=moment_prefix,
+        positive_rows_path=positives,
+        vod_cache_root=cache_root,
+        out_base=out,
+        top_n_per_vod=1,
+        max_duration_sec=120.0,
+        exclude_known_reposts=True,
+        excerpt_pad_sec=1.0,
+        excerpt_max_chars=400,
+        overlap_ratio=0.45,
+        match_mode="center_or_overlap",
+    )
+
+    jsonl_rows = [json.loads(line) for line in out.with_suffix(".jsonl").read_text(encoding="utf-8").splitlines()]
+    assert summary["queue_rows"] == 1
+    assert summary["known_repost_matches_in_queue"] == 0
+    assert summary["excluded_known_repost_count"] == 1
+    assert jsonl_rows[0]["source_rank"] == 2
+
+
+def test_build_review_queue_keeps_rationale_without_transcript_evidence(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    cache_root = tmp_path / "vod_feature_cache"
+    moment_prefix = artifacts / "jynxzi_llm_moment_finder_d0"
+    positives = artifacts / "positives.jsonl"
+    out = artifacts / "precision_review"
+    _write_moments(
+        moment_prefix.parent / "jynxzi_llm_moment_finder_d0_vod-a.moments.json",
+        [
+            {
+                "rank": 1,
+                "start": 100.0,
+                "end": 160.0,
+                "virality": 0.9,
+                "rationale": "Streamer receives an airsoft shotgun and mistakes it for a real firearm.",
+            },
+            {"rank": 2, "start": 300.0, "end": 330.0, "virality": 0.8, "rationale": "short funny reaction"},
+        ],
+    )
+    _write_transcript(cache_root, "vod-a")
+    _write_jsonl(positives, [])
+
+    summary = review.build_review_queue(
+        profile="jynxzi",
+        vod_ids=["vod-a"],
+        moment_prefix=moment_prefix,
+        positive_rows_path=positives,
+        vod_cache_root=cache_root,
+        out_base=out,
+        top_n_per_vod=1,
+        max_duration_sec=120.0,
+        exclude_known_reposts=True,
+        excerpt_pad_sec=1.0,
+        excerpt_max_chars=400,
+        overlap_ratio=0.45,
+        match_mode="center_or_overlap",
+    )
+
+    jsonl_rows = [json.loads(line) for line in out.with_suffix(".jsonl").read_text(encoding="utf-8").splitlines()]
+    assert summary["queue_rows"] == 1
+    assert jsonl_rows[0]["source_rank"] == 1
+
+
 def test_cut_review_clips_writes_ready_clip_metadata(tmp_path: Path) -> None:
     source_root = tmp_path / "sources"
     source = source_root / "vod_vod-a.mp4"
     source.parent.mkdir(parents=True)
     source.write_bytes(b"fake video")
     output_dir = tmp_path / "artifacts" / "clips"
+    output_dir.mkdir(parents=True)
+    stale_clip = output_dir / "vod-a_rank99_000000_000010.mp4"
+    stale_clip.write_bytes(b"stale")
     html_dir = tmp_path / "artifacts"
     rows = [
         {
@@ -108,9 +384,11 @@ def test_cut_review_clips_writes_ready_clip_metadata(tmp_path: Path) -> None:
 
     assert summary["all_clips_ready"] is True
     assert summary["ready_clip_count"] == 1
+    assert summary["pruned_stale_clip_count"] == 1
     assert rows[0]["clip_status"] == "ready"
     assert rows[0]["clip_rel_path"] == "clips/vod-a_rank01_000010_000022.mp4"
     assert Path(rows[0]["clip_path"]).read_bytes() == b"clip"
+    assert not stale_clip.exists()
     assert "-ss" in calls[0]
 
 

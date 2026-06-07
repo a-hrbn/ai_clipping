@@ -55,6 +55,7 @@ DEFAULT_RESCORER_FEW_SHOTS = 12
 DEFAULT_RESCORER_MAX_TOKENS = 12000
 DEFAULT_RESCORER_BATCH_SIZE = 40
 DEFAULT_RESCORER_MAX_DURATION_SEC = 120.0
+DEFAULT_BLOB_DROP_DURATION_SEC = 300.0
 _FILLER_TOKENS = {
     "you",
     "yeah",
@@ -115,6 +116,23 @@ class LlmMoment:
     @property
     def duration(self) -> float:
         return max(0.0, self.end - self.start)
+
+
+@dataclass(frozen=True)
+class MomentLengthDisciplineResult:
+    moments: list[LlmMoment]
+    input_moment_count: int
+    dropped_non_positive_duration_count: int
+    capped_moment_count: int
+    dropped_blob_moments: list[LlmMoment]
+    max_duration_sec: float
+    blob_drop_duration_sec: float
+
+
+@dataclass(frozen=True)
+class TimestampRepairResult:
+    moments: list[LlmMoment]
+    repaired_moment_count: int
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -758,6 +776,7 @@ def run_d0_rescore_for_vod(
         positives,
         overlap_ratio=overlap_ratio,
         match_mode=match_mode,
+        max_duration_sec=rescore_max_duration_sec,
     )
     report = {
         **metadata,
@@ -888,9 +907,17 @@ def run_d0_for_vod(
             retry_backoff_sec=retry_backoff_sec,
         )
     response_path.write_text(response_text, encoding="utf-8")
-    moments = parse_moments(response_text)
+    raw_moments = parse_moments(response_text)
+    timestamp_repair = repair_clock_encoded_timestamps(raw_moments)
+    moments = timestamp_repair.moments
+    length_discipline = enforce_moment_length_discipline(
+        moments,
+        max_duration_sec=max_duration_sec,
+        blob_drop_duration_sec=DEFAULT_BLOB_DROP_DURATION_SEC,
+    )
+    deduped_moments, duplicate_moments = dedupe_moments_by_overlap(length_discipline.moments)
     ranked_moments = sorted(
-        (moment for moment in moments if moment.duration > 0.0),
+        deduped_moments,
         key=lambda moment: moment.virality,
         reverse=True,
     )
@@ -901,6 +928,7 @@ def run_d0_for_vod(
         top_n=top_n,
         overlap_ratio=overlap_ratio,
         match_mode=match_mode,
+        max_duration_sec=max_duration_sec,
     )
     recall_at_top_n = evaluation["recall_at_top_n"]
     gate_min_recall = bounded_ratio(gate_min_recall)
@@ -913,6 +941,15 @@ def run_d0_for_vod(
         "eval_path": str(output_prefix.with_suffix(".eval.json")),
         "response_path": str(response_path),
         "moments": moments_payload,
+        "input_moment_count": length_discipline.input_moment_count,
+        "moment_count": len(ranked_moments),
+        "timestamp_repaired_moment_count": timestamp_repair.repaired_moment_count,
+        "duplicate_moment_count": len(duplicate_moments),
+        "dropped_non_positive_duration_count": length_discipline.dropped_non_positive_duration_count,
+        "capped_moment_count": length_discipline.capped_moment_count,
+        "dropped_long_moment_count": len(length_discipline.dropped_blob_moments),
+        "max_duration_sec": round(length_discipline.max_duration_sec, 3),
+        "blob_drop_duration_sec": round(length_discipline.blob_drop_duration_sec, 3),
         "evaluation": evaluation,
         "gate": {
             "baseline_pre_judge_top80_ratio": 0.08,
@@ -1054,6 +1091,13 @@ def aggregate_d0_reports(
                 "matched_positive_windows": matched_count,
                 "recall_at_top_n": evaluation.get("recall_at_top_n"),
                 "moment_count": evaluation.get("moment_count") if evaluation else len(report.get("moments") or []),
+                "input_moment_count": report.get("input_moment_count") or evaluation.get("input_moment_count"),
+                "capped_moment_count": report.get("capped_moment_count"),
+                "dropped_long_moment_count": report.get("dropped_long_moment_count"),
+                "dropped_non_positive_duration_count": report.get("dropped_non_positive_duration_count"),
+                "ignored_long_moment_count": evaluation.get("ignored_long_moment_count"),
+                "max_duration_sec": report.get("max_duration_sec") or evaluation.get("max_duration_sec"),
+                "blob_drop_duration_sec": report.get("blob_drop_duration_sec"),
                 "prompt_path": report.get("prompt_path"),
                 "response_path": report.get("response_path"),
                 "moments_path": report.get("moments_path"),
@@ -1554,7 +1598,12 @@ def format_transcript_for_prompt(
         if drop_reason:
             dropped_reasons[drop_reason] += 1
             continue
-        lines.append(f"[{format_time(segment.start)} - {format_time(segment.end)}] {text}")
+        lines.append(
+            "["
+            f"t={format_seconds_for_prompt(segment.start)}s - t={format_seconds_for_prompt(segment.end)}s"
+            f" | clock={format_time(segment.start)} - {format_time(segment.end)}"
+            f"] {text}"
+        )
         kept_chars += len(text)
     return PromptTranscript(
         text="\n".join(lines),
@@ -1606,8 +1655,8 @@ Return raw JSON only, no markdown. Use this exact shape:
 {{
   "moments": [
     {{
-      "start": <seconds>,
-      "end": <seconds>,
+      "start": <absolute_seconds_from_vod_start>,
+      "end": <absolute_seconds_from_vod_start>,
       "hook": <0.0-1.0>,
       "flow": <0.0-1.0>,
       "value": <0.0-1.0>,
@@ -1620,12 +1669,14 @@ Return raw JSON only, no markdown. Use this exact shape:
 
 Rules:
 - Return at most {max_moments} moments.
-- Each moment should be between {min_duration_sec:.0f} and {max_duration_sec:.0f} seconds unless a tighter boundary is clearly better.
-- Use exact transcript bracket timestamps. Start on the first transcript segment needed for the hook/setup; end on the final payoff/reaction segment.
+- Treat one continuous bit (setup -> reaction -> payoff) as ONE moment. Never split a single moment into several adjacent windows; if neighboring beats belong to the same bit, return one window that spans all of them.
+- Each moment should be between {min_duration_sec:.0f} and {max_duration_sec:.0f} seconds. Capture the whole arc within this range; do not trim a clip down to only the punchline.
+- Use the `t=...s` absolute second values from the transcript brackets. Do not copy display clock values like `19:44` as `1944`; `19:44` means `1184` seconds.
+- Start a few seconds before the hook, on the segment that sets it up (the line that makes the payoff land), and end on the LAST reaction/payoff segment of the bit, not the first one.
 - Do not use rounded minute boundaries like 3600, 4980, or 8100 unless the transcript itself has that exact boundary.
-- Prefer many localized moments over a few broad summaries. A good 12-30s exact window is better than a generic 60s region.
+- Prefer one self-contained clip per distinct moment over many fragments of the same moment. A complete 25-60s clip that includes both setup and payoff is better than a 10s window that cuts either one off.
 - Optimize recall for viral Jynxzi-style clips: rage, clutch, absurd chat reactions, fanmail/unboxing reveals, strong arguments, quotable hot takes, streamer shock, and clear payoff beats.
-- Penalize generic talking, long setup with no payoff, and moments that need too much missing context.
+- Penalize generic talking, long setup with no payoff, moments that need too much missing context, clipping only the punchline without its setup, and splitting one bit across multiple windows.
 
 VOD ID: {vod_id}
 
@@ -2015,6 +2066,61 @@ def parse_moments(text: str) -> list[LlmMoment]:
     return moments
 
 
+def repair_clock_encoded_timestamps(
+    moments: Sequence[LlmMoment],
+) -> TimestampRepairResult:
+    repaired: list[LlmMoment] = []
+    repaired_count = 0
+    for moment in moments:
+        repaired_moment = repair_clock_encoded_moment(moment)
+        if repaired_moment != moment:
+            repaired_count += 1
+        repaired.append(repaired_moment)
+    return TimestampRepairResult(moments=repaired, repaired_moment_count=repaired_count)
+
+
+def repair_clock_encoded_moment(
+    moment: LlmMoment,
+) -> LlmMoment:
+    converted_start = compact_clock_to_seconds(moment.start)
+    converted_end = compact_clock_to_seconds(moment.end)
+    if converted_start is None or converted_end is None or converted_end <= converted_start:
+        return moment
+    return LlmMoment(
+        start=round(float(converted_start), 3),
+        end=round(float(converted_end), 3),
+        hook=moment.hook,
+        flow=moment.flow,
+        value=moment.value,
+        trend=moment.trend,
+        virality=moment.virality,
+        rationale=moment.rationale,
+    )
+
+
+def compact_clock_to_seconds(value: float) -> float | None:
+    if abs(float(value) - round(float(value))) > 0.001:
+        return None
+    raw = int(round(float(value)))
+    if raw < 1000:
+        return None
+    seconds = raw % 100
+    if seconds >= 60:
+        return None
+    if raw >= 10000:
+        hours = raw // 10000
+        minutes = (raw // 100) % 100
+        if minutes >= 60:
+            return None
+        converted = float((hours * 3600) + (minutes * 60) + seconds)
+    else:
+        minutes = raw // 100
+        converted = float((minutes * 60) + seconds)
+    if abs(converted - float(value)) < 0.001:
+        return None
+    return converted
+
+
 def load_moment_rows(path: pathlib.Path) -> list[dict[str, Any]]:
     if not path.exists():
         raise FileNotFoundError(f"Missing moment artifact: {path}")
@@ -2053,6 +2159,100 @@ def filter_rescore_moment_rows(
         row["duration"] = round(duration, 3)
         kept.append(row)
     return kept, dropped
+
+
+def enforce_moment_length_discipline(
+    moments: Sequence[LlmMoment],
+    *,
+    max_duration_sec: float = DEFAULT_MAX_DURATION_SEC,
+    blob_drop_duration_sec: float = DEFAULT_BLOB_DROP_DURATION_SEC,
+) -> MomentLengthDisciplineResult:
+    max_duration = max(float(max_duration_sec or 0.0), 0.001)
+    blob_drop_duration = max(float(blob_drop_duration_sec or 0.0), max_duration)
+    kept: list[LlmMoment] = []
+    dropped_blob_moments: list[LlmMoment] = []
+    dropped_non_positive_duration_count = 0
+    capped_moment_count = 0
+    for moment in moments:
+        duration = moment.duration
+        if duration <= 0.0:
+            dropped_non_positive_duration_count += 1
+            continue
+        if duration > blob_drop_duration:
+            dropped_blob_moments.append(moment)
+            continue
+        if duration > max_duration:
+            capped_moment_count += 1
+            kept.append(
+                LlmMoment(
+                    start=moment.start,
+                    end=moment.start + max_duration,
+                    hook=moment.hook,
+                    flow=moment.flow,
+                    value=moment.value,
+                    trend=moment.trend,
+                    virality=moment.virality,
+                    rationale=moment.rationale,
+                )
+            )
+            continue
+        kept.append(moment)
+    return MomentLengthDisciplineResult(
+        moments=kept,
+        input_moment_count=len(moments),
+        dropped_non_positive_duration_count=dropped_non_positive_duration_count,
+        capped_moment_count=capped_moment_count,
+        dropped_blob_moments=dropped_blob_moments,
+        max_duration_sec=max_duration,
+        blob_drop_duration_sec=blob_drop_duration,
+    )
+
+
+def dedupe_moments_by_overlap(
+    moments: Sequence[LlmMoment],
+    *,
+    overlap_ratio: float = 0.8,
+    min_gap_sec: float = 30.0,
+    min_gap_dedupe_duration_sec: float = 60.0,
+) -> tuple[list[LlmMoment], list[LlmMoment]]:
+    threshold = bounded_ratio(overlap_ratio)
+    min_gap = max(float(min_gap_sec), 0.0)
+    min_gap_dedupe_duration = max(float(min_gap_dedupe_duration_sec), 0.0)
+    ordered = sorted(enumerate(moments), key=lambda item: (-item[1].virality, item[0]))
+    kept: list[tuple[int, LlmMoment]] = []
+    duplicates: list[LlmMoment] = []
+    for original_index, moment in ordered:
+        is_duplicate = any(
+            moment_is_duplicate_of(
+                moment,
+                kept_moment,
+                threshold=threshold,
+                min_gap_sec=min_gap,
+                min_gap_dedupe_duration_sec=min_gap_dedupe_duration,
+            )
+            for _, kept_moment in kept
+        )
+        if is_duplicate:
+            duplicates.append(moment)
+            continue
+        kept.append((original_index, moment))
+    return [moment for _, moment in kept], duplicates
+
+
+def moment_is_duplicate_of(
+    moment: LlmMoment,
+    other: LlmMoment,
+    *,
+    threshold: float,
+    min_gap_sec: float,
+    min_gap_dedupe_duration_sec: float,
+) -> bool:
+    if window_overlap_ratio(moment.start, moment.end, other.start, other.end) >= threshold:
+        return True
+    if min(moment.duration, other.duration) < min_gap_dedupe_duration_sec:
+        return False
+    gap = max(max(moment.start, other.start) - min(moment.end, other.end), 0.0)
+    return gap <= min_gap_sec
 
 
 def moment_row_duration(row: Mapping[str, Any]) -> float | None:
@@ -2314,10 +2514,23 @@ def evaluate_moments(
     top_n: int,
     overlap_ratio: float,
     match_mode: str = DEFAULT_MATCH_MODE,
+    max_duration_sec: float | None = None,
 ) -> dict[str, Any]:
     threshold = bounded_ratio(overlap_ratio)
     match_mode = normalize_match_mode(match_mode)
-    top_moments = list(moments[: max(int(top_n), 1)])
+    max_duration = float(max_duration_sec) if max_duration_sec is not None else None
+    eligible_moments: list[LlmMoment] = []
+    ignored_long_moment_count = 0
+    ignored_non_positive_duration_count = 0
+    for moment in moments:
+        if moment.duration <= 0.0:
+            ignored_non_positive_duration_count += 1
+            continue
+        if max_duration is not None and moment.duration > max_duration:
+            ignored_long_moment_count += 1
+            continue
+        eligible_moments.append(moment)
+    top_moments = list(eligible_moments[: max(int(top_n), 1)])
     details: list[dict[str, Any]] = []
     matched = 0
     for positive in positives:
@@ -2344,7 +2557,11 @@ def evaluate_moments(
         "match_mode": match_mode,
         "matched_positive_windows": matched,
         "recall_at_top_n": round(matched / total, 6) if total else None,
-        "moment_count": len(moments),
+        "moment_count": len(eligible_moments),
+        "input_moment_count": len(moments),
+        "ignored_long_moment_count": ignored_long_moment_count,
+        "ignored_non_positive_duration_count": ignored_non_positive_duration_count,
+        "max_duration_sec": round(max_duration, 3) if max_duration is not None else None,
         "details": details,
     }
 
@@ -2356,6 +2573,7 @@ def evaluate_operating_points(
     overlap_ratio: float,
     match_mode: str,
     operating_points: Sequence[int] = DEFAULT_RESCORER_OPERATING_POINTS,
+    max_duration_sec: float | None = None,
 ) -> dict[str, dict[str, Any]]:
     return {
         str(int(top_n)): evaluate_moments(
@@ -2364,6 +2582,7 @@ def evaluate_operating_points(
             top_n=int(top_n),
             overlap_ratio=overlap_ratio,
             match_mode=match_mode,
+            max_duration_sec=max_duration_sec,
         )
         for top_n in operating_points
     }
@@ -2448,6 +2667,10 @@ def format_time(seconds: float) -> str:
     if hours:
         return f"{hours:02d}:{minutes:02d}:{secs:02d}"
     return f"{minutes:02d}:{secs:02d}"
+
+
+def format_seconds_for_prompt(seconds: float) -> str:
+    return f"{max(float(seconds), 0.0):.3f}".rstrip("0").rstrip(".")
 
 
 def score01(value: Any) -> float:

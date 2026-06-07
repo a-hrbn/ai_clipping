@@ -50,6 +50,17 @@ def test_format_transcript_filters_short_filler_noise() -> None:
     }
 
 
+def test_format_transcript_uses_absolute_seconds_as_authoritative_timestamp() -> None:
+    prompt_transcript = d0.format_transcript_for_prompt(
+        [
+            d0.TranscriptSegment(start=1184.0, end=1186.0, text="Is this even legal?"),
+        ],
+        filter_noise=True,
+    )
+
+    assert "[t=1184s - t=1186s | clock=19:44 - 19:46] Is this even legal?" in prompt_transcript.text
+
+
 def test_select_spike_vod_uses_train_vod_with_transcript_and_excludes_holdout(tmp_path: Path) -> None:
     positives = [
         {"vod_id": "holdout", "candidate_id": "h1", "window_start": 10.0, "window_end": 20.0, "label": 1},
@@ -173,6 +184,48 @@ def test_parse_moments_recovers_complete_objects_from_truncated_response() -> No
     assert [moment.start for moment in moments] == [100.0, 300.0]
 
 
+def test_repair_clock_encoded_timestamps_converts_compact_mmss_without_rationale_matching() -> None:
+    moments = [
+        d0.LlmMoment(
+            start=1938.0,
+            end=2036.0,
+            hook=0.8,
+            flow=0.7,
+            value=0.9,
+            trend=0.7,
+            virality=0.9,
+            rationale="Streamer receives an airsoft shotgun as fan mail, initially mistaking it for a real firearm.",
+        )
+    ]
+
+    repaired = d0.repair_clock_encoded_timestamps(moments)
+
+    assert repaired.repaired_moment_count == 1
+    assert repaired.moments[0].start == 1178.0
+    assert repaired.moments[0].end == 1236.0
+
+
+def test_repair_clock_encoded_timestamps_keeps_invalid_clock_values() -> None:
+    moments = [
+        d0.LlmMoment(
+            start=1968.0,
+            end=2036.0,
+            hook=0.8,
+            flow=0.7,
+            value=0.9,
+            trend=0.7,
+            virality=0.9,
+            rationale="Seconds part above 59 cannot be compact clock time.",
+        )
+    ]
+
+    repaired = d0.repair_clock_encoded_timestamps(moments)
+
+    assert repaired.repaired_moment_count == 0
+    assert repaired.moments[0].start == 1968.0
+    assert repaired.moments[0].end == 2036.0
+
+
 def test_evaluate_moments_can_match_positive_center_inside_moment() -> None:
     moments = [d0.LlmMoment(start=109.0, end=200.0, hook=1, flow=1, value=1, trend=1, virality=1, rationale="broad")]
     positives = [d0.PositiveWindow(positive_id="p1", vod_id="v", start=100.0, end=120.0)]
@@ -189,6 +242,78 @@ def test_evaluate_moments_can_match_positive_center_inside_moment() -> None:
     assert overlap_only["matched_positive_windows"] == 0
     assert center_or_overlap["matched_positive_windows"] == 1
     assert center_or_overlap["details"][0]["best_moment"]["positive_center_inside"] is True
+
+
+def test_enforce_moment_length_discipline_caps_windows_and_drops_blobs() -> None:
+    moments = [
+        d0.LlmMoment(start=0.0, end=30.0, hook=1, flow=1, value=1, trend=1, virality=0.5, rationale="tight"),
+        d0.LlmMoment(start=100.0, end=205.0, hook=1, flow=1, value=1, trend=1, virality=0.9, rationale="cap"),
+        d0.LlmMoment(start=300.0, end=500.0, hook=1, flow=1, value=1, trend=1, virality=1.0, rationale="blob"),
+        d0.LlmMoment(start=600.0, end=600.0, hook=1, flow=1, value=1, trend=1, virality=0.1, rationale="zero"),
+    ]
+
+    result = d0.enforce_moment_length_discipline(moments, max_duration_sec=90.0, blob_drop_duration_sec=120.0)
+
+    assert result.input_moment_count == 4
+    assert len(result.moments) == 2
+    assert result.capped_moment_count == 1
+    assert len(result.dropped_blob_moments) == 1
+    assert result.dropped_non_positive_duration_count == 1
+    assert result.moments[1].start == 100.0
+    assert result.moments[1].end == 190.0
+    assert result.moments[1].duration == 90.0
+
+
+def test_default_length_discipline_caps_moderate_blobs_before_dropping_marathon_windows() -> None:
+    moments = [
+        d0.LlmMoment(start=5006.0, end=5216.0, hook=1, flow=1, value=1, trend=1, virality=0.9, rationale="pokemon"),
+        d0.LlmMoment(start=0.0, end=600.0, hook=1, flow=1, value=1, trend=1, virality=0.9, rationale="marathon"),
+    ]
+
+    result = d0.enforce_moment_length_discipline(moments)
+
+    assert len(result.moments) == 1
+    assert result.moments[0].start == 5006.0
+    assert result.moments[0].end == 5096.0
+    assert result.capped_moment_count == 1
+    assert len(result.dropped_blob_moments) == 1
+
+
+def test_dedupe_moments_by_overlap_removes_repeated_llm_windows() -> None:
+    moments = [
+        d0.LlmMoment(start=100.0, end=160.0, hook=1, flow=1, value=1, trend=1, virality=0.9, rationale="first"),
+        d0.LlmMoment(start=100.0, end=160.0, hook=1, flow=1, value=1, trend=1, virality=0.9, rationale="repeat"),
+        d0.LlmMoment(start=112.0, end=160.0, hook=1, flow=1, value=1, trend=1, virality=0.8, rationale="overlap"),
+        d0.LlmMoment(start=300.0, end=330.0, hook=1, flow=1, value=1, trend=1, virality=0.7, rationale="distinct"),
+    ]
+
+    kept, duplicates = d0.dedupe_moments_by_overlap(moments, overlap_ratio=0.8)
+
+    assert [(moment.start, moment.end) for moment in kept] == [(100.0, 160.0), (300.0, 330.0)]
+    assert len(duplicates) == 2
+
+
+def test_evaluate_moments_ignores_over_max_duration_matches() -> None:
+    moments = [
+        d0.LlmMoment(start=0.0, end=200.0, hook=1, flow=1, value=1, trend=1, virality=1, rationale="too broad"),
+    ]
+    positives = [d0.PositiveWindow(positive_id="p1", vod_id="v", start=95.0, end=105.0)]
+
+    loose = d0.evaluate_moments(moments, positives, top_n=1, overlap_ratio=0.45, match_mode="center_or_overlap")
+    strict = d0.evaluate_moments(
+        moments,
+        positives,
+        top_n=1,
+        overlap_ratio=0.45,
+        match_mode="center_or_overlap",
+        max_duration_sec=90.0,
+    )
+
+    assert loose["matched_positive_windows"] == 1
+    assert strict["matched_positive_windows"] == 0
+    assert strict["moment_count"] == 0
+    assert strict["ignored_long_moment_count"] == 1
+    assert strict["top_n"] == 0
 
 
 def test_parse_rescore_response_and_apply_scores_reorders_moments() -> None:
