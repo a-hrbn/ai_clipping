@@ -19,7 +19,7 @@ from models import (
     ClipFeedbackResponse,
     ReviewCandidateResponse,
 )
-from job_manager import bind_job_session, cancel_job, create_job, get_job, touch_job_session
+from job_manager import bind_job_session, cancel_job, create_job, delete_job, get_job, touch_job_session
 from job_manager import update_job
 from services import clip_strategy, feedback_store
 
@@ -104,6 +104,42 @@ def _diagnostic_stage(
     }
 
 
+def _gt_matches_for_vod(vod_id: str) -> list[dict]:
+    """Search all gt_run eval manifests for GT moments belonging to vod_id."""
+    gt_runs_root = _BACKEND_ROOT / "tmp" / "gt_runs"
+    if not gt_runs_root.exists():
+        return []
+    for run_dir in sorted(gt_runs_root.iterdir()):
+        if not run_dir.is_dir():
+            continue
+        manifest = run_dir / "eval_manifest.jsonl"
+        if not manifest.exists():
+            continue
+        try:
+            for line in manifest.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if str(row.get("vod_id", "")) == vod_id:
+                    return list(row.get("gt_moments") or [])
+        except OSError:
+            continue
+    return []
+
+
+def _vod_id_from_url(url: str | None) -> str | None:
+    """Extract Twitch VOD ID from a URL like https://www.twitch.tv/videos/12345."""
+    import re
+    if not url:
+        return None
+    m = re.search(r"/videos/(\d+)", url)
+    return m.group(1) if m else None
+
+
 def _debug_last_modified(debug_dir: pathlib.Path) -> str | None:
     mtimes: list[float] = []
     try:
@@ -140,265 +176,112 @@ def _job_pipeline_diagnostics(job_id: str, job: JobStatus | dict | None = None) 
             "stages": [],
         }
 
-    candidate_counts = {
-        "peak": _jsonl_count(debug_dir / "candidates_peak.jsonl"),
-        "semantic": _jsonl_count(debug_dir / "candidates_semantic.jsonl"),
-        "dense": _jsonl_count(debug_dir / "candidates_dense.jsonl"),
-        "fallback": _jsonl_count(debug_dir / "candidates_fallback.jsonl"),
-        "merged": _jsonl_count(debug_dir / "candidates_merged.jsonl"),
-        "normalized": _jsonl_count(debug_dir / "candidates_normalized.jsonl"),
-    }
-    total_raw_candidates = (
-        candidate_counts["peak"]
-        + candidate_counts["semantic"]
-        + candidate_counts["dense"]
-        + candidate_counts["fallback"]
-    )
-    candidate_status = "pending"
-    if candidate_counts["normalized"] > 0 or candidate_counts["merged"] > 0:
-        candidate_status = "ok"
+    segments_count = _jsonl_count(debug_dir / "segments.jsonl")
+    transcript_status = "pending"
+    transcript_details: list[str] = []
+    if segments_count > 0:
+        transcript_status = "ok"
     elif job_status in _TERMINAL_STATES:
-        candidate_status = "warning"
+        transcript_status = "warning"
+        transcript_details.append("Keine Transcript-Segmente gefunden.")
 
-    recall_report = _read_json_file(debug_dir / "candidate_recall_report.json")
-    funnel_summary = _read_json_file(debug_dir / "candidate_funnel_summary.json")
-    trace_rows = _read_jsonl_rows(debug_dir / "candidate_trace.jsonl")
-    trace_row_count = len(trace_rows)
-    recall_status = "pending"
-    recall_summary = "Recall-Funnel noch nicht geschrieben."
-    recall_details: list[str] = []
-    recall_metrics: list[dict] = []
-    if isinstance(recall_report, dict) and recall_report:
-        stage_counts = recall_report.get("stage_counts") if isinstance(recall_report.get("stage_counts"), dict) else {}
-        largest_losses = recall_report.get("largest_losses") if isinstance(recall_report.get("largest_losses"), list) else []
-        final_count_from_recall = int(stage_counts.get("final_moments") or 0)
-        recall_status = "ok" if final_count_from_recall > 0 else ("warning" if job_status in _TERMINAL_STATES else "pending")
-        recall_summary = (
-            f"Recall-Funnel: {int(stage_counts.get('merged') or 0)} merged, "
-            f"{int(stage_counts.get('ranked_pre_judge') or 0)} ranked, "
-            f"{int(stage_counts.get('quality_kept') or 0)} Quality-kept, "
-            f"{final_count_from_recall} final."
-        )
-        recall_metrics = [
-            _metric("Dense Inventory", int(stage_counts.get("dense_inventory") or 0)),
-            _metric("Merged", int(stage_counts.get("merged") or 0)),
-            _metric("Ranked", int(stage_counts.get("ranked_pre_judge") or 0)),
-            _metric("Judge Scope", int(stage_counts.get("judge_scope") or 0)),
-            _metric("Quality Kept", int(stage_counts.get("quality_kept") or 0)),
-            _metric("Final", final_count_from_recall),
-            _metric("Trace Rows", trace_row_count),
-        ]
-        for loss in largest_losses[:3]:
-            if not isinstance(loss, dict) or int(loss.get("lost_count") or 0) <= 0:
-                continue
-            recall_details.append(
-                f"{loss.get('transition')}: {loss.get('lost_count')} verloren "
-                f"({loss.get('input_count')} -> {loss.get('output_count')})."
-            )
-    elif job_status in _TERMINAL_STATES:
-        recall_status = "disabled"
-        recall_summary = "Kein Recall-Funnel-Artefakt gefunden; vermutlich alter Job oder vorzeitiger Abbruch."
-    if trace_row_count > 0 and not isinstance(funnel_summary, dict):
-        funnel_summary = {
-            "rows": trace_row_count,
-            "trace_samples": {
-                "highest_ranked_rejected": trace_rows[:8],
-            },
-        }
-
-    dense_inventory_rows = _jsonl_count(debug_dir / "candidates_dense_inventory.jsonl")
-    dense_inventory_status = "pending"
-    dense_inventory_details: list[str] = []
-    dense_inventory_metrics = [
-        _metric("Inventory", dense_inventory_rows),
-    ]
-    if dense_inventory_rows > 0:
-        dense_inventory_status = "ok"
-    elif job_status in _TERMINAL_STATES:
-        dense_inventory_status = "warning"
-        dense_inventory_details.append("Kein Dense-Inventory-Artefakt gefunden.")
-
-    ranked_rows = _read_jsonl_rows(debug_dir / "ranked_candidates_v2.jsonl")
-    if ranked_rows:
-        ranked_count = len(ranked_rows)
-        trained_rows = sum(1 for row in ranked_rows if row.get("trained_model_used"))
-        judge_used_rows = sum(1 for row in ranked_rows if row.get("judge_used"))
-        selected_rows = sum(1 for row in ranked_rows if row.get("selected_after_diversity"))
-        best_pre_judge = max((float(row.get("pre_judge_rank_score") or 0.0) for row in ranked_rows), default=0.0)
-        best_judged = max((float(row.get("judged_rank_score") or 0.0) for row in ranked_rows), default=0.0)
-    else:
-        ranked_count = _jsonl_count(debug_dir / "ranked_candidates_pre_judge.jsonl")
-        trained_rows = 0
-        judge_used_rows = 0
-        selected_rows = _jsonl_count(debug_dir / "ranked_candidates.jsonl")
-        best_pre_judge = 0.0
-        best_judged = 0.0
-
-    ranker_status = "pending"
-    ranker_details: list[str] = []
-    if ranked_count > 0:
-        ranker_status = "ok" if trained_rows > 0 else "warning"
-        if trained_rows == 0:
-            ranker_details.append("Ranker-Ausgabe vorhanden, aber kein trainiertes Modell wurde in den Audit-Rows markiert.")
-    elif job_status in _TERMINAL_STATES:
-        ranker_status = "warning"
-
-    judged_file_rows = _jsonl_count(debug_dir / "judged_candidates.jsonl")
-    judge_stage = _read_json_file(debug_dir / "clip_judge_stage.json")
-    judge_status = "pending"
-    judge_details: list[str] = []
-    judge_summary = f"{judge_used_rows or judged_file_rows} Kandidaten mit Judge-Signal."
-    judged_count = judge_used_rows or judged_file_rows
-    processed_candidates = 0
-    attempted_candidates = 0
-    recall_filtered_candidates = 0
-    if isinstance(judge_stage, dict) and judge_stage:
-        stage_status = str(judge_stage.get("status") or "")
-        reason = judge_stage.get("reason")
-        attempted = bool(judge_stage.get("attempted"))
-        judged_count = int(judge_stage.get("judged_candidates") or 0)
-        judge_top_k = int(judge_stage.get("judge_top_k") or 0)
-        fallback_candidates = int(judge_stage.get("fallback_candidates") or 0)
-        processed_candidates = int(judge_stage.get("processed_candidates") or 0)
-        attempted_candidates = int(judge_stage.get("attempted_candidates") or 0)
-        recall_filtered_candidates = int(judge_stage.get("recall_filtered_candidates") or 0)
+    llm_stage = _read_json_file(debug_dir / "llm_moment_finder_stage.json")
+    llm_moments_count = _jsonl_count(debug_dir / "llm_moment_finder_moments.jsonl")
+    llm_status = "pending"
+    llm_summary = "LLM Moment Finder noch nicht ausgeführt."
+    llm_details: list[str] = []
+    llm_metrics: list[dict] = []
+    if isinstance(llm_stage, dict) and llm_stage:
+        stage_status = str(llm_stage.get("status") or "")
         if stage_status == "ok":
-            judge_status = "ok"
-        elif stage_status == "disabled":
-            judge_status = "disabled"
-        elif stage_status in {"degraded", "failed"}:
-            judge_status = "warning"
-        elif stage_status:
-            judge_status = "pending"
-        if reason == "timeout":
-            judge_details.append(
-                f"Clip Judge ist nach {judge_stage.get('timeout_sec')}s getimeoutet; "
-                f"Fallback auf {fallback_candidates} Pre-Judge Kandidaten."
-            )
-        elif reason == "llm_judge_failed":
-            error = judge_stage.get("error")
-            judge_details.append(f"Clip Judge Fehler: {error or judge_stage.get('error_type') or reason}.")
-        elif reason == "empty_judge_result":
-            judge_details.append("Clip Judge lief, lieferte aber kein nutzbares Judge-Ergebnis.")
-        elif reason == "enable_clip_judge_false":
-            judge_details.append("Clip Judge ist deaktiviert.")
-        elif reason:
-            judge_details.append(f"Clip Judge Status: {reason}.")
-        judge_summary = (
-            f"{processed_candidates or judged_count} von {judge_top_k} Clip-Judge Kandidaten verarbeitet."
-            if attempted
-            else "Clip Judge wurde nicht ausgeführt."
-        )
-    elif judge_used_rows > 0 or judged_file_rows > 0:
-        judge_status = "ok"
-    elif ranked_count > 0:
-        judge_status = "warning"
-        judge_details.append("Kein Clip-Judge Ergebnis gefunden; Auswahl basiert auf dem Pre-Judge Ranking.")
-    if job_error and "judge" in str(job_error).lower():
-        judge_status = "warning"
-        judge_details.append(str(job_error))
-
-    quality_rows = _read_jsonl_rows(debug_dir / "serving_quality_gate.jsonl")
-    quality_count = len(quality_rows)
-    quality_kept = sum(
-        1
-        for row in quality_rows
-        if row.get("kept") is True or row.get("accepted") is True or row.get("status") == "kept"
-    )
-    quality_status = "pending"
-    quality_details: list[str] = []
-    if quality_count > 0:
-        quality_status = "ok" if quality_kept > 0 else "warning"
-        if quality_kept == 0:
-            quality_details.append("Quality Gate hat keinen Kandidaten explizit als behalten markiert.")
-    elif ranked_count > 0 and job_status in _TERMINAL_STATES:
-        quality_status = "warning"
-        quality_details.append("Kein Quality-Gate Audit gefunden.")
-
-    final_moments = _read_json_file(debug_dir / "final_moments.json")
-    final_count = len(final_moments) if isinstance(final_moments, list) else clip_count
-    final_status = "pending"
-    if final_count > 0 or clip_count > 0:
-        final_status = "ok"
+            llm_status = "ok"
+            llm_summary = f"{llm_moments_count} Momente gefunden."
+        elif stage_status == "failed":
+            llm_status = "warning"
+            llm_summary = "LLM Moment Finder fehlgeschlagen."
+        else:
+            llm_summary = f"Status: {stage_status or 'running'}."
+        if llm_stage.get("error"):
+            llm_details.append(str(llm_stage["error"]))
+        llm_metrics = [
+            _metric("Momente", llm_moments_count),
+            _metric("Provider", str(llm_stage.get("provider") or "-")),
+            _metric("Model", str(llm_stage.get("model") or "default")),
+            _metric("Max Momente", int(llm_stage.get("max_moments") or 0)),
+        ]
     elif job_status in _TERMINAL_STATES:
-        final_status = "warning"
+        llm_status = "warning"
+        llm_details.append("Kein LLM-Stage-Artefakt gefunden.")
+
+    final_moments_data = _read_json_file(debug_dir / "final_moments.json")
+    final_count = 0
+    if isinstance(final_moments_data, dict):
+        moments_list = final_moments_data.get("moments")
+        final_count = int(final_moments_data.get("count") or (len(moments_list) if isinstance(moments_list, list) else 0))
+    clip_status = "pending"
+    clip_details: list[str] = []
+    if clip_count > 0 or final_count > 0:
+        clip_status = "ok"
+    elif job_status in _TERMINAL_STATES:
+        clip_status = "warning"
+        clip_details.append("Keine Clips geschnitten.")
 
     stages = [
         _diagnostic_stage(
-            "candidate_generation",
-            "Kandidatengenerierung",
-            candidate_status,
-            f"{candidate_counts['normalized'] or candidate_counts['merged']} Kandidaten nach Merge/Normalisierung.",
-            [
-                _metric("Peak", candidate_counts["peak"]),
-                _metric("Semantic", candidate_counts["semantic"]),
-                _metric("Dense", candidate_counts["dense"]),
-                _metric("Fallback", candidate_counts["fallback"]),
-                _metric("Raw Total", total_raw_candidates),
-            ],
+            "transcript",
+            "Transkription",
+            transcript_status,
+            f"{segments_count} Transcript-Segmente.",
+            [_metric("Segmente", segments_count)],
+            transcript_details,
         ),
         _diagnostic_stage(
-            "candidate_recall",
-            "Candidate Recall",
-            recall_status,
-            recall_summary,
-            recall_metrics,
-            recall_details,
+            "llm_moment_finder",
+            "LLM Moment Finder",
+            llm_status,
+            llm_summary,
+            llm_metrics,
+            llm_details,
         ),
         _diagnostic_stage(
-            "dense_inventory",
-            "Dense Inventory",
-            dense_inventory_status,
-            "Dense Inventory wird direkt in den Ranker-Pool gemerged.",
-            dense_inventory_metrics,
-            dense_inventory_details,
-        ),
-        _diagnostic_stage(
-            "ranker",
-            "Ranker",
-            ranker_status,
-            f"{ranked_count} Kandidaten gerankt, {trained_rows} mit trainiertem Ranker markiert.",
-            [
-                _metric("Ranked", ranked_count),
-                _metric("ML genutzt", trained_rows),
-                _metric("Top Pre-Judge", round(best_pre_judge, 3)),
-            ],
-            ranker_details,
-        ),
-        _diagnostic_stage(
-            "clip_judge",
-            "Clip Judge",
-            judge_status,
-            judge_summary,
-            [
-                _metric("Processed", processed_candidates),
-                _metric("Attempted", attempted_candidates),
-                _metric("Judged", judged_count or judge_used_rows or judged_file_rows),
-                _metric("Filtered", recall_filtered_candidates),
-                _metric("Top Judged", round(best_judged, 3)),
-            ],
-            judge_details,
-        ),
-        _diagnostic_stage(
-            "quality_gate",
-            "Quality Gate",
-            quality_status,
-            f"{quality_count} Audit-Rows, {quality_kept} explizit behalten.",
-            [_metric("Audit Rows", quality_count), _metric("Behalten", quality_kept)],
-            quality_details,
-        ),
-        _diagnostic_stage(
-            "final_selection",
-            "Finale Auswahl",
-            final_status,
-            f"{final_count or clip_count} finale Momente, {clip_count} geschnittene Clips.",
-            [
-                _metric("Momente", final_count),
-                _metric("Clips", clip_count),
-                _metric("Diversity Auswahl", selected_rows),
-            ],
+            "clipping",
+            "Clips schneiden",
+            clip_status,
+            f"{final_count} Momente → {clip_count} Clips.",
+            [_metric("Momente", final_count), _metric("Clips", clip_count)],
+            clip_details,
         ),
     ]
+    # GT matches stage — only shown for Twitch VOD jobs that have a match in the eval manifest
+    request_meta = _read_json_file(job_dir / "request.json")
+    source_url = request_meta.get("url") if isinstance(request_meta, dict) else None
+    vod_id = _vod_id_from_url(source_url)
+    if vod_id:
+        gt_moments = _gt_matches_for_vod(vod_id)
+        if gt_moments:
+            gt_details = []
+            for m in sorted(gt_moments, key=lambda x: float(x.get("start") or 0)):
+                start = int(float(m.get("start") or 0))
+                end = int(float(m.get("end") or 0))
+                sim = float(m.get("match_similarity") or 0)
+                views = int(float(m.get("views") or 0))
+                desc = str(m.get("desc") or "")[:60]
+                twitch_link = f"https://www.twitch.tv/videos/{vod_id}?t={start}s"
+                gt_details.append(
+                    f"t={start}s–{end}s  sim={sim:.2f}  {views//1000}k views — {desc}  → {twitch_link}"
+                )
+            stages.append(_diagnostic_stage(
+                "gt_matches",
+                "Ground Truth Matches",
+                "ok",
+                f"{len(gt_moments)} verifizierte GT-Momente für VOD {vod_id}.",
+                [
+                    _metric("GT-Momente", len(gt_moments)),
+                    _metric("VOD", vod_id),
+                ],
+                gt_details,
+            ))
+
     warnings = sum(1 for stage in stages if stage["status"] == "warning")
     ok = sum(1 for stage in stages if stage["status"] == "ok")
     return {
@@ -407,7 +290,7 @@ def _job_pipeline_diagnostics(job_id: str, job: JobStatus | dict | None = None) 
         "last_modified": _debug_last_modified(debug_dir),
         "summary": f"{ok}/{len(stages)} Stages ok, {warnings} mit Warnung.",
         "stages": stages,
-        "candidate_funnel": _candidate_funnel_payload(funnel_summary, trace_rows),
+        "candidate_funnel": {"available": False, "rows": 0, "samples": []},
     }
 
 
@@ -561,7 +444,7 @@ def _pipeline_subprocess_error(returncode: int) -> str:
 
 
 def _cleanup_serving_job_source_media(job_id: str) -> None:
-    if str(job_id or "").startswith(("twitch_vod", "judge_backfill_")):
+    if str(job_id or "").startswith(("twitch_vod", "judge_backfill_", "pipeline_debug_")):
         return
 
     job_dir = pathlib.Path(settings.storage_dir) / job_id
@@ -1302,6 +1185,22 @@ async def cancel_job_status(job_id: str):
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
     return job
+
+
+@router.delete("/{job_id}")
+async def delete_job_run(job_id: str):
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.status not in {"done", "failed", "cancelled"}:
+        raise HTTPException(status_code=409, detail="Job is still running — cancel it first")
+    deleted = delete_job(job_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job_dir = pathlib.Path(settings.storage_dir) / job_id
+    if job_dir.exists():
+        shutil.rmtree(job_dir, ignore_errors=True)
+    return {"deleted": job_id}
 
 
 @router.post("/{job_id}/feedback", response_model=ClipFeedbackResponse)

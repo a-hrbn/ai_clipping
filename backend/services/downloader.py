@@ -109,6 +109,7 @@ def _twitch_download_ydl_opts(job_dir: pathlib.Path, *, max_height: int = 0) -> 
             "1M",
             "--file-allocation=none",
             "--summary-interval=0",
+            "--console-log-level=error",
         ]
     return opts
 
@@ -494,9 +495,12 @@ def ensure_cached_download(
 
         temp_job_id = f"_cache_fill_{cache_namespace}_{uuid.uuid4().hex[:12]}"
         temp_job_dir = pathlib.Path(settings.storage_dir) / temp_job_id
-        ydl_opt_overrides = {}
+        ydl_opt_overrides: dict[str, object] = {}
         if cache_namespace == "short_form":
             _apply_short_form_sleep_opts(ydl_opt_overrides)
+            # Retry transient HTTP errors (incl. 403) up to 3 times before raising.
+            ydl_opt_overrides.setdefault("retries", 3)
+            ydl_opt_overrides.setdefault("fragment_retries", 3)
         downloaded_path = _download_uncached(
             url,
             temp_job_id,

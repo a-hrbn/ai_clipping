@@ -1,0 +1,14 @@
+vod_id,vod_date,note
+# VOD ID:   numeric Twitch VOD ID  (twitch.tv/videos/<id>),,
+# vod_date: YYYY-MM-DD — optional, auto-resolved via Twitch API if left empty,
+# note:     optional label,,
+#,,
+# Examples:,,
+# 2398471123,,
+# 2401882244,,rage compilation
+# 2405000000,2026-05-20,manually set date
+2777621798,,
+2780984594,,
+2787844740,,
+2783108932,,
+2774440901,,

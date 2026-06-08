@@ -256,6 +256,28 @@ def bind_job_session(job_id: str, session_id: str | None) -> None:
         _job_session_expires_at[job_id] = time.monotonic() + _SESSION_TTL_SECONDS
 
 
+def delete_job(job_id: str) -> bool:
+    """Remove a terminal job from the in-memory store and persist.
+
+    Returns True if the job was found and deleted, False if not found or still
+    running (active jobs cannot be deleted — cancel first).
+    """
+    with _lock:
+        _reload_jobs_from_disk_if_changed()
+        job = _jobs.get(job_id)
+        if job is None:
+            return False
+        if job.status not in _TERMINAL_JOB_STATUSES:
+            return False
+        _jobs.pop(job_id, None)
+        _job_created_at.pop(job_id, None)
+        _cancelled_jobs.discard(job_id)
+        _job_session_id.pop(job_id, None)
+        _job_session_expires_at.pop(job_id, None)
+    _persist_jobs()
+    return True
+
+
 def touch_job_session(job_id: str, session_id: str | None) -> JobStatus | None:
     should_persist = False
     with _lock:

@@ -91,86 +91,138 @@ export interface ReviewCandidateResponse {
   candidates: ReviewCandidate[];
 }
 
-export type LlmMomentReviewStatus = "queued" | "running" | "done" | "failed";
-export type LlmMomentReviewStage = "queued" | "moment_finder" | "precision_review" | "done" | "failed";
-export type LlmMomentReviewViralLabel = "yes" | "no" | "unsure" | "";
-export type LlmMomentReviewBoundaryLabel = "good" | "too_wide" | "too_short" | "wrong" | "unsure" | "";
+export type PipelineDebugStatus = "queued" | "running" | "done" | "failed";
+export type PipelineDebugStage = "queued" | "transcribe" | "moment_finder" | "cut_clips" | "done" | "failed";
+export type PipelineDebugViralLabel = "yes" | "no" | "unsure" | "";
+export type PipelineDebugBoundaryLabel = "good" | "too_wide" | "too_short" | "wrong" | "unsure" | "";
 
-export interface LlmMomentReviewStartRequest {
+export interface PipelineDebugStartRequest {
   profile?: string;
   vod_ids?: string[];
-  vod_limit?: number;
-  top_n?: number;
   max_moments?: number;
-  max_tokens?: number;
   provider?: "gemini" | "anthropic";
   model?: string;
-  top_n_per_vod?: number;
-  max_duration_sec?: number;
-  exclude_known_reposts?: boolean;
-  phase2_min_non_repost_precision?: number;
-  cut_clips?: boolean;
-  allow_holdout?: boolean;
-  dry_run?: boolean;
+  name?: string;
 }
 
-export interface LlmMomentReviewRow {
+export interface PipelineDebugRow {
   review_id: string;
-  profile?: string;
   vod_id: string;
+  job_id?: string;
   review_rank: number;
   source_rank?: number | null;
-  start: number;
-  end: number;
+  start_time: number;
+  end_time: number;
   duration: number;
   virality?: number | null;
+  llm_virality?: number | null;
   hook?: number | null;
   flow?: number | null;
   value?: number | null;
   trend?: number | null;
   rationale?: string;
-  timestamp_repaired?: boolean;
-  original_start?: number | string | null;
-  original_end?: number | string | null;
   transcript_excerpt?: string;
   clip_status?: string;
   clip_url?: string;
-  clip_error?: string;
-  known_repost_match?: boolean;
-  known_repost_title?: string;
-  known_repost_source_url?: string;
-  human_viral_label?: LlmMomentReviewViralLabel;
-  human_boundary_label?: LlmMomentReviewBoundaryLabel;
+  human_viral_label?: PipelineDebugViralLabel;
+  human_boundary_label?: PipelineDebugBoundaryLabel;
   human_notes?: string;
   label_updated_at?: string;
+  // GT annotation (set when eval manifest is available)
+  gt_hit?: boolean;
+  gt_desc?: string;
+  gt_coverage?: number | null;
+  gt_views?: number | null;
+  gt_rank?: number | null;
 }
 
-export interface LlmMomentReviewWorkflow {
+export interface PipelineDebugGtHit {
+  gt_index: number;
+  gt_start: number;
+  gt_end: number;
+  desc: string;
+  views: number;
+  source_url: string;
+  hit: boolean;
+  hit_rank: number | null;
+  coverage: number;
+  pred_start_time: number | null;
+  pred_end_time: number | null;
+}
+
+export interface PipelineDebugRecall {
+  "5": number | null;
+  "10": number | null;
+  "20": number | null;
+}
+
+export interface PipelineDebugVodEval {
+  vod_id: string;
+  has_gt: boolean;
+  gt_count: number;
+  pred_count: number;
+  recall: PipelineDebugRecall;
+  avg_rank: number | null;
+  miss_rate: number | null;
+  hit_count: number;
+  miss_count: number;
+  gt_hits: PipelineDebugGtHit[];
+}
+
+export interface PipelineDebugOverallEval {
+  vods_with_gt: number;
+  vods_total: number;
+  gt_count: number;
+  pred_count: number;
+  recall: PipelineDebugRecall;
+  avg_rank: number | null;
+  miss_rate: number | null;
+  hit_count: number;
+  miss_count: number;
+}
+
+export interface PipelineDebugEval {
+  per_vod: PipelineDebugVodEval[];
+  overall: PipelineDebugOverallEval;
+  ks: number[];
+  coverage_threshold: number;
+  computed_at: string;
+}
+
+export interface PipelineDebugAnchorsResponse {
+  vod_ids: string[];
+  vods: { vod_id: string; url: string }[];
+  count: number;
+}
+
+export interface PipelineDebugWorkflow {
   workflow_id: string;
-  status: LlmMomentReviewStatus;
-  stage: LlmMomentReviewStage;
+  name?: string;
+  status: PipelineDebugStatus;
+  stage: PipelineDebugStage;
   progress_pct: number;
   message: string;
   error?: string | null;
   created_at?: string;
   updated_at?: string;
   workflow_dir?: string;
-  request?: LlmMomentReviewStartRequest;
+  request?: PipelineDebugStartRequest;
   summary?: Record<string, unknown>;
   label_summary?: Record<string, unknown>;
-  phase2_gate?: Record<string, unknown>;
   row_count: number;
-  rows: LlmMomentReviewRow[];
+  llm_moment_count?: number;
+  eval?: PipelineDebugEval;
+  rows: PipelineDebugRow[];
 }
 
-export interface LlmMomentReviewListResponse {
-  workflows: LlmMomentReviewWorkflow[];
+export interface PipelineDebugListResponse {
+  workflows: PipelineDebugWorkflow[];
 }
 
-export interface LlmMomentReviewLabelRequest {
+export interface PipelineDebugLabelRequest {
   review_id: string;
-  human_viral_label: LlmMomentReviewViralLabel;
-  human_boundary_label: LlmMomentReviewBoundaryLabel;
+  human_viral_label: PipelineDebugViralLabel;
+  human_boundary_label: PipelineDebugBoundaryLabel;
   human_notes?: string;
 }
 

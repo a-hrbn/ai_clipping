@@ -1,24 +1,37 @@
+import concurrent.futures
 import hashlib
 import pathlib
 import re
+import threading
+from typing import Callable
 import ffmpeg
 from config import settings
 from models import ClipResult
-from services.analyzer import Moment
+Moment = dict
+
+_CLIP_MAX_WORKERS = 4
 
 
-def cut_clips(video_path: pathlib.Path, moments: list[Moment], job_id: str) -> list[ClipResult]:
+def cut_clips(
+    video_path: pathlib.Path,
+    moments: list[Moment],
+    job_id: str,
+    *,
+    progress_cb: Callable[[list[ClipResult], int, int], None] | None = None,
+) -> list[ClipResult]:
     clips_dir = video_path.parent / "clips"
     clips_dir.mkdir(exist_ok=True)
     min_story_duration = 8.0
+    total = len(moments)
 
-    results: list[ClipResult] = []
+    slot: list[ClipResult | None] = [None] * total
+    done_count = 0
+    _lock = threading.Lock()
 
-    for i, moment in enumerate(moments, start=1):
+    def _cut_one(idx: int, moment: Moment) -> None:
+        nonlocal done_count
         start = moment["start_time"]
         end = moment["end_time"]
-
-        # Clamp duration to configured limits
         duration = end - start
         if duration > settings.max_clip_duration:
             end = start + settings.max_clip_duration
@@ -27,9 +40,9 @@ def cut_clips(video_path: pathlib.Path, moments: list[Moment], job_id: str) -> l
         elif duration <= 0:
             end = start + min(min_story_duration, settings.max_clip_duration)
 
-        filename = f"clip_{i:02d}.mp4"
+        rank = idx + 1
+        filename = f"clip_{rank:02d}.mp4"
         output_path = clips_dir / filename
-
         (
             ffmpeg
             .input(str(video_path), ss=start, t=end - start)
@@ -43,9 +56,8 @@ def cut_clips(video_path: pathlib.Path, moments: list[Moment], job_id: str) -> l
             .overwrite_output()
             .run(quiet=True)
         )
-
-        results.append(ClipResult(
-            candidate_id=str(moment.get("candidate_id") or f"clip_{i:02d}"),
+        result = ClipResult(
+            candidate_id=str(moment.get("candidate_id") or f"clip_{rank:02d}"),
             filename=filename,
             download_url=f"/static/{job_id}/clips/{filename}",
             start_time=start,
@@ -59,9 +71,21 @@ def cut_clips(video_path: pathlib.Path, moments: list[Moment], job_id: str) -> l
             variant_label=moment.get("variant_label"),
             projected_hook_score=moment.get("projected_hook_score"),
             projected_retention_score=moment.get("projected_retention_score"),
-        ))
+        )
+        with _lock:
+            slot[idx] = result
+            done_count += 1
+            d = done_count
+            so_far = [r for r in slot if r is not None]
+        if progress_cb is not None:
+            progress_cb(so_far, d, total)
 
-    return results
+    with concurrent.futures.ThreadPoolExecutor(max_workers=_CLIP_MAX_WORKERS) as executor:
+        futures = {executor.submit(_cut_one, i, m): i for i, m in enumerate(moments)}
+        for fut in concurrent.futures.as_completed(futures):
+            fut.result()
+
+    return [r for r in slot if r is not None]
 
 
 def cut_review_clips(

@@ -3,10 +3,11 @@ import {
   ClipFeedbackPayload,
   ClipRequestOptions,
   JobStatus,
-  LlmMomentReviewLabelRequest,
-  LlmMomentReviewListResponse,
-  LlmMomentReviewStartRequest,
-  LlmMomentReviewWorkflow,
+  PipelineDebugAnchorsResponse,
+  PipelineDebugLabelRequest,
+  PipelineDebugListResponse,
+  PipelineDebugStartRequest,
+  PipelineDebugWorkflow,
   ReviewCandidateResponse,
   UploadProgress,
 } from "./types";
@@ -225,6 +226,26 @@ export async function cancelJob(jobId: string): Promise<void> {
   }
 }
 
+export async function deleteJobRun(jobId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/jobs/${encodeURIComponent(jobId)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body?.detail ?? `HTTP ${res.status}`);
+  }
+}
+
+export async function deletePipelineDebugWorkflow(workflowId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/pipeline-debug/workflows/${encodeURIComponent(workflowId)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body?.detail ?? `HTTP ${res.status}`);
+  }
+}
+
 export function cancelJobBeacon(jobId: string): void {
   const url = `${API_BASE}/api/jobs/${jobId}/cancel`;
   if (typeof navigator !== "undefined" && typeof navigator.sendBeacon === "function") {
@@ -271,10 +292,16 @@ export async function getReviewCandidates(jobId: string, limit = 80): Promise<Re
   return res.json();
 }
 
-export async function startLlmMomentReviewWorkflow(
-  payload: LlmMomentReviewStartRequest,
-): Promise<LlmMomentReviewWorkflow> {
-  const res = await fetch(`${API_BASE}/api/llm-moment-review/workflows`, {
+export async function getPipelineDebugAnchors(): Promise<PipelineDebugAnchorsResponse> {
+  const res = await fetch(`${API_BASE}/api/pipeline-debug/anchors`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function startPipelineDebugWorkflow(
+  payload: PipelineDebugStartRequest,
+): Promise<PipelineDebugWorkflow> {
+  const res = await fetch(`${API_BASE}/api/pipeline-debug/workflows`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -293,23 +320,23 @@ export async function startLlmMomentReviewWorkflow(
   return res.json();
 }
 
-export async function listLlmMomentReviewWorkflows(limit = 10): Promise<LlmMomentReviewListResponse> {
-  const res = await fetch(`${API_BASE}/api/llm-moment-review/workflows?limit=${encodeURIComponent(String(limit))}`);
+export async function listPipelineDebugWorkflows(limit = 10): Promise<PipelineDebugListResponse> {
+  const res = await fetch(`${API_BASE}/api/pipeline-debug/workflows?limit=${encodeURIComponent(String(limit))}`);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
 
-export async function getLlmMomentReviewWorkflow(workflowId: string): Promise<LlmMomentReviewWorkflow> {
-  const res = await fetch(`${API_BASE}/api/llm-moment-review/workflows/${encodeURIComponent(workflowId)}`);
+export async function getPipelineDebugWorkflow(workflowId: string): Promise<PipelineDebugWorkflow> {
+  const res = await fetch(`${API_BASE}/api/pipeline-debug/workflows/${encodeURIComponent(workflowId)}`);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
 
-export async function saveLlmMomentReviewLabel(
+export async function savePipelineDebugLabel(
   workflowId: string,
-  payload: LlmMomentReviewLabelRequest,
+  payload: PipelineDebugLabelRequest,
 ): Promise<void> {
-  const res = await fetch(`${API_BASE}/api/llm-moment-review/workflows/${encodeURIComponent(workflowId)}/labels`, {
+  const res = await fetch(`${API_BASE}/api/pipeline-debug/workflows/${encodeURIComponent(workflowId)}/labels`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -325,23 +352,4 @@ export async function saveLlmMomentReviewLabel(
     }
     throw new Error(msg);
   }
-}
-
-export async function attachLatestLlmMomentReviewRecallFloor(workflowId: string): Promise<LlmMomentReviewWorkflow> {
-  const res = await fetch(
-    `${API_BASE}/api/llm-moment-review/workflows/${encodeURIComponent(workflowId)}/recall-floor/latest`,
-    { method: "POST" },
-  );
-  if (!res.ok) {
-    let msg = `HTTP ${res.status}`;
-    try {
-      const json = await res.json();
-      msg = formatApiErrorDetail(json.detail) ?? formatApiErrorDetail(json.message) ?? msg;
-    } catch {
-      const text = await res.text().catch(() => "");
-      if (text) msg = text;
-    }
-    throw new Error(msg);
-  }
-  return res.json();
 }

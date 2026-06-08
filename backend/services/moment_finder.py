@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
-from ml import run_llm_moment_finder_d0 as d0
+from ml import llm_moment_finder as d0
 from services import post_processor
 from services.timeline_types import Candidate, CandidateFeatures, RankedCandidate
 from services.transcriber import RichSegment
@@ -126,7 +126,13 @@ def rich_segments_to_transcript_segments(segments: Sequence[RichSegment]) -> lis
         text = str(getattr(segment, "text", "") or "").strip()
         if end <= start or not text:
             continue
-        transcript_segments.append(d0.TranscriptSegment(start=start, end=end, text=text))
+        transcript_segments.append(d0.TranscriptSegment(
+            start=start,
+            end=end,
+            text=text,
+            chat_spike_score=float(getattr(segment, "chat_spike_score", 0.0) or 0.0),
+            chat_category=str(getattr(segment, "chat_category", "") or ""),
+        ))
     return transcript_segments
 
 

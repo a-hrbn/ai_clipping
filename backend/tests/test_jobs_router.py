@@ -423,119 +423,32 @@ class JobsRouterTests(unittest.TestCase):
              patch.object(jobs.settings, "storage_dir", tmp):
             debug_dir = Path(tmp) / "job-1" / "debug"
             debug_dir.mkdir(parents=True)
-            (debug_dir / "candidates_peak.jsonl").write_text('{"id":"p1"}\n', encoding="utf-8")
-            (debug_dir / "candidates_semantic.jsonl").write_text('{"id":"s1"}\n', encoding="utf-8")
-            (debug_dir / "candidates_merged.jsonl").write_text(
-                '{"id":"p1"}\n{"id":"s1"}\n',
+            (debug_dir / "segments.jsonl").write_text(
+                '{"start":0.0,"end":5.0,"text":"hello"}\n{"start":5.0,"end":10.0,"text":"world"}\n',
                 encoding="utf-8",
             )
-            (debug_dir / "candidates_normalized.jsonl").write_text(
-                '{"id":"p1"}\n{"id":"s1"}\n',
-                encoding="utf-8",
-            )
-            (debug_dir / "candidates_dense_inventory.jsonl").write_text(
-                '{"id":"d1"}\n{"id":"d2"}\n',
-                encoding="utf-8",
-            )
-            (debug_dir / "ranked_candidates_v2.jsonl").write_text(
-                "\n".join(
-                    [
-                        jobs.json.dumps(
-                            {
-                                "candidate_id": "p1",
-                                "trained_model_used": True,
-                                "judge_used": True,
-                                "selected_after_diversity": True,
-                                "pre_judge_rank_score": 3.2,
-                                "judged_rank_score": 4.1,
-                            }
-                        ),
-                        jobs.json.dumps(
-                            {
-                                "candidate_id": "s1",
-                                "trained_model_used": False,
-                                "judge_used": False,
-                                "selected_after_diversity": False,
-                                "pre_judge_rank_score": 1.1,
-                                "judged_rank_score": 1.1,
-                            }
-                        ),
-                    ]
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            (debug_dir / "serving_quality_gate.jsonl").write_text('{"candidate_id":"p1","kept":true}\n', encoding="utf-8")
-            (debug_dir / "final_moments.json").write_text('[{"candidate_id":"p1"}]', encoding="utf-8")
-            (debug_dir / "candidate_recall_report.json").write_text(
+            (debug_dir / "llm_moment_finder_stage.json").write_text(
                 jobs.json.dumps(
                     {
-                        "stage_counts": {
-                            "dense_inventory": 2,
-                            "merged": 2,
-                            "ranked_pre_judge": 2,
-                            "judge_scope": 1,
-                            "quality_kept": 1,
-                            "final_moments": 1,
-                        },
-                        "largest_losses": [
-                            {
-                                "transition": "ranked_to_judge_scope",
-                                "lost_count": 1,
-                                "input_count": 2,
-                                "output_count": 1,
-                            }
-                        ],
+                        "attempted": True,
+                        "status": "ok",
+                        "provider": "gemini",
+                        "model": "gemini-2.5-flash-lite",
+                        "max_moments": 180,
+                        "ranked_candidate_count": 3,
+                        "post_processed_moment_count": 3,
                     }
                 ),
                 encoding="utf-8",
             )
-            (debug_dir / "candidate_funnel_summary.json").write_text(
-                jobs.json.dumps(
-                    {
-                        "rows": 2,
-                        "final_selected_rows": 1,
-                        "stage_counts": {"final_moments": 1},
-                        "largest_losses": [
-                            {
-                                "transition": "ranked_to_judge_scope",
-                                "lost_count": 1,
-                                "input_count": 2,
-                                "output_count": 1,
-                            }
-                        ],
-                        "drop_stage_counts": {"judge_scope": 1},
-                        "rejection_reason_counts": {"outside_judge_scope": 1},
-                        "source_counts": {"peak": 1, "semantic": 1},
-                        "final_source_counts": {"peak": 1},
-                        "quality_breakdown": {
-                            "judged_kept": 1,
-                            "unjudged_kept": 0,
-                            "judged_rejected": 0,
-                            "unjudged_rejected": 1,
-                        },
-                        "ranker_lift": {
-                            "high_judge_rows": 1,
-                            "high_judge_pre_judge_top20_ratio": 1.0,
-                        },
-                        "trace_samples": {
-                            "final": [{"candidate_id": "p1", "source": "peak", "final_rank": 1}],
-                            "highest_ranked_rejected": [
-                                {
-                                    "candidate_id": "s1",
-                                    "source": "semantic",
-                                    "dropped_stage": "judge_scope",
-                                    "drop_reason": "outside_judge_scope",
-                                }
-                            ],
-                        },
-                    }
-                ),
+            (debug_dir / "llm_moment_finder_moments.jsonl").write_text(
+                '{"rank":1,"start_time":10.0,"end_time":40.0}\n'
+                '{"rank":2,"start_time":60.0,"end_time":90.0}\n'
+                '{"rank":3,"start_time":120.0,"end_time":150.0}\n',
                 encoding="utf-8",
             )
-            (debug_dir / "candidate_trace.jsonl").write_text(
-                '{"candidate_id":"p1","final_selected":true}\n'
-                '{"candidate_id":"s1","dropped_stage":"judge_scope"}\n',
+            (debug_dir / "final_moments.json").write_text(
+                jobs.json.dumps({"moments": [{"candidate_id": "llm_moment_01"}, {"candidate_id": "llm_moment_02"}, {"candidate_id": "llm_moment_03"}], "count": 3}),
                 encoding="utf-8",
             )
 
@@ -546,54 +459,32 @@ class JobsRouterTests(unittest.TestCase):
 
         self.assertTrue(result["available"])
         stages = {stage["id"]: stage for stage in result["stages"]}
-        self.assertEqual(stages["candidate_generation"]["status"], "ok")
-        self.assertEqual(stages["candidate_recall"]["status"], "ok")
-        self.assertIn("Recall-Funnel", stages["candidate_recall"]["summary"])
-        self.assertEqual(stages["dense_inventory"]["status"], "ok")
-        self.assertEqual(stages["ranker"]["status"], "ok")
-        self.assertEqual(stages["clip_judge"]["status"], "ok")
-        self.assertEqual(stages["quality_gate"]["status"], "ok")
-        self.assertEqual(stages["final_selection"]["status"], "ok")
+        self.assertEqual(stages["transcript"]["status"], "ok")
+        self.assertIn("2", stages["transcript"]["summary"])
+        self.assertEqual(stages["llm_moment_finder"]["status"], "ok")
+        self.assertIn("3 Momente", stages["llm_moment_finder"]["summary"])
+        self.assertEqual(stages["clipping"]["status"], "ok")
         self.assertIn("Stages ok", result["summary"])
-        self.assertTrue(result["candidate_funnel"]["available"])
-        self.assertEqual(result["candidate_funnel"]["rows"], 2)
-        self.assertEqual(result["candidate_funnel"]["drop_stage_counts"], {"judge_scope": 1})
-        self.assertEqual(result["candidate_funnel"]["quality_breakdown"]["judged_kept"], 1)
-        self.assertEqual(result["candidate_funnel"]["ranker_lift"]["high_judge_rows"], 1)
-        self.assertEqual(result["candidate_funnel"]["samples"][0]["candidate_id"], "p1")
+        self.assertFalse(result["candidate_funnel"]["available"])
 
-    def test_job_pipeline_diagnostics_reports_clip_judge_timeout(self) -> None:
+    def test_job_pipeline_diagnostics_reports_llm_moment_finder_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, \
              patch.object(jobs.settings, "storage_dir", tmp):
             debug_dir = Path(tmp) / "job-1" / "debug"
             debug_dir.mkdir(parents=True)
-            (debug_dir / "ranked_candidates_v2.jsonl").write_text(
-                jobs.json.dumps(
-                    {
-                        "candidate_id": "p1",
-                        "trained_model_used": True,
-                        "judge_used": False,
-                        "selected_after_diversity": True,
-                        "pre_judge_rank_score": 3.2,
-                        "judged_rank_score": 3.2,
-                    }
-                )
-                + "\n",
+            (debug_dir / "segments.jsonl").write_text(
+                '{"start":0.0,"end":5.0,"text":"hello"}\n',
                 encoding="utf-8",
             )
-            (debug_dir / "clip_judge_stage.json").write_text(
+            (debug_dir / "llm_moment_finder_stage.json").write_text(
                 jobs.json.dumps(
                     {
-                        "enabled": True,
                         "attempted": True,
-                        "status": "degraded",
-                        "reason": "timeout",
-                        "candidates": 247,
-                        "judge_top_k": 24,
-                        "timeout_sec": 90.0,
-                        "fallback": "pre_judge_ranked_candidates",
-                        "fallback_candidates": 247,
-                        "judged_candidates": 0,
+                        "status": "failed",
+                        "provider": "gemini",
+                        "model": "gemini-2.5-flash-lite",
+                        "max_moments": 180,
+                        "error": "API quota exceeded",
                     }
                 ),
                 encoding="utf-8",
@@ -601,14 +492,14 @@ class JobsRouterTests(unittest.TestCase):
 
             result = jobs._job_pipeline_diagnostics(
                 "job-1",
-                JobStatus(job_id="job-1", status="done", clips=[]),
+                JobStatus(job_id="job-1", status="failed", clips=[]),
             )
 
         stages = {stage["id"]: stage for stage in result["stages"]}
-        judge_stage = stages["clip_judge"]
-        self.assertEqual(judge_stage["status"], "warning")
-        self.assertIn("0 von 24", judge_stage["summary"])
-        self.assertIn("getimeoutet", judge_stage["details"][0])
+        llm = stages["llm_moment_finder"]
+        self.assertEqual(llm["status"], "warning")
+        self.assertIn("fehlgeschlagen", llm["summary"])
+        self.assertIn("API quota exceeded", llm["details"][0])
 
     def test_submit_clip_feedback_accepts_gold_eval_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

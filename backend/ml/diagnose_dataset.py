@@ -10,7 +10,26 @@ BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from ml import train_ranker
+def _read_jsonl(path: pathlib.Path) -> list:
+    rows = []
+    with path.open(encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if line:
+                rows.append(json.loads(line))
+    return rows
+
+
+def _numeric_feature_names(features: dict) -> list:
+    return [k for k, v in features.items() if isinstance(v, (int, float))]
+
+
+def _row_timestamp(row: dict) -> float:
+    for key in ("timestamp", "vod_timestamp", "start_time", "created_at"):
+        val = row.get(key)
+        if isinstance(val, (int, float)) and val > 0:
+            return float(val)
+    return 0.0
 
 
 def main() -> int:
@@ -19,16 +38,16 @@ def main() -> int:
     parser.add_argument("--top", type=int, default=8, help="How many strongest separating features to print.")
     args = parser.parse_args()
 
-    rows = train_ranker._read_jsonl(pathlib.Path(args.dataset))
+    rows = _read_jsonl(pathlib.Path(args.dataset))
     if not rows:
         print("No dataset rows found.")
         return 1
 
-    feature_names = train_ranker._numeric_feature_names(rows[0]["features"])
+    feature_names = _numeric_feature_names(rows[0]["features"])
     positives = [row for row in rows if int(row["label"]) == 1]
     negatives = [row for row in rows if int(row["label"]) == 0]
     creator_counts = Counter(str(row.get("creator_id") or row.get("streamer") or "unknown") for row in rows)
-    timestamps = [train_ranker._row_timestamp(row) for row in rows if train_ranker._row_timestamp(row) > 0]
+    timestamps = [_row_timestamp(row) for row in rows if _row_timestamp(row) > 0]
 
     print(json.dumps({
         "rows": len(rows),

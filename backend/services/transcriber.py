@@ -50,6 +50,10 @@ def _word_timestamps_enabled() -> bool:
     return bool(getattr(settings, "whisper_word_timestamps", False))
 
 
+def _vad_filter_enabled() -> bool:
+    return bool(getattr(settings, "whisper_vad_filter", True))
+
+
 def _resolved_whisper_backend() -> str:
     requested = str(getattr(settings, "whisper_backend", "auto") or "auto").strip().lower()
     requested = requested.replace("_", "-")
@@ -194,40 +198,10 @@ class RichSegment:
     speaker: str = "UNKNOWN"
     emotions: list[str] = field(default_factory=list)  # "exclamation", "question", "laughter"
     words_per_second: float = 0.0
-    # Numerical audio features (populated by audio_features.enrich_segments)
-    laughter_prob: float = 0.0
-    max_rms_db: float = 0.0
-    mean_rms_db: float = 0.0   # average over non-silent frames (0.0 = not set)
-    max_pitch_hz: float = 0.0
-    pitch_std_hz: float = 0.0
-    max_onset_rate: float = 0.0
-    voice_activity_score: float = 0.0
-    rms_burst_score: float = 0.0
-    # Composite virality score (populated by scorer.score_segments)
-    hype_score: float = 0.0
-    # Emotional arc score of the best candidate window this segment belongs to
-    # (populated by scorer.extract_candidates)
-    arc_score: float = 0.0
-    # Visual features (populated by video_features.enrich_segments)
-    max_motion_score: float = 0.0    # peak optical flow magnitude (0–1, normalised)
-    mean_face_size: float = 0.0      # largest face bbox area / frame area
-    max_face_count: int = 0          # peak simultaneous faces in segment
-    max_face_reaction: float = 0.0   # peak DeepFace surprise+fear+disgust prob
-    has_scene_change: bool = False   # any hard cut / overlay event in segment
-    visual_activity: float = 0.0    # composite visual activity level
-    # Chat-replay signal (populated by chat_analyzer.enrich_segments)
-    chat_spike_score: float = 0.0   # normalised chat message-rate spike intensity (0–1)
+    # Chat-replay signal (populated by chat_signal.enrich_segments)
+    chat_spike_score: float = 0.0   # normalised message-rate spike vs. local baseline (0–1)
     chat_message_count: int = 0
-    chat_message_rate: float = 0.0
-    chat_density_score: float = 0.0
-    chat_emote_score: float = 0.0
-    chat_hype_score: float = 0.0
-    chat_laugh_score: float = 0.0
-    chat_shock_score: float = 0.0
-    chat_sadge_score: float = 0.0
-    chat_ema_rate: float = 0.0
-    chat_rate_derivative: float = 0.0
-    chat_ema_crossing_score: float = 0.0
+    chat_category: str = ""         # "hype" | "funny" | "shock" | ""
 
     def to_tuple(self) -> Segment:
         return (self.start, self.end, self.text)
@@ -317,13 +291,11 @@ def transcribe_with_progress(
                 if progress_cb is not None and total_chunks > 0:
                     progress_cb(progress_index_by_chunk[chunk_idx], total_chunks, chunk_file)
                 _write_chunk_cache(chunk_cache_dir, chunk_idx, [])
-                _release_transient_inference_memory()
                 continue
 
             chunk_segments = _rich_segments_from_result(result, chunk_idx=chunk_idx, chunk_file=chunk_file)
             segments_by_chunk[chunk_idx] = chunk_segments
             _write_chunk_cache(chunk_cache_dir, chunk_idx, chunk_segments)
-            _release_transient_inference_memory()
 
             if progress_cb is not None and total_chunks > 0:
                 progress_cb(progress_index_by_chunk[chunk_idx], total_chunks, chunk_file)
@@ -783,16 +755,68 @@ def _segment_from_cache_record(record: object) -> RichSegment:
     )
 
 
-def _release_transient_inference_memory() -> None:
-    if torch.cuda.is_available():
-        try:
-            torch.cuda.empty_cache()
-        except Exception as exc:
-            logger.debug(
-                "transcriber_cuda_empty_cache_failed error_type=%s error=%s",
-                type(exc).__name__,
-                _compact_exception_message(exc),
-            )
+
+def _chat_enrichment_path(cache_key: str | None) -> pathlib.Path | None:
+    digest = stable_cache_key_for_source(cache_key)
+    if not digest:
+        return None
+    return pathlib.Path(settings.storage_dir) / "_transcript_cache" / digest / "chat_enriched.json"
+
+
+def save_chat_enrichment(cache_key: str | None, segments: list[RichSegment]) -> None:
+    """Persist chat fields from enriched segments alongside the transcript chunk cache."""
+    path = _chat_enrichment_path(cache_key)
+    if path is None:
+        return
+    records = [
+        {
+            "start": round(seg.start, 3),
+            "chat_spike_score": round(seg.chat_spike_score, 4),
+            "chat_message_count": seg.chat_message_count,
+            "chat_category": seg.chat_category,
+        }
+        for seg in segments
+        if seg.chat_spike_score > 0 or seg.chat_message_count > 0 or seg.chat_category
+    ]
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(records, ensure_ascii=True), encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        pass
+
+
+def apply_chat_enrichment(
+    cache_key: str | None,
+    segments: list[RichSegment],
+) -> list[RichSegment] | None:
+    """Load cached chat enrichment and apply it to segments. Returns None on cache miss."""
+    path = _chat_enrichment_path(cache_key)
+    if path is None or not path.exists():
+        return None
+    try:
+        records: list[dict] = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(records, list):
+        return None
+    lookup: dict[float, dict] = {round(r["start"], 3): r for r in records if isinstance(r, dict)}
+    result: list[RichSegment] = []
+    for seg in segments:
+        rec = lookup.get(round(seg.start, 3))
+        if rec:
+            result.append(RichSegment(
+                start=seg.start, end=seg.end, text=seg.text,
+                speaker=seg.speaker, emotions=seg.emotions,
+                words_per_second=seg.words_per_second,
+                chat_spike_score=float(rec.get("chat_spike_score", 0.0)),
+                chat_message_count=int(rec.get("chat_message_count", 0)),
+                chat_category=str(rec.get("chat_category", "")),
+            ))
+        else:
+            result.append(seg)
+    return result
 
 
 def _filter_transcribable_chunks(
@@ -867,6 +891,7 @@ def _transcribe_chunk_faster(model: object, chunk_file: pathlib.Path) -> dict:
         configured_language = str(settings.whisper_language or "").strip().lower()
         transcribe_kwargs: dict[str, object] = {
             "word_timestamps": _word_timestamps_enabled(),
+            "vad_filter": _vad_filter_enabled(),
         }
         if configured_language:
             transcribe_kwargs["language"] = configured_language
@@ -1123,16 +1148,12 @@ def format_transcript(
                 parts.append(f"[{','.join(seg.emotions).upper()}]")
             if seg.words_per_second:
                 parts.append(f"[{seg.words_per_second:.1f}w/s]")
-            if seg.hype_score > 0:
-                parts.append(f"[HYPE:{seg.hype_score:.1f}]")
-            if seg.arc_score > 0:
-                parts.append(f"[ARC:{seg.arc_score:.1f}]")
             if seg.chat_spike_score > 0:
-                parts.append(f"[CHAT:{seg.chat_spike_score:.2f}]")
-            elif seg.chat_density_score > 0:
-                parts.append(f"[CHAT_DENSITY:{seg.chat_density_score:.2f}]")
-            if seg.visual_activity > 0:
-                parts.append(f"[VIS:{seg.visual_activity:.1f}]")
+                label = f"[CHAT:{seg.chat_spike_score:.2f}"
+                if seg.chat_category:
+                    label += f"({seg.chat_category})"
+                label += "]"
+                parts.append(label)
             parts.append(seg.text)
             lines.append(" ".join(parts))
         else:
@@ -1159,34 +1180,9 @@ def format_jsonl(segments: list[RichSegment]) -> str:
             "text": seg.text,
             "tags": seg.emotions,
             "words_per_second": seg.words_per_second,
-            "laughter_prob": seg.laughter_prob,
-            "max_rms_db": seg.max_rms_db,
-            "mean_rms_db": seg.mean_rms_db,
-            "max_pitch_hz": seg.max_pitch_hz,
-            "pitch_std_hz": seg.pitch_std_hz,
-            "max_onset_rate": seg.max_onset_rate,
-            "voice_activity_score": seg.voice_activity_score,
-            "rms_burst_score": seg.rms_burst_score,
-            "hype_score": seg.hype_score,
-            "arc_score": seg.arc_score,
-            "max_motion_score": seg.max_motion_score,
-            "mean_face_size": seg.mean_face_size,
-            "max_face_count": seg.max_face_count,
-            "max_face_reaction": seg.max_face_reaction,
-            "has_scene_change": seg.has_scene_change,
-            "visual_activity": seg.visual_activity,
             "chat_spike_score": seg.chat_spike_score,
             "chat_message_count": seg.chat_message_count,
-            "chat_message_rate": seg.chat_message_rate,
-            "chat_density_score": seg.chat_density_score,
-            "chat_emote_score": seg.chat_emote_score,
-            "chat_hype_score": seg.chat_hype_score,
-            "chat_laugh_score": seg.chat_laugh_score,
-            "chat_shock_score": seg.chat_shock_score,
-            "chat_sadge_score": seg.chat_sadge_score,
-            "chat_ema_rate": seg.chat_ema_rate,
-            "chat_rate_derivative": seg.chat_rate_derivative,
-            "chat_ema_crossing_score": seg.chat_ema_crossing_score,
+            "chat_category": seg.chat_category,
         }))
     return "\n".join(lines)
 

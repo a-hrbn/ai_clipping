@@ -7,49 +7,23 @@ import re
 import shutil
 import subprocess
 import uuid
-from dataclasses import asdict, fields, is_dataclass, replace
-from types import SimpleNamespace
+from dataclasses import asdict, is_dataclass
 from config import settings
 from job_manager import is_job_cancelled, update_job
 from services import (
     downloader,
     audio_extractor,
     transcriber,
-    analyzer,
     clipper,
-    audio_features,
-    video_features,
-    post_processor,
-    chat_analyzer,
-    selector,
-    feedback_store,
-    clip_judge,
-    keyframe_sampler,
     clip_strategy,
-    clip_taxonomy,
-    context_patterns,
-    high_recall_protection,
     moment_finder,
+    chat_signal,
 )
-from services.timeline_types import Candidate, RankedCandidate
-from services.transcriber import RichSegment
 
 logger = logging.getLogger(__name__)
 
 _TWITCH_VOD_RE = re.compile(r"twitch\.tv/videos/(\d+)")
 _AUDIO_CACHE_VERSION = 1
-_FEATURE_FRAME_CACHE_VERSION = 1
-_CROSS_PLATFORM_CONTEXT_TEXT_FIELDS = (
-    "repost_title",
-    "short_title",
-    "video_title",
-    "title",
-    "matched_cross_platform_title",
-    "transcript_repost_excerpt",
-    "transcript_vod_excerpt",
-    "description",
-    "repost_description",
-)
 
 
 class PipelineCancelledError(RuntimeError):
@@ -65,7 +39,11 @@ def _frontend_cache_enabled_for_job(job_id: str) -> bool:
     if bool(getattr(settings, "frontend_job_cache_enabled", False)):
         return True
     job_id = str(job_id or "")
-    return job_id.startswith(("twitch_vod", "judge_backfill_"))
+    return job_id.startswith(("twitch_vod", "judge_backfill_", "pipeline_debug_"))
+
+
+def _debug_job(job_id: str) -> bool:
+    return str(job_id or "").startswith("pipeline_debug_")
 
 
 def _transcript_cache_enabled_for_job(job_id: str, url: str | None) -> bool:
@@ -75,13 +53,6 @@ def _transcript_cache_enabled_for_job(job_id: str, url: str | None) -> bool:
         return False
     return bool(_source_twitch_vod_id(url))
 
-
-def _feature_cache_enabled_for_job(job_id: str, url: str | None) -> bool:
-    if _frontend_cache_enabled_for_job(job_id):
-        return True
-    if not bool(getattr(settings, "frontend_feature_cache_enabled", True)):
-        return False
-    return bool(_source_twitch_vod_id(url))
 
 
 def _path_is_relative_to(path: pathlib.Path, parent: pathlib.Path) -> bool:
@@ -148,21 +119,6 @@ def _transcript_cache_source(url: str | None, video_path: pathlib.Path | None) -
     return None
 
 
-def _feature_cache_source(
-    *,
-    job_id: str,
-    url: str | None,
-    video_path: pathlib.Path | None,
-) -> str | None:
-    if not _feature_cache_enabled_for_job(job_id, url):
-        return None
-    source = _transcript_cache_source(url, video_path)
-    if not source:
-        return None
-    if not _frontend_cache_enabled_for_job(job_id) and not source.startswith("twitch_vod:"):
-        return None
-    return source
-
 
 def _source_twitch_vod_id(url: str | None) -> str:
     if not url:
@@ -170,155 +126,6 @@ def _source_twitch_vod_id(url: str | None) -> str:
     match = _TWITCH_VOD_RE.search(str(url).strip().lower())
     return match.group(1) if match else ""
 
-
-def _cross_platform_positive_rows_path(profile: str) -> pathlib.Path:
-    configured = str(getattr(settings, "serving_cross_platform_positive_rows_path", "") or "").strip()
-    if configured:
-        path = pathlib.Path(configured).expanduser()
-        if not path.is_absolute():
-            path = pathlib.Path(__file__).resolve().parent / path
-        return path
-    safe_profile = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(profile or "general").strip().lower())
-    return pathlib.Path(__file__).resolve().parent / "ml" / "artifacts" / f"{safe_profile}_cross_platform_fingerprint_rows.jsonl"
-
-
-def _load_cross_platform_positive_windows(
-    profile: str,
-    source_url: str | None,
-    *,
-    force_load: bool = False,
-) -> tuple[list[dict], dict]:
-    vod_id = _source_twitch_vod_id(source_url)
-    enabled = bool(getattr(settings, "serving_cross_platform_recall_enabled", False))
-    active = enabled or force_load
-    path = _cross_platform_positive_rows_path(profile)
-    summary = {
-        "enabled": enabled,
-        "active": active,
-        "diagnostic_only": bool(force_load and not enabled),
-        "vod_id": vod_id,
-        "path": str(path),
-        "rows": 0,
-        "matched_rows": 0,
-        "status": "disabled" if not active else "not_loaded",
-    }
-    if not active:
-        return [], summary
-    if not vod_id:
-        summary["status"] = "missing_vod_id"
-        return [], summary
-    if not path.exists():
-        summary["status"] = "missing_file"
-        return [], summary
-    rows: list[dict] = []
-    matched: list[dict] = []
-    try:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            row = json.loads(line)
-            rows.append(row)
-            if str(row.get("vod_id") or "") == vod_id or vod_id in str(row.get("vod_url") or ""):
-                matched.append(row)
-    except (OSError, json.JSONDecodeError) as exc:
-        summary.update({"rows": len(rows), "status": "read_error", "error": str(exc)})
-        return [], summary
-    summary.update({"rows": len(rows), "matched_rows": len(matched), "status": "loaded"})
-    return matched, summary
-
-
-def _best_cross_platform_positive_match(start: float, end: float, positives: list[dict]) -> dict:
-    best = {"overlap_ratio": 0.0, "row": None}
-    for row in positives:
-        try:
-            pos_start = float(row["window_start"])
-            pos_end = float(row["window_end"])
-        except (KeyError, TypeError, ValueError):
-            continue
-        overlap = max(0.0, min(float(end), pos_end) - max(float(start), pos_start))
-        if overlap <= 0.0:
-            continue
-        candidate_duration = max(float(end) - float(start), 0.001)
-        positive_duration = max(pos_end - pos_start, 0.001)
-        ratio = max(overlap / candidate_duration, overlap / positive_duration)
-        if ratio > float(best["overlap_ratio"]):
-            best = {"overlap_ratio": ratio, "row": row}
-    return best
-
-
-def _cross_platform_recall_targets(candidates, positives: list[dict], *, profile: str = "jynxzi") -> dict[str, dict]:
-    if not positives:
-        return {}
-    min_overlap = float(getattr(settings, "serving_cross_platform_recall_overlap_ratio", 0.45) or 0.45)
-    targets: dict[str, dict] = {}
-    for candidate in candidates:
-        match = _best_cross_platform_positive_match(candidate.start, candidate.end, positives)
-        if float(match["overlap_ratio"] or 0.0) < min_overlap:
-            continue
-        row = match["row"] or {}
-        context = _cross_platform_context_from_row(row, profile=profile)
-        targets[candidate.id] = {
-            "positive_overlap_ratio": round(float(match["overlap_ratio"] or 0.0), 6),
-            "matched_cross_platform_candidate_id": row.get("candidate_id") or "",
-            "matched_cross_platform_source_url": row.get("source_url") or row.get("repost_source_url") or "",
-            "matched_cross_platform_title": context["title"],
-            "matched_cross_platform_context_text": context["text"],
-            "matched_cross_platform_clip_type": context["clip_type"],
-            "matched_cross_platform_similarity": row.get("transcript_similarity") or row.get("confidence") or 0.0,
-            "matched_cross_platform_views": row.get("repost_views") or 0.0,
-            "matched_cross_platform_window_start": row.get("window_start"),
-            "matched_cross_platform_window_end": row.get("window_end"),
-            "matched_cross_platform_pattern": context["pattern"],
-        }
-    return targets
-
-
-def _cross_platform_context_from_row(row: dict, *, profile: str = "jynxzi") -> dict[str, object]:
-    title = _first_nonempty_text(
-        row,
-        ("repost_title", "short_title", "video_title", "title", "matched_cross_platform_title"),
-    )
-    text_parts = [
-        str(row.get(key) or "").strip()
-        for key in _CROSS_PLATFORM_CONTEXT_TEXT_FIELDS
-        if str(row.get(key) or "").strip()
-    ]
-    text = " ".join(dict.fromkeys(text_parts))
-    taxonomy = clip_taxonomy.classify_text(text, fallback_type="general")
-    pattern = context_patterns.score_text(text, profile=profile)
-    return {
-        "title": title,
-        "text": text[:500],
-        "clip_type": taxonomy.clip_type,
-        "pattern": {
-            "pattern_id": pattern.pattern_id,
-            "label": pattern.label,
-            "score": pattern.score,
-            "support": pattern.support,
-            "views_prior": pattern.views_prior,
-            "confidence": pattern.confidence,
-            "similarity_margin": pattern.similarity_margin,
-        },
-    }
-
-
-def _first_nonempty_text(row: dict, keys: tuple[str, ...]) -> str:
-    for key in keys:
-        value = str(row.get(key) or "").strip()
-        if value:
-            return value
-    return ""
-
-
-def _candidate_region_overlap(left: Candidate, right: Candidate) -> float:
-    start = max(float(left.start), float(right.start))
-    end = min(float(left.end), float(right.end))
-    overlap = max(0.0, end - start)
-    if overlap <= 0:
-        return 0.0
-    left_duration = max(float(left.end) - float(left.start), 0.001)
-    right_duration = max(float(right.end) - float(right.start), 0.001)
-    return max(overlap / left_duration, overlap / right_duration)
 
 
 def _probe_media_duration_sec(video_path: pathlib.Path) -> float | None:
@@ -364,29 +171,6 @@ def _load_complete_cached_transcript(
     )
 
 
-def _should_extract_full_visual_features(video_path: pathlib.Path) -> bool:
-    max_duration_sec = float(settings.pipeline_full_visual_feature_max_duration_sec or 0.0)
-    if max_duration_sec <= 0:
-        return True
-    duration_sec = _probe_media_duration_sec(video_path)
-    if duration_sec is None or duration_sec <= max_duration_sec:
-        return True
-    logger.info(
-        "pipeline_full_visual_features_skipped path=%s duration_sec=%.3f max_duration_sec=%.3f",
-        video_path,
-        duration_sec,
-        max_duration_sec,
-    )
-    return False
-
-
-def _feature_cache_path(cache_source: str | None, kind: str) -> pathlib.Path | None:
-    digest = transcriber.stable_cache_key_for_source(cache_source)
-    if not digest:
-        return None
-    safe_kind = re.sub(r"[^a-zA-Z0-9_.-]+", "_", kind.strip().lower())
-    return pathlib.Path(settings.storage_dir) / "_feature_cache" / digest / f"{safe_kind}_frames.json"
-
 
 def _audio_cache_path(cache_source: str | None) -> pathlib.Path | None:
     digest = transcriber.stable_cache_key_for_source(cache_source)
@@ -398,22 +182,6 @@ def _audio_cache_path(cache_source: str | None) -> pathlib.Path | None:
 def _audio_cache_metadata_path(audio_cache_path: pathlib.Path) -> pathlib.Path:
     return audio_cache_path.with_name("audio_metadata.json")
 
-
-def _feature_cache_metadata(kind: str, cache_source: str, video_path: pathlib.Path | None) -> dict:
-    metadata: dict[str, object] = {
-        "version": _FEATURE_FRAME_CACHE_VERSION,
-        "kind": kind,
-        "source": cache_source,
-    }
-    if video_path is not None:
-        duration_sec = _probe_media_duration_sec(video_path)
-        metadata["duration_sec"] = round(duration_sec, 3) if duration_sec is not None else None
-    if kind == "video":
-        metadata["runtime_summary"] = video_features.runtime_summary()
-        metadata["full_visual_feature_max_duration_sec"] = float(
-            settings.pipeline_full_visual_feature_max_duration_sec or 0.0
-        )
-    return metadata
 
 
 def _audio_cache_metadata(cache_source: str, video_path: pathlib.Path | None) -> dict:
@@ -438,18 +206,6 @@ def _metadata_matches(cached: object, expected: dict) -> bool:
             return False
     return True
 
-
-def _frame_from_payload(frame_cls, payload: object):
-    if not isinstance(payload, dict):
-        return None
-    if is_dataclass(frame_cls):
-        allowed_fields = {field.name for field in fields(frame_cls)}
-        values = {key: value for key, value in payload.items() if key in allowed_fields}
-        try:
-            return frame_cls(**values)
-        except TypeError:
-            return None
-    return None
 
 
 def _json_safe_cache_value(value: object) -> object:
@@ -582,116 +338,6 @@ def _extract_audio_cached(
     return audio_path
 
 
-def _load_feature_frame_cache(cache_source: str | None, kind: str, frame_cls, metadata: dict) -> list | None:
-    path = _feature_cache_path(cache_source, kind)
-    if path is None or not path.exists():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        logger.warning("pipeline_feature_cache_read_failed kind=%s path=%s", kind, path, exc_info=True)
-        return None
-    if not isinstance(payload, dict):
-        return None
-    if not _metadata_matches(payload.get("metadata"), metadata):
-        logger.info("pipeline_feature_cache_stale kind=%s path=%s", kind, path)
-        return None
-    raw_frames = payload.get("frames")
-    if not isinstance(raw_frames, list):
-        return None
-    frames = []
-    for raw_frame in raw_frames:
-        frame = _frame_from_payload(frame_cls, raw_frame)
-        if frame is None:
-            logger.info("pipeline_feature_cache_invalid kind=%s path=%s", kind, path)
-            return None
-        frames.append(frame)
-    logger.info(
-        "pipeline_feature_cache_hit kind=%s source=%s frames=%s",
-        kind,
-        cache_source,
-        len(frames),
-    )
-    return frames
-
-
-def _write_feature_frame_cache(cache_source: str | None, kind: str, frames: list, metadata: dict) -> None:
-    path = _feature_cache_path(cache_source, kind)
-    if path is None:
-        return
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "metadata": _json_safe_cache_value(metadata),
-            "frames": [asdict(frame) if is_dataclass(frame) else dict(frame) for frame in frames],
-        }
-        payload["frames"] = _json_safe_cache_value(payload["frames"])
-        tmp_path = path.with_suffix(path.suffix + ".tmp")
-        tmp_path.write_text(json.dumps(payload, ensure_ascii=True), encoding="utf-8")
-        tmp_path.replace(path)
-        logger.info(
-            "pipeline_feature_cache_written kind=%s source=%s frames=%s path=%s",
-            kind,
-            cache_source,
-            len(frames),
-            path,
-        )
-    except (OSError, TypeError, ValueError):
-        logger.warning("pipeline_feature_cache_write_failed kind=%s path=%s", kind, path, exc_info=True)
-
-
-def _extract_audio_features_cached(
-    video_path: pathlib.Path,
-    *,
-    audio_path: pathlib.Path | None,
-    job_id: str,
-    cache_source: str | None,
-    audio_cache_source: str | None = None,
-) -> tuple[list[audio_features.AudioFeatureFrame], pathlib.Path | None]:
-    metadata = _feature_cache_metadata("audio", cache_source, video_path) if cache_source else {}
-    cached = (
-        _load_feature_frame_cache(cache_source, "audio", audio_features.AudioFeatureFrame, metadata)
-        if cache_source
-        else None
-    )
-    if cached is not None:
-        return cached, audio_path
-    logger.info("pipeline_feature_cache_miss kind=audio source=%s", cache_source)
-    if audio_path is None:
-        audio_path = _extract_audio_cached(
-            video_path,
-            job_id,
-            cache_source=audio_cache_source if audio_cache_source is not None else cache_source,
-        )
-    frames = audio_features.extract(audio_path)
-    if cache_source:
-        _write_feature_frame_cache(cache_source, "audio", frames, metadata)
-    return frames, audio_path
-
-
-def _extract_video_features_cached(
-    video_path: pathlib.Path,
-    *,
-    cache_source: str | None,
-    allow_extract: bool = True,
-) -> list[video_features.VideoFeatureFrame]:
-    metadata = _feature_cache_metadata("video", cache_source, video_path) if cache_source else {}
-    cached = (
-        _load_feature_frame_cache(cache_source, "video", video_features.VideoFeatureFrame, metadata)
-        if cache_source
-        else None
-    )
-    if cached is not None:
-        return cached
-    if not allow_extract:
-        logger.info("pipeline_feature_cache_skip kind=video reason=full_visual_feature_limit source=%s", cache_source)
-        return []
-    logger.info("pipeline_feature_cache_miss kind=video source=%s", cache_source)
-    frames = video_features.extract(video_path)
-    if cache_source:
-        _write_feature_frame_cache(cache_source, "video", frames, metadata)
-    return frames
-
 
 def _write_json(path: pathlib.Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -701,324 +347,24 @@ def _write_json(path: pathlib.Path, payload: dict) -> None:
     )
 
 
-def _build_review_candidate_rows(
-    feedback_events: list[feedback_store.CandidateFeedback],
-    candidate_trace_rows: list[dict],
-    *,
-    limit: int,
-) -> list[dict]:
-    trace_by_id = {
-        str(row.get("candidate_id") or "").strip(): row
-        for row in candidate_trace_rows
-        if str(row.get("candidate_id") or "").strip()
-    }
-    rows: list[dict] = []
-    seen: set[str] = set()
-    for event in feedback_events:
-        payload = event.to_dict()
-        candidate_id = str(payload.get("candidate_id") or "").strip()
-        if not candidate_id or candidate_id in seen:
-            continue
-        seen.add(candidate_id)
-        start = _optional_float_value(payload.get("final_start" if payload.get("selected") else "proposed_start"))
-        end = _optional_float_value(payload.get("final_end" if payload.get("selected") else "proposed_end"))
-        if start is None:
-            start = _optional_float_value(payload.get("proposed_start"))
-        if end is None:
-            end = _optional_float_value(payload.get("proposed_end"))
-        if start is None or end is None or end <= start:
-            continue
+def _moments_from_post_processed(rows: list[dict], platform: str) -> list[dict]:
+    moments = []
+    for i, row in enumerate(rows, start=1):
+        start = float(row["start_time"])
+        end = float(row["end_time"])
+        moments.append({
+            "start_time": start,
+            "end_time": end,
+            "viral_score": float(row.get("viral_score") or 1.0),
+            "reason": str(row.get("reason") or ""),
+            "candidate_id": f"llm_moment_{i:02d}",
+            "ranking_mode": "llm_moment_finder",
+            "platform": platform,
+            "projected_hook_score": row.get("hook"),
+            "projected_retention_score": row.get("flow"),
+        })
+    return moments
 
-        trace = trace_by_id.get(candidate_id, {})
-        rows.append(
-            {
-                "candidate_id": candidate_id,
-                "source": trace.get("source"),
-                "clip_type": trace.get("clip_type"),
-                "start_time": round(start, 3),
-                "end_time": round(end, 3),
-                "duration": round(end - start, 3),
-                "rank_score": payload.get("rank_score"),
-                "pre_judge_rank": trace.get("pre_judge_rank"),
-                "judge_score": payload.get("judge_score"),
-                "selected": bool(payload.get("selected")),
-                "rejected_reason": payload.get("rejected_reason"),
-                "rejection_source": payload.get("rejection_source"),
-                "judge_reason": payload.get("judge_reason"),
-                "feedback_rating": payload.get("feedback_rating"),
-                "feedback_tags": list(payload.get("feedback_tags") or []),
-                "feedback_notes": payload.get("feedback_notes"),
-            }
-        )
-
-    rows.sort(key=_review_candidate_sort_key)
-    return rows[: max(int(limit or 0), 0)]
-
-
-def _review_candidate_sort_key(row: dict) -> tuple:
-    selected_rank = 0 if bool(row.get("selected")) else 1
-    judged_rank = 0 if row.get("judge_score") not in (None, "") else 1
-    pre_judge_rank = row.get("pre_judge_rank")
-    try:
-        pre_judge_sort = int(pre_judge_rank)
-    except (TypeError, ValueError):
-        pre_judge_sort = 10_000
-    return (
-        selected_rank,
-        judged_rank,
-        -_float_value(row.get("judge_score")),
-        pre_judge_sort,
-        -_float_value(row.get("rank_score")),
-        _float_value(row.get("start_time")),
-    )
-
-
-def _optional_float_value(value) -> float | None:
-    if value in (None, ""):
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _float_value(value) -> float:
-    parsed = _optional_float_value(value)
-    return parsed if parsed is not None else 0.0
-
-
-async def _await_with_optional_timeout(awaitable, timeout_sec: float | None):
-    if timeout_sec is None or timeout_sec <= 0:
-        return await asyncio.shield(awaitable)
-    return await asyncio.wait_for(
-        asyncio.shield(awaitable),
-        timeout=timeout_sec,
-    )
-
-
-async def _await_clip_judge_or_fallback(
-    awaitable,
-    *,
-    timeout_sec: float | None,
-    fallback_candidates: list,
-    job_id: str,
-) -> tuple[list, bool]:
-    try:
-        return await _await_with_optional_timeout(awaitable, timeout_sec), False
-    except asyncio.TimeoutError:
-        fallback = list(fallback_candidates)
-        logger.warning(
-            json.dumps(
-                {
-                    "event": "clip_judge_stage_degraded",
-                    "job_id": job_id,
-                    "reason": "timeout",
-                    "timeout_sec": float(timeout_sec or 0.0),
-                    "fail_fast": bool(getattr(settings, "clip_judge_fail_fast", False)),
-                    "fallback": "pre_judge_ranked_candidates",
-                    "fallback_candidates": len(fallback),
-                },
-                ensure_ascii=True,
-                sort_keys=True,
-            )
-        )
-        return fallback, True
-
-
-def _build_judge_recall_reserved_order(
-    ranked_candidates: list[RankedCandidate],
-    recall_signal_rows: list[dict] | tuple[dict, ...],
-    judge_top_k: int,
-) -> tuple[list[RankedCandidate], dict]:
-    """Reserve some judge slots for deeper candidates with strong recall signals."""
-
-    total_candidates = len(ranked_candidates)
-    judge_limit = min(max(int(judge_top_k or 0), 0), total_candidates)
-    enabled = bool(getattr(settings, "judge_recall_reserve_enabled", True))
-    summary = {
-        "enabled": enabled,
-        "judge_top_k": judge_limit,
-        "normal_slots": judge_limit,
-        "reserve_slots": 0,
-        "pool_k": judge_limit,
-        "selected": 0,
-        "selected_candidates": [],
-        "min_score": float(getattr(settings, "judge_recall_reserve_min_score", 0.12) or 0.0),
-    }
-    if not enabled or judge_limit <= 0:
-        return list(ranked_candidates), summary
-
-    reserve_slots = min(
-        max(int(getattr(settings, "judge_recall_reserve_slots", 0) or 0), 0),
-        judge_limit,
-    )
-    if reserve_slots <= 0:
-        return list(ranked_candidates), summary
-
-    normal_slots = max(judge_limit - reserve_slots, 0)
-    pool_k = min(
-        max(int(getattr(settings, "judge_recall_reserve_pool_k", judge_limit) or judge_limit), judge_limit),
-        total_candidates,
-    )
-    min_score = float(getattr(settings, "judge_recall_reserve_min_score", 0.12) or 0.0)
-    recall_signal_by_id = {
-        _base_candidate_id(str(row.get("candidate_id") or row.get("id") or "")): row
-        for row in recall_signal_rows
-        if row.get("candidate_id") or row.get("id")
-    }
-    normal = list(ranked_candidates[:normal_slots])
-    normal_ids = {_base_candidate_id(item.candidate.id) for item in normal}
-    scored: list[tuple[float, int, RankedCandidate, dict]] = []
-    for index, ranked in enumerate(ranked_candidates[normal_slots:pool_k], start=normal_slots + 1):
-        candidate_id = _base_candidate_id(ranked.candidate.id)
-        if candidate_id in normal_ids:
-            continue
-        recall_signal = recall_signal_by_id.get(candidate_id, {})
-        protection = high_recall_protection.oracle_free_recall_score(ranked)
-        reserve_score = _judge_recall_reserve_score(ranked, index, pool_k, protection)
-        if reserve_score < min_score:
-            continue
-        scored.append((reserve_score, index, ranked, recall_signal))
-
-    scored.sort(
-        key=lambda item: (
-            item[0],
-            _safe_float(item[2].rank_score),
-        ),
-        reverse=True,
-    )
-    selected: list[tuple[float, int, RankedCandidate, dict]] = []
-    for item in scored:
-        if len(selected) >= reserve_slots:
-            break
-        ranked = item[2]
-        if any(_candidate_overlap_ratio(ranked, selected_item[2]) > 0.65 for selected_item in selected):
-            continue
-        if any(_candidate_overlap_ratio(ranked, normal_item) > 0.65 for normal_item in normal):
-            continue
-        selected.append(item)
-    if len(selected) < reserve_slots:
-        selected_ids = {_base_candidate_id(item[2].candidate.id) for item in selected}
-        for item in scored:
-            if len(selected) >= reserve_slots:
-                break
-            candidate_id = _base_candidate_id(item[2].candidate.id)
-            if candidate_id in selected_ids:
-                continue
-            selected.append(item)
-            selected_ids.add(candidate_id)
-
-    reserve = [
-        replace(
-            ranked,
-            rationale=[*ranked.rationale, "judge_recall_reserved"],
-        )
-        for _, _, ranked, _ in selected
-    ]
-    reserved_ids = {_base_candidate_id(item.candidate.id) for item in reserve}
-    rest = [
-        ranked
-        for ranked in ranked_candidates
-        if _base_candidate_id(ranked.candidate.id) not in normal_ids | reserved_ids
-    ]
-    summary.update(
-        {
-            "normal_slots": normal_slots,
-            "reserve_slots": reserve_slots,
-            "pool_k": pool_k,
-            "selected": len(reserve),
-            "selected_candidates": [
-                {
-                    "candidate_id": ranked.candidate.id,
-                    "source": ranked.candidate.source,
-                    "start": round(float(ranked.candidate.start), 3),
-                    "end": round(float(ranked.candidate.end), 3),
-                    "pre_judge_rank": index,
-                    "pre_judge_rank_score": round(_safe_float(ranked.rank_score), 6),
-                    "reserve_score": round(score, 6),
-                    "high_recall_score": protection["score"],
-                    "high_recall_reasons": list(protection["reasons"]),
-                }
-                for score, index, ranked, row in selected
-                for protection in [high_recall_protection.oracle_free_recall_score(ranked)]
-            ],
-        }
-    )
-    return [*normal, *reserve, *rest], summary
-
-
-def _judge_recall_reserve_score(
-    ranked: RankedCandidate,
-    pre_judge_rank: int,
-    pool_k: int,
-    protection: dict[str, object] | None = None,
-) -> float:
-    features = ranked.features
-    rank_score = min(max(_safe_float(ranked.rank_score) / 12.0, 0.0), 1.0)
-    heuristic_score = min(max(_safe_float(ranked.heuristic_rank_score) / 12.0, 0.0), 1.0)
-    score_hint = min(max(_safe_float(ranked.candidate.score_hint) / 10.0, 0.0), 1.0)
-    rank_position = 1.0 - (max(pre_judge_rank - 1, 0) / max(pool_k, 1))
-    feature_score = 0.0
-    if features is not None:
-        if bool(getattr(settings, "serving_cross_platform_feature_boosts_enabled", False)) and bool(
-            getattr(features, "cross_platform_recall_target", False)
-        ):
-            overlap = min(max(_safe_float(getattr(features, "cross_platform_positive_overlap_ratio", 0.0)), 0.0), 1.0)
-            similarity = min(max(_safe_float(getattr(features, "cross_platform_positive_similarity", 0.0)), 0.0), 1.0)
-            feature_score += 4.0 + overlap * 1.5 + similarity * 0.5
-        feature_score += 0.24 * min(max(_safe_float(features.payoff_score) / 10.0, 0.0), 1.0)
-        context_completeness = min(max(_safe_float(getattr(features, "context_completeness_score", 0.0)), 0.0), 1.0)
-        context_strength = min(max(_safe_float(getattr(features, "context_strength_score", 0.0)), 0.0), 1.0)
-        setup_present = min(max(_safe_float(getattr(features, "setup_present_score", 0.0)), 0.0), 1.0)
-        payoff_present = min(max(_safe_float(getattr(features, "payoff_present_score", 0.0)), 0.0), 1.0)
-        pattern_score = min(max(_safe_float(getattr(features, "context_pattern_score", 0.0)), 0.0), 1.0)
-        pattern_margin = min(max(_safe_float(getattr(features, "context_pattern_similarity_margin", 0.0)) / 0.08, 0.0), 1.0)
-        feature_score += 0.55 * context_completeness
-        feature_score += 0.38 * context_strength
-        feature_score += 0.24 * setup_present
-        feature_score += 0.24 * payoff_present
-        feature_score += 0.26 * pattern_score
-        feature_score += 0.18 * pattern_margin
-        feature_score += 0.18 * min(max(_safe_float(features.projected_retention_score), 0.0), 1.0)
-        feature_score += 0.16 * min(max(_safe_float(features.multimodal_proxy_score), 0.0), 1.0)
-        feature_score += 0.16 * min(max(_safe_float(features.outcome_prior_score), 0.0), 1.0)
-        feature_score += 0.10 * min(max(_safe_float(features.hook_strength) / 10.0, 0.0), 1.0)
-        feature_score += 0.10 * min(max(_safe_float(features.standalone_score), 0.0), 1.0)
-    protection_score = 0.0
-    if isinstance(protection, dict):
-        protection_score = min(max(_safe_float(protection.get("score")), 0.0), 1.0)
-    source_bonus = 0.06 if ranked.candidate.source in {"dense_inventory", "dense_window", "dense"} else 0.0
-    return (
-        0.35 * rank_score
-        + 0.20 * heuristic_score
-        + 0.15 * score_hint
-        + 0.08 * rank_position
-        + 0.65 * protection_score
-        + feature_score
-        + source_bonus
-    )
-
-
-def _candidate_overlap_ratio(left: RankedCandidate, right: RankedCandidate) -> float:
-    start = max(float(left.candidate.start), float(right.candidate.start))
-    end = min(float(left.candidate.end), float(right.candidate.end))
-    overlap = max(0.0, end - start)
-    if overlap <= 0:
-        return 0.0
-    left_duration = max(float(left.candidate.end) - float(left.candidate.start), 0.001)
-    right_duration = max(float(right.candidate.end) - float(right.candidate.start), 0.001)
-    return max(overlap / left_duration, overlap / right_duration)
-
-
-def _base_candidate_id(candidate_id: str) -> str:
-    return candidate_id.split("::", 1)[0]
-
-
-def _safe_float(value) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
 
 
 async def run_pipeline(
@@ -1030,15 +376,6 @@ async def run_pipeline(
 ) -> None:
     effective_profile = profile or settings.clip_profile
     normalized_strategy = clip_strategy.normalize_strategy(strategy)
-    cross_platform_positive_windows, cross_platform_positive_summary = _load_cross_platform_positive_windows(
-        effective_profile,
-        url,
-    )
-    diagnostic_positive_windows, diagnostic_positive_summary = _load_cross_platform_positive_windows(
-        effective_profile,
-        url,
-        force_load=True,
-    )
     loop = asyncio.get_running_loop()
     audio_path: pathlib.Path | None = None
     try:
@@ -1050,7 +387,6 @@ async def run_pipeline(
             update_job(job_id, status="downloading", progress_pct=19)
 
         def _transcription_progress(done_chunks: int, total_chunks: int, _chunk_path) -> None:
-            # Reserve 30-55% for ASR progress.
             pct = 30 + int((done_chunks / max(total_chunks, 1)) * 25)
             update_job(job_id, status="transcribing", progress_pct=min(max(pct, 30), 55))
 
@@ -1060,22 +396,6 @@ async def run_pipeline(
             if _transcript_cache_enabled_for_job(job_id, url)
             else None
         )
-        feature_cache_source = _feature_cache_source(
-            job_id=job_id,
-            url=url,
-            video_path=video_path,
-        )
-        audio_cache_source = transcript_cache_source or feature_cache_source
-        chat_path = None
-        if settings.enable_chat_analysis:
-            update_job(job_id, status="downloading_chat", progress_pct=28)
-            chat_path = await loop.run_in_executor(
-                None,
-                chat_analyzer.download_chat,
-                url,
-                job_id,
-                pathlib.Path(settings.storage_dir) / job_id,
-            )
 
         update_job(job_id, status="transcribing", progress_pct=30)
         transcript = await loop.run_in_executor(
@@ -1090,8 +410,7 @@ async def run_pipeline(
                 else None
             ),
         )
-        transcript_cache_hit = transcript is not None
-        if transcript_cache_hit:
+        if transcript is not None:
             logger.info(
                 "pipeline_transcript_cache_hit job_id=%s source=%s segments=%s",
                 job_id,
@@ -1105,12 +424,9 @@ async def run_pipeline(
                 lambda: _extract_audio_cached(
                     video_path,
                     job_id,
-                    cache_source=audio_cache_source,
+                    cache_source=transcript_cache_source,
                 ),
             )
-
-            # Start non-transcription tasks in the background, but keep transcription
-            # as its own visible phase so long uploads do not appear stuck.
             update_job(job_id, status="transcribing", progress_pct=30)
             transcript = await loop.run_in_executor(
                 None,
@@ -1123,111 +439,39 @@ async def run_pipeline(
                 ),
             )
 
-        overlap_feature_extraction = bool(settings.pipeline_overlap_feature_extraction)
-        extract_full_visual_features = _should_extract_full_visual_features(video_path)
-        audio_features_task = None
-        video_features_task = None
-        if overlap_feature_extraction:
-            audio_features_task = loop.run_in_executor(
-                None,
-                lambda: _extract_audio_features_cached(
-                    video_path,
-                    audio_path=audio_path,
-                    job_id=job_id,
-                    cache_source=feature_cache_source,
-                    audio_cache_source=audio_cache_source,
-                ),
-            )
-            if extract_full_visual_features or feature_cache_source:
-                video_features_task = loop.run_in_executor(
-                    None,
-                    lambda: _extract_video_features_cached(
-                        video_path,
-                        cache_source=feature_cache_source,
-                        allow_extract=extract_full_visual_features,
-                    ),
-                )
-
-        _raise_if_cancelled(job_id)
-        update_job(job_id, status="extracting_features", progress_pct=56)
-        if overlap_feature_extraction:
-            visual_frames = await video_features_task if video_features_task is not None else []
-            audio_frames, audio_path = (
-                await audio_features_task if audio_features_task is not None else ([], audio_path)
-            )
-        else:
-            audio_frames, audio_path = await loop.run_in_executor(
-                None,
-                lambda: _extract_audio_features_cached(
-                    video_path,
-                    audio_path=audio_path,
-                    job_id=job_id,
-                    cache_source=feature_cache_source,
-                    audio_cache_source=audio_cache_source,
-                ),
-            )
-            _raise_if_cancelled(job_id)
-            visual_frames = []
-            if extract_full_visual_features or feature_cache_source:
-                visual_frames = await loop.run_in_executor(
-                    None,
-                    lambda: _extract_video_features_cached(
-                        video_path,
-                        cache_source=feature_cache_source,
-                        allow_extract=extract_full_visual_features,
-                    ),
-                )
-
-        # Merge audio features, then visual features into transcript segments
-        transcript = audio_features.enrich_segments(transcript, audio_frames)
-        transcript = video_features.enrich_segments(transcript, visual_frames)
-
-        # Speaker diarization — MFCC clustering (runs when pyannote is unavailable)
-        # pyannote already ran inside transcriber.transcribe() when hf_token is set
-        if settings.pipeline_enable_diarization and not settings.hf_token and audio_path is None:
-            update_job(job_id, status="extracting_audio", progress_pct=64)
-            audio_path = await loop.run_in_executor(
-                None,
-                lambda: _extract_audio_cached(
-                    video_path,
-                    job_id,
-                    cache_source=audio_cache_source,
-                ),
-            )
-        if audio_path is not None and settings.pipeline_enable_diarization and not settings.hf_token:
-            update_job(job_id, status="diarizing", progress_pct=65)
-            transcript = await loop.run_in_executor(
-                None, audio_features.diarize_speakers, transcript, audio_path
-            )
-
-        # Chat-replay enrichment (best-effort — no-op when chat_path is None)
-        transcript = chat_analyzer.enrich_segments(transcript, chat_path)
-
         job_dir = pathlib.Path(settings.storage_dir) / job_id
         debug_dir = job_dir / "debug"
         debug_dir.mkdir(parents=True, exist_ok=True)
-        llm_moment_finder_stage: dict[str, object] = {
+
+        if settings.enable_chat_analysis and url:
+            update_job(job_id, status="downloading_chat", progress_pct=60)
+            enriched = transcriber.apply_chat_enrichment(transcript_cache_source, transcript)
+            if enriched is not None:
+                transcript = enriched
+            else:
+                chat_path = await loop.run_in_executor(
+                    None,
+                    lambda: chat_signal.download_chat(
+                        url, job_id, debug_dir,
+                        timeout_sec=settings.chat_download_timeout_sec,
+                    ),
+                )
+                if chat_path:
+                    transcript = chat_signal.enrich_segments(transcript, chat_path)
+                    if transcript_cache_source:
+                        await loop.run_in_executor(
+                            None,
+                            lambda: transcriber.save_chat_enrichment(transcript_cache_source, transcript),
+                        )
+
+        llm_stage: dict[str, object] = {
             "attempted": True,
-            "status": "pending",
-            "reason": None,
-            "error_type": None,
-            "error": None,
-            "ranked_candidate_count": 0,
+            "status": "running",
+            "provider": str(getattr(settings, "moment_finder_provider", "gemini") or "gemini"),
+            "model": str(getattr(settings, "moment_finder_model", "") or ""),
+            "max_moments": int(getattr(settings, "moment_finder_max_moments", 180) or 180),
         }
-        normalized_candidates: list[Candidate] = []
-        candidate_features = []
-        normalized_recall_targets: dict[str, dict[str, object]] = {}
-        cross_platform_feature_boost_summary: dict[str, object] = {"enabled": False}
-        ranked_candidates: list[RankedCandidate] = []
-        llm_moment_finder_stage.update(
-            {
-                "status": "running",
-                "provider": str(getattr(settings, "moment_finder_provider", "gemini") or "gemini"),
-                "model": str(getattr(settings, "moment_finder_model", "") or ""),
-                "max_moments": int(getattr(settings, "moment_finder_max_moments", 180) or 180),
-            }
-        )
-        _write_json(debug_dir / "llm_moment_finder_stage.json", llm_moment_finder_stage)
+        _write_json(debug_dir / "llm_moment_finder_stage.json", llm_stage)
         update_job(job_id, status="analyzing", progress_pct=73)
         try:
             llm_result = await loop.run_in_executor(
@@ -1249,587 +493,62 @@ async def run_pipeline(
                     filter_transcript_noise=bool(getattr(settings, "moment_finder_filter_transcript_noise", True)),
                 ),
             )
-            ranked_candidates = list(llm_result.ranked_candidates)
-            if not ranked_candidates:
+            if not llm_result.ranked_candidates:
                 raise moment_finder.MomentFinderError("LLM moment finder returned no ranked candidates.")
-            normalized_candidates = [ranked.candidate for ranked in ranked_candidates]
-            candidate_features = [
-                ranked.features
-                for ranked in ranked_candidates
-                if ranked.features is not None
-            ]
-            normalized_recall_targets = _cross_platform_recall_targets(
-                normalized_candidates,
-                cross_platform_positive_windows,
-                profile=effective_profile,
-            )
-            llm_moment_finder_stage.update(
-                {
-                    "status": "ok",
-                    "ranked_candidate_count": len(ranked_candidates),
-                    "normalized_candidate_count": len(normalized_candidates),
-                    "feature_count": len(candidate_features),
-                    **llm_result.summary,
-                }
-            )
+            llm_stage.update({"status": "ok", **llm_result.summary})
             (debug_dir / "llm_moment_finder_prompt.txt").write_text(llm_result.prompt, encoding="utf-8")
             (debug_dir / "llm_moment_finder_response.txt").write_text(llm_result.response_text, encoding="utf-8")
-            _write_json(debug_dir / "llm_moment_finder_stage.json", llm_moment_finder_stage)
+            _write_json(debug_dir / "llm_moment_finder_stage.json", llm_stage)
             _write_json(debug_dir / "llm_moment_finder_usage.json", llm_result.usage)
             _write_jsonl(debug_dir / "llm_moment_finder_moments.jsonl", llm_result.post_processed_moments)
         except moment_finder.MomentFinderError as exc:
-            llm_moment_finder_stage.update(
-                {
-                    "status": "failed",
-                    "error_type": type(exc).__name__,
-                    "error": str(exc),
-                }
-            )
-            _write_json(debug_dir / "llm_moment_finder_stage.json", llm_moment_finder_stage)
+            llm_stage.update({"status": "failed", "error_type": type(exc).__name__, "error": str(exc)})
+            _write_json(debug_dir / "llm_moment_finder_stage.json", llm_stage)
             logger.error(
                 json.dumps(
-                    {
-                        "event": "llm_moment_finder_failed",
-                        "job_id": job_id,
-                        "error_type": type(exc).__name__,
-                        "error": str(exc),
-                    },
-                    ensure_ascii=True,
-                    sort_keys=True,
+                    {"event": "llm_moment_finder_failed", "job_id": job_id,
+                     "error_type": type(exc).__name__, "error": str(exc)},
+                    ensure_ascii=True, sort_keys=True,
                 )
             )
             raise
-        ranked_candidates_pre_judge = list(ranked_candidates)
-        judged_ranked_candidates = list(ranked_candidates)
-        judge_top_k = min(
-            max(int(getattr(settings, "moment_finder_multimodal_confirm_top_n", 12) or 0), 0),
-            len(ranked_candidates),
-        )
-        judge_input_candidates, judge_recall_reserve_summary = _build_judge_recall_reserved_order(
-            ranked_candidates,
-            [],
-            judge_top_k,
-        )
-        sampled_keyframes: dict[str, list[keyframe_sampler.SampledKeyframe]] = {}
-        judge_provider = (getattr(settings, "judge_provider", None) or "auto").strip().lower()
-        clip_judge_stage_status = {
-            "enabled": bool(settings.enable_clip_judge),
-            "attempted": False,
-            "status": "pending" if settings.enable_clip_judge and judge_top_k > 0 else "disabled",
-            "reason": None,
-            "error_type": None,
-            "error": None,
-            "candidates": len(ranked_candidates),
-            "judge_top_k": judge_top_k,
-            "judge_provider": judge_provider,
-            "stage_timeout_sec": 0.0,
-            "provider_request_timeout_sec": float(settings.clip_judge_timeout_sec or 0.0),
-            "fail_fast": bool(getattr(settings, "clip_judge_fail_fast", False)),
-            "provider_fallback_enabled": bool(getattr(settings, "judge_provider_fallback_enabled", True)),
-            "sample_count": int(getattr(settings, "clip_judge_sample_count", 1) or 1),
-            "uncertain_sample_count": int(getattr(settings, "clip_judge_uncertain_sample_count", 1) or 1),
-            "cache_enabled": bool(getattr(settings, "clip_judge_cache_enabled", True)),
-            "fallback": None,
-            "fallback_candidates": 0,
-            "processed_candidates": 0,
-            "attempted_candidates": 0,
-            "recall_filtered_candidates": 0,
-            "judged_candidates": 0,
-            "elapsed_sec": 0.0,
-            "judge_input_candidates": len(judge_input_candidates),
-            "judge_recall_reserve": judge_recall_reserve_summary,
-            "cross_platform_recall": {
-                **cross_platform_positive_summary,
-                "normalized_recall_targets": len(normalized_recall_targets),
-                **cross_platform_feature_boost_summary,
-            },
-            "llm_moment_finder": dict(llm_moment_finder_stage),
-        }
-
-        def _clip_judge_progress(progress: dict[str, object]) -> None:
-            processed = int(progress.get("processed_candidates") or 0)
-            total = max(int(progress.get("total_candidates") or judge_top_k or 0), 1)
-            clip_judge_stage_status.update(
-                {
-                    "status": "running",
-                    "processed_candidates": processed,
-                    "attempted_candidates": int(progress.get("attempted_candidates") or 0),
-                    "judged_candidates": int(progress.get("judged_candidates") or 0),
-                    "recall_filtered_candidates": int(progress.get("recall_filtered_candidates") or 0),
-                    "current_candidate_id": progress.get("candidate_id"),
-                    "current_candidate_start": progress.get("candidate_start"),
-                    "current_candidate_end": progress.get("candidate_end"),
-                    "elapsed_sec": float(progress.get("elapsed_sec") or 0.0),
-                }
-            )
-            _write_json(debug_dir / "clip_judge_stage.json", clip_judge_stage_status)
-            progress_fraction = min(max(processed / total, 0.0), 1.0)
-            update_job(
-                job_id,
-                status="judging",
-                progress_pct=76 + int(progress_fraction * 10),
-            )
-
-        if not settings.enable_clip_judge:
-            clip_judge_stage_status.update(
-                {
-                    "status": "disabled",
-                    "reason": "enable_clip_judge_false",
-                }
-            )
-            logger.info(
-                json.dumps(
-                    {
-                        "event": "clip_judge_stage_disabled",
-                        "job_id": job_id,
-                        "reason": "enable_clip_judge_false",
-                    },
-                    ensure_ascii=True,
-                    sort_keys=True,
-                )
-            )
-        if settings.enable_clip_judge and judge_top_k > 0:
-            update_job(job_id, status="judging", progress_pct=76)
-            use_anthropic_two_tier = (
-                bool(settings.judge_two_tier_enabled)
-                and bool(settings.anthropic_api_key)
-                and bool(settings.enable_multimodal_clip_judge)
-                and int(settings.judge_topk_multimodal_k) > 0
-                and judge_provider in {"", "auto", "anthropic", "anthropic_text", "anthropic_multimodal"}
-            )
-            clip_judge_stage_status.update(
-                {
-                    "attempted": True,
-                    "status": "running",
-                    "anthropic_two_tier": use_anthropic_two_tier,
-                }
-            )
-            logger.info(
-                json.dumps(
-                    {
-                        "event": "clip_judge_stage_start",
-                        "job_id": job_id,
-                        "candidates": len(ranked_candidates),
-                        "judge_input_candidates": len(judge_input_candidates),
-                        "judge_top_k": judge_top_k,
-                        "judge_recall_reserve": judge_recall_reserve_summary,
-                        "judge_provider": judge_provider,
-                        "anthropic_two_tier": use_anthropic_two_tier,
-                        "sample_count": int(getattr(settings, "clip_judge_sample_count", 1) or 1),
-                        "uncertain_sample_count": int(getattr(settings, "clip_judge_uncertain_sample_count", 1) or 1),
-                        "fail_fast": bool(getattr(settings, "clip_judge_fail_fast", False)),
-                        "provider_fallback_enabled": bool(getattr(settings, "judge_provider_fallback_enabled", True)),
-                    },
-                    ensure_ascii=True,
-                    sort_keys=True,
-                )
-            )
-            try:
-                if use_anthropic_two_tier:
-                    text_judge_future = loop.run_in_executor(
-                        None,
-                        lambda: clip_judge.rerank_candidates(
-                            judge_input_candidates,
-                            transcript,
-                            effective_profile,
-                            judge_top_k,
-                            "anthropic",
-                            None,
-                            progress_cb=_clip_judge_progress,
-                        ),
-                    )
-                    judged_ranked_candidates = await _await_with_optional_timeout(text_judge_future, None)
-                    judge_degraded = False
-                    if judge_degraded:
-                        clip_judge_stage_status.update(
-                            {
-                                "status": "degraded",
-                                "reason": "timeout",
-                                "fallback": "pre_judge_ranked_candidates",
-                                "fallback_candidates": len(ranked_candidates_pre_judge),
-                            }
-                        )
-                    if not judge_degraded:
-                        multimodal_top_k = min(
-                            max(int(settings.judge_topk_multimodal_k), 0),
-                            len(judged_ranked_candidates),
-                        )
-                        if multimodal_top_k > 0:
-                            sampled_keyframes = await loop.run_in_executor(
-                                None,
-                                keyframe_sampler.sample_candidate_keyframes,
-                                video_path,
-                                judged_ranked_candidates[:multimodal_top_k],
-                                debug_dir,
-                                settings.judge_keyframes_per_candidate,
-                            )
-                            multimodal_judge_future = loop.run_in_executor(
-                                None,
-                                lambda: clip_judge.rerank_candidates(
-                                    judged_ranked_candidates,
-                                    transcript,
-                                    effective_profile,
-                                    multimodal_top_k,
-                                    "anthropic_multimodal",
-                                    sampled_keyframes,
-                                    progress_cb=_clip_judge_progress,
-                                ),
-                            )
-                            judged_ranked_candidates = await _await_with_optional_timeout(
-                                multimodal_judge_future,
-                                None,
-                            )
-                            _judge_degraded = False
-                            if _judge_degraded:
-                                clip_judge_stage_status.update(
-                                    {
-                                        "status": "degraded",
-                                        "reason": "timeout",
-                                        "fallback": "text_judged_candidates",
-                                        "fallback_candidates": len(judged_ranked_candidates),
-                                    }
-                                )
-                else:
-                    multimodal_provider_allowed = judge_provider in {
-                        "",
-                        "auto",
-                        "anthropic",
-                        "anthropic_multimodal",
-                        "gemini",
-                    }
-                    multimodal_provider_available = bool(
-                        multimodal_provider_allowed and (settings.gemini_api_key or settings.anthropic_api_key)
-                    )
-                    if settings.enable_multimodal_clip_judge and multimodal_provider_available:
-                        sampled_keyframes = await loop.run_in_executor(
-                            None,
-                            keyframe_sampler.sample_candidate_keyframes,
-                            video_path,
-                            judge_input_candidates[:judge_top_k],
-                            debug_dir,
-                            settings.judge_keyframes_per_candidate,
-                        )
-                    judge_future = loop.run_in_executor(
-                        None,
-                        lambda: clip_judge.rerank_candidates(
-                            judge_input_candidates,
-                            transcript,
-                            effective_profile,
-                            judge_top_k,
-                            judge_provider,
-                            sampled_keyframes,
-                            progress_cb=_clip_judge_progress,
-                        ),
-                    )
-                    judged_ranked_candidates = await _await_with_optional_timeout(judge_future, None)
-                    _judge_degraded = False
-                    if _judge_degraded:
-                        clip_judge_stage_status.update(
-                            {
-                                "status": "degraded",
-                                "reason": "timeout",
-                                "fallback": "pre_judge_ranked_candidates",
-                                "fallback_candidates": len(ranked_candidates_pre_judge),
-                            }
-                        )
-            except clip_judge.ClipJudgeError as exc:
-                clip_judge_stage_status.update(
-                    {
-                        "status": "failed" if bool(getattr(settings, "clip_judge_fail_fast", False)) else "degraded",
-                        "reason": "llm_judge_failed",
-                        "error_type": type(exc).__name__,
-                        "error": str(exc),
-                        "fallback": "pre_judge_ranked_candidates",
-                        "fallback_candidates": len(ranked_candidates_pre_judge),
-                    }
-                )
-                logger.error(
-                    json.dumps(
-                        {
-                            "event": "clip_judge_stage_failed",
-                            "job_id": job_id,
-                            "reason": "llm_judge_failed",
-                            "error_type": type(exc).__name__,
-                            "error": str(exc),
-                            "fail_fast": bool(getattr(settings, "clip_judge_fail_fast", False)),
-                        },
-                        ensure_ascii=True,
-                        sort_keys=True,
-                    )
-                )
-                if bool(getattr(settings, "clip_judge_fail_fast", False)):
-                    raise
-            else:
-                judged_count = sum(
-                    1 for item in judged_ranked_candidates if item.judge_result is not None
-                )
-                clip_judge_stage_status["judged_candidates"] = judged_count
-                if clip_judge_stage_status.get("status") == "running":
-                    clip_judge_stage_status["status"] = "ok" if judged_count > 0 else "degraded"
-                    if judged_count <= 0:
-                        clip_judge_stage_status.update(
-                            {
-                                "reason": "empty_judge_result",
-                                "fallback": "pre_judge_ranked_candidates",
-                                "fallback_candidates": len(ranked_candidates_pre_judge),
-                            }
-                        )
-                logger.info(
-                    json.dumps(
-                        {
-                            "event": "clip_judge_stage_done",
-                            "job_id": job_id,
-                            "judged_candidates": judged_count,
-                            "candidates": len(judged_ranked_candidates),
-                        },
-                        ensure_ascii=True,
-                        sort_keys=True,
-                    )
-                )
-        _write_json(debug_dir / "clip_judge_stage.json", clip_judge_stage_status)
-        quality_gate_result = await loop.run_in_executor(
-            None,
-            selector.apply_serving_quality_gate,
-            judged_ranked_candidates,
-        )
-        logger.info(
-            json.dumps(
-                {
-                    "event": "serving_quality_gate_done",
-                    "job_id": job_id,
-                    **quality_gate_result.summary,
-                },
-                ensure_ascii=True,
-                sort_keys=True,
-            )
-        )
-        final_top_k = 12
-        judge_completed_with_results = (
-            bool(settings.enable_clip_judge)
-            and bool(clip_judge_stage_status.get("attempted"))
-            and int(clip_judge_stage_status.get("judged_candidates") or 0) > 0
-        )
-        if judge_completed_with_results:
-            final_selection_result = await loop.run_in_executor(
-                None,
-                lambda: selector.select_post_judge_final_candidates(
-                    quality_gate_result.kept,
-                    final_top_k,
-                    strategy=normalized_strategy,
-                ),
-            )
-        else:
-            def _select_without_judge_results():
-                selected = selector.select_diverse_ranked_candidates(
-                    quality_gate_result.kept,
-                    final_top_k,
-                    strategy=normalized_strategy,
-                )
-                selected_judged = sum(1 for item in selected if item.judge_result is not None)
-                return SimpleNamespace(
-                    selected=selected,
-                    summary={
-                        "policy": "pre_judge_diverse_selection",
-                        "reason": (
-                            "clip_judge_disabled"
-                            if not settings.enable_clip_judge
-                            else "clip_judge_no_judged_results"
-                        ),
-                        "input_candidates": len(quality_gate_result.kept),
-                        "selected_candidates": len(selected),
-                        "selected_judged_candidates": selected_judged,
-                        "selected_unjudged_candidates": len(selected) - selected_judged,
-                        "fallback_unjudged_candidates": 0,
-                        "unjudged_fallback_enabled": False,
-                        "judge_only_final_selection": False,
-                        "top_k": int(final_top_k),
-                        "strategy_platform": normalized_strategy.get("platform"),
-                        "selected": [
-                            {
-                                "candidate_id": item.candidate.id,
-                                "source": item.candidate.source,
-                                "start": round(float(item.candidate.start), 3),
-                                "end": round(float(item.candidate.end), 3),
-                                "rank_score": round(float(item.rank_score), 3),
-                                "judge_score": (
-                                    round(float(item.judge_result.judge_score), 3)
-                                    if item.judge_result is not None
-                                    else None
-                                ),
-                            }
-                            for item in selected
-                        ],
-                    },
-                )
-
-            final_selection_result = await loop.run_in_executor(
-                None,
-                _select_without_judge_results,
-            )
-        ranked_candidates = final_selection_result.selected
-        logger.info(
-            json.dumps(
-                {
-                    "event": "post_judge_final_selection_done",
-                    "job_id": job_id,
-                    **final_selection_result.summary,
-                },
-                ensure_ascii=True,
-                sort_keys=True,
-            )
-        )
-        boundary_refinement_limit = len(ranked_candidates)
-        refine_future = loop.run_in_executor(
-            None,
-            analyzer.refine_candidates,
-            ranked_candidates,
-            transcript,
-            boundary_refinement_limit,
-            effective_profile,
-            normalized_strategy,
-        )
-        try:
-            moments = await _await_with_optional_timeout(
-                refine_future,
-                settings.analyzer_refine_timeout_sec,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(
-                "analyzer.refine_candidates timed out after %.1fs; no moments will be produced for this job",
-                settings.analyzer_refine_timeout_sec,
-            )
-            moments = []
 
         transcripts_dir = pathlib.Path(__file__).parents[1] / "transcripts"
         transcripts_dir.mkdir(exist_ok=True)
-        (transcripts_dir / f"{job_id}.txt").write_text(
-            transcriber.format_transcript(transcript), encoding="utf-8"
-        )
-        (transcripts_dir / f"{job_id}.jsonl").write_text(
-            transcriber.format_jsonl(transcript), encoding="utf-8"
-        )
+        (transcripts_dir / f"{job_id}.txt").write_text(transcriber.format_transcript(transcript), encoding="utf-8")
+        (transcripts_dir / f"{job_id}.jsonl").write_text(transcriber.format_jsonl(transcript), encoding="utf-8")
         _write_jsonl(debug_dir / "segments.jsonl", _segment_records(transcript))
-        _write_json(debug_dir / "llm_moment_finder_stage_final.json", dict(llm_moment_finder_stage))
-        _write_jsonl(
-            debug_dir / "candidates_normalized.jsonl",
-            [candidate.to_dict() for candidate in normalized_candidates],
-        )
-        _write_jsonl(
-            debug_dir / "candidate_features.jsonl",
-            [feature.to_dict() for feature in candidate_features],
-        )
-        _write_jsonl(
-            debug_dir / "ranked_candidates_pre_judge.jsonl",
-            [ranked.to_dict() for ranked in ranked_candidates_pre_judge],
-        )
-        _write_jsonl(
-            debug_dir / "judge_input_candidates.jsonl",
-            [ranked.to_dict() for ranked in judge_input_candidates[:judge_top_k]],
-        )
-        (debug_dir / "judge_recall_reserve_summary.json").write_text(
-            json.dumps(judge_recall_reserve_summary, ensure_ascii=True, indent=2),
-            encoding="utf-8",
-        )
-        _write_jsonl(
-            debug_dir / "judged_candidates.jsonl",
-            [
-                ranked.to_dict()
-                for ranked in judged_ranked_candidates
-                if ranked.judge_result is not None
-            ],
-        )
-        _write_jsonl(
-            debug_dir / "serving_quality_gate.jsonl",
-            quality_gate_result.audit_rows,
-        )
-        (debug_dir / "post_judge_final_selection.json").write_text(
-            json.dumps(final_selection_result.summary, ensure_ascii=True, indent=2),
-            encoding="utf-8",
-        )
-        _write_jsonl(
-            debug_dir / "judge_keyframes.jsonl",
-            [
-                frame.to_dict()
-                for frames in sampled_keyframes.values()
-                for frame in frames
-            ],
-        )
-        _write_jsonl(
-            debug_dir / "ranked_candidates.jsonl",
-            [ranked.to_dict() for ranked in ranked_candidates],
-        )
-        _write_jsonl(
-            debug_dir / "ranked_candidates_v2.jsonl",
-            _ranked_score_records(
-                ranked_candidates_pre_judge,
-                judged_ranked_candidates,
-                ranked_candidates,
-            ),
-        )
-        # Post-process: align to sentence boundaries, then enforce clip diversity
-        moments = post_processor.snap_boundaries(moments, transcript)
-        moments = post_processor.enforce_diversity(moments)
-        moments = await loop.run_in_executor(
-            None,
-            analyzer.expand_variants,
-            moments,
-            ranked_candidates,
-            transcript,
-            normalized_strategy,
-        )
-        feedback_events = feedback_store.build_pipeline_feedback(
-            job_id,
-            ranked_candidates,
-            moments,
-            quality_gate_result.audit_rows,
-        )
-        feedback_store.write_job_feedback(debug_dir, feedback_events)
-        feedback_store.append_feedback_events(pathlib.Path(settings.storage_dir), feedback_events)
-        (debug_dir / "final_moments.json").write_text(
-            json.dumps(moments, ensure_ascii=True, indent=2),
-            encoding="utf-8",
-        )
-        review_candidate_rows = _build_review_candidate_rows(
-            feedback_events,
-            [],
-            limit=int(getattr(settings, "frontend_review_preview_limit", 40) or 0),
-        )
-        if review_candidate_rows:
-            update_job(job_id, status="clipping", progress_pct=86)
-            _raise_if_cancelled(job_id)
-            review_candidate_rows = await loop.run_in_executor(
-                None,
-                clipper.cut_review_clips,
-                video_path,
-                review_candidate_rows,
-                job_id,
-                int(getattr(settings, "frontend_review_preview_limit", 40) or 0),
-            )
-        _write_jsonl(debug_dir / "review_candidates.jsonl", review_candidate_rows)
+
+        platform = str(normalized_strategy.get("platform") or "general")
+        moments = _moments_from_post_processed(llm_result.post_processed_moments, platform)
+        _write_json(debug_dir / "final_moments.json", {"moments": moments, "count": len(moments)})
+
         logger.info(
             json.dumps(
-                {
-                    "event": "pipeline_debug_done",
-                    "job_id": job_id,
-                    "moments": len(moments),
-                    "cross_platform_positive_diagnostics": diagnostic_positive_summary,
-                    "review_candidate_rows": len(review_candidate_rows),
-                },
-                ensure_ascii=True,
-                sort_keys=True,
+                {"event": "pipeline_moments_ready", "job_id": job_id, "moment_count": len(moments)},
+                ensure_ascii=True, sort_keys=True,
             )
         )
 
         update_job(job_id, status="clipping", progress_pct=88)
         _raise_if_cancelled(job_id)
-        clips = await loop.run_in_executor(None, clipper.cut_clips, video_path, moments, job_id)
+
+        def _clip_progress(so_far: list, done: int, total: int) -> None:
+            pct = 88 + int(done / total * 11)
+            try:
+                update_job(job_id, status="clipping", progress_pct=pct, clips=so_far)
+            except Exception:
+                pass
+
+        clips = await loop.run_in_executor(
+            None, lambda: clipper.cut_clips(video_path, moments, job_id, progress_cb=_clip_progress)
+        )
 
         _cleanup_audio_artifacts(audio_path)
         audio_path = None
 
         update_job(job_id, status="done", progress_pct=100, clips=clips)
 
-        # Schedule cleanup of entire job directory after 1 hour
         asyncio.create_task(_cleanup_later(job_id))
 
     except (PipelineCancelledError, downloader.DownloadCancelledError):
@@ -1846,8 +565,8 @@ async def run_pipeline(
 
 
 async def _cleanup_later(job_id: str) -> None:
-    await asyncio.sleep(3600)
-    import pathlib
+    ttl = 7 * 24 * 3600 if _debug_job(job_id) else 3600
+    await asyncio.sleep(ttl)
     job_dir = pathlib.Path(settings.storage_dir) / job_id
     if job_dir.exists():
         shutil.rmtree(job_dir)
@@ -1864,32 +583,3 @@ def _write_jsonl(path: pathlib.Path, rows: list[dict]) -> None:
 def _segment_records(transcript) -> list[dict]:
     lines = transcriber.format_jsonl(transcript).splitlines()
     return [json.loads(line) for line in lines if line.strip()]
-
-
-def _ranked_score_records(
-    pre_judge: list,
-    judged: list,
-    final_ranked: list,
-) -> list[dict]:
-    judged_map = {item.candidate.id: item for item in judged}
-    final_ids = {item.candidate.id for item in final_ranked}
-    rows: list[dict] = []
-    for item in pre_judge:
-        judged_item = judged_map.get(item.candidate.id, item)
-        rows.append(
-            {
-                "candidate_id": item.candidate.id,
-                "source": item.candidate.source,
-                "heuristic_rank_score": item.heuristic_rank_score,
-                "trained_rank_score": item.trained_rank_score,
-                "model_blend": item.model_blend,
-                "pre_judge_rank_score": item.rank_score,
-                "judged_rank_score": judged_item.rank_score,
-                "trained_model_used": item.trained_model_used,
-                "judge_used": judged_item.judge_result is not None,
-                "selected_after_diversity": item.candidate.id in final_ids,
-                "rationale": list(judged_item.rationale),
-            }
-        )
-    rows.sort(key=lambda row: (float(row.get("judged_rank_score") or 0.0), row["candidate_id"]), reverse=True)
-    return rows

@@ -5775,3 +5775,31 @@ Kernprobleme: kleines Goldlabeled-Dataset, Train-Holdout-Gap, twitch_proxy schad
 ### Next Step
 
 - Run a focused VOD feature build/training run for `backend/ml/artifacts/jynxzi_top_viewed_30d_gold_positive_needs_features.jsonl`, then import the newly feature-backed windows into gold eval as the second batch.
+
+---
+
+## 2026-06-08 Phase 3 — Chat-Signal von Grund auf neu + Dead-Code-Bereinigung
+
+### Teil D — Dead-Code löschen
+- [ ] 19 tote Service-Module + Tests löschen
+- [ ] Tote Config-Flags entfernen
+- [ ] services/__init__.py prüfen
+
+### Teil A — Neues Chat-Signal-Modul
+- [ ] backend/services/chat_signal.py (GraphQL download + spike + emotion)
+- [ ] backend/tests/test_chat_signal.py
+
+### Teil B — RichSegment schlankmachen
+- [ ] 12 chat_*-Felder → 3 (chat_spike_score, chat_message_count, chat_category)
+- [ ] Tote audio/visual-Felder entfernen
+- [ ] to_dict/from_dict/format_transcript aktualisieren
+
+### Teil C — Verdrahtung + LLM-Prompt
+- [ ] pipeline.py: chat_signal import + wiring
+- [ ] llm_moment_finder.py: TranscriptSegment chat fields + format_transcript_for_prompt + preamble
+- [ ] moment_finder.py: rich_segments_to_transcript_segments chat fields durchreichen
+
+### Verifikation
+- [ ] Import-Check: python -c "import pipeline, main"
+- [ ] Tests: python -m pytest backend/tests/ -q
+- [ ] Graphify update

@@ -1,156 +1,637 @@
 {
-  "/home/antonio/ai_clipping/backend/pipeline.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/job_manager.py": 1776883178.9066896,
-  "/home/antonio/ai_clipping/backend/config.py": 1776983199.872434,
-  "/home/antonio/ai_clipping/backend/models.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/main.py": 1776883178.9066896,
-  "/home/antonio/ai_clipping/backend/ml/import_gold_eval_labels.py": 1777030703.774123,
-  "/home/antonio/ai_clipping/backend/ml/audit_chat_feature_coverage.py": 1777053254.1436396,
-  "/home/antonio/ai_clipping/backend/ml/evaluate_twitch_ranker.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/ml/__init__.py": 1776883178.9066896,
-  "/home/antonio/ai_clipping/backend/ml/audit_ranker_artifacts.py": 1776883178.9066896,
-  "/home/antonio/ai_clipping/backend/ml/diagnose_dataset.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/ml/train_jynxzi_vod.ps1": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/ml/evaluate_pipeline.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/ml/hpo_ranker.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/ml/train_ranker.py": 1777032478.2026641,
-  "/home/antonio/ai_clipping/backend/ml/verify_twitch_api_live.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/ml/train_vod_ranker.py": 1777052269.802143,
-  "/home/antonio/ai_clipping/backend/ml/generate_synthetic_data.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/ml/export_frontend_gold_eval.py": 1777032518.3667407,
-  "/home/antonio/ai_clipping/backend/ml/calibrate_ranker_threshold.py": 1776986355.3793273,
-  "/home/antonio/ai_clipping/backend/ml/enrich_vector_reference_transcripts.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/ml/evaluate_ranker.py": 1776986362.6863294,
-  "/home/antonio/ai_clipping/backend/ml/build_gold_eval_manifest.py": 1776883178.9066896,
-  "/home/antonio/ai_clipping/backend/ml/annotation_store.py": 1776883178.9066896,
-  "/home/antonio/ai_clipping/backend/ml/merge_annotations.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/ml/auto_train_short_form.py": 1776883178.9066896,
-  "/home/antonio/ai_clipping/backend/ml/cache_cleanup.py": 1776947705.5118968,
-  "/home/antonio/ai_clipping/backend/ml/build_vector_reference_set.py": 1776883178.9066896,
-  "/home/antonio/ai_clipping/backend/ml/build_active_gold_eval_queue.py": 1776987739.0309873,
-  "/home/antonio/ai_clipping/backend/ml/export_annotation_queue.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/ml/evaluate_boundary_refinement.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/ml/diagnose_ranker_holdout.py": 1777033588.7096062,
-  "/home/antonio/ai_clipping/backend/ml/collect_viral_clips.py": 1776905943.571201,
-  "/home/antonio/ai_clipping/backend/ml/local_train.py": 1776983229.8539433,
-  "/home/antonio/ai_clipping/backend/ml/build_twitch_training_dataset.py": 1777053464.2513134,
-  "/home/antonio/ai_clipping/backend/ml/train_boundary_ranker.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/ml/mlflow_tracking.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/ml/build_eval_dataset.py": 1776980581.237885,
-  "/home/antonio/ai_clipping/backend/ml/training_workflow_state.py": 1777052273.6411104,
-  "/home/antonio/ai_clipping/backend/ml/build_gold_eval_queue.py": 1776883178.9066896,
-  "/home/antonio/ai_clipping/backend/ml/collect_twitch_clip_labels.py": 1776883178.9066896,
-  "/home/antonio/ai_clipping/backend/ml/embed_reference_clips.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/ml/export_ranker_hard_negatives.py": 1777034782.0106301,
-  "/home/antonio/ai_clipping/backend/ml/pipelines/__init__.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/ml/pipelines/io.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/ml/pipelines/runtime_env.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/ml/pipelines/components/build_eval_dataset_op.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/ml/pipelines/components/evaluate_ranker_op.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/ml/pipelines/components/__init__.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/ml/pipelines/components/_subprocess.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/ml/pipelines/components/train_ranker_op.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/ml/pipelines/components/collect_twitch_clips_op.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/ml/pipelines/components/promote_op.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/ml/pipelines/components/build_training_dataset_op.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/ml/pipelines/backends/__init__.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/ml/pipelines/backends/local_shell.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/routers/__init__.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/routers/jobs.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/tests/test_export_frontend_gold_eval.py": 1777031970.459827,
-  "/home/antonio/ai_clipping/backend/tests/test_clip_judge.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_build_twitch_training_dataset.py": 1777053509.5618794,
-  "/home/antonio/ai_clipping/backend/tests/test_audit_ranker_artifacts.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_post_processor.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_boundary_candidates.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_job_session.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_train_ranker.py": 1777032562.172431,
-  "/home/antonio/ai_clipping/backend/tests/test_annotation_flow.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_keyframe_sampler.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_twitch_clip_labels.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_semantic_service.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_scorer_timeline.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_evaluate_boundary_refinement.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_local_shell_pipeline.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_local_train.py": 1776983200.0203907,
-  "/home/antonio/ai_clipping/backend/tests/test_feedback_store.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_export_ranker_hard_negatives.py": 1777034718.7167068,
-  "/home/antonio/ai_clipping/backend/tests/test_analyzer.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_jobs_router.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_train_vod_ranker.py": 1777052295.5673792,
-  "/home/antonio/ai_clipping/backend/tests/test_transcriber_progress.py": 1776907810.4796371,
-  "/home/antonio/ai_clipping/backend/tests/test_evaluate_pipeline.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_enrich_vector_reference_transcripts.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_downloader.py": 1776947659.9295466,
-  "/home/antonio/ai_clipping/backend/tests/test_train_boundary_ranker.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_candidate_generators.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_collect_viral_clips.py": 1776906271.3091218,
-  "/home/antonio/ai_clipping/backend/tests/test_clip_strategy.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_auto_train_short_form.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_build_gold_eval_manifest.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_candidate_normalizer.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_peak_detector.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_job_cancellation.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_calibrate_ranker_threshold.py": 1776986392.4184935,
-  "/home/antonio/ai_clipping/backend/tests/test_job_manager.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_config.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_cache_cleanup.py": 1776947672.090576,
-  "/home/antonio/ai_clipping/backend/tests/test_chapter_segmenter.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_build_active_gold_eval_queue.py": 1776987753.6244943,
-  "/home/antonio/ai_clipping/backend/tests/test_diagnose_ranker_holdout.py": 1777033561.023624,
-  "/home/antonio/ai_clipping/backend/tests/test_training_workflow_state.py": 1777052288.7367702,
-  "/home/antonio/ai_clipping/backend/tests/test_hpo_ranker.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_pipeline_component_env.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_chat_analyzer.py": 1777065998.3601367,
-  "/home/antonio/ai_clipping/backend/tests/test_pipeline_integration.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_semantic_candidates.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_clip_similarity.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_build_eval_dataset.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_feature_builder.py": 1777053259.5294554,
-  "/home/antonio/ai_clipping/backend/tests/test_profile_config.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_vod_memory.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_video_features.py": 1776951218.3531554,
-  "/home/antonio/ai_clipping/backend/tests/test_gold_eval_workflow.py": 1777030722.2116604,
-  "/home/antonio/ai_clipping/backend/tests/test_audit_chat_feature_coverage.py": 1777053267.67916,
-  "/home/antonio/ai_clipping/backend/tests/test_trend_prior.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_ranker.py": 1776985471.9577618,
-  "/home/antonio/ai_clipping/backend/tests/test_training_export.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/tests/test_transcriber.py": 1776907803.0913043,
-  "/home/antonio/ai_clipping/backend/services/audio_features.py": 1776900987.5895813,
-  "/home/antonio/ai_clipping/backend/services/profile_config.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/services/clip_judge.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/services/__init__.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/services/feature_builder.py": 1777053205.4721613,
-  "/home/antonio/ai_clipping/backend/services/candidate_generators.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/services/video_features.py": 1776951209.6961703,
-  "/home/antonio/ai_clipping/backend/services/downloader.py": 1776947578.505139,
-  "/home/antonio/ai_clipping/backend/services/semantic_candidates.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/services/chat_analyzer.py": 1777066034.381817,
-  "/home/antonio/ai_clipping/backend/services/scorer.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/services/ranker.py": 1776985434.443726,
-  "/home/antonio/ai_clipping/backend/services/chapter_segmenter.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/services/boundary_refiner.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/services/timeline_types.py": 1777053175.2534354,
-  "/home/antonio/ai_clipping/backend/services/candidate_normalizer.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/services/selector.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/services/analyzer.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/services/transcriber.py": 1776907791.4132628,
-  "/home/antonio/ai_clipping/backend/services/post_processor.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/services/clip_strategy.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/services/peak_detector.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/services/boundary_features.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/services/clipper.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/services/vod_memory.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/services/semantic_service.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/services/feedback_store.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/services/audio_extractor.py": 1776895767.9983885,
-  "/home/antonio/ai_clipping/backend/services/trend_prior.py": 1776883178.9150562,
-  "/home/antonio/ai_clipping/backend/services/keyframe_sampler.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/services/boundary_candidates.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/services/training_export.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/services/clip_similarity.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/services/boundary_scorer.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/services/gold_eval_policy.py": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/ml/viral_clips.txt": 1776883178.910873,
-  "/home/antonio/ai_clipping/backend/data/README.md": 1776883178.885773
+  "config.py": {
+    "mtime": 1780929761.777385,
+    "ast_hash": "93352c2bb595057f9368649f5c53f3e5",
+    "semantic_hash": ""
+  },
+  "data/hook_patterns.json": {
+    "mtime": 1780869053.0277474,
+    "ast_hash": "65fadaea0c014b6349842fb4a4eaddef",
+    "semantic_hash": ""
+  },
+  "job_manager.py": {
+    "mtime": 1780869053.4675374,
+    "ast_hash": "e2a38e36ef1fe48f492f901e35e565c1",
+    "semantic_hash": ""
+  },
+  "main.py": {
+    "mtime": 1780875679.5777402,
+    "ast_hash": "fa031f3288735c52d49882685fa70ebe",
+    "semantic_hash": ""
+  },
+  "ml/__init__.py": {
+    "mtime": 1780869053.482505,
+    "ast_hash": "b43a7b99a3230ea84b2d2dd6095a7f86",
+    "semantic_hash": ""
+  },
+  "ml/annotation_store.py": {
+    "mtime": 1780869053.4926758,
+    "ast_hash": "ebf7141b512256b274ef9fe40cb8359a",
+    "semantic_hash": ""
+  },
+  "ml/artifacts/jynxzi_ranker_feature_confounds.json": {
+    "mtime": 1780869053.5894544,
+    "ast_hash": "60aded08de34c7d886be565c45d87f68",
+    "semantic_hash": ""
+  },
+  "ml/artifacts/jynxzi_rollout_review_queue.summary.json": {
+    "mtime": 1780869053.6483805,
+    "ast_hash": "d20e11e00b80e26633b38dfc7ea617d8",
+    "semantic_hash": ""
+  },
+  "ml/audit_chat_feature_coverage.py": {
+    "mtime": 1780869054.0886276,
+    "ast_hash": "b827a34d598bcc78f25b71afba35ff6e",
+    "semantic_hash": ""
+  },
+  "ml/audit_clipfinding_artifacts.py": {
+    "mtime": 1780869054.0993128,
+    "ast_hash": "15bc47851a18dddb451e1120a9a000df",
+    "semantic_hash": ""
+  },
+  "ml/build_eval_dataset.py": {
+    "mtime": 1780869054.1263132,
+    "ast_hash": "c3be6fb31cf03d3310e7688de56b6ec6",
+    "semantic_hash": ""
+  },
+  "ml/build_eval_manifest.py": {
+    "mtime": 1780882688.3248549,
+    "ast_hash": "1b102f0babfa8e9e5873ac5895cffefd",
+    "semantic_hash": ""
+  },
+  "ml/build_gold_eval_manifest.py": {
+    "mtime": 1780869054.135316,
+    "ast_hash": "858f27c8a0b5a03aae0c5b2c1ff91fe6",
+    "semantic_hash": ""
+  },
+  "ml/build_gold_eval_queue.py": {
+    "mtime": 1780869054.1433136,
+    "ast_hash": "5b25d9ea11d43662578c632264fc3081",
+    "semantic_hash": ""
+  },
+  "ml/build_gold_holdout_annotation_manifest.py": {
+    "mtime": 1780869054.151312,
+    "ast_hash": "1b8e6a8360f9a3c89eb3270b9d058389",
+    "semantic_hash": ""
+  },
+  "ml/build_gt_vod_transcripts.py": {
+    "mtime": 1780919148.213256,
+    "ast_hash": "cc01454659b7b63d411c4b755eff0c25",
+    "semantic_hash": ""
+  },
+  "ml/build_outcome_holdout_dataset.py": {
+    "mtime": 1780869054.1693118,
+    "ast_hash": "dad86ad0a467329ace2fb37d254d349d",
+    "semantic_hash": ""
+  },
+  "ml/build_recent_vod_holdout.py": {
+    "mtime": 1780869054.1773126,
+    "ast_hash": "9895fdaf0fd4c6a2462076961c66d161",
+    "semantic_hash": ""
+  },
+  "ml/build_training_holdout_policy.py": {
+    "mtime": 1780869054.185313,
+    "ast_hash": "0a9a2381dcb2b8c8cf6733e8ac26f6d6",
+    "semantic_hash": ""
+  },
+  "ml/build_vector_reference_set.py": {
+    "mtime": 1780869054.1943126,
+    "ast_hash": "c83ab215ab9d4f8aec346913aa5493f8",
+    "semantic_hash": ""
+  },
+  "ml/cache_cleanup.py": {
+    "mtime": 1780869054.2033134,
+    "ast_hash": "9f3033a824f2868ef83841fa51b04aa9",
+    "semantic_hash": ""
+  },
+  "ml/collect_twitch_clip_labels.py": {
+    "mtime": 1780869054.212318,
+    "ast_hash": "818c1a5f19b2955d3fae3c61f293ae2c",
+    "semantic_hash": ""
+  },
+  "ml/diagnose_dataset.py": {
+    "mtime": 1780871144.039865,
+    "ast_hash": "ef77e63e3fdcd7e57e1d87b5b2319330",
+    "semantic_hash": ""
+  },
+  "ml/discover_iboclipss_clips.py": {
+    "mtime": 1780882644.8097353,
+    "ast_hash": "30d00b41ae4dec59c0fb9e71c374f908",
+    "semantic_hash": ""
+  },
+  "ml/embed_reference_clips.py": {
+    "mtime": 1780869054.2525501,
+    "ast_hash": "df54316ac6cf745b90c3f48041e44d7d",
+    "semantic_hash": ""
+  },
+  "ml/eval_clip_finder.py": {
+    "mtime": 1780924382.1719508,
+    "ast_hash": "5e92191660e9aeff5211e78830dd426b",
+    "semantic_hash": ""
+  },
+  "ml/evaluate_boundary_refinement.py": {
+    "mtime": 1780869054.2697654,
+    "ast_hash": "0fbdaa867533ed9bb4b91b0248b21013",
+    "semantic_hash": ""
+  },
+  "ml/evaluate_candidate_funnel.py": {
+    "mtime": 1780871538.773963,
+    "ast_hash": "09b3152bca69b8a7a544781d3ae6d3c7",
+    "semantic_hash": ""
+  },
+  "ml/evaluate_serving_recall_holdout.py": {
+    "mtime": 1780869054.2872849,
+    "ast_hash": "c805120adffc8ee79a6390eb72a170f3",
+    "semantic_hash": ""
+  },
+  "ml/export_annotation_queue.py": {
+    "mtime": 1780869054.2952933,
+    "ast_hash": "eb7e5574a0f2757cb0ece819734716c6",
+    "semantic_hash": ""
+  },
+  "ml/export_auto_outcome_negatives.py": {
+    "mtime": 1780869054.3041,
+    "ast_hash": "7fa07c8c3356ad2546009103201d9747",
+    "semantic_hash": ""
+  },
+  "ml/export_frontend_gold_eval.py": {
+    "mtime": 1780869054.3121014,
+    "ast_hash": "0a3f710d0e657d603a4068e49ea4709f",
+    "semantic_hash": ""
+  },
+  "ml/export_serving_hard_negatives.py": {
+    "mtime": 1780869054.321103,
+    "ast_hash": "efa8b41c1c8a733bd94f55b387f8c42f",
+    "semantic_hash": ""
+  },
+  "ml/gt_pipeline.py": {
+    "mtime": 1780925694.7653258,
+    "ast_hash": "9d46430bc50e6075753611ea50866448",
+    "semantic_hash": ""
+  },
+  "ml/import_gold_eval_labels.py": {
+    "mtime": 1780869054.338101,
+    "ast_hash": "5c6a576c527b1e17bd311988f44936e6",
+    "semantic_hash": ""
+  },
+  "ml/import_mm_judge_labels.py": {
+    "mtime": 1780869054.3471007,
+    "ast_hash": "54a98781f7dc9db3076f39c32dbdf984",
+    "semantic_hash": ""
+  },
+  "ml/import_yt_retention.py": {
+    "mtime": 1780869054.3561013,
+    "ast_hash": "64b1ae147f8c22af86966d331b240629",
+    "semantic_hash": ""
+  },
+  "ml/inspect_background_negatives.py": {
+    "mtime": 1780869054.3651006,
+    "ast_hash": "7275a90bd236336a55a8c9a8cb8d54eb",
+    "semantic_hash": ""
+  },
+  "ml/llm_moment_finder.py": {
+    "mtime": 1780929919.761074,
+    "ast_hash": "1855d837e91299bb7ace4db01e5fa6ce",
+    "semantic_hash": ""
+  },
+  "ml/match_cross_platform_audio_fingerprints.py": {
+    "mtime": 1780869054.3751013,
+    "ast_hash": "aef3d3394182ac9b65b0c4695a555349",
+    "semantic_hash": ""
+  },
+  "ml/match_cross_platform_transcripts.py": {
+    "mtime": 1780922909.1661036,
+    "ast_hash": "b2f311fdef9df65c031810ca24637467",
+    "semantic_hash": ""
+  },
+  "ml/merge_annotations.py": {
+    "mtime": 1780869054.3941014,
+    "ast_hash": "ec6d81c244464ff21aa40d60e0855030",
+    "semantic_hash": ""
+  },
+  "ml/mlflow_tracking.py": {
+    "mtime": 1780869054.4041023,
+    "ast_hash": "4fcccf1845306fad5293fb8425e5567e",
+    "semantic_hash": ""
+  },
+  "ml/outcome_view_weighting.py": {
+    "mtime": 1780869054.4131079,
+    "ast_hash": "a5a6cf3f0a8abd4b38d1637082766158",
+    "semantic_hash": ""
+  },
+  "ml/pipelines/__init__.py": {
+    "mtime": 1780869054.4312086,
+    "ast_hash": "2fc7cf57709f7e47bc09e3a666061f75",
+    "semantic_hash": ""
+  },
+  "ml/pipelines/backends/__init__.py": {
+    "mtime": 1780869054.4572165,
+    "ast_hash": "6e499625763a70e7a9b9123222a7806d",
+    "semantic_hash": ""
+  },
+  "ml/pipelines/backends/local_shell.py": {
+    "mtime": 1780869054.4717276,
+    "ast_hash": "bae808e8f5328c7b23791e5ab31c566a",
+    "semantic_hash": ""
+  },
+  "ml/pipelines/components/__init__.py": {
+    "mtime": 1780869054.4958847,
+    "ast_hash": "98ada2942139c2d914bb98e5c5acb4cb",
+    "semantic_hash": ""
+  },
+  "ml/pipelines/components/_subprocess.py": {
+    "mtime": 1780869054.5848844,
+    "ast_hash": "3c081cca5eaebdb8ba5642645c782e28",
+    "semantic_hash": ""
+  },
+  "ml/pipelines/components/build_eval_dataset_op.py": {
+    "mtime": 1780869054.5978863,
+    "ast_hash": "cfb340391fcedf472d58356a6c6f730b",
+    "semantic_hash": ""
+  },
+  "ml/pipelines/components/build_training_dataset_op.py": {
+    "mtime": 1780869054.6098952,
+    "ast_hash": "ac105e80473ec551c332a74387ac4fe6",
+    "semantic_hash": ""
+  },
+  "ml/pipelines/components/collect_twitch_clips_op.py": {
+    "mtime": 1780869054.622892,
+    "ast_hash": "7f7a8c9495d59d3bf78aad0aa845281f",
+    "semantic_hash": ""
+  },
+  "ml/pipelines/components/promote_op.py": {
+    "mtime": 1780869054.6440418,
+    "ast_hash": "3bd513d70794109d8fe1b0716d28bc03",
+    "semantic_hash": ""
+  },
+  "ml/pipelines/io.py": {
+    "mtime": 1780869054.6550453,
+    "ast_hash": "076c317a9d397f2f349022a3427bdb69",
+    "semantic_hash": ""
+  },
+  "ml/pipelines/runtime_env.py": {
+    "mtime": 1780869054.6652157,
+    "ast_hash": "57b0b5d3b613f97e9bf1529cfe26138f",
+    "semantic_hash": ""
+  },
+  "ml/prune_twitch_clip_labels.py": {
+    "mtime": 1780869054.6746137,
+    "ast_hash": "9153cab768afbfabbe45f8061d1545aa",
+    "semantic_hash": ""
+  },
+  "ml/row_identity.py": {
+    "mtime": 1780869054.684129,
+    "ast_hash": "bf27e077f3e66a12819170c06644ccbf",
+    "semantic_hash": ""
+  },
+  "ml/sample_background_negatives.py": {
+    "mtime": 1780869054.7237527,
+    "ast_hash": "f0efb0e99731f5703fb151b0bdb285ab",
+    "semantic_hash": ""
+  },
+  "ml/train_jynxzi_vod.ps1": {
+    "mtime": 1780869054.7407517,
+    "ast_hash": "ff7d8e8d72b9cee68f2aa6a1350effbf",
+    "semantic_hash": ""
+  },
+  "ml/verify_twitch_api_live.py": {
+    "mtime": 1780869054.759753,
+    "ast_hash": "af9d0b785a6d379b9ab240c102da48c3",
+    "semantic_hash": ""
+  },
+  "ml/vod_download_preflight.py": {
+    "mtime": 1780869054.7767522,
+    "ast_hash": "d49e2ce7162f0a8cd0fa8432cc8a18a4",
+    "semantic_hash": ""
+  },
+  "models.py": {
+    "mtime": 1780869054.783751,
+    "ast_hash": "d39ff4985dd40fdcd6e67d06f06db9c0",
+    "semantic_hash": ""
+  },
+  "pipeline.py": {
+    "mtime": 1780929898.3316374,
+    "ast_hash": "3d475fbccb194473174b1e2f608aa6da",
+    "semantic_hash": ""
+  },
+  "pipeline_runner.py": {
+    "mtime": 1780875603.6319518,
+    "ast_hash": "02abbdd2a494c0968fbbd393ba1518e9",
+    "semantic_hash": ""
+  },
+  "pipeline_worker.py": {
+    "mtime": 1780869054.7987516,
+    "ast_hash": "cbeabf5c59a905c21ab192269c58fba0",
+    "semantic_hash": ""
+  },
+  "routers/__init__.py": {
+    "mtime": 1780869054.8197587,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": ""
+  },
+  "routers/jobs.py": {
+    "mtime": 1780914734.3987174,
+    "ast_hash": "810273582a270103ec2e19402967d57a",
+    "semantic_hash": ""
+  },
+  "routers/pipeline_debug.py": {
+    "mtime": 1780925554.1962767,
+    "ast_hash": "f70d72709f4f6d210df7810160c82fb9",
+    "semantic_hash": ""
+  },
+  "services/__init__.py": {
+    "mtime": 1780869054.852006,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": ""
+  },
+  "services/audio_extractor.py": {
+    "mtime": 1780869054.8695188,
+    "ast_hash": "dee2514eaa32995b26fef75fb54e625c",
+    "semantic_hash": ""
+  },
+  "services/chat_signal.py": {
+    "mtime": 1780930060.4215276,
+    "ast_hash": "45cb95cf99035960494a4d95f379cfba",
+    "semantic_hash": ""
+  },
+  "services/clip_strategy.py": {
+    "mtime": 1780869054.966305,
+    "ast_hash": "aa10c0afc747b45c509543d3f1e2a7ec",
+    "semantic_hash": ""
+  },
+  "services/clipper.py": {
+    "mtime": 1780922433.6073823,
+    "ast_hash": "17cf8dc1090609eba10b4306929d0ac8",
+    "semantic_hash": ""
+  },
+  "services/downloader.py": {
+    "mtime": 1780926792.0756612,
+    "ast_hash": "12977005473f65c66a7091d2a4ce6d5f",
+    "semantic_hash": ""
+  },
+  "services/feedback_store.py": {
+    "mtime": 1780869055.0323372,
+    "ast_hash": "790a5aa40e3207ec6aac47b4849c8fbc",
+    "semantic_hash": ""
+  },
+  "services/gold_eval_policy.py": {
+    "mtime": 1780869055.0600574,
+    "ast_hash": "f346abd0bfabe7027fd48e40c11e8191",
+    "semantic_hash": ""
+  },
+  "services/moment_finder.py": {
+    "mtime": 1780929928.5805542,
+    "ast_hash": "f76f7f86f04d66bdd340894e2746dd86",
+    "semantic_hash": ""
+  },
+  "services/post_processor.py": {
+    "mtime": 1780869055.1163025,
+    "ast_hash": "da80e58febb10c23cb750dc2be0934bf",
+    "semantic_hash": ""
+  },
+  "services/semantic_candidates.py": {
+    "mtime": 1780869055.1522987,
+    "ast_hash": "8045e545abe20bb27441702d437b9efe",
+    "semantic_hash": ""
+  },
+  "services/timeline_types.py": {
+    "mtime": 1780869055.1702993,
+    "ast_hash": "668b742466ec4300466489b5f9411d46",
+    "semantic_hash": ""
+  },
+  "services/transcriber.py": {
+    "mtime": 1780929870.2489126,
+    "ast_hash": "018989f58fd3d46954ba83b9987fc2e4",
+    "semantic_hash": ""
+  },
+  "services/yt_dlp_auth.py": {
+    "mtime": 1780869055.2318225,
+    "ast_hash": "1fdd99650ebbea05a593e7bd0df852db",
+    "semantic_hash": ""
+  },
+  "setup.sh": {
+    "mtime": 1780869055.2386143,
+    "ast_hash": "bac3fd81f07d70b322a72903ed18afc7",
+    "semantic_hash": ""
+  },
+  "tests/test_annotation_flow.py": {
+    "mtime": 1780869055.2606206,
+    "ast_hash": "d0c000bf0c1e82d2c2210408f1b5a910",
+    "semantic_hash": ""
+  },
+  "tests/test_audit_clipfinding_artifacts.py": {
+    "mtime": 1780869055.2858617,
+    "ast_hash": "9859ef9f7c0b7b83e359e6430104837e",
+    "semantic_hash": ""
+  },
+  "tests/test_build_eval_dataset.py": {
+    "mtime": 1780869055.309825,
+    "ast_hash": "84e9606138b9ec737cd92c2a051f23f5",
+    "semantic_hash": ""
+  },
+  "tests/test_build_gold_eval_manifest.py": {
+    "mtime": 1780869055.3178234,
+    "ast_hash": "62ebd53a839688413f4174971b408871",
+    "semantic_hash": ""
+  },
+  "tests/test_build_gold_holdout_annotation_manifest.py": {
+    "mtime": 1780869055.325826,
+    "ast_hash": "2040069c00b8bc0eb7bd9b4affa4172a",
+    "semantic_hash": ""
+  },
+  "tests/test_build_outcome_holdout_dataset.py": {
+    "mtime": 1780869055.3458247,
+    "ast_hash": "87bfdf39b17e4fd489610302cddcac07",
+    "semantic_hash": ""
+  },
+  "tests/test_cache_cleanup.py": {
+    "mtime": 1780869055.3538234,
+    "ast_hash": "2bc8e867533c65b9a841d75c74e1f925",
+    "semantic_hash": ""
+  },
+  "tests/test_chat_signal.py": {
+    "mtime": 1780930142.649916,
+    "ast_hash": "d52fe17ada18542c33fbdaa4117badf3",
+    "semantic_hash": ""
+  },
+  "tests/test_clip_strategy.py": {
+    "mtime": 1780869055.409826,
+    "ast_hash": "79a10edb9a1012fb6fee37ab91c99e03",
+    "semantic_hash": ""
+  },
+  "tests/test_config.py": {
+    "mtime": 1780869055.427347,
+    "ast_hash": "1d9697288d0333c9b01586de78e59144",
+    "semantic_hash": ""
+  },
+  "tests/test_downloader.py": {
+    "mtime": 1780869055.438349,
+    "ast_hash": "2547d4e7f4544bc67bb6684e49f0c4fd",
+    "semantic_hash": ""
+  },
+  "tests/test_evaluate_boundary_refinement.py": {
+    "mtime": 1780869055.4556558,
+    "ast_hash": "c1cea33ffa0250dd7216d5169d0d72b8",
+    "semantic_hash": ""
+  },
+  "tests/test_evaluate_candidate_funnel.py": {
+    "mtime": 1780869055.4646559,
+    "ast_hash": "cab58cf74c5d507f4492756bb045d0b9",
+    "semantic_hash": ""
+  },
+  "tests/test_evaluate_serving_recall_holdout.py": {
+    "mtime": 1780869055.4738467,
+    "ast_hash": "b1b3badac925e1b8fbf5ee69f5f7f3b6",
+    "semantic_hash": ""
+  },
+  "tests/test_export_auto_outcome_negatives.py": {
+    "mtime": 1780869055.4808464,
+    "ast_hash": "74adac816b937da10afdf76e6036666c",
+    "semantic_hash": ""
+  },
+  "tests/test_export_frontend_gold_eval.py": {
+    "mtime": 1780869055.490362,
+    "ast_hash": "38b4113f04e6fc29ca0fae6908a093e6",
+    "semantic_hash": ""
+  },
+  "tests/test_export_serving_hard_negatives.py": {
+    "mtime": 1780869055.497359,
+    "ast_hash": "73c6f7ef2240689e666dcdfd62fa3d26",
+    "semantic_hash": ""
+  },
+  "tests/test_feedback_store.py": {
+    "mtime": 1780869055.5069413,
+    "ast_hash": "5e14ee9fcf1ee553d822ccdd70b68286",
+    "semantic_hash": ""
+  },
+  "tests/test_gold_eval_workflow.py": {
+    "mtime": 1780869055.5149438,
+    "ast_hash": "fa5818910ca08c7fe3e51d02850b6a11",
+    "semantic_hash": ""
+  },
+  "tests/test_inspect_background_negatives.py": {
+    "mtime": 1780869055.5229418,
+    "ast_hash": "925a4818dcef0dc1d4a91a280ca7d9f6",
+    "semantic_hash": ""
+  },
+  "tests/test_job_cancellation.py": {
+    "mtime": 1780869055.52994,
+    "ast_hash": "d4b23b051d87aeabc3f007e32fab01dc",
+    "semantic_hash": ""
+  },
+  "tests/test_job_manager.py": {
+    "mtime": 1780869055.5389397,
+    "ast_hash": "34d7fd83240fb04652e605838e838837",
+    "semantic_hash": ""
+  },
+  "tests/test_job_session.py": {
+    "mtime": 1780869055.5469425,
+    "ast_hash": "c9cde09fa1d2932947a230ce92dce723",
+    "semantic_hash": ""
+  },
+  "tests/test_jobs_router.py": {
+    "mtime": 1780877278.1852105,
+    "ast_hash": "36f9d31d0abb07844082012a1a086936",
+    "semantic_hash": ""
+  },
+  "tests/test_llm_moment_finder.py": {
+    "mtime": 1780875437.319171,
+    "ast_hash": "15ea033fd8a345fc97c79eb7edf4a523",
+    "semantic_hash": ""
+  },
+  "tests/test_local_shell_pipeline.py": {
+    "mtime": 1780869055.5799396,
+    "ast_hash": "653c901fa51851437642c66a0793b144",
+    "semantic_hash": ""
+  },
+  "tests/test_match_cross_platform_audio_fingerprints.py": {
+    "mtime": 1780869055.5879405,
+    "ast_hash": "2542ecb2a7626042b70fc6379c6e4df8",
+    "semantic_hash": ""
+  },
+  "tests/test_match_cross_platform_transcripts.py": {
+    "mtime": 1780869055.5959435,
+    "ast_hash": "52aa8923f4c152b2763eb3ea0823ab2a",
+    "semantic_hash": ""
+  },
+  "tests/test_moment_finder.py": {
+    "mtime": 1780869055.60394,
+    "ast_hash": "e899a8e56aacfeb3629e3120571a211d",
+    "semantic_hash": ""
+  },
+  "tests/test_outcome_view_weighting.py": {
+    "mtime": 1780869055.611946,
+    "ast_hash": "a2ba2514c30c06f9fc150f2497e3ec9f",
+    "semantic_hash": ""
+  },
+  "tests/test_pipeline_integration.py": {
+    "mtime": 1780876500.6388469,
+    "ast_hash": "1ae19a8c3e17406b2fa125e932329087",
+    "semantic_hash": ""
+  },
+  "tests/test_pipeline_worker.py": {
+    "mtime": 1780869055.6361506,
+    "ast_hash": "27d6c1e5fbb87b5a6858ad53eebc9524",
+    "semantic_hash": ""
+  },
+  "tests/test_post_processor.py": {
+    "mtime": 1780869055.6451507,
+    "ast_hash": "cf98d93bdd6a9fef400ff9451eda01bd",
+    "semantic_hash": ""
+  },
+  "tests/test_recent_vod_holdout_policy.py": {
+    "mtime": 1780869055.6591592,
+    "ast_hash": "80aa274d70f90e0500160f0953431da6",
+    "semantic_hash": ""
+  },
+  "tests/test_sample_background_negatives.py": {
+    "mtime": 1780869055.6976225,
+    "ast_hash": "4b040b59325c89b31b6d5c139f5acc6d",
+    "semantic_hash": ""
+  },
+  "tests/test_semantic_candidates.py": {
+    "mtime": 1780869055.7206209,
+    "ast_hash": "4c3af06683abd182339e6b519d7756f7",
+    "semantic_hash": ""
+  },
+  "tests/test_train_jynxzi_vod_script.py": {
+    "mtime": 1780869055.7376213,
+    "ast_hash": "8e5caf41abbdfb6ca45541f20c724f9b",
+    "semantic_hash": ""
+  },
+  "tests/test_transcriber.py": {
+    "mtime": 1780869055.753621,
+    "ast_hash": "9de0309e74d57d58bba3f867dfdd02ec",
+    "semantic_hash": ""
+  },
+  "tests/test_transcriber_progress.py": {
+    "mtime": 1780869055.7606213,
+    "ast_hash": "459cca1158a197cfc36f673ea2a99f97",
+    "semantic_hash": ""
+  },
+  "tests/test_twitch_clip_labels.py": {
+    "mtime": 1780869055.7756226,
+    "ast_hash": "712ec29cd95bb837c3a58f7abecbdbba",
+    "semantic_hash": ""
+  },
+  "tests/test_vod_download_preflight.py": {
+    "mtime": 1780869055.7956257,
+    "ast_hash": "f6989b76072e86b7e02e2d6b3e313211",
+    "semantic_hash": ""
+  },
+  "tests/test_yt_dlp_auth.py": {
+    "mtime": 1780869055.8151414,
+    "ast_hash": "642079f0437a0ef56b3f13e8189f5803",
+    "semantic_hash": ""
+  },
+  "data/README.md": {
+    "mtime": 1780869053.0196795,
+    "ast_hash": "315012e42cd774cde079c59702c12316",
+    "semantic_hash": ""
+  },
+  "ml/viral_clips.txt": {
+    "mtime": 1780869054.767754,
+    "ast_hash": "b8837b4fbce2e34394e1d8a2c636652b",
+    "semantic_hash": ""
+  }
 }

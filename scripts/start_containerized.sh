@@ -136,17 +136,6 @@ REMOTE_MODE="$(normalize_boolish "${AI_CLIPPING_REMOTE:-ngrok}")"
 DEV_MODE="$(normalize_boolish "${AI_CLIPPING_DEV:-1}")"
 REBUILD_MODE="$(normalize_boolish "${AI_CLIPPING_REBUILD:-auto}")"
 COMPOSE_FILES=(-f docker-compose.yml)
-ENABLE_OLLAMA="${AI_CLIPPING_ENABLE_OLLAMA:-1}"
-OLLAMA_CONTAINER="${AI_CLIPPING_OLLAMA_CONTAINER:-ai-clipping-ollama}"
-OLLAMA_MODEL="${AI_CLIPPING_OLLAMA_MODEL:-qwen2.5:7b}"
-OLLAMA_PULL_MODEL="$(normalize_boolish "${AI_CLIPPING_OLLAMA_PULL_MODEL:-0}")"
-
-if [ -z "$ENABLE_OLLAMA" ] && [ -f backend/.env ]; then
-  if grep -Eq '^[[:space:]]*JUDGE_PROVIDER[[:space:]]*=[[:space:]]*ollama[[:space:]]*$' backend/.env; then
-    ENABLE_OLLAMA=1
-  fi
-fi
-ENABLE_OLLAMA_NORMALIZED="$(normalize_boolish "${ENABLE_OLLAMA:-0}")"
 
 case "$REMOTE_MODE" in
   none|off|false|0|"")
@@ -207,17 +196,6 @@ if [ "$BACKEND_RUNTIME" = "cuda" ]; then
   fi
 fi
 
-case "$ENABLE_OLLAMA_NORMALIZED" in
-  1|true|yes|on)
-    COMPOSE_FILES+=(-f docker-compose.ollama.yml)
-    ;;
-  0|false|no|off|"")
-    ;;
-  *)
-    echo "Invalid AI_CLIPPING_ENABLE_OLLAMA=$ENABLE_OLLAMA. Use true/false." >&2
-    exit 1
-    ;;
-esac
 
 mkdir -p \
   backend/tmp/storage \
@@ -229,9 +207,6 @@ echo "Starting AI Clipping with backend runtime: $BACKEND_RUNTIME"
 if [ "$DEV_MODE" = "1" ] || [ "$DEV_MODE" = "true" ] || [ "$DEV_MODE" = "yes" ] || [ "$DEV_MODE" = "on" ]; then
   echo "Dev live reload: enabled"
   echo "Set AI_CLIPPING_DEV=0 for image-only production-style containers."
-fi
-if [ "$ENABLE_OLLAMA_NORMALIZED" = "1" ] || [ "$ENABLE_OLLAMA_NORMALIZED" = "true" ] || [ "$ENABLE_OLLAMA_NORMALIZED" = "yes" ] || [ "$ENABLE_OLLAMA_NORMALIZED" = "on" ]; then
-  echo "Ollama service: enabled"
 fi
 if [ "$REMOTE_MODE" = "ngrok" ]; then
   echo "Remote mode: ngrok"
@@ -258,14 +233,6 @@ if [ "$REMOTE_MODE" = "ngrok" ]; then
   start_ngrok_remote
 fi
 
-if is_truthy "$ENABLE_OLLAMA_NORMALIZED"; then
-  wait_for_backend_container ai-clipping-backend 180
-  if is_truthy "$OLLAMA_PULL_MODEL"; then
-    ensure_backend_ollama_ready ai-clipping-backend "$OLLAMA_CONTAINER" "$OLLAMA_MODEL" "$OLLAMA_PULL_MODEL" 180
-  else
-    ensure_backend_ollama_ready ai-clipping-backend "$OLLAMA_CONTAINER" "" 0 180
-  fi
-fi
 
 cat <<'EOF'
 

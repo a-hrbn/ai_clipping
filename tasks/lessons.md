@@ -1,5 +1,12 @@
 # Lessons
 
+- Vor dem Löschen von ML-Dateien immer einen vollständigen Reverse-Import-Check
+  durchführen: `grep -r "evaluate_candidate_funnel\|<modul>" backend/` reicht
+  nicht — auch Router und andere ML-Module können aktive Abhängigkeiten haben.
+  Die Audit-Klassifikation "DEAD" bezog sich auf ranker-spezifische Funktionen,
+  nicht auf die gesamte Datei. Immer auf Funktionsebene prüfen, nicht auf
+  Dateiebene.
+
 - Human precision review queues must dedupe identical or heavily overlapping
   LLM moment windows before selecting Top-N. Repeated windows can make a
   hallucinated or stale rationale look like multiple strong candidates and

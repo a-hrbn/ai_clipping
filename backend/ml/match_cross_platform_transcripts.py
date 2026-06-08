@@ -66,6 +66,7 @@ def _load_compatible_transcript_cache(cache_dir: pathlib.Path, vod_id: str) -> t
 DEFAULT_OUTPUT = BACKEND_ROOT / "ml" / "artifacts" / "jynxzi_cross_platform_fingerprint_rows.jsonl"
 DEFAULT_VOD_CACHE_ROOT = BACKEND_ROOT / "tmp" / "vod_feature_cache"
 DEFAULT_SHORT_TRANSCRIPT_CACHE_ROOT = pathlib.Path(settings.storage_dir) / "_download_cache" / "short_form_transcripts"
+DEFAULT_SHORT_FINGERPRINT_CACHE_ROOT = pathlib.Path(settings.storage_dir) / "_download_cache" / "short_form_fingerprints"
 TRANSCRIPT_MATCH_SOURCE = "cross_platform_transcript_match"
 _SHORT_TRANSCRIPT_CACHE_VERSION = 1
 _MULTI_WINDOW_NEAR_DUPLICATE_MERGE_GAP_SEC = 30.0
@@ -205,6 +206,7 @@ def match_reposts_to_vods_with_diagnostics(
     min_similarity: float = 0.60,
     vod_cache_root: pathlib.Path = DEFAULT_VOD_CACHE_ROOT,
     short_transcript_cache_root: pathlib.Path = DEFAULT_SHORT_TRANSCRIPT_CACHE_ROOT,
+    short_fingerprint_cache_root: pathlib.Path = DEFAULT_SHORT_FINGERPRINT_CACHE_ROOT,
     diagnostic_top_k: int = 25,
     log_progress: bool = False,
     vod_progress_interval: int = 25,
@@ -405,7 +407,7 @@ def match_reposts_to_vods_with_diagnostics(
             audio_fallback_attempts += 1
             if audio_vod_fps is None:
                 audio_vod_fps = _load_audio_vod_fingerprints(vod_rows)
-            audio_match = _audio_fingerprint_fallback(repost, best, vod_fps=audio_vod_fps)
+            audio_match = _audio_fingerprint_fallback(repost, best, vod_fps=audio_vod_fps, fp_cache_root=short_fingerprint_cache_root)
             if audio_match is not None:
                 accepted_audio = _with_acceptance(
                     audio_match,
@@ -534,12 +536,20 @@ def _match_repost_input(
     vod_transcripts: list[VodTranscript],
 ) -> tuple[int, dict, RepostTranscriptMatchResult]:
     index, repost, repost_text, repost_tokens, repost_duration, repost_chunks = match_input
+    # If candidate_vod_ids is set (GT pipeline: date-window filtered), only compare
+    # this repost against its candidate VODs instead of the full VOD list.
+    candidate_vod_ids = repost.get("candidate_vod_ids")
+    if candidate_vod_ids:
+        candidate_set = {str(v) for v in candidate_vod_ids}
+        active_vods = [vt for vt in vod_transcripts if str(vt.row.get("vod_id") or "") in candidate_set]
+    else:
+        active_vods = vod_transcripts
     best = _best_transcript_match(
         repost,
         repost_text=repost_text,
         repost_tokens=repost_tokens,
         repost_duration=repost_duration,
-        vod_transcripts=vod_transcripts,
+        vod_transcripts=active_vods,
     )
     chunk_matches: list[TranscriptMatch] = []
     for chunk in repost_chunks:
@@ -548,7 +558,7 @@ def _match_repost_input(
             repost_text=chunk.text,
             repost_tokens=chunk.tokens,
             repost_duration=chunk.duration,
-            vod_transcripts=vod_transcripts,
+            vod_transcripts=active_vods,
             match_kind="multi_window_chunk",
             chunk_index=chunk.index,
             chunk_count=chunk.count,
@@ -654,6 +664,53 @@ def _repost_transcript_cache_payload(repost: dict, video_path: pathlib.Path) -> 
         "whisper_model": str(settings.whisper_model),
         "whisper_language": str(settings.whisper_language or "").strip().lower(),
     }
+
+
+def _repost_fingerprint_cache_path(repost: dict, video_path: pathlib.Path, *, cache_root: pathlib.Path) -> pathlib.Path:
+    try:
+        stat = video_path.stat()
+        size = int(stat.st_size)
+        mtime_ns = int(stat.st_mtime_ns)
+    except OSError:
+        size = 0
+        mtime_ns = 0
+    payload = {
+        "kind": "short_form_fingerprint",
+        "source_url": str(repost.get("source_url") or ""),
+        "video_path": str(video_path),
+        "video_size": size,
+        "video_mtime_ns": mtime_ns,
+    }
+    normalized = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    return cache_root / f"{digest}.json"
+
+
+def _load_or_build_repost_fingerprint(
+    repost: dict,
+    video_path: pathlib.Path,
+    fpcalc: str,
+    *,
+    fp_cache_root: pathlib.Path,
+) -> audio_matcher.Fingerprint:
+    cache_path = _repost_fingerprint_cache_path(repost, video_path, cache_root=fp_cache_root)
+    if cache_path.exists():
+        try:
+            fp = audio_matcher._read_fingerprint_file(cache_path)
+            if fp.values:
+                return fp
+        except Exception:
+            pass
+    fp = audio_matcher._fingerprint(video_path, fpcalc)
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(
+            json.dumps({"duration": float(fp.duration), "fingerprint": fp.values}, ensure_ascii=True, sort_keys=True),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+    return fp
 
 
 def _repost_transcript_chunks(transcript: list, *, total_duration: float) -> tuple[RepostTranscriptChunk, ...]:
@@ -1049,6 +1106,7 @@ def _audio_fingerprint_fallback(
     transcript_best: TranscriptMatch,
     *,
     vod_fps: list[tuple[dict, audio_matcher.Fingerprint]],
+    fp_cache_root: pathlib.Path | None = None,
 ) -> TranscriptMatch | None:
     if not vod_fps:
         return None
@@ -1059,7 +1117,10 @@ def _audio_fingerprint_fallback(
     if repost_path is None:
         return None
     try:
-        repost_fp = audio_matcher._fingerprint(repost_path, fpcalc)
+        if fp_cache_root is not None:
+            repost_fp = _load_or_build_repost_fingerprint(repost, repost_path, fpcalc, fp_cache_root=fp_cache_root)
+        else:
+            repost_fp = audio_matcher._fingerprint(repost_path, fpcalc)
     except Exception:
         return None
     best_audio: tuple[float, int, dict, audio_matcher.Fingerprint] | None = None
