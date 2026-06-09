@@ -1,4 +1,5 @@
 import {
+  ActiveClipProfile,
   AIProviderStatus,
   ClipFeedbackPayload,
   ClipRequestOptions,
@@ -6,6 +7,7 @@ import {
   PipelineDebugAnchorsResponse,
   PipelineDebugLabelRequest,
   PipelineDebugListResponse,
+  PipelineDebugRunPrompt,
   PipelineDebugStartRequest,
   PipelineDebugWorkflow,
   ReviewCandidateResponse,
@@ -328,6 +330,20 @@ export async function listPipelineDebugWorkflows(limit = 10): Promise<PipelineDe
 
 export async function getPipelineDebugWorkflow(workflowId: string): Promise<PipelineDebugWorkflow> {
   const res = await fetch(`${API_BASE}/api/pipeline-debug/workflows/${encodeURIComponent(workflowId)}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function getActiveClipProfile(profile = "jynxzi"): Promise<ActiveClipProfile> {
+  const res = await fetch(`${API_BASE}/api/pipeline-debug/active-profile?profile=${encodeURIComponent(profile)}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function getPipelineDebugRunPrompt(workflowId: string, vodId: string): Promise<PipelineDebugRunPrompt> {
+  const res = await fetch(
+    `${API_BASE}/api/pipeline-debug/workflows/${encodeURIComponent(workflowId)}/prompt?vod_id=${encodeURIComponent(vodId)}`,
+  );
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }

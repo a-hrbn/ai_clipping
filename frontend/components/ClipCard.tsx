@@ -149,6 +149,19 @@ export default function ClipCard({ clip, rank, jobId }: Props) {
           </div>
         )}
 
+        {/* Sub-scores */}
+        {(clip.composite_score != null || clip.projected_hook_score != null) && (
+          <div className="grid grid-cols-5 gap-2 text-[11px] text-dim font-mono">
+            {clip.composite_score != null && (
+              <span className="font-semibold text-tx">C {clip.composite_score.toFixed(2)}</span>
+            )}
+            {clip.projected_hook_score != null && <span>H {clip.projected_hook_score.toFixed(2)}</span>}
+            {clip.projected_retention_score != null && <span>F {clip.projected_retention_score.toFixed(2)}</span>}
+            {clip.value_score != null && <span>W {clip.value_score.toFixed(2)}</span>}
+            {clip.trend_score != null && <span>T {clip.trend_score.toFixed(2)}</span>}
+          </div>
+        )}
+
         {/* Timecode */}
         <div className="flex items-center gap-3 font-mono text-xs text-muted">
           <span>{fmtTime(clip.start_time)} → {fmtTime(clip.end_time)}</span>

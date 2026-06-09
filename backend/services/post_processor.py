@@ -108,7 +108,7 @@ def snap_boundaries(
 
 def enforce_diversity(
     moments: list[dict],
-    min_gap_sec: float = 45.0,
+    min_gap_sec: float = 15.0,
 ) -> list[dict]:
     """
     Greedily keep only clips that are sufficiently spread apart in time.
@@ -117,13 +117,13 @@ def enforce_diversity(
     it overlaps or is within `min_gap_sec` of any already-kept clip.
 
     If the strict gap would leave fewer than 3 clips, the gap is relaxed to
-    15 s (just enough to prevent actual overlap) and the selection is retried.
+    5 s (just enough to prevent actual overlap) and the selection is retried.
 
     Surviving clips are re-ranked by start_time so rank == chronological order.
     """
     result = _apply_min_gap(moments, min_gap_sec)
-    if len(result) < 3 and min_gap_sec > 15.0:
-        result = _apply_min_gap(moments, 15.0)
+    if len(result) < 3 and min_gap_sec > 5.0:
+        result = _apply_min_gap(moments, 5.0)
     # Re-rank chronologically
     for i, m in enumerate(sorted(result, key=lambda m: m["start_time"]), 1):
         m["rank"] = i
@@ -136,7 +136,11 @@ def enforce_diversity(
 
 def _apply_min_gap(moments: list[dict], min_gap_sec: float) -> list[dict]:
     """Core greedy selection: highest score first, enforce minimum time gap."""
-    by_score = sorted(moments, key=lambda m: m["viral_score"], reverse=True)
+    by_score = sorted(
+        moments,
+        key=lambda m: m.get("composite_score") or m["viral_score"],
+        reverse=True,
+    )
     kept: list[dict] = []
 
     for m in by_score:

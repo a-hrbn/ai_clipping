@@ -20,7 +20,7 @@ from config import settings
 
 
 DEFAULT_MAX_MOMENTS = 180
-DEFAULT_MAX_TOKENS = 16000
+DEFAULT_MAX_TOKENS = 32000
 DEFAULT_TIMEOUT_SEC = 900.0
 DEFAULT_API_RETRIES = 2
 DEFAULT_RETRY_BACKOFF_SEC = 20.0
@@ -38,7 +38,6 @@ ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
 GEMINI_OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
 
-CHAT_PROMPT_SPIKE_THRESHOLD = 0.4  # tune via eval_clip_finder.py Schritt 3.4
 
 @dataclass(frozen=True)
 class TranscriptSegment:
@@ -46,7 +45,10 @@ class TranscriptSegment:
     end: float
     text: str
     chat_spike_score: float = 0.0
-    chat_category: str = ""
+    chat_hype_score: float = 0.0
+    chat_funny_score: float = 0.0
+    chat_shock_score: float = 0.0
+    voice_energy_burst_score: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -93,6 +95,36 @@ class TimestampRepairResult:
     repaired_moment_count: int
 
 
+def _build_chat_marker(segment: "TranscriptSegment") -> str:
+    """Build inline annotations for a transcript line.
+
+    Examples:
+      chat_spike=0.82, dominant=hype, vol=0.9  → ' | chat=0.82 hype | vol=0.90'
+      chat_spike=0.74, no class                → ' | chat=0.74'
+      vol=0.85, no spike                       → ' | vol=0.85'
+      all low                                  → ''
+    """
+    parts: list[str] = []
+
+    spike = float(getattr(segment, "chat_spike_score", 0.0) or 0.0)
+    if spike >= 0.4:
+        hype  = float(getattr(segment, "chat_hype_score",  0.0) or 0.0)
+        funny = float(getattr(segment, "chat_funny_score", 0.0) or 0.0)
+        shock = float(getattr(segment, "chat_shock_score", 0.0) or 0.0)
+        dominant_score = max(hype, funny, shock)
+        if dominant_score >= 0.25:
+            label = "hype" if dominant_score == hype else ("funny" if dominant_score == funny else "shock")
+            parts.append(f"chat={spike:.2f} {label}")
+        else:
+            parts.append(f"chat={spike:.2f}")
+
+    vol = float(getattr(segment, "voice_energy_burst_score", 0.0) or 0.0)
+    if vol >= 0.5:
+        parts.append(f"vol={vol:.2f}")
+
+    return (" | " + " | ".join(parts)) if parts else ""
+
+
 def normalize_provider(provider: str) -> str:
     normalized = str(provider or DEFAULT_PROVIDER).strip().lower()
     if normalized not in PROVIDERS:
@@ -122,9 +154,64 @@ def read_jsonl(path: pathlib.Path) -> list[dict[str, Any]]:
     return rows
 
 
+def read_json(path: pathlib.Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
 def write_json(path: pathlib.Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def load_clip_profile(profile_name: str) -> dict[str, Any] | None:
+    """Load ml/artifacts/{profile_name}_profile.json. Returns None on missing/invalid file."""
+    safe_name = re.sub(r"[^a-z0-9_-]", "", str(profile_name or "").strip().lower())
+    if not safe_name:
+        return None
+    path = BACKEND_ROOT / "ml" / "artifacts" / f"{safe_name}_profile.json"
+    return read_json(path)
+
+
+def render_profile_rules(profile_spec: Mapping[str, Any]) -> str:
+    """Format a loaded clip profile into bullet-point rules for the moment-finder prompt."""
+    lines: list[str] = []
+
+    archetypes = sorted(
+        [a for a in (profile_spec.get("archetypes") or []) if isinstance(a, dict)],
+        key=lambda a: float(a.get("weight") or 0),
+        reverse=True,
+    )
+    if archetypes:
+        parts: list[str] = []
+        for arch in archetypes:
+            name = str(arch.get("name") or "").strip()
+            desc = str(arch.get("description") or "").strip()
+            signals = [str(s) for s in (arch.get("transcript_signals") or []) if s]
+            if not name:
+                continue
+            entry = f"{name}: {desc}"
+            if signals:
+                entry += f" (listen for: {'; '.join(signals)})"
+            parts.append(entry)
+        if parts:
+            lines.append("- Optimize recall for these clip archetypes: " + " | ".join(parts) + ".")
+
+    for rule in (profile_spec.get("selection_rules") or []):
+        rule_str = str(rule).strip()
+        if rule_str:
+            lines.append(f"- {rule_str}")
+
+    avoid_rules = [str(r).strip() for r in (profile_spec.get("avoid") or []) if str(r).strip()]
+    if avoid_rules:
+        lines.append("- Avoid: " + "; ".join(avoid_rules) + ".")
+
+    return "\n".join(lines)
 
 
 def format_transcript_for_prompt(
@@ -146,12 +233,7 @@ def format_transcript_for_prompt(
         if drop_reason:
             dropped_reasons[drop_reason] += 1
             continue
-        chat_marker = ""
-        if segment.chat_spike_score >= CHAT_PROMPT_SPIKE_THRESHOLD:
-            level = "HIGH" if segment.chat_spike_score >= 0.7 else "MED"
-            chat_marker = f" | chat={level}"
-            if segment.chat_category:
-                chat_marker += f"({segment.chat_category})"
+        chat_marker = _build_chat_marker(segment)
         lines.append(
             "["
             f"t={format_seconds_for_prompt(segment.start)}s - t={format_seconds_for_prompt(segment.end)}s"
@@ -201,7 +283,17 @@ def build_moment_finder_prompt(
     max_moments: int,
     min_duration_sec: float,
     max_duration_sec: float,
+    profile_spec: Mapping[str, Any] | None = None,
 ) -> str:
+    if profile_spec is not None:
+        content_rules = render_profile_rules(profile_spec)
+    else:
+        content_rules = (
+            "- Optimize recall for viral Jynxzi-style clips: rage, clutch, absurd chat reactions, "
+            "fanmail/unboxing reveals, strong arguments, quotable hot takes, streamer shock, and clear payoff beats.\n"
+            "- Penalize generic talking, long setup with no payoff, moments that need too much missing context, "
+            "clipping only the punchline without its setup, and splitting one bit across multiple windows."
+        )
     return f"""You are an expert short-form clip producer for Twitch creator {profile}.
 
 Read the entire VOD transcript and find the strongest viral clip moments. This is a moment-finder pass, not a judge for preselected clips. Look for the moments an OpusClip-style system would surface: immediate hook, clear reaction or conflict, payoff, standalone value, short-form trend fit, replay value.
@@ -223,16 +315,21 @@ Return raw JSON only, no markdown. Use this exact shape:
 }}
 
 Rules:
-- Segments annotated with `chat=MED(...)` or `chat=HIGH(...)` show live audience reaction intensity (message-rate spike vs. local baseline). `HIGH` means the chat went noticeably wild at this moment. Treat these as strong evidence that something viral happened — weigh them heavily when selecting and scoring moments.
+- Segments annotated with `chat=N.NN` had a live audience spike (message-rate N.NN × above local baseline, scale 0–1). Treat these as strong evidence that something viral happened — weigh them heavily. The optional label after the score tells you the *kind* of reaction the audience had: `hype` = clutch/win/pop-off; `funny` = comedy/laughing moment; `shock` = rage/meltdown/drama. Use the label to inform the clip archetype and score — e.g. a `funny` spike raises `hook` and `value` for a comedy clip, a `shock` spike raises `virality` for a rage/drama clip. A segment with no `chat=` annotation had a normal or low chat rate.
+- Segments with `chat=` ≥ 0.40 are strong recall signals — the live audience voted in real time. For each such cluster, you should almost always include a moment that covers the content that triggered the spike, even if the transcript text seems brief, confusing, or context-free. Anchor the moment so it starts just before the spike and ends after the audience reaction dies down. Use your normal virality-scoring judgment — do not artificially inflate or cap scores for spike regions.
+- Segments annotated with `vol=N.NN` had a significant audio energy burst (relative loudness N.NN × above the local audio baseline, scale 0–1). This signals a shout, rage outburst, or sudden audio peak. A `vol=` burst on its own (without `chat=`) is still meaningful — it often marks the onset of a reaction before the audience has typed. A combined `chat=... shock` + `vol=` is a near-certain rage/meltdown moment.
 - Return at most {max_moments} moments.
-- Treat one continuous bit (setup -> reaction -> payoff) as ONE moment. Never split a single moment into several adjacent windows; if neighboring beats belong to the same bit, return one window that spans all of them.
+- **Virality scoring calibration:** Use the full 0.0–1.0 scale. Most moments should score 0.60–0.80. Reserve 0.85–0.95 for genuinely exceptional moments: rare verbal tics, massive chat spikes (≥ 0.50), emotional breakdowns, shocking reveals, or moments that match one of the priority archetypes above. Do not cluster moments at the same value — assign each score independently based on its own merit.
+- Treat one continuous bit (setup -> reaction -> payoff) as ONE moment only if its beats are within ~30s of each other. Never merge two reactions into one window just because they are thematically related.
+- If two distinct reactions are more than ~30s apart, return them as SEPARATE moments even if they share the same theme or game context.
 - Each moment should be between {min_duration_sec:.0f} and {max_duration_sec:.0f} seconds. Capture the whole arc within this range; do not trim a clip down to only the punchline.
 - Use the `t=...s` absolute second values from the transcript brackets. Do not copy display clock values like `19:44` as `1944`; `19:44` means `1184` seconds.
 - Start a few seconds before the hook, on the segment that sets it up (the line that makes the payoff land), and end on the LAST reaction/payoff segment of the bit, not the first one.
 - Do not use rounded minute boundaries like 3600, 4980, or 8100 unless the transcript itself has that exact boundary.
-- Prefer one self-contained clip per distinct moment over many fragments of the same moment. A complete 25-60s clip that includes both setup and payoff is better than a 10s window that cuts either one off.
-- Optimize recall for viral Jynxzi-style clips: rage, clutch, absurd chat reactions, fanmail/unboxing reveals, strong arguments, quotable hot takes, streamer shock, and clear payoff beats.
-- Penalize generic talking, long setup with no payoff, moments that need too much missing context, clipping only the punchline without its setup, and splitting one bit across multiple windows.
+- Prefer one self-contained clip per distinct moment over many fragments of the same moment. If the entire payoff fits in 10–20s (a verbal tic, a visual reveal, a single reaction), return it at that length — do not pad it. If a moment requires setup + payoff to land, extend to 25–60s. Let the content dictate the length.
+- Err on the side of including a borderline moment — it is better to return a candidate that might not be viral than to miss one that is. A later ranking stage handles precision.
+- Scan the **entire** transcript from start to finish before you output anything. Do not stop generating candidates early. The best moments can appear anywhere — early, mid, or late in a multi-hour stream.
+{content_rules}
 
 VOD ID: {vod_id}
 
@@ -353,10 +450,11 @@ def call_anthropic_moment_finder(
 ) -> tuple[str, dict[str, Any]]:
     if not settings.anthropic_api_key:
         raise SystemExit("ANTHROPIC_API_KEY is required for the moment finder.")
-    payload = {
+    # Opus 4.7+ removed temperature/top_p/top_k as API params
+    _no_sampling = model.startswith(("claude-opus-4-7", "claude-opus-4-8"))
+    payload: dict[str, Any] = {
         "model": model,
         "max_tokens": int(max_tokens),
-        "temperature": float(temperature),
         "system": [
             {
                 "type": "text",
@@ -366,6 +464,8 @@ def call_anthropic_moment_finder(
         ],
         "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
     }
+    if not _no_sampling:
+        payload["temperature"] = float(temperature)
     request = urllib.request.Request(
         ANTHROPIC_MESSAGES_URL,
         data=json.dumps(payload).encode("utf-8"),

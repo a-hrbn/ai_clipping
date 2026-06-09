@@ -8,11 +8,19 @@ from services import post_processor
 from services.timeline_types import Candidate, CandidateFeatures, RankedCandidate
 from services.transcriber import RichSegment
 
+# Composite-score weights (must sum to 1.0). Tune against Holdout-Eval.
+_COMPOSITE_W_VIRALITY = 0.45
+_COMPOSITE_W_HOOK     = 0.25
+_COMPOSITE_W_VALUE    = 0.15
+_COMPOSITE_W_FLOW     = 0.10
+_COMPOSITE_W_TREND    = 0.05
+
 
 @dataclass(frozen=True)
 class MomentFinderResult:
     ranked_candidates: list[RankedCandidate]
     post_processed_moments: list[dict[str, Any]]
+    raw_moments: list[dict[str, Any]]
     prompt: str
     response_text: str
     usage: dict[str, Any]
@@ -47,6 +55,7 @@ def find_moments(
     )
     resolved_provider = d0.normalize_provider(provider)
     resolved_model = d0.resolve_provider_model(resolved_provider, model)
+    profile_spec = d0.load_clip_profile(profile)
     prompt = d0.build_moment_finder_prompt(
         profile=profile,
         vod_id=vod_id or "serving",
@@ -54,6 +63,7 @@ def find_moments(
         max_moments=max_moments,
         min_duration_sec=min_duration_sec,
         max_duration_sec=max_duration_sec,
+        profile_spec=profile_spec,
     )
     try:
         response_text, usage = d0.call_moment_finder_provider(
@@ -79,8 +89,14 @@ def find_moments(
         max_duration_sec=max_duration_sec,
         blob_drop_duration_sec=d0.DEFAULT_BLOB_DROP_DURATION_SEC,
     )
+    # Raw branch: pre-dedupe, pre-diversity — measures true LLM recall for eval.
+    raw_ranked = sorted(length_discipline.moments, key=_llm_moment_composite, reverse=True)
+    raw_rows = llm_moments_to_post_processor_rows(raw_ranked)
+    raw_snapped = post_processor.snap_boundaries(raw_rows, list(segments))
+    raw_post_processed_rows = _rank_post_processed_rows(raw_snapped)
+
     deduped_moments, duplicate_moments = d0.dedupe_moments_by_overlap(length_discipline.moments)
-    ranked_moments = sorted(deduped_moments, key=lambda moment: moment.virality, reverse=True)
+    ranked_moments = sorted(deduped_moments, key=_llm_moment_composite, reverse=True)
     moment_rows = llm_moments_to_post_processor_rows(ranked_moments)
     snapped_rows = post_processor.snap_boundaries(moment_rows, list(segments))
     diverse_rows = post_processor.enforce_diversity(snapped_rows)
@@ -90,7 +106,7 @@ def find_moments(
         "provider": resolved_provider,
         "model": resolved_model,
         "vod_id": vod_id,
-        "raw_moment_count": len(raw_moments),
+        "raw_moment_count": len(raw_post_processed_rows),
         "timestamp_repaired_moment_count": timestamp_repair.repaired_moment_count,
         "moment_count_after_length_policy": len(ranked_moments),
         "duplicate_moment_count": len(duplicate_moments),
@@ -111,6 +127,7 @@ def find_moments(
     return MomentFinderResult(
         ranked_candidates=ranked_candidates,
         post_processed_moments=post_processed_rows,
+        raw_moments=raw_post_processed_rows,
         prompt=prompt,
         response_text=response_text,
         usage=usage,
@@ -131,7 +148,10 @@ def rich_segments_to_transcript_segments(segments: Sequence[RichSegment]) -> lis
             end=end,
             text=text,
             chat_spike_score=float(getattr(segment, "chat_spike_score", 0.0) or 0.0),
-            chat_category=str(getattr(segment, "chat_category", "") or ""),
+            chat_hype_score=float(getattr(segment, "chat_hype_score", 0.0) or 0.0),
+            chat_funny_score=float(getattr(segment, "chat_funny_score", 0.0) or 0.0),
+            chat_shock_score=float(getattr(segment, "chat_shock_score", 0.0) or 0.0),
+            voice_energy_burst_score=float(getattr(segment, "voice_energy_burst_score", 0.0) or 0.0),
         ))
     return transcript_segments
 
@@ -139,17 +159,23 @@ def rich_segments_to_transcript_segments(segments: Sequence[RichSegment]) -> lis
 def llm_moments_to_post_processor_rows(moments: Sequence[d0.LlmMoment]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for index, moment in enumerate(moments, start=1):
+        hook = round(float(moment.hook), 6)
+        flow = round(float(moment.flow), 6)
+        value = round(float(moment.value), 6)
+        trend = round(float(moment.trend), 6)
+        virality = round(float(moment.virality), 6)
         rows.append(
             {
                 "rank": index,
                 "start_time": round(float(moment.start), 3),
                 "end_time": round(float(moment.end), 3),
-                "viral_score": _virality_to_pipeline_score(moment.virality),
-                "llm_virality": round(float(moment.virality), 6),
-                "hook": round(float(moment.hook), 6),
-                "flow": round(float(moment.flow), 6),
-                "value": round(float(moment.value), 6),
-                "trend": round(float(moment.trend), 6),
+                "viral_score": _virality_to_pipeline_score(virality),
+                "composite_score": _virality_to_pipeline_score(_llm_moment_composite(moment)),
+                "llm_virality": virality,
+                "hook": hook,
+                "flow": flow,
+                "value": value,
+                "trend": trend,
                 "reason": moment.rationale,
             }
         )
@@ -205,9 +231,6 @@ def post_processed_rows_to_ranked_candidates(rows: Sequence[Mapping[str, Any]]) 
                 rationale=rationale,
                 base_rank_score=float(rank_score),
                 heuristic_rank_score=float(rank_score),
-                trained_rank_score=None,
-                model_blend=0.0,
-                trained_model_used=False,
             )
         )
     ranked.sort(key=lambda item: item.rank_score, reverse=True)
@@ -218,7 +241,7 @@ def _rank_post_processed_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[st
     ranked_rows = [dict(row) for row in rows]
     ranked_rows.sort(
         key=lambda row: (
-            _float_value(row.get("viral_score")) or 0.0,
+            _float_value(row.get("composite_score")) or _float_value(row.get("viral_score")) or 0.0,
             -(_float_value(row.get("start_time")) or 0.0),
         ),
         reverse=True,
@@ -282,3 +305,18 @@ def _float_value(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _llm_moment_composite(moment: d0.LlmMoment) -> float:
+    """Weighted composite from a LlmMoment (0-1 scale).
+
+    Audio-energy is a per-segment signal, not a per-moment LlmMoment field.
+    It is factored in later via _composite_score on the row dict.
+    """
+    return (
+        _COMPOSITE_W_VIRALITY * float(moment.virality)
+        + _COMPOSITE_W_HOOK * float(moment.hook)
+        + _COMPOSITE_W_VALUE * float(moment.value)
+        + _COMPOSITE_W_FLOW * float(moment.flow)
+        + _COMPOSITE_W_TREND * float(moment.trend)
+    )

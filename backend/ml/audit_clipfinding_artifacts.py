@@ -28,10 +28,7 @@ def main(argv: list[str] | None = None) -> int:
 def build_audit(*, profile: str, artifact_dir: Path) -> dict[str, Any]:
     artifact_dir = Path(artifact_dir)
     paths = {
-        "ranker": artifact_dir / f"{profile}_ranker.json",
-        "boundary_ranker": artifact_dir / f"{profile}_boundary_ranker.json",
         "cross_platform_rows": artifact_dir / f"{profile}_cross_platform_fingerprint_rows.jsonl",
-        "ranker_eval": artifact_dir / f"{profile}_ranker_eval_summary.json",
         "rollout_readiness": artifact_dir / f"{profile}_rollout_readiness_summary.json",
     }
     artifacts = {name: _artifact_snapshot(path) for name, path in paths.items()}
@@ -48,7 +45,6 @@ def build_audit(*, profile: str, artifact_dir: Path) -> dict[str, Any]:
             "existing_artifacts": sum(1 for row in artifacts.values() if row["exists"]),
             "warnings": len(warnings),
             "cross_platform_rows": artifacts["cross_platform_rows"].get("rows"),
-            "ranker_status": artifacts["ranker"].get("training_status"),
         },
     }
 

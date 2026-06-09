@@ -321,7 +321,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--vods", default=str(DEFAULT_ANCHOR_CSV), help="Anchor VOD CSV")
     parser.add_argument("--predictions-dir", default=str(DEFAULT_STORAGE_DIR))
     parser.add_argument("--workflow-id", default="", help="Workflow ID to resolve job paths")
-    parser.add_argument("--ks", default="5,10,20", help="Recall@K comma-separated")
+    parser.add_argument("--ks", default="5,10,20,50", help="Recall@K comma-separated")
     parser.add_argument("--json", dest="output_json", action="store_true")
     args = parser.parse_args(argv)
 
@@ -334,7 +334,9 @@ def main(argv: list[str] | None = None) -> int:
     for vod_id in anchor_ids:
         if args.workflow_id:
             job_id = f"pipeline_debug_{args.workflow_id}_{vod_id}"
-            moments_path = storage / job_id / "debug" / "llm_moment_finder_moments.jsonl"
+            raw_path = storage / job_id / "debug" / "llm_moment_finder_moments_raw.jsonl"
+            filtered_path = storage / job_id / "debug" / "llm_moment_finder_moments.jsonl"
+            moments_path = raw_path if raw_path.exists() else filtered_path
         else:
             # Find most-recently modified pipeline_debug job for this VOD
             candidates = sorted(
@@ -343,7 +345,9 @@ def main(argv: list[str] | None = None) -> int:
                 reverse=True,
             )
             if candidates:
-                moments_path = candidates[0] / "debug" / "llm_moment_finder_moments.jsonl"
+                raw_path = candidates[0] / "debug" / "llm_moment_finder_moments_raw.jsonl"
+                filtered_path = candidates[0] / "debug" / "llm_moment_finder_moments.jsonl"
+                moments_path = raw_path if raw_path.exists() else filtered_path
             else:
                 moments_path = pathlib.Path("/dev/null")
         predictions_by_vod[vod_id] = _read_moments_jsonl(moments_path)

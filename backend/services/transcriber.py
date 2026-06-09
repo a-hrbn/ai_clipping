@@ -201,7 +201,12 @@ class RichSegment:
     # Chat-replay signal (populated by chat_signal.enrich_segments)
     chat_spike_score: float = 0.0   # normalised message-rate spike vs. local baseline (0–1)
     chat_message_count: int = 0
-    chat_category: str = ""         # "hype" | "funny" | "shock" | ""
+    # Emote-class scores: fraction of classified emotes in window that are hype/funny/shock
+    chat_hype_score: float = 0.0
+    chat_funny_score: float = 0.0
+    chat_shock_score: float = 0.0
+    # Audio signal (populated by audio_energy.compute_segment_energy before WAV cleanup)
+    voice_energy_burst_score: float = 0.0  # relative RMS burst vs. local baseline (0–1)
 
     def to_tuple(self) -> Segment:
         return (self.start, self.end, self.text)
@@ -773,10 +778,14 @@ def save_chat_enrichment(cache_key: str | None, segments: list[RichSegment]) -> 
             "start": round(seg.start, 3),
             "chat_spike_score": round(seg.chat_spike_score, 4),
             "chat_message_count": seg.chat_message_count,
-            "chat_category": seg.chat_category,
+            "chat_hype_score":  round(seg.chat_hype_score, 4),
+            "chat_funny_score": round(seg.chat_funny_score, 4),
+            "chat_shock_score": round(seg.chat_shock_score, 4),
+            "voice_energy_burst_score": round(seg.voice_energy_burst_score, 4),
         }
         for seg in segments
-        if seg.chat_spike_score > 0 or seg.chat_message_count > 0 or seg.chat_category
+        if seg.chat_spike_score > 0 or seg.chat_message_count > 0
+        or seg.voice_energy_burst_score > 0
     ]
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -812,7 +821,10 @@ def apply_chat_enrichment(
                 words_per_second=seg.words_per_second,
                 chat_spike_score=float(rec.get("chat_spike_score", 0.0)),
                 chat_message_count=int(rec.get("chat_message_count", 0)),
-                chat_category=str(rec.get("chat_category", "")),
+                chat_hype_score=float(rec.get("chat_hype_score", 0.0)),
+                chat_funny_score=float(rec.get("chat_funny_score", 0.0)),
+                chat_shock_score=float(rec.get("chat_shock_score", 0.0)),
+                voice_energy_burst_score=float(rec.get("voice_energy_burst_score", 0.0)),
             ))
         else:
             result.append(seg)
@@ -1149,11 +1161,7 @@ def format_transcript(
             if seg.words_per_second:
                 parts.append(f"[{seg.words_per_second:.1f}w/s]")
             if seg.chat_spike_score > 0:
-                label = f"[CHAT:{seg.chat_spike_score:.2f}"
-                if seg.chat_category:
-                    label += f"({seg.chat_category})"
-                label += "]"
-                parts.append(label)
+                parts.append(f"[CHAT:{seg.chat_spike_score:.2f}]")
             parts.append(seg.text)
             lines.append(" ".join(parts))
         else:
@@ -1182,7 +1190,6 @@ def format_jsonl(segments: list[RichSegment]) -> str:
             "words_per_second": seg.words_per_second,
             "chat_spike_score": seg.chat_spike_score,
             "chat_message_count": seg.chat_message_count,
-            "chat_category": seg.chat_category,
         }))
     return "\n".join(lines)
 

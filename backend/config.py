@@ -148,6 +148,10 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("YTDLP_SHORT_FORM_MAX_SLEEP_INTERVAL_SEC", "YT_DLP_SHORT_FORM_MAX_SLEEP_INTERVAL_SEC"),
     )
     max_clip_duration: int = 90
+    # Only the top-K ranked moments per job are cut into clips (ffmpeg). The full
+    # candidate set is still written to the debug JSONL files for review/eval;
+    # this only bounds how many video clips are produced. 0 disables the cap.
+    clip_top_k: int = 20
     max_upload_size_bytes: int | None = None
     clip_profile: str = "general"
     hf_token: str | None = None  # HuggingFace token for pyannote diarization (optional)
@@ -236,7 +240,7 @@ class Settings(BaseSettings):
     moment_finder_max_moments: int = 180
     moment_finder_min_duration_sec: float = 8.0
     moment_finder_max_duration_sec: float = 90.0
-    moment_finder_max_tokens: int = 16000
+    moment_finder_max_tokens: int = 32000
     moment_finder_timeout_sec: float = 900.0
     moment_finder_api_retries: int = 2
     moment_finder_retry_backoff_sec: float = 20.0

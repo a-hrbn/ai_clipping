@@ -128,7 +128,6 @@ def main() -> int:
                     "window_start": start,
                     "window_end": end,
                     "heuristic_rank_score": ranked.get("heuristic_rank_score"),
-                    "trained_rank_score": ranked.get("trained_rank_score"),
                     "features": feature_dict,
                 }
             )

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import pathlib
 import sys
 
@@ -68,11 +69,19 @@ async def _run(args: argparse.Namespace) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+    from log_setup import configure_job_logging
+    configure_job_logging()
+    logging.getLogger("pipeline_worker").info(
+        "pipeline_worker_start job_id=%s url=%s profile=%s",
+        args.job_id, args.url or "(none)", args.profile or "(none)",
+    )
     try:
         asyncio.run(_run(args))
     except Exception as exc:
+        logging.getLogger("pipeline_worker").exception("pipeline_worker_failed job_id=%s", args.job_id)
         update_job(args.job_id, status="failed", error=str(exc))
         return 1
+    logging.getLogger("pipeline_worker").info("pipeline_worker_done job_id=%s", args.job_id)
     return 0
 
 

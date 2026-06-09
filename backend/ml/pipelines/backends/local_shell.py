@@ -22,17 +22,11 @@ def run_local_pipeline(
     labels_uri = str(root / "datasets" / f"{streamer}_twitch_labels.jsonl")
     progress_uri = str(root / "state" / f"{streamer}_twitch_progress.json")
     training_rows_uri = str(root / "datasets" / f"{streamer}_training_rows.jsonl")
-    proxy_eval_dataset_uri = str(root / "datasets" / f"{streamer}_proxy_eval_rows.jsonl")
-    proxy_eval_summary_uri = str(root / "metrics" / f"{streamer}_proxy_eval_dataset_summary.json")
     gold_eval_rows_uri = str(root / "datasets" / f"{streamer}_gold_eval_rows.jsonl")
     gold_eval_dataset_uri = str(root / "datasets" / f"{streamer}_gold_eval_dataset.jsonl")
     gold_eval_summary_uri = str(root / "metrics" / f"{streamer}_gold_eval_dataset_summary.json")
-    artifact_bundle_uri = str(root / "artifacts" / f"{streamer}_ranker_bundle")
-    training_stats_uri = str(root / "metrics" / f"{streamer}_training_stats.json")
-    proxy_eval_report_uri = str(root / "metrics" / f"{streamer}_proxy_eval.json")
-    gold_eval_report_uri = str(root / "metrics" / f"{streamer}_gold_eval.json")
-    pipeline_eval_report_uri = str(root / "metrics" / f"{streamer}_pipeline_eval.json")
-    registry_report_uri = str(root / "metrics" / f"{streamer}_registry_report.json")
+    proxy_eval_dataset_uri = str(root / "datasets" / f"{streamer}_proxy_eval_rows.jsonl")
+    proxy_eval_summary_uri = str(root / "metrics" / f"{streamer}_proxy_eval_dataset_summary.json")
 
     run_python_module(
         "ml.pipelines.components.collect_twitch_clips_op",
@@ -63,19 +57,6 @@ def run_local_pipeline(
         ],
     )
     run_python_module(
-        "ml.pipelines.components.train_ranker_op",
-        [
-            "--training-rows-uri",
-            training_rows_uri,
-            "--artifact-bundle-uri",
-            artifact_bundle_uri,
-            "--training-stats-uri",
-            training_stats_uri,
-            "--profile",
-            profile,
-        ],
-    )
-    run_python_module(
         "ml.pipelines.components.build_eval_dataset_op",
         [
             "--training-rows-uri",
@@ -96,50 +77,9 @@ def run_local_pipeline(
             storage_dir,
         ],
     )
-    run_python_module(
-        "ml.pipelines.components.evaluate_ranker_op",
-        [
-            "--artifact-bundle-uri",
-            artifact_bundle_uri,
-            "--proxy-eval-dataset-uri",
-            proxy_eval_dataset_uri,
-            "--gold-eval-rows-uri",
-            gold_eval_rows_uri,
-            "--proxy-eval-report-uri",
-            proxy_eval_report_uri,
-            "--gold-eval-report-uri",
-            gold_eval_report_uri,
-            "--pipeline-eval-report-uri",
-            pipeline_eval_report_uri,
-            "--profile",
-            profile,
-        ],
-    )
-    run_python_module(
-        "ml.pipelines.components.promote_op",
-        [
-            "--artifact-bundle-uri",
-            artifact_bundle_uri,
-            "--proxy-eval-report-uri",
-            proxy_eval_report_uri,
-            "--gold-eval-report-uri",
-            gold_eval_report_uri,
-            "--pipeline-eval-report-uri",
-            pipeline_eval_report_uri,
-            "--output-uri",
-            registry_report_uri,
-            "--profile",
-            profile,
-        ],
-    )
     return {
         "labels_uri": labels_uri,
         "training_rows_uri": training_rows_uri,
-        "artifact_bundle_uri": artifact_bundle_uri,
-        "proxy_eval_report_uri": proxy_eval_report_uri,
-        "gold_eval_report_uri": gold_eval_report_uri,
-        "pipeline_eval_report_uri": pipeline_eval_report_uri,
-        "registry_report_uri": registry_report_uri,
     }
 
 

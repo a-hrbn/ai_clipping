@@ -15,26 +15,53 @@ _TWITCH_GQL_URL = "https://gql.twitch.tv/gql"
 _TWITCH_CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
 _VOD_ID_RE = re.compile(r"(?:twitch\.tv/videos?/|^)(\d{7,12})")
 
-# Curated emote/keyword sets — deliberately small; only signals that correlate with viral moments
-_HYPE_TOKENS = frozenset([
-    "pog", "pogchamp", "pogu", "pogcrazy", "pogs", "hypepog",
-    "monkaw", "monkas", "hype", "letsgo", "omg", "bro", "insane",
-    "clip", "clipped", "w", "ww", "www", "goat", "clutch",
-])
-_FUNNY_TOKENS = frozenset([
-    "lul", "lulw", "kekw", "lmao", "lol", "loool", "xd", "haha", "😂", "💀",
-    "dead", "ded", "kekw",
-])
-_SHOCK_TOKENS = frozenset([
-    "wtf", "what", "noway", "noooo", "noo", "ohno",
-    "peeposad", "sadge", "pepehands", "dno",
-])
 
 CHAT_SPIKE_BASELINE_WINDOW_SEC = 60
 CHAT_SPIKE_SATURATION_RATIO = 8.0  # ratio at which spike_score reaches ~1.0
 # Viewers type ~5-10s after the moment; look forward by this many seconds when
 # attributing a chat spike to the segment that caused it.
 CHAT_REACTION_DELAY_SEC = 8
+
+# ---------------------------------------------------------------------------
+# Emote classification — curated from real Jynxzi chat data (307k messages,
+# 583 distinct emotes across 2 VODs). Generic Twitch emotes carry little signal;
+# Jynxzi's own channel emotes are the meaningful classifiers.
+#
+# To refresh: python3 -c "
+#   import json, collections, glob
+#   c = collections.Counter()
+#   for p in glob.glob('backend/tmp/storage/**/chat.json', recursive=True):
+#       for m in json.load(open(p)):
+#           for e in (m.get('emotes') or []): c[e] += 1
+#   print(c.most_common(60))
+# "
+# ---------------------------------------------------------------------------
+_EMOTES_FUNNY: frozenset[str] = frozenset({
+    "LUL", "JinxLUL", "jynxziLaugh", "jynxziLOL", "jynxziCORNY",
+    "jynxziTONGUE", "jynxziClown", "lacyKEKW", "kairyucLMAO", "CoolStoryBob",
+})
+_EMOTES_HYPE: frozenset[str] = frozenset({
+    "jynxziGRIDDY", "jynxziPACK", "jynxziChampion", "jynxziGoodAim",
+    "jynxziGG", "jynxziEZ", "jynxziSubHype", "TwitchConHYPE", "PogChamp",
+    "Kreygasm", "PewPewPew", "PackItUp", "WeDidThat", "fifakillWins",
+    "FBtouchdown", "winWatch", "xqcEZ",
+})
+_EMOTES_SHOCK: frozenset[str] = frozenset({
+    "jynxziRAHHH", "jynxziRage", "jynxziBadAim", "jynxziWTF", "jynxziCRY",
+    "jynxziSNOT", "jynxziSad", "jynxziFALL", "NotLikeThis", "WutFace",
+    "BigSad", "BabyRage", "ohneExplode",
+})
+
+
+def _classify_emote(name: str) -> str | None:
+    """Return 'funny', 'hype', 'shock', or None (ambient/unclassified)."""
+    if name in _EMOTES_FUNNY:
+        return "funny"
+    if name in _EMOTES_HYPE:
+        return "hype"
+    if name in _EMOTES_SHOCK:
+        return "shock"
+    return None
 
 
 def _extract_vod_id(url: str) -> str | None:
@@ -170,7 +197,11 @@ def enrich_segments(
     segments: Sequence[RichSegment],
     chat_path: pathlib.Path | None,
 ) -> list[RichSegment]:
-    """Attach chat_spike_score, chat_message_count, chat_category to each segment.
+    """Attach chat_spike_score, chat_message_count, and emote-class scores to each segment.
+
+    Emote scores (chat_hype_score, chat_funny_score, chat_shock_score) represent
+    the fraction of classified emotes in the segment window that belong to each
+    class.  They are additional signal on top of the magnitude (chat_spike_score).
 
     Safe: returns segments unchanged on any error or missing chat data.
     """
@@ -189,6 +220,7 @@ def enrich_segments(
 
     per_sec = _build_per_second_counts(messages)
     spike_scores = _compute_spike_scores(per_sec)
+    per_sec_emotes = _build_per_second_emote_classes(messages)
 
     result: list[RichSegment] = []
     for seg in segments:
@@ -198,12 +230,26 @@ def enrich_segments(
         # after the moment (viewers type ~5-10s after what they see).
         chat_end = end + CHAT_REACTION_DELAY_SEC
 
-        # message count for this window (raw, no delay extension — counts what chat said during segment)
         count = sum(per_sec.get(s, 0) for s in range(start, max(start + 1, end)))
-        # max spike score over the delay-extended window
         spike = max((spike_scores.get(s, 0.0) for s in range(start, max(start + 1, chat_end))), default=0.0)
-        # dominant emotion category over the delay-extended window
-        category = _dominant_category(messages, start, chat_end)
+
+        # Aggregate emote class counts over the extended window
+        funny_total = hype_total = shock_total = classified_total = 0
+        for s in range(start, max(start + 1, chat_end)):
+            ec = per_sec_emotes.get(s)
+            if ec:
+                funny_total    += ec.get("funny", 0)
+                hype_total     += ec.get("hype", 0)
+                shock_total    += ec.get("shock", 0)
+                classified_total += ec.get("_classified", 0)
+        # Score = fraction of classified emotes (not total messages) that belong to class.
+        # Uses classified_total as denominator so sparse but clear bursts aren't diluted.
+        if classified_total > 0:
+            chat_funny_score = round(funny_total / classified_total, 4)
+            chat_hype_score  = round(hype_total  / classified_total, 4)
+            chat_shock_score = round(shock_total / classified_total, 4)
+        else:
+            chat_funny_score = chat_hype_score = chat_shock_score = 0.0
 
         result.append(
             seg.__class__(
@@ -214,7 +260,9 @@ def enrich_segments(
                     },
                     "chat_spike_score": round(min(spike, 1.0), 4),
                     "chat_message_count": count,
-                    "chat_category": category,
+                    "chat_hype_score":  chat_hype_score,
+                    "chat_funny_score": chat_funny_score,
+                    "chat_shock_score": chat_shock_score,
                 }
             )
         )
@@ -228,6 +276,27 @@ def _build_per_second_counts(messages: list[dict]) -> dict[int, int]:
         if isinstance(t, int):
             counts[t] = counts.get(t, 0) + 1
     return counts
+
+
+def _build_per_second_emote_classes(messages: list[dict]) -> dict[int, dict[str, int]]:
+    """Aggregate classified emote counts per second.
+
+    Returns {second: {"funny": N, "hype": N, "shock": N, "_classified": N}}.
+    Only seconds with at least one classified emote are included.
+    """
+    result: dict[int, dict[str, int]] = {}
+    for msg in messages:
+        t = msg.get("t")
+        if not isinstance(t, int):
+            continue
+        for emote_name in (msg.get("emotes") or []):
+            cls = _classify_emote(str(emote_name))
+            if cls is None:
+                continue
+            bucket = result.setdefault(t, {"funny": 0, "hype": 0, "shock": 0, "_classified": 0})
+            bucket[cls] += 1
+            bucket["_classified"] += 1
+    return result
 
 
 def _compute_spike_scores(per_sec: dict[int, int]) -> dict[int, float]:
@@ -253,27 +322,3 @@ def _compute_spike_scores(per_sec: dict[int, int]) -> dict[int, float]:
     return scores
 
 
-def _dominant_category(messages: list[dict], start: int, end: int) -> str:
-    hype = funny = shock = 0
-    for msg in messages:
-        t = msg.get("t")
-        if not isinstance(t, int) or not (start <= t < max(start + 1, end)):
-            continue
-        text_lower = msg.get("text", "").lower()
-        emotes_lower = [e.lower() for e in msg.get("emotes", [])]
-        tokens = set(text_lower.split()) | set(emotes_lower)
-        hype += bool(tokens & _HYPE_TOKENS)
-        funny += bool(tokens & _FUNNY_TOKENS)
-        shock += bool(tokens & _SHOCK_TOKENS)
-    total = hype + funny + shock
-    if total == 0:
-        return ""
-    # Require at least 2 matching messages to assign a category
-    best_count = max(hype, funny, shock)
-    if best_count < 2:
-        return ""
-    if hype == best_count:
-        return "hype"
-    if funny == best_count:
-        return "funny"
-    return "shock"

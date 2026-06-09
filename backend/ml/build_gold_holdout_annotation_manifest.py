@@ -22,7 +22,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--diagnosis-csv",
-        default=str(BACKEND_ROOT / "ml" / "artifacts" / "jynxzi_ranker_holdout_diagnosis.csv"),
+        default=None,
     )
     parser.add_argument(
         "--out",

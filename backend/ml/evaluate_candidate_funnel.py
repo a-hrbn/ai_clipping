@@ -52,7 +52,6 @@ def summarize_debug_dir(debug_dir: Path) -> dict[str, Any]:
         "high_judge_rows": len(high_judge_rows),
         "stage_counts": funnel.get("stage_counts") or {},
         "quality_breakdown": funnel.get("quality_breakdown") or {},
-        "ranker_lift": funnel.get("ranker_lift") or {},
         "final_selected": _candidate_summary(final_rows),
         "high_judge_not_final": _candidate_summary(
             [row for row in high_judge_rows if not row.get("final_selected")][:10]
@@ -60,9 +59,7 @@ def summarize_debug_dir(debug_dir: Path) -> dict[str, Any]:
         "score_summary": {
             "final_pre_judge_rank_mean": _mean(row.get("pre_judge_rank") for row in final_rows),
             "final_judge_score_mean": _mean(row.get("judge_score") for row in final_rows),
-            "high_judge_pre_judge_top20_ratio": (funnel.get("ranker_lift") or {}).get(
-                "high_judge_pre_judge_top20_ratio"
-            ),
+            "high_judge_pre_judge_top20_ratio": None,
         },
     }
 

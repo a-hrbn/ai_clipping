@@ -110,6 +110,9 @@ def _twitch_download_ydl_opts(job_dir: pathlib.Path, *, max_height: int = 0) -> 
             "--file-allocation=none",
             "--summary-interval=0",
             "--console-log-level=error",
+            # Silence the realtime "[#hash MiB/MiB(%)]" readout that otherwise
+            # floods orchestrator.log with thousands of lines; errors still log.
+            "--show-console-readout=false",
         ]
     return opts
 

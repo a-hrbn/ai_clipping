@@ -4,14 +4,17 @@ import { useEffect, useMemo, useState } from "react";
 
 import {
   deletePipelineDebugWorkflow,
+  getActiveClipProfile,
   getDownloadUrl,
   getPipelineDebugAnchors,
+  getPipelineDebugRunPrompt,
   getPipelineDebugWorkflow,
   listPipelineDebugWorkflows,
   savePipelineDebugLabel,
   startPipelineDebugWorkflow,
 } from "@/lib/api";
 import {
+  ActiveClipProfile,
   PipelineDebugBoundaryLabel,
   PipelineDebugEval,
   PipelineDebugGtHit,
@@ -110,6 +113,11 @@ export default function PipelineDebugWorkbench() {
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const [activeProfile, setActiveProfile] = useState<ActiveClipProfile | null>(null);
+  const [loadingProfile, setLoadingProfile] = useState(false);
+  const [promptsByVod, setPromptsByVod] = useState<Record<string, string | null>>({});
+  const [loadingPromptVod, setLoadingPromptVod] = useState<string | null>(null);
+
   const isActive = expandedWorkflow?.status === "queued" || expandedWorkflow?.status === "running";
   const rows = useMemo(() => expandedWorkflow?.rows ?? [], [expandedWorkflow?.rows]);
   const groupedRows = useMemo(() => {
@@ -129,6 +137,11 @@ export default function PipelineDebugWorkbench() {
         setSelectedAnchors(new Set(r.vod_ids));
       })
       .catch(() => {});
+    setLoadingProfile(true);
+    void getActiveClipProfile()
+      .then(setActiveProfile)
+      .catch(() => {})
+      .finally(() => setLoadingProfile(false));
   }, []);
 
   // Poll the expanded workflow while it's active
@@ -243,6 +256,20 @@ export default function PipelineDebugWorkbench() {
       setError(err instanceof Error ? err.message : "Workflow konnte nicht gestartet werden");
     } finally {
       setStarting(false);
+    }
+  }
+
+  async function loadRunPrompt(workflowId: string, vodId: string) {
+    const key = `${workflowId}:${vodId}`;
+    if (promptsByVod[key] !== undefined) return;
+    setLoadingPromptVod(key);
+    try {
+      const result = await getPipelineDebugRunPrompt(workflowId, vodId);
+      setPromptsByVod((prev) => ({ ...prev, [key]: result.exists ? result.prompt : "" }));
+    } catch {
+      setPromptsByVod((prev) => ({ ...prev, [key]: "" }));
+    } finally {
+      setLoadingPromptVod(null);
     }
   }
 
@@ -371,6 +398,9 @@ export default function PipelineDebugWorkbench() {
         </label>
       </div>
 
+      {/* Active Profile */}
+      <ActiveProfileCard profile={activeProfile} loading={loadingProfile} />
+
       {error && <p className="mt-4 border border-danger/30 bg-danger/5 px-3 py-2 text-sm text-danger">{error}</p>}
 
       {/* Run list */}
@@ -458,6 +488,13 @@ export default function PipelineDebugWorkbench() {
                                   <h3 className="font-mono text-sm font-semibold text-tx">VOD {vodId}</h3>
                                   <span className="text-[10px] uppercase tracking-widest text-muted">{vodRows.length} Clips</span>
                                 </div>
+                                <VodPromptToggle
+                                  workflowId={expandedWorkflow.workflow_id}
+                                  vodId={vodId}
+                                  promptsByVod={promptsByVod}
+                                  loadingPromptVod={loadingPromptVod}
+                                  onLoad={loadRunPrompt}
+                                />
                                 <div className="mt-3 grid gap-4 lg:grid-cols-2">
                                   {vodRows.map((row) => (
                                     <ReviewCard
@@ -716,7 +753,8 @@ function ReviewCard({
         )}
       </div>
 
-      <div className="mt-3 grid grid-cols-5 gap-2 text-[11px] text-dim">
+      <div className="mt-3 grid grid-cols-6 gap-2 text-[11px] text-dim">
+        <span className="font-semibold text-tx">C {fmtScore(row.composite_score)}</span>
         <span>V {fmtScore(row.virality ?? row.llm_virality)}</span>
         <span>H {fmtScore(row.hook)}</span>
         <span>F {fmtScore(row.flow)}</span>
@@ -799,5 +837,152 @@ function ToggleButton({
     >
       {label}
     </button>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Active Profile Card
+// ─────────────────────────────────────────────────────────────────────────────
+
+function ActiveProfileCard({ profile, loading }: { profile: ActiveClipProfile | null; loading: boolean }) {
+  const [open, setOpen] = useState(false);
+
+  if (loading) {
+    return (
+      <div className="mt-3 border border-border/50 px-3 py-2 text-[10px] uppercase tracking-widest text-muted">
+        Profil wird geladen…
+      </div>
+    );
+  }
+
+  if (!profile) return null;
+
+  const generatedAt = profile.generated_at
+    ? new Date(profile.generated_at).toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit", year: "numeric" })
+    : null;
+
+  return (
+    <div className="mt-3 border border-border bg-bg/40">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center justify-between px-3 py-2 text-left hover:bg-border/10"
+      >
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] uppercase tracking-widest text-muted">Aktiver Prompt</span>
+          {profile.is_generated ? (
+            <span className="border border-accent/30 bg-accent-dim px-1.5 py-0.5 text-[9px] uppercase tracking-widest text-accent">
+              generiert
+            </span>
+          ) : (
+            <span className="border border-border px-1.5 py-0.5 text-[9px] uppercase tracking-widest text-muted">
+              statisch
+            </span>
+          )}
+          {generatedAt && (
+            <span className="text-[10px] text-muted/70">{generatedAt}</span>
+          )}
+          {profile.source?.clips_analyzed != null && (
+            <span className="text-[10px] text-muted/70">{profile.source.clips_analyzed} Clips analysiert</span>
+          )}
+        </div>
+        <span className="text-[10px] text-muted">{open ? "▲" : "▼"}</span>
+      </button>
+
+      {open && (
+        <div className="border-t border-border px-3 pb-4 pt-3">
+          {profile.summary && (
+            <p className="mb-3 text-xs leading-relaxed text-dim">{profile.summary}</p>
+          )}
+
+          {profile.archetypes.length > 0 && (
+            <div className="mb-3">
+              <p className="mb-1.5 text-[9px] uppercase tracking-widest text-muted">Archetypes</p>
+              <div className="flex flex-col gap-1.5">
+                {[...profile.archetypes]
+                  .sort((a, b) => b.weight - a.weight)
+                  .map((arch) => (
+                    <div key={arch.name} className="border border-border/60 bg-surface/40 px-2 py-1.5">
+                      <div className="flex items-baseline gap-2">
+                        <span className="font-mono text-[11px] font-semibold text-accent">{arch.name}</span>
+                        <span className="text-[10px] text-muted">w={arch.weight.toFixed(2)}</span>
+                        <span className="min-w-0 truncate text-[11px] text-dim">{arch.description}</span>
+                      </div>
+                      {arch.transcript_signals.length > 0 && (
+                        <p className="mt-0.5 text-[10px] text-muted/80">
+                          signals: {arch.transcript_signals.join(" · ")}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+              </div>
+            </div>
+          )}
+
+          {profile.rendered_rules && (
+            <div>
+              <p className="mb-1 text-[9px] uppercase tracking-widest text-muted">Prompt-Regeln</p>
+              <pre className="max-h-48 overflow-auto whitespace-pre-wrap border border-border bg-surface p-2 text-[10px] leading-relaxed text-muted">
+                {profile.rendered_rules}
+              </pre>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-VOD Prompt Toggle
+// ─────────────────────────────────────────────────────────────────────────────
+
+function VodPromptToggle({
+  workflowId,
+  vodId,
+  promptsByVod,
+  loadingPromptVod,
+  onLoad,
+}: {
+  workflowId: string;
+  vodId: string;
+  promptsByVod: Record<string, string | null>;
+  loadingPromptVod: string | null;
+  onLoad: (workflowId: string, vodId: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const key = `${workflowId}:${vodId}`;
+  const promptText = promptsByVod[key];
+  const isLoading = loadingPromptVod === key;
+
+  function toggle() {
+    if (!open && promptText === undefined) {
+      onLoad(workflowId, vodId);
+    }
+    setOpen((v) => !v);
+  }
+
+  return (
+    <div className="mt-2 mb-1">
+      <button
+        type="button"
+        onClick={toggle}
+        className="text-[10px] uppercase tracking-widest text-muted hover:text-tx"
+      >
+        {isLoading ? "Prompt wird geladen…" : open ? "▲ Prompt ausblenden" : "▼ Verwendeten Prompt anzeigen"}
+      </button>
+
+      {open && !isLoading && (
+        <div className="mt-2">
+          {promptText ? (
+            <pre className="max-h-80 overflow-auto whitespace-pre-wrap border border-border bg-surface p-3 text-[10px] leading-relaxed text-muted">
+              {promptText}
+            </pre>
+          ) : (
+            <p className="text-[11px] text-muted italic">Prompt-Datei nicht verfügbar.</p>
+          )}
+        </div>
+      )}
+    </div>
   );
 }

@@ -298,9 +298,6 @@ class CandidateFeatures:
     payoff_present_score: float = 0.0
     context_strength_score: float = 0.0
     context_completeness_score: float = 0.0
-    # Rule-based heuristic score used as an input feature for trained rankers.
-    # Populated at scoring time (services/ranker.py) from _heuristic_scores so the
-    # trained model can learn how to adjust it rather than being blended post-hoc.
     heuristic_score: float = 0.0
 
     @classmethod
@@ -329,9 +326,6 @@ class RankedCandidate:
     rationale: list[str] = field(default_factory=list)
     base_rank_score: float | None = None
     heuristic_rank_score: float | None = None
-    trained_rank_score: float | None = None
-    model_blend: float | None = None
-    trained_model_used: bool = False
     judge_result: "JudgeResult | None" = None
 
     def to_dict(self) -> dict:
@@ -342,9 +336,6 @@ class RankedCandidate:
             "rationale": list(self.rationale),
             "base_rank_score": self.base_rank_score,
             "heuristic_rank_score": self.heuristic_rank_score,
-            "trained_rank_score": self.trained_rank_score,
-            "model_blend": self.model_blend,
-            "trained_model_used": self.trained_model_used,
             "judge_result": self.judge_result.to_dict() if self.judge_result is not None else None,
         }
 

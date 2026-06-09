@@ -9,7 +9,6 @@ import unittest
 from services.chat_signal import (
     _build_per_second_counts,
     _compute_spike_scores,
-    _dominant_category,
     _extract_vod_id,
     _parse_comment_node,
 )
@@ -62,30 +61,6 @@ class TestSpikeScores(unittest.TestCase):
         self.assertAlmostEqual(scores[25], 1.0)
 
 
-class TestDominantCategory(unittest.TestCase):
-    def _make_msgs(self, texts, start=0):
-        return [{"t": start + i, "text": t, "emotes": []} for i, t in enumerate(texts)]
-
-    def test_hype_wins(self):
-        msgs = self._make_msgs(["pog", "omg", "lol"], start=100)
-        cat = _dominant_category(msgs, 99, 104)
-        self.assertEqual(cat, "hype")
-
-    def test_funny_wins(self):
-        msgs = self._make_msgs(["lol", "lmao", "pog"], start=200)
-        cat = _dominant_category(msgs, 199, 204)
-        self.assertEqual(cat, "funny")
-
-    def test_single_match_returns_empty(self):
-        msgs = self._make_msgs(["pog", "random stuff"], start=300)
-        cat = _dominant_category(msgs, 299, 303)
-        self.assertEqual(cat, "")
-
-    def test_no_messages_in_window(self):
-        msgs = [{"t": 999, "text": "pog", "emotes": []}]
-        cat = _dominant_category(msgs, 0, 10)
-        self.assertEqual(cat, "")
-
 
 class TestParseCommentNode(unittest.TestCase):
     def test_basic_node(self):
@@ -117,21 +92,20 @@ class _FakeRichSegment:
     """Minimal stand-in for RichSegment in enrich_segments tests (no torch required)."""
 
     _FIELDS = ["start", "end", "text", "speaker", "emotions", "words_per_second",
-               "chat_spike_score", "chat_message_count", "chat_category"]
+               "chat_spike_score", "chat_message_count"]
 
     __dataclass_fields__ = {f: _FakeField(f) for f in _FIELDS}
 
     def __init__(self, **kwargs):
         for f in self._FIELDS:
-            setattr(self, f, kwargs.get(f, "" if f in ("text", "speaker", "chat_category") else
-                                        [] if f == "emotions" else
-                                        False if f == "has_scene_change" else 0))
+            setattr(self, f, kwargs.get(f, "" if f in ("text", "speaker") else
+                                        [] if f == "emotions" else 0))
 
 
 def _make_seg(start, end, text="hello"):
     return _FakeRichSegment(
         start=start, end=end, text=text, speaker="UNKNOWN", emotions=[],
-        words_per_second=0.0, chat_spike_score=0.0, chat_message_count=0, chat_category="",
+        words_per_second=0.0, chat_spike_score=0.0, chat_message_count=0,
     )
 
 

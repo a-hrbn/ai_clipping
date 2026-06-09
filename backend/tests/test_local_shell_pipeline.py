@@ -29,18 +29,13 @@ class LocalShellPipelineTests(unittest.TestCase):
             [
                 "ml.pipelines.components.collect_twitch_clips_op",
                 "ml.pipelines.components.build_training_dataset_op",
-                "ml.pipelines.components.train_ranker_op",
                 "ml.pipelines.components.build_eval_dataset_op",
-                "ml.pipelines.components.evaluate_ranker_op",
-                "ml.pipelines.components.promote_op",
             ],
         )
-        self.assertEqual(outputs["artifact_bundle_uri"], "/tmp/pipeline-root/artifacts/jynxzi_ranker_bundle")
-        self.assertEqual(outputs["registry_report_uri"], "/tmp/pipeline-root/metrics/jynxzi_registry_report.json")
+        self.assertIn("labels_uri", outputs)
+        self.assertIn("training_rows_uri", outputs)
         self.assertIn("--skip-covered", calls[0][1])
         self.assertIn("--merge-output", calls[0][1])
-        self.assertIn("--profile", calls[2][1])
-        self.assertIn("jynxzi", calls[2][1])
         self.assertEqual(Path(calls[1][1][1]), Path("/tmp/pipeline-root/datasets/jynxzi_twitch_labels.jsonl"))
 
 

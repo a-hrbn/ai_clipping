@@ -22,6 +22,9 @@ export interface ClipResult {
   variant_label?: string | null;
   projected_hook_score?: number | null;
   projected_retention_score?: number | null;
+  composite_score?: number | null;
+  value_score?: number | null;
+  trend_score?: number | null;
 }
 
 export type ClipFeedbackRating = "excellent" | "good" | "maybe" | "medium" | "bad" | "boundary_bad";
@@ -115,6 +118,7 @@ export interface PipelineDebugRow {
   end_time: number;
   duration: number;
   virality?: number | null;
+  composite_score?: number | null;
   llm_virality?: number | null;
   hook?: number | null;
   flow?: number | null;
@@ -224,6 +228,41 @@ export interface PipelineDebugLabelRequest {
   human_viral_label: PipelineDebugViralLabel;
   human_boundary_label: PipelineDebugBoundaryLabel;
   human_notes?: string;
+}
+
+export interface ClipArchetype {
+  name: string;
+  description: string;
+  transcript_signals: string[];
+  weight: number;
+}
+
+export interface ActiveClipProfileSource {
+  channel: string;
+  clips_analyzed: number;
+  window_days: number;
+  provider: string;
+  model: string;
+}
+
+export interface ActiveClipProfile {
+  is_generated: boolean;
+  profile_name: string;
+  rendered_rules: string | null;
+  version?: number;
+  streamer?: string;
+  generated_at?: string | null;
+  source?: ActiveClipProfileSource | null;
+  summary?: string | null;
+  archetypes: ClipArchetype[];
+  selection_rules: string[];
+  avoid: string[];
+}
+
+export interface PipelineDebugRunPrompt {
+  vod_id: string;
+  prompt: string;
+  exists: boolean;
 }
 
 export type PipelineStageStatus = "ok" | "warning" | "pending" | "disabled" | "error";

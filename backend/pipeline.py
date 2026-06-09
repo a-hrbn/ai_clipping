@@ -18,6 +18,7 @@ from services import (
     clip_strategy,
     moment_finder,
     chat_signal,
+    audio_energy,
 )
 
 logger = logging.getLogger(__name__)
@@ -356,12 +357,15 @@ def _moments_from_post_processed(rows: list[dict], platform: str) -> list[dict]:
             "start_time": start,
             "end_time": end,
             "viral_score": float(row.get("viral_score") or 1.0),
+            "composite_score": float(row.get("composite_score") or row.get("viral_score") or 1.0),
             "reason": str(row.get("reason") or ""),
             "candidate_id": f"llm_moment_{i:02d}",
             "ranking_mode": "llm_moment_finder",
             "platform": platform,
             "projected_hook_score": row.get("hook"),
             "projected_retention_score": row.get("flow"),
+            "value_score": row.get("value"),
+            "trend_score": row.get("trend"),
         })
     return moments
 
@@ -443,6 +447,23 @@ async def run_pipeline(
         debug_dir = job_dir / "debug"
         debug_dir.mkdir(parents=True, exist_ok=True)
 
+        # Compute audio energy before WAV cleanup (only available on non-cached runs).
+        if audio_path is not None:
+            energy_scores = await loop.run_in_executor(
+                None,
+                lambda: audio_energy.compute_segment_energy(audio_path, transcript),
+            )
+            if energy_scores:
+                transcript = [
+                    seg.__class__(
+                        **{
+                            **{f.name: getattr(seg, f.name) for f in seg.__dataclass_fields__.values()},
+                            "voice_energy_burst_score": energy_scores[i],
+                        }
+                    )
+                    for i, seg in enumerate(transcript)
+                ]
+
         if settings.enable_chat_analysis and url:
             update_job(job_id, status="downloading_chat", progress_pct=60)
             enriched = transcriber.apply_chat_enrichment(transcript_cache_source, transcript)
@@ -485,7 +506,7 @@ async def run_pipeline(
                     max_moments=int(getattr(settings, "moment_finder_max_moments", 180) or 180),
                     min_duration_sec=float(getattr(settings, "moment_finder_min_duration_sec", 8.0) or 8.0),
                     max_duration_sec=float(getattr(settings, "moment_finder_max_duration_sec", 90.0) or 90.0),
-                    max_tokens=int(getattr(settings, "moment_finder_max_tokens", 16000) or 16000),
+                    max_tokens=int(getattr(settings, "moment_finder_max_tokens", 32000) or 32000),
                     temperature=0.0,
                     timeout_sec=float(getattr(settings, "moment_finder_timeout_sec", 900.0) or 900.0),
                     api_retries=int(getattr(settings, "moment_finder_api_retries", 2) or 0),
@@ -501,6 +522,7 @@ async def run_pipeline(
             _write_json(debug_dir / "llm_moment_finder_stage.json", llm_stage)
             _write_json(debug_dir / "llm_moment_finder_usage.json", llm_result.usage)
             _write_jsonl(debug_dir / "llm_moment_finder_moments.jsonl", llm_result.post_processed_moments)
+            _write_jsonl(debug_dir / "llm_moment_finder_moments_raw.jsonl", llm_result.raw_moments)
         except moment_finder.MomentFinderError as exc:
             llm_stage.update({"status": "failed", "error_type": type(exc).__name__, "error": str(exc)})
             _write_json(debug_dir / "llm_moment_finder_stage.json", llm_stage)
@@ -520,12 +542,22 @@ async def run_pipeline(
         _write_jsonl(debug_dir / "segments.jsonl", _segment_records(transcript))
 
         platform = str(normalized_strategy.get("platform") or "general")
-        moments = _moments_from_post_processed(llm_result.post_processed_moments, platform)
+        moment_candidates = _moments_from_post_processed(llm_result.post_processed_moments, platform)
+        # Cut only the top-K ranked moments into clips; the full candidate set
+        # remains in the debug JSONL files for review/eval.
+        clip_top_k = int(getattr(settings, "clip_top_k", 0) or 0)
+        moments = moment_candidates[:clip_top_k] if clip_top_k > 0 else moment_candidates
         _write_json(debug_dir / "final_moments.json", {"moments": moments, "count": len(moments)})
 
         logger.info(
             json.dumps(
-                {"event": "pipeline_moments_ready", "job_id": job_id, "moment_count": len(moments)},
+                {
+                    "event": "pipeline_moments_ready",
+                    "job_id": job_id,
+                    "candidate_count": len(moment_candidates),
+                    "clipped_count": len(moments),
+                    "clip_top_k": clip_top_k,
+                },
                 ensure_ascii=True, sort_keys=True,
             )
         )

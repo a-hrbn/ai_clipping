@@ -1,5 +1,80 @@
 # Task Plan
 
+## 2026-06-09: Jobs sollen nicht unnötig abbrechen
+
+### Root Cause (untersucht)
+Der Pipeline-Debug-Orchestrator (`_run_workflow_sync`) lief als `daemon=True`
+Thread **im** uvicorn-Server-Prozess (`routers/pipeline_debug.py:256`).
+Dev-Compose startet uvicorn mit `--reload --reload-dir /app/backend`. Jede
+Quellcode-Änderung → WatchFiles → Server-Restart → Daemon-Thread tot → Run
+stirbt mitten drin, VOD 4/5 starten nie. → killte all_v1 + all_v2.
+Worker (`pipeline_worker.py`) sind bereits detached Subprozesse und überleben
+Reloads (PPID 1). Session-TTL (300s) betrifft nur UI-Clip-Jobs, nicht Debug.
+
+### Fix: Orchestrator als detached Subprozess (Muster wie pipeline_worker.py)
+- [x] `backend/pipeline_debug_runner.py` — liest request aus workflow.json
+- [x] `routers/pipeline_debug.py`: Daemon-Thread → `Popen(start_new_session=True)`
+- [x] Orchestrator-PID + Logpfad in workflow.json persistieren
+- [x] ungenutzten `threading`-Import entfernen
+
+### Verifikation
+- [x] Import-Check im Container (router + runner) ✓
+- [x] 1-VOD-Run gestartet → detached Orchestrator PID 68855, eigene Session (SID==PID)
+- [x] `touch main.py` → Reload erzwungen (Server 68796→68886) → Orchestrator 68855
+      überlebte (PPID 1), lief bis `status=done` durch (292 Review-Rows)
+- [x] job_session-Tests grün; Graph neu gebaut
+
+### Review
+Orchestrator läuft jetzt als detached Subprozess (`pipeline_debug_runner.py`,
+`Popen(start_new_session=True)`), identisch robust wie die Worker. uvicorn
+`--reload` und Server-Crashes brechen laufende Runs nicht mehr ab. PID + Logpfad
+landen in workflow.json (Kontrolle/Debug). Dev-Hot-Reload bleibt erhalten.
+Offen/optional: Cancel-Endpoint, der `orchestrator_pid` killt (statt manuellem kill).
+
+### Follow-up (2026-06-09): Cleanup + Result-Recovery entfernt
+- [x] 5 verwaiste Storage-Dirs entfernt (38 GB freigegeben) — Cross-Check
+      Storage-Dir vs. existierender Workflow-Dir, alle Waisen weg.
+- [x] `_try_recover_stalled_workflow` + Aufrufstelle entfernt. War das
+      Sicherheitsnetz der alten Daemon-Thread-Welt (Run hängt auf "running" nach
+      Reload → aus Alt-Artefakten rekonstruieren → "(recovered)"). Mit detached
+      Orchestrator überflüssig und für korrektes Debugging unerwünscht.
+- [x] Verifiziert: `moment_finder.find_moments` (pipeline.py:500) ist UNBEDINGT
+      → jeder Job schickt frische LLM-Anfrage. Kein LLM-Response-Cache.
+      Identische 291 moments im Test = Determinismus (temp=0), kein Cache.
+- [x] Transcript-Cache (Whisper, kein LLM) bleibt — `frontend_job_cache` steuert
+      nur Transcript-Reuse + Media-Retention, nicht das Moment-Finding.
+
+### Follow-up (2026-06-09): Debug-Pipeline-Logs verbessert
+Root Cause: detached Orchestrator/Worker laufen außerhalb uvicorn → KEIN Logging
+konfiguriert → alle `logger.info` unterdrückt (Root default WARNING). orchestrator.log
+enthielt nur Rauschen + aria2c-Download-Spam (tausende `[DL:...]`-Zeilen).
+- [x] `backend/log_setup.py` — `configure_job_logging()`: stderr-Handler mit
+      Timestamp/Level/Logger, INFO-Level, laute Libs (transformers/httpx/urllib3 …)
+      auf WARNING gedämpft. Idempotent, Level via AI_CLIPPING_LOG_LEVEL.
+- [x] Runner + Worker rufen `configure_job_logging()` beim Start; Worker loggt
+      `pipeline_worker_start/done/failed`.
+- [x] aria2c `--show-console-readout=false` (korrigiert von falschem
+      `--enable-console-readout`, das aria2 1.37.0 ablehnt) → kein DL-Spam.
+- [x] Live-Stage-Spiegelung: `_mirror_job_progress` pollt den Job alle 3s und
+      spiegelt JobState→WorkflowStage + % in workflow.json (kein eingefrorenes
+      "transcribe" mehr). Mapping `_JOB_STATE_TO_WORKFLOW_STAGE`.
+
+Verifiziert (logs_test3): orchestrator.log = 5 strukturierte INFO-Zeilen, 0
+`[DL:...]`, 0 unrecognized-option; Stage-Mirror reflektiert Job-Status live.
+
+### Follow-up (2026-06-09): Nur Top-20-Clips pro VOD
+- [x] `config.py`: `clip_top_k: int = 20` (0 = kein Cap).
+- [x] `pipeline.py`: `moments = moment_candidates[:clip_top_k]` vor `cut_clips`;
+      volle Kandidaten bleiben in raw/filtered JSONL für Review/Eval; `final_moments.json`
+      + Clips spiegeln Top-20. Log `pipeline_moments_ready` zeigt candidate/clipped/cap.
+- [x] Clip↔Moment-Zuordnung robust: `_build_filtered_clip_map` baut volle Map,
+      aber `_resolve_clip_for_raw_moment` liefert "ready" nur wenn Clip-Datei
+      existiert → Moments 21+ = "missing". Keine Review-Logik-Änderung nötig.
+- [x] all_v3 neu gestartet (`20260609T114714136540Z`) — alter Run hatte VOD 1
+      mit 65 Clips (Worker vor Edit); jetzt Cap auf allen 5 VODs.
+
+---
+
 ## 2026-06-05 Plan (KONKRET): LLM-Moment-Finder produktiv — Lokalisierung → Integration → Entscheidungs-Gate
 
 **Leit-Entscheidung (begründet):** LLM-Pfad ist die einzige ungetestete Stellschraube, die zum Produktziel ("virale Jynxzi-Momente finden") passt; Ranker-Reparatur ist empirisch erschöpft. ABER: kein bewiesener Gewinner — die **tragende, noch unmessene Metrik ist Top-N-Precision auf `known_repost_match=false`**. Erst additiv bauen → in Phase 2 messen → DANN Ranker löschen. Exact-Pick-@top-12 (~8 %, für beide Pfade) ist NICHT mehr die Zielmetrik.

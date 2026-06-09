@@ -1,5 +1,6 @@
 import concurrent.futures
 import hashlib
+import logging
 import pathlib
 import re
 import threading
@@ -7,9 +8,45 @@ from typing import Callable
 import ffmpeg
 from config import settings
 from models import ClipResult
+
+logger = logging.getLogger(__name__)
 Moment = dict
 
 _CLIP_MAX_WORKERS = 4
+
+# NVENC availability — probed once against the first real video file.
+_nvenc_lock = threading.Lock()
+_nvenc_available: bool | None = None
+
+
+def _probe_nvenc(video_path: pathlib.Path) -> bool:
+    try:
+        (
+            ffmpeg
+            .input(str(video_path), ss=0, t=1)
+            .output("/dev/null", vcodec="h264_nvenc", preset="fast", acodec="aac", f="null")
+            .overwrite_output()
+            .run(quiet=True)
+        )
+        return True
+    except Exception:
+        return False
+
+
+def _get_nvenc_available(video_path: pathlib.Path) -> bool:
+    global _nvenc_available
+    if _nvenc_available is None:
+        with _nvenc_lock:
+            if _nvenc_available is None:
+                _nvenc_available = _probe_nvenc(video_path)
+                logger.info("NVENC probe result: %s", "available" if _nvenc_available else "unavailable — using libx264")
+    return _nvenc_available
+
+
+def _video_output_kwargs(video_path: pathlib.Path) -> dict:
+    if _get_nvenc_available(video_path):
+        return {"vcodec": "h264_nvenc", "preset": "fast", "acodec": "aac", "movflags": "+faststart"}
+    return {"vcodec": "libx264", "preset": "ultrafast", "acodec": "aac", "movflags": "+faststart"}
 
 
 def cut_clips(
@@ -46,13 +83,7 @@ def cut_clips(
         (
             ffmpeg
             .input(str(video_path), ss=start, t=end - start)
-            .output(
-                str(output_path),
-                vcodec="libx264",
-                acodec="aac",
-                preset="veryfast",
-                movflags="+faststart",
-            )
+            .output(str(output_path), **_video_output_kwargs(video_path))
             .overwrite_output()
             .run(quiet=True)
         )
@@ -71,6 +102,9 @@ def cut_clips(
             variant_label=moment.get("variant_label"),
             projected_hook_score=moment.get("projected_hook_score"),
             projected_retention_score=moment.get("projected_retention_score"),
+            composite_score=moment.get("composite_score"),
+            value_score=moment.get("value_score"),
+            trend_score=moment.get("trend_score"),
         )
         with _lock:
             slot[idx] = result
@@ -112,13 +146,7 @@ def cut_review_clips(
             (
                 ffmpeg
                 .input(str(video_path), ss=start, t=duration)
-                .output(
-                    str(output_path),
-                    vcodec="libx264",
-                    acodec="aac",
-                    preset="veryfast",
-                    movflags="+faststart",
-                )
+                .output(str(output_path), **_video_output_kwargs(video_path))
                 .overwrite_output()
                 .run(quiet=True)
             )

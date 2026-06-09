@@ -84,6 +84,9 @@ class ClipResult(BaseModel):
     variant_label: str | None = None
     projected_hook_score: float | None = None
     projected_retention_score: float | None = None
+    composite_score: float | None = None
+    value_score: float | None = None
+    trend_score: float | None = None
 
 
 class JobStatus(BaseModel):

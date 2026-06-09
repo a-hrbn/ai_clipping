@@ -295,8 +295,6 @@ def _hard_negative_rows_for_job(
                 "pre_judge_rank": rank,
                 "pre_judge_rank_score": round(rank_score, 6),
                 "heuristic_rank_score": _as_float(ranked.get("heuristic_rank_score")),
-                "trained_rank_score": _as_float(ranked.get("trained_rank_score")),
-                "model_blend": _as_float(ranked.get("model_blend")),
                 "best_positive_overlap_ratio": round(best_overlap, 6),
                 "same_vod_positive_lookalike_score": round(float(lookalike), 6),
                 "same_vod_positive_reference_count": len(positive_refs),

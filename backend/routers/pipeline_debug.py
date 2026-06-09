@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import datetime
 import json
 import logging
 import pathlib
 import re
-import threading
+import subprocess
+import sys
 import time
 from typing import Any, Literal
 
@@ -22,10 +24,28 @@ from pipeline_runner import run_job_subprocess
 
 logger = logging.getLogger(__name__)
 
+_BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
+
 router = APIRouter(prefix="/api/pipeline-debug", tags=["pipeline-debug"])
 
 WorkflowStatus = Literal["queued", "running", "done", "failed"]
 WorkflowStage = Literal["queued", "transcribe", "moment_finder", "cut_clips", "done", "failed"]
+
+# Map the worker's fine-grained JobState onto the coarse workflow stage shown in
+# the review UI, so a long run reports its real phase instead of a frozen one.
+_JOB_STATE_TO_WORKFLOW_STAGE: dict[str, WorkflowStage] = {
+    "queued": "transcribe",
+    "downloading": "transcribe",
+    "downloading_chat": "transcribe",
+    "extracting_audio": "transcribe",
+    "transcribing": "transcribe",
+    "extracting_features": "transcribe",
+    "diarizing": "transcribe",
+    "analyzing": "moment_finder",
+    "judging": "moment_finder",
+    "clipping": "cut_clips",
+    "done": "cut_clips",
+}
 
 WORKFLOW_ROOT = pathlib.Path(settings.storage_dir).parent / "pipeline_debug_workflows"
 LABELS_FILENAME = "review_labels.json"
@@ -167,6 +187,52 @@ def _update_status(
     return payload
 
 
+@router.get("/active-profile")
+async def get_active_clip_profile(profile: str = "jynxzi") -> dict[str, Any]:
+    from ml import llm_moment_finder as d0
+    profile_spec = d0.load_clip_profile(profile)
+    if profile_spec is not None:
+        return {
+            "is_generated": True,
+            "profile_name": profile,
+            "rendered_rules": d0.render_profile_rules(profile_spec),
+            **profile_spec,
+        }
+    return {
+        "is_generated": False,
+        "profile_name": profile,
+        "rendered_rules": None,
+        "summary": None,
+        "archetypes": [],
+        "selection_rules": [],
+        "avoid": [],
+        "source": None,
+        "generated_at": None,
+    }
+
+
+@router.get("/workflows/{workflow_id}/prompt")
+async def get_pipeline_debug_run_prompt(workflow_id: str, vod_id: str = "") -> dict[str, Any]:
+    safe_id = _safe_workflow_id(workflow_id)
+    vod_id_clean = re.sub(r"[^0-9a-zA-Z_-]", "", str(vod_id or "").strip())
+    if not vod_id_clean:
+        raise HTTPException(status_code=400, detail="vod_id is required")
+    job_id = f"pipeline_debug_{safe_id}_{vod_id_clean}"
+    storage_root = pathlib.Path(settings.storage_dir).resolve()
+    prompt_path = (storage_root / job_id / "debug" / "llm_moment_finder_prompt.txt").resolve()
+    try:
+        prompt_path.relative_to(storage_root)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Not found")
+    if not prompt_path.is_file():
+        return {"vod_id": vod_id_clean, "prompt": "", "exists": False}
+    try:
+        prompt_text = prompt_path.read_text(encoding="utf-8")
+    except OSError:
+        return {"vod_id": vod_id_clean, "prompt": "", "exists": False}
+    return {"vod_id": vod_id_clean, "prompt": prompt_text, "exists": True}
+
+
 @router.get("/anchors")
 async def get_pipeline_debug_anchors() -> dict[str, Any]:
     from ml.eval_clip_finder import read_anchor_vod_ids as _read_anchors
@@ -207,14 +273,39 @@ async def start_pipeline_debug_workflow(request: PipelineDebugStartRequest) -> d
         message="Workflow queued.",
         patch={"request": req_dict, "workflow_dir": str(root), "name": req_dict.get("name", "").strip()},
     )
-    thread = threading.Thread(
-        target=_run_workflow_sync,
-        args=(workflow_id, req_dict),
-        name=f"pipeline-debug-{workflow_id}",
-        daemon=True,
-    )
-    thread.start()
+    # Spawn AFTER the queued status (with the request payload) is persisted — the
+    # detached orchestrator reads its request straight back from workflow.json.
+    _spawn_detached_orchestrator(workflow_id, root)
     return _hydrate_workflow_response(_read_json(_status_path(root)) or initial)
+
+
+def _spawn_detached_orchestrator(workflow_id: str, root: pathlib.Path) -> int:
+    """Launch the workflow orchestrator as a fully detached subprocess.
+
+    Running in its own session (``start_new_session=True``) keeps the run alive
+    across uvicorn ``--reload`` restarts and server crashes, so a long multi-VOD
+    run is not aborted when source files change during development. This mirrors
+    how ``pipeline_worker.py`` is already spawned. The request payload lives in
+    ``workflow.json``, so the detached process is fully self-describing.
+    """
+    from pipeline_runner import build_subprocess_env
+
+    log_handle = open(root / "orchestrator.log", "ab")
+    try:
+        process = subprocess.Popen(
+            [sys.executable, str(_BACKEND_ROOT / "pipeline_debug_runner.py"), "--workflow-id", workflow_id],
+            cwd=str(_BACKEND_ROOT),
+            env=build_subprocess_env(),
+            stdout=log_handle,
+            stderr=log_handle,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+    finally:
+        log_handle.close()  # the child holds its own dup'd fd
+    logger.info("pipeline_debug_orchestrator_spawned workflow_id=%s pid=%d", workflow_id, process.pid)
+    return process.pid
 
 
 @router.get("/workflows")
@@ -309,6 +400,44 @@ def serve_pipeline_debug_clip(workflow_id: str, clip_path: str) -> FileResponse:
     return FileResponse(str(path), media_type="video/mp4", filename=path.name)
 
 
+async def _mirror_job_progress(
+    *,
+    workflow_id: str,
+    job_id: str,
+    vod_id: str,
+    vod_index: int,
+    vod_count: int,
+    stop: asyncio.Event,
+    poll_sec: float = 3.0,
+) -> None:
+    """Mirror the running worker's job status into the workflow status.
+
+    The orchestrator otherwise blocks on the subprocess and the review UI would
+    show a frozen 'transcribe' stage for the whole run. Polling the job store and
+    reflecting status/progress makes a long run observable phase by phase.
+    """
+    base = 5 + int((vod_index / max(vod_count, 1)) * 80)
+    span = max(int(80 / max(vod_count, 1)), 1)
+    last: tuple[str, int] | None = None
+    while not stop.is_set():
+        job = get_job(job_id)
+        if job is not None and (job.status, job.progress_pct) != last:
+            last = (job.status, job.progress_pct)
+            stage = _JOB_STATE_TO_WORKFLOW_STAGE.get(job.status, "transcribe")
+            progress = min(base + int((job.progress_pct / 100.0) * span), 95)
+            _update_status(
+                workflow_id,
+                status="running",
+                stage=stage,
+                progress_pct=progress,
+                message=f"VOD {vod_index + 1}/{vod_count} ({vod_id}): {job.status} {job.progress_pct}%",
+            )
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=poll_sec)
+        except asyncio.TimeoutError:
+            pass
+
+
 def _run_workflow_sync(workflow_id: str, request: dict[str, Any]) -> None:
     import asyncio as _asyncio
     loop = _asyncio.new_event_loop()
@@ -369,12 +498,27 @@ async def _run_workflow(workflow_id: str, request: dict[str, Any]) -> None:
 
             create_job(job_id, profile=profile)
 
-            returncode = await run_job_subprocess(
-                job_id=job_id,
-                url=url,
-                profile=profile,
-                strategy=strategy,
+            stop_mirror = asyncio.Event()
+            mirror_task = asyncio.create_task(
+                _mirror_job_progress(
+                    workflow_id=workflow_id,
+                    job_id=job_id,
+                    vod_id=vod_id,
+                    vod_index=vod_index,
+                    vod_count=vod_count,
+                    stop=stop_mirror,
+                )
             )
+            try:
+                returncode = await run_job_subprocess(
+                    job_id=job_id,
+                    url=url,
+                    profile=profile,
+                    strategy=strategy,
+                )
+            finally:
+                stop_mirror.set()
+                await mirror_task
 
             vod_elapsed = round(time.monotonic() - vod_start, 1)
             if returncode != 0:
@@ -460,14 +604,58 @@ async def _run_workflow(workflow_id: str, request: dict[str, Any]) -> None:
         )
 
 
+def _clip_overlap(start: float, end: float, clip_start: float, clip_end: float) -> float:
+    """Overlap fraction of [start,end] covered by [clip_start,clip_end]."""
+    dur = max(end - start, 0.001)
+    overlap = max(0.0, min(end, clip_end) - max(start, clip_start))
+    return overlap / dur
+
+
+def _build_filtered_clip_map(clips_dir: pathlib.Path, filtered_moments: list[dict[str, Any]]) -> dict[tuple[float, float], str]:
+    """Map (start_time, end_time) → clip filename for each filtered moment by position."""
+    clip_map: dict[tuple[float, float], str] = {}
+    for i, m in enumerate(filtered_moments, start=1):
+        clip_map[(round(float(m.get("start_time") or 0), 3), round(float(m.get("end_time") or 0), 3))] = f"clip_{i:02d}.mp4"
+    return clip_map
+
+
+def _resolve_clip_for_raw_moment(
+    start: float,
+    end: float,
+    clip_map: dict[tuple[float, float], str],
+    clips_dir: pathlib.Path,
+    job_id: str,
+) -> tuple[str, str]:
+    """Return (clip_status, clip_url) for a raw moment by matching against filtered clips."""
+    best_filename: str | None = None
+    best_overlap = 0.0
+    for (cs, ce), fname in clip_map.items():
+        ov = _clip_overlap(start, end, cs, ce)
+        if ov > best_overlap:
+            best_overlap = ov
+            best_filename = fname
+    if best_filename and best_overlap >= 0.9 and (clips_dir / best_filename).is_file():
+        return "ready", f"/static/{job_id}/clips/{best_filename}"
+    return "missing", ""
+
+
 def _build_review_rows(*, workflow_id: str, vod_id: str, job_id: str) -> tuple[list[dict[str, Any]], int]:
-    """Return (rows, raw_llm_moment_count)."""
+    """Return (rows, raw_llm_moment_count).
+
+    Rows are built from the pre-diversity raw moments so the eval and review UI
+    reflect true LLM recall. Clip URLs are resolved by matching raw moments against
+    the filtered (clipped) set via overlap — only moments that survived diversity
+    filtering will have a playable clip.
+    """
     job_dir = pathlib.Path(settings.storage_dir) / job_id
     debug_dir = job_dir / "debug"
-    moments_path = debug_dir / "llm_moment_finder_moments.jsonl"
+    raw_path = debug_dir / "llm_moment_finder_moments_raw.jsonl"
+    filtered_path = debug_dir / "llm_moment_finder_moments.jsonl"
     segments_path = debug_dir / "segments.jsonl"
     clips_dir = job_dir / "clips"
 
+    # Prefer raw; fall back to filtered for backwards-compat with older workflow runs.
+    moments_path = raw_path if raw_path.exists() else filtered_path
     moment_rows = _read_jsonl(moments_path)
     raw_llm_count = len(moment_rows)
     if not moments_path.exists():
@@ -477,14 +665,18 @@ def _build_review_rows(*, workflow_id: str, vod_id: str, job_id: str) -> tuple[l
         )
     segment_records = _read_jsonl(segments_path)
     logger.info(
-        "pipeline_debug_build_rows workflow_id=%s vod=%s moments=%d segments=%d",
-        workflow_id, vod_id, raw_llm_count, len(segment_records),
+        "pipeline_debug_build_rows workflow_id=%s vod=%s moments=%d segments=%d raw=%s",
+        workflow_id, vod_id, raw_llm_count, len(segment_records), raw_path.exists(),
     )
     segments = [
         TranscriptSegment(start=float(s.get("start") or 0), end=float(s.get("end") or 0), text=str(s.get("text") or ""))
         for s in segment_records
         if s.get("start") is not None and s.get("end") is not None and s.get("text")
     ]
+
+    # Build clip map from filtered moments (clips are only cut for filtered set).
+    filtered_moments = _read_jsonl(filtered_path) if filtered_path.exists() else []
+    clip_map = _build_filtered_clip_map(clips_dir, filtered_moments)
 
     rows: list[dict[str, Any]] = []
     for i, moment in enumerate(moment_rows, start=1):
@@ -493,10 +685,7 @@ def _build_review_rows(*, workflow_id: str, vod_id: str, job_id: str) -> tuple[l
         if end <= start:
             continue
         duration = round(end - start, 3)
-        clip_filename = f"clip_{i:02d}.mp4"
-        clip_file = clips_dir / clip_filename
-        clip_status = "ready" if clip_file.is_file() else "missing"
-        clip_url = f"/static/{job_id}/clips/{clip_filename}" if clip_status == "ready" else ""
+        clip_status, clip_url = _resolve_clip_for_raw_moment(start, end, clip_map, clips_dir, job_id)
         excerpt = transcript_excerpt(segments, start, end, pad_sec=EXCERPT_PAD_SEC, max_chars=EXCERPT_MAX_CHARS) if segments else ""
         review_id = f"pipeline_debug:{vod_id}:rank{i:02d}"
         rows.append({
@@ -509,6 +698,7 @@ def _build_review_rows(*, workflow_id: str, vod_id: str, job_id: str) -> tuple[l
             "end_time": round(end, 3),
             "duration": duration,
             "virality": float(moment.get("viral_score") or 0),
+            "composite_score": float(moment.get("composite_score") or moment.get("viral_score") or 0),
             "llm_virality": float(moment.get("llm_virality") or 0),
             "hook": float(moment.get("hook") or 0),
             "flow": float(moment.get("flow") or 0),
@@ -525,64 +715,8 @@ def _build_review_rows(*, workflow_id: str, vod_id: str, job_id: str) -> tuple[l
     return rows, raw_llm_count
 
 
-def _try_recover_stalled_workflow(workflow_id: str, status: dict[str, Any]) -> dict[str, Any]:
-    """If a workflow is stuck in 'running' but all jobs have completed artifacts, recover it."""
-    request = status.get("request") or {}
-    vod_ids = [str(v).strip() for v in (request.get("vod_ids") or []) if str(v).strip()]
-    if not vod_ids:
-        return status
-
-    storage = pathlib.Path(settings.storage_dir)
-    all_done = True
-    for vod_id in vod_ids:
-        job_id = f"pipeline_debug_{workflow_id}_{vod_id}"
-        moments_path = storage / job_id / "debug" / "llm_moment_finder_moments.jsonl"
-        if not moments_path.is_file():
-            all_done = False
-            break
-
-    if not all_done:
-        return status
-
-    logger.warning("pipeline_debug recovering stalled workflow workflow_id=%s", workflow_id)
-    root = _workflow_dir(workflow_id)
-    review_dir = root / "review"
-    review_dir.mkdir(parents=True, exist_ok=True)
-
-    all_rows: list[dict[str, Any]] = []
-    failed_vods: list[str] = []
-    total_llm_moment_count = 0
-    for vod_id in vod_ids:
-        job_id = f"pipeline_debug_{workflow_id}_{vod_id}"
-        vod_rows, vod_llm_count = _build_review_rows(workflow_id=workflow_id, vod_id=vod_id, job_id=job_id)
-        if vod_rows:
-            all_rows.extend(vod_rows)
-            total_llm_moment_count += vod_llm_count
-        else:
-            failed_vods.append(vod_id)
-
-    _write_jsonl(_review_jsonl_path(root), all_rows)
-
-    return _update_status(
-        workflow_id,
-        status="done",
-        stage="done",
-        progress_pct=100,
-        message="Review ready. (recovered)",
-        patch={
-            "vod_count": len(vod_ids),
-            "failed_vod_count": len(failed_vods),
-            "failed_vod_ids": failed_vods,
-            "row_count": len(all_rows),
-            "llm_moment_count": total_llm_moment_count,
-        },
-    )
-
-
 def _hydrate_workflow_response(status: dict[str, Any], *, include_rows: bool = True) -> dict[str, Any]:
     workflow_id = str(status.get("workflow_id") or "")
-    if status.get("status") == "running":
-        status = _try_recover_stalled_workflow(workflow_id, status)
     root = _workflow_dir(workflow_id)
     rows = _hydrate_review_rows(root, workflow_id) if include_rows else []
     # Compute eval metrics live (only on detail GET when status=done; skipped on list endpoint)
@@ -616,12 +750,11 @@ def _hydrate_review_rows(root: pathlib.Path, workflow_id: str) -> list[dict[str,
             copied["label_updated_at"] = label.get("updated_at")
         # Refresh clip_status from filesystem — baked-in value may be stale if
         # clipping was still in progress when the workflow state was written.
+        # Only use the clip_url that was resolved during _build_review_rows (via
+        # overlap-matching against filtered clips). Do NOT fall back to review_rank
+        # as a position index — raw rows have different positions than filtered clips.
         job_id = str(copied.get("job_id") or "")
         clip_filename = str(copied.get("clip_url") or "").rsplit("/", 1)[-1] or ""
-        if not clip_filename:
-            rank = int(copied.get("review_rank") or 0)
-            if rank > 0:
-                clip_filename = f"clip_{rank:02d}.mp4"
         if job_id and clip_filename:
             clip_file = storage / job_id / "clips" / clip_filename
             if clip_file.is_file():
@@ -653,7 +786,10 @@ def _compute_eval(status: dict[str, Any]) -> dict[str, Any]:
         predictions_by_vod: dict[str, list[dict[str, Any]]] = {}
         for vod_id in run_vod_ids:
             job_id = f"pipeline_debug_{workflow_id}_{vod_id}"
-            moments_path = storage / job_id / "debug" / "llm_moment_finder_moments.jsonl"
+            # Prefer raw (pre-diversity) moments for eval; fall back to filtered for older runs.
+            raw_path = storage / job_id / "debug" / "llm_moment_finder_moments_raw.jsonl"
+            filtered_path = storage / job_id / "debug" / "llm_moment_finder_moments.jsonl"
+            moments_path = raw_path if raw_path.exists() else filtered_path
             predictions_by_vod[vod_id] = _read_jsonl(moments_path)
         manifest = _load_manifest()
         manifest_vod_count = sum(1 for v in run_vod_ids if v in manifest)
@@ -663,7 +799,7 @@ def _compute_eval(status: dict[str, Any]) -> dict[str, Any]:
             workflow_id, len(run_vod_ids), manifest_vod_count, len(run_vod_ids),
             ",".join(f"{v}:{n}" for v, n in pred_counts.items()),
         )
-        result = _evaluate_all(predictions_by_vod, manifest=manifest, anchor_vod_ids=run_vod_ids)
+        result = _evaluate_all(predictions_by_vod, manifest=manifest, anchor_vod_ids=run_vod_ids, ks=(5, 10, 20, 50))
         overall = result.get("overall") or {}
         logger.info(
             "pipeline_debug_eval_result workflow_id=%s gt_count=%d hits=%d miss_rate=%s"
