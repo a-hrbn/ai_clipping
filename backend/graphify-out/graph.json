@@ -348,7 +348,7 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "job_manager",
-      "community": 9,
+      "community": 134,
       "norm_label": "job_manager.py"
     },
     {
@@ -358,7 +358,7 @@
       "source_location": "L37",
       "_origin": "ast",
       "id": "job_manager_evict_expired",
-      "community": 9,
+      "community": 134,
       "norm_label": "_evict_expired()"
     },
     {
@@ -368,7 +368,7 @@
       "source_location": "L56",
       "_origin": "ast",
       "id": "job_manager_load_jobs",
-      "community": 9,
+      "community": 134,
       "norm_label": "_load_jobs()"
     },
     {
@@ -378,7 +378,7 @@
       "source_location": "L100",
       "_origin": "ast",
       "id": "job_manager_reload_jobs_from_disk_if_changed",
-      "community": 9,
+      "community": 134,
       "norm_label": "_reload_jobs_from_disk_if_changed()"
     },
     {
@@ -388,7 +388,7 @@
       "source_location": "L110",
       "_origin": "ast",
       "id": "job_manager_persist_jobs",
-      "community": 9,
+      "community": 134,
       "norm_label": "_persist_jobs()"
     },
     {
@@ -398,7 +398,7 @@
       "source_location": "L135",
       "_origin": "ast",
       "id": "job_manager_should_persist_update",
-      "community": 9,
+      "community": 134,
       "norm_label": "_should_persist_update()"
     },
     {
@@ -408,7 +408,7 @@
       "source_location": "L147",
       "_origin": "ast",
       "id": "job_manager_create_job",
-      "community": 9,
+      "community": 134,
       "norm_label": "create_job()"
     },
     {
@@ -418,7 +418,7 @@
       "source_location": "L147",
       "_origin": "ast",
       "id": "job_manager_py_jobstatus",
-      "community": 9,
+      "community": 134,
       "norm_label": "jobstatus"
     },
     {
@@ -428,7 +428,7 @@
       "source_location": "L158",
       "_origin": "ast",
       "id": "job_manager_get_job",
-      "community": 9,
+      "community": 134,
       "norm_label": "get_job()"
     },
     {
@@ -438,7 +438,7 @@
       "source_location": "L168",
       "_origin": "ast",
       "id": "job_manager_update_job",
-      "community": 9,
+      "community": 134,
       "norm_label": "update_job()"
     },
     {
@@ -448,7 +448,7 @@
       "source_location": "L198",
       "_origin": "ast",
       "id": "job_manager_write_job_progress_file",
-      "community": 9,
+      "community": 134,
       "norm_label": "_write_job_progress_file()"
     },
     {
@@ -458,7 +458,7 @@
       "source_location": "L221",
       "_origin": "ast",
       "id": "job_manager_cancel_job",
-      "community": 9,
+      "community": 134,
       "norm_label": "cancel_job()"
     },
     {
@@ -468,7 +468,7 @@
       "source_location": "L251",
       "_origin": "ast",
       "id": "job_manager_is_job_cancelled",
-      "community": 9,
+      "community": 134,
       "norm_label": "is_job_cancelled()"
     },
     {
@@ -478,7 +478,7 @@
       "source_location": "L278",
       "_origin": "ast",
       "id": "job_manager_bind_job_session",
-      "community": 9,
+      "community": 80,
       "norm_label": "bind_job_session()"
     },
     {
@@ -488,7 +488,7 @@
       "source_location": "L290",
       "_origin": "ast",
       "id": "job_manager_delete_job",
-      "community": 9,
+      "community": 134,
       "norm_label": "delete_job()"
     },
     {
@@ -498,7 +498,7 @@
       "source_location": "L312",
       "_origin": "ast",
       "id": "job_manager_touch_job_session",
-      "community": 9,
+      "community": 134,
       "norm_label": "touch_job_session()"
     },
     {
@@ -508,7 +508,7 @@
       "source_location": "L38",
       "_origin": "ast",
       "id": "job_manager_rationale_38",
-      "community": 9,
+      "community": 134,
       "norm_label": "remove jobs older than _job_ttl_seconds from the in-memory store."
     },
     {
@@ -518,7 +518,7 @@
       "source_location": "L111",
       "_origin": "ast",
       "id": "job_manager_rationale_111",
-      "community": 9,
+      "community": 134,
       "norm_label": "flush current job state to disk without holding the state lock during i/o."
     },
     {
@@ -528,7 +528,7 @@
       "source_location": "L199",
       "_origin": "ast",
       "id": "job_manager_rationale_199",
-      "community": 9,
+      "community": 134,
       "norm_label": "write a per-job progress side-file for reliable cross-process status reads."
     },
     {
@@ -538,7 +538,7 @@
       "source_location": "L291",
       "_origin": "ast",
       "id": "job_manager_rationale_291",
-      "community": 9,
+      "community": 134,
       "norm_label": "remove a terminal job from the in-memory store and persist.      returns true if"
     },
     {
@@ -548,7 +548,7 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "log_setup",
-      "community": 35,
+      "community": 134,
       "norm_label": "log_setup.py"
     },
     {
@@ -558,7 +558,7 @@
       "source_location": "L24",
       "_origin": "ast",
       "id": "log_setup_configure_job_logging",
-      "community": 35,
+      "community": 134,
       "norm_label": "configure_job_logging()"
     },
     {
@@ -568,7 +568,7 @@
       "source_location": "L25",
       "_origin": "ast",
       "id": "log_setup_rationale_25",
-      "community": 35,
+      "community": 134,
       "norm_label": "configure root logging for a detached pipeline subprocess.      the orchestrator"
     },
     {
@@ -2918,7 +2918,7 @@
       "source_location": "L1159",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_label_row_key",
-      "community": 25,
+      "community": 89,
       "norm_label": "_label_row_key()"
     },
     {
@@ -3172,6 +3172,176 @@
       "norm_label": "main()"
     },
     {
+      "label": "directional_eval.py",
+      "file_type": "code",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L1",
+      "_origin": "ast",
+      "id": "ml_directional_eval",
+      "community": 9,
+      "norm_label": "directional_eval.py"
+    },
+    {
+      "label": "gold_manifest()",
+      "file_type": "code",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L55",
+      "_origin": "ast",
+      "id": "ml_directional_eval_gold_manifest",
+      "community": 9,
+      "norm_label": "gold_manifest()"
+    },
+    {
+      "label": "missing_prediction_vods()",
+      "file_type": "code",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L70",
+      "_origin": "ast",
+      "id": "ml_directional_eval_missing_prediction_vods",
+      "community": 9,
+      "norm_label": "missing_prediction_vods()"
+    },
+    {
+      "label": "aggregate_tier()",
+      "file_type": "code",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L86",
+      "_origin": "ast",
+      "id": "ml_directional_eval_aggregate_tier",
+      "community": 9,
+      "norm_label": "aggregate_tier()"
+    },
+    {
+      "label": "two_tier_recall()",
+      "file_type": "code",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L137",
+      "_origin": "ast",
+      "id": "ml_directional_eval_two_tier_recall",
+      "community": 9,
+      "norm_label": "two_tier_recall()"
+    },
+    {
+      "label": "run()",
+      "file_type": "code",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L155",
+      "_origin": "ast",
+      "id": "ml_directional_eval_run",
+      "community": 9,
+      "norm_label": "run()"
+    },
+    {
+      "label": "_fmt()",
+      "file_type": "code",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L194",
+      "_origin": "ast",
+      "id": "ml_directional_eval_fmt",
+      "community": 9,
+      "norm_label": "_fmt()"
+    },
+    {
+      "label": "Any",
+      "file_type": "code",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L194",
+      "_origin": "ast",
+      "id": "ml_directional_eval_py_any",
+      "community": 9,
+      "norm_label": "any"
+    },
+    {
+      "label": "_tier_line()",
+      "file_type": "code",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L202",
+      "_origin": "ast",
+      "id": "ml_directional_eval_tier_line",
+      "community": 9,
+      "norm_label": "_tier_line()"
+    },
+    {
+      "label": "format_report()",
+      "file_type": "code",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L211",
+      "_origin": "ast",
+      "id": "ml_directional_eval_format_report",
+      "community": 9,
+      "norm_label": "format_report()"
+    },
+    {
+      "label": "main()",
+      "file_type": "code",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L249",
+      "_origin": "ast",
+      "id": "ml_directional_eval_main",
+      "community": 9,
+      "norm_label": "main()"
+    },
+    {
+      "label": "Directional finder eval \u2014 localize the LLM moment finder's gap.  Scores the curr",
+      "file_type": "rationale",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L1",
+      "_origin": "ast",
+      "id": "ml_directional_eval_rationale_1",
+      "community": 9,
+      "norm_label": "directional finder eval \u2014 localize the llm moment finder's gap.  scores the curr"
+    },
+    {
+      "label": "Gold-filtered manifest: keep only gt_moments in `tiers`, drop empty VODs.      W",
+      "file_type": "rationale",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L59",
+      "_origin": "ast",
+      "id": "ml_directional_eval_rationale_59",
+      "community": 9,
+      "norm_label": "gold-filtered manifest: keep only gt_moments in `tiers`, drop empty vods.      w"
+    },
+    {
+      "label": "Gold VODs (>=1 gold moment) with no finder predictions, sorted.      These are c",
+      "file_type": "rationale",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L74",
+      "_origin": "ast",
+      "id": "ml_directional_eval_rationale_74",
+      "community": 9,
+      "norm_label": "gold vods (>=1 gold moment) with no finder predictions, sorted.      these are c"
+    },
+    {
+      "label": "Micro-averaged recall over gold gt_hits with views >= min_views.      Operates o",
+      "file_type": "rationale",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L92",
+      "_origin": "ast",
+      "id": "ml_directional_eval_rationale_92",
+      "community": 9,
+      "norm_label": "micro-averaged recall over gold gt_hits with views >= min_views.      operates o"
+    },
+    {
+      "label": "Floor (all gold) + headline (gold with views >= headline_min_views).",
+      "file_type": "rationale",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L143",
+      "_origin": "ast",
+      "id": "ml_directional_eval_rationale_143",
+      "community": 9,
+      "norm_label": "floor (all gold) + headline (gold with views >= headline_min_views)."
+    },
+    {
+      "label": "Run the directional eval over the gold-filtered manifest.      Returns a structu",
+      "file_type": "rationale",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L163",
+      "_origin": "ast",
+      "id": "ml_directional_eval_rationale_163",
+      "community": 9,
+      "norm_label": "run the directional eval over the gold-filtered manifest.      returns a structu"
+    },
+    {
       "label": "discover_iboclipss_clips.py",
       "file_type": "code",
       "source_file": "ml/discover_iboclipss_clips.py",
@@ -3398,7 +3568,7 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "ml_eval_clip_finder",
-      "community": 1,
+      "community": 9,
       "norm_label": "eval_clip_finder.py"
     },
     {
@@ -3408,7 +3578,7 @@
       "source_location": "L36",
       "_origin": "ast",
       "id": "ml_eval_clip_finder_coverage_ratio",
-      "community": 1,
+      "community": 9,
       "norm_label": "coverage_ratio()"
     },
     {
@@ -3418,7 +3588,7 @@
       "source_location": "L52",
       "_origin": "ast",
       "id": "ml_eval_clip_finder_is_hit",
-      "community": 1,
+      "community": 9,
       "norm_label": "is_hit()"
     },
     {
@@ -3428,7 +3598,7 @@
       "source_location": "L56",
       "_origin": "ast",
       "id": "ml_eval_clip_finder_pred_rank",
-      "community": 1,
+      "community": 9,
       "norm_label": "_pred_rank()"
     },
     {
@@ -3438,7 +3608,7 @@
       "source_location": "L67",
       "_origin": "ast",
       "id": "ml_eval_clip_finder_evaluate_vod",
-      "community": 1,
+      "community": 9,
       "norm_label": "evaluate_vod()"
     },
     {
@@ -3448,7 +3618,7 @@
       "source_location": "L159",
       "_origin": "ast",
       "id": "ml_eval_clip_finder_aggregate_overall",
-      "community": 1,
+      "community": 9,
       "norm_label": "aggregate_overall()"
     },
     {
@@ -3458,7 +3628,7 @@
       "source_location": "L221",
       "_origin": "ast",
       "id": "ml_eval_clip_finder_load_manifest",
-      "community": 1,
+      "community": 9,
       "norm_label": "load_manifest()"
     },
     {
@@ -3468,7 +3638,7 @@
       "source_location": "L221",
       "_origin": "ast",
       "id": "ml_eval_clip_finder_py_path",
-      "community": 1,
+      "community": 9,
       "norm_label": "path"
     },
     {
@@ -3478,7 +3648,7 @@
       "source_location": "L242",
       "_origin": "ast",
       "id": "ml_eval_clip_finder_filter_manifest_tiers",
-      "community": 1,
+      "community": 9,
       "norm_label": "filter_manifest_tiers()"
     },
     {
@@ -3488,7 +3658,7 @@
       "source_location": "L254",
       "_origin": "ast",
       "id": "ml_eval_clip_finder_read_anchor_vod_ids",
-      "community": 1,
+      "community": 9,
       "norm_label": "read_anchor_vod_ids()"
     },
     {
@@ -3498,27 +3668,47 @@
       "source_location": "L272",
       "_origin": "ast",
       "id": "ml_eval_clip_finder_read_moments_jsonl",
-      "community": 1,
+      "community": 9,
       "norm_label": "_read_moments_jsonl()"
+    },
+    {
+      "label": "_finder_moments_path()",
+      "file_type": "code",
+      "source_file": "ml/eval_clip_finder.py",
+      "source_location": "L289",
+      "_origin": "ast",
+      "id": "ml_eval_clip_finder_finder_moments_path",
+      "community": 9,
+      "norm_label": "_finder_moments_path()"
+    },
+    {
+      "label": "load_predictions()",
+      "file_type": "code",
+      "source_file": "ml/eval_clip_finder.py",
+      "source_location": "L296",
+      "_origin": "ast",
+      "id": "ml_eval_clip_finder_load_predictions",
+      "community": 9,
+      "norm_label": "load_predictions()"
     },
     {
       "label": "evaluate_all()",
       "file_type": "code",
       "source_file": "ml/eval_clip_finder.py",
-      "source_location": "L293",
+      "source_location": "L326",
       "_origin": "ast",
       "id": "ml_eval_clip_finder_evaluate_all",
-      "community": 1,
+      "community": 9,
       "norm_label": "evaluate_all()"
     },
     {
       "label": "main()",
       "file_type": "code",
       "source_file": "ml/eval_clip_finder.py",
-      "source_location": "L327",
+      "source_location": "L360",
       "_origin": "ast",
       "id": "ml_eval_clip_finder_main",
-      "community": 1,
+      "community": 9,
       "norm_label": "main()"
     },
     {
@@ -3528,7 +3718,7 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "ml_eval_clip_finder_rationale_1",
-      "community": 1,
+      "community": 9,
       "norm_label": "evaluate llm clip finder against the ground-truth eval manifest.  overlap rule:"
     },
     {
@@ -3538,7 +3728,7 @@
       "source_location": "L37",
       "_origin": "ast",
       "id": "ml_eval_clip_finder_rationale_37",
-      "community": 1,
+      "community": 9,
       "norm_label": "fraction of the gt window covered by the prediction window.      gt uses start/e"
     },
     {
@@ -3548,7 +3738,7 @@
       "source_location": "L74",
       "_origin": "ast",
       "id": "ml_eval_clip_finder_rationale_74",
-      "community": 1,
+      "community": 9,
       "norm_label": "evaluate one vod.      pred_moments should be rank-sorted ascending (rank 1 = be"
     },
     {
@@ -3558,7 +3748,7 @@
       "source_location": "L160",
       "_origin": "ast",
       "id": "ml_eval_clip_finder_rationale_160",
-      "community": 1,
+      "community": 9,
       "norm_label": "micro-average across all has_gt vods (vods without gt excluded)."
     },
     {
@@ -3568,7 +3758,7 @@
       "source_location": "L222",
       "_origin": "ast",
       "id": "ml_eval_clip_finder_rationale_222",
-      "community": 1,
+      "community": 9,
       "norm_label": "parse gt manifest jsonl \u2192 {vod_id: gt_moments}. missing file \u2192 {}."
     },
     {
@@ -3578,7 +3768,7 @@
       "source_location": "L243",
       "_origin": "ast",
       "id": "ml_eval_clip_finder_rationale_243",
-      "community": 1,
+      "community": 9,
       "norm_label": "keep only gt moments whose gt_tier is in `tiers`.      moments without a gt_tier"
     },
     {
@@ -3588,17 +3778,37 @@
       "source_location": "L255",
       "_origin": "ast",
       "id": "ml_eval_clip_finder_rationale_255",
-      "community": 1,
+      "community": 9,
       "norm_label": "read anchor vod ids from csv (lightweight, no heavy imports)."
+    },
+    {
+      "label": "Prefer the raw (pre-filter) finder moments, fall back to the filtered set.",
+      "file_type": "rationale",
+      "source_file": "ml/eval_clip_finder.py",
+      "source_location": "L290",
+      "_origin": "ast",
+      "id": "ml_eval_clip_finder_rationale_290",
+      "community": 9,
+      "norm_label": "prefer the raw (pre-filter) finder moments, fall back to the filtered set."
+    },
+    {
+      "label": "Load finder predictions per VOD from pipeline_debug job dirs.      With a workfl",
+      "file_type": "rationale",
+      "source_file": "ml/eval_clip_finder.py",
+      "source_location": "L301",
+      "_origin": "ast",
+      "id": "ml_eval_clip_finder_rationale_301",
+      "community": 9,
+      "norm_label": "load finder predictions per vod from pipeline_debug job dirs.      with a workfl"
     },
     {
       "label": "Evaluate all anchor VODs and return complete result dict.      Used by the pipel",
       "file_type": "rationale",
       "source_file": "ml/eval_clip_finder.py",
-      "source_location": "L299",
+      "source_location": "L332",
       "_origin": "ast",
-      "id": "ml_eval_clip_finder_rationale_299",
-      "community": 1,
+      "id": "ml_eval_clip_finder_rationale_332",
+      "community": 9,
       "norm_label": "evaluate all anchor vods and return complete result dict.      used by the pipel"
     },
     {
@@ -8658,7 +8868,7 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "ml_vod_download_preflight",
-      "community": 134,
+      "community": 22,
       "norm_label": "vod_download_preflight.py"
     },
     {
@@ -8668,7 +8878,7 @@
       "source_location": "L12",
       "_origin": "ast",
       "id": "ml_vod_download_preflight_voddownloadpreflighterror",
-      "community": 134,
+      "community": 22,
       "norm_label": "voddownloadpreflighterror"
     },
     {
@@ -8688,7 +8898,7 @@
       "source_location": "L13",
       "_origin": "ast",
       "id": "ml_vod_download_preflight_voddownloadpreflighterror_init",
-      "community": 134,
+      "community": 22,
       "norm_label": ".__init__()"
     },
     {
@@ -8698,7 +8908,7 @@
       "source_location": "L13",
       "_origin": "ast",
       "id": "ml_vod_download_preflight_py_any",
-      "community": 134,
+      "community": 22,
       "norm_label": "any"
     },
     {
@@ -8708,7 +8918,7 @@
       "source_location": "L19",
       "_origin": "ast",
       "id": "ml_vod_download_preflight_twitch_vod_url",
-      "community": 134,
+      "community": 22,
       "norm_label": "twitch_vod_url()"
     },
     {
@@ -8718,7 +8928,7 @@
       "source_location": "L23",
       "_origin": "ast",
       "id": "ml_vod_download_preflight_source_video_path",
-      "community": 134,
+      "community": 22,
       "norm_label": "source_video_path()"
     },
     {
@@ -8728,7 +8938,7 @@
       "source_location": "L23",
       "_origin": "ast",
       "id": "ml_vod_download_preflight_py_path",
-      "community": 134,
+      "community": 22,
       "norm_label": "path"
     },
     {
@@ -8738,7 +8948,7 @@
       "source_location": "L36",
       "_origin": "ast",
       "id": "ml_vod_download_preflight_ensure_vod_sources",
-      "community": 134,
+      "community": 22,
       "norm_label": "ensure_vod_sources()"
     },
     {
@@ -8748,7 +8958,7 @@
       "source_location": "L36",
       "_origin": "ast",
       "id": "downloader",
-      "community": 134,
+      "community": 22,
       "norm_label": "downloader"
     },
     {
@@ -8758,7 +8968,7 @@
       "source_location": "L124",
       "_origin": "ast",
       "id": "ml_vod_download_preflight_resolve_downloader",
-      "community": 134,
+      "community": 22,
       "norm_label": "resolve_downloader()"
     },
     {
@@ -9318,7 +9528,7 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "pipeline_worker",
-      "community": 35,
+      "community": 134,
       "norm_label": "pipeline_worker.py"
     },
     {
@@ -9328,7 +9538,7 @@
       "source_location": "L12",
       "_origin": "ast",
       "id": "pipeline_worker_parse_args",
-      "community": 35,
+      "community": 134,
       "norm_label": "_parse_args()"
     },
     {
@@ -9338,7 +9548,7 @@
       "source_location": "L12",
       "_origin": "ast",
       "id": "pipeline_worker_py_namespace",
-      "community": 35,
+      "community": 134,
       "norm_label": "namespace"
     },
     {
@@ -9348,7 +9558,7 @@
       "source_location": "L24",
       "_origin": "ast",
       "id": "pipeline_worker_load_strategy",
-      "community": 35,
+      "community": 134,
       "norm_label": "_load_strategy()"
     },
     {
@@ -9358,7 +9568,7 @@
       "source_location": "L34",
       "_origin": "ast",
       "id": "pipeline_worker_run",
-      "community": 35,
+      "community": 134,
       "norm_label": "_run()"
     },
     {
@@ -9368,7 +9578,7 @@
       "source_location": "L48",
       "_origin": "ast",
       "id": "pipeline_worker_main",
-      "community": 35,
+      "community": 134,
       "norm_label": "main()"
     },
     {
@@ -9788,7 +9998,7 @@
       "source_location": "L1166",
       "_origin": "ast",
       "id": "routers_jobs_get_job_status",
-      "community": 80,
+      "community": 134,
       "norm_label": "get_job_status()"
     },
     {
@@ -9798,7 +10008,7 @@
       "source_location": "L1183",
       "_origin": "ast",
       "id": "routers_jobs_cancel_job_status",
-      "community": 80,
+      "community": 134,
       "norm_label": "cancel_job_status()"
     },
     {
@@ -9808,7 +10018,7 @@
       "source_location": "L1191",
       "_origin": "ast",
       "id": "routers_jobs_delete_job_run",
-      "community": 9,
+      "community": 134,
       "norm_label": "delete_job_run()"
     },
     {
@@ -12558,7 +12768,7 @@
       "source_location": "L56",
       "_origin": "ast",
       "id": "services_transcriber_vad_filter_enabled",
-      "community": 6,
+      "community": 21,
       "norm_label": "_vad_filter_enabled()"
     },
     {
@@ -12648,7 +12858,7 @@
       "source_location": "L201",
       "_origin": "ast",
       "id": "services_transcriber_transcription_slots",
-      "community": 1,
+      "community": 20,
       "norm_label": "transcription_slots()"
     },
     {
@@ -12668,7 +12878,7 @@
       "source_location": "L220",
       "_origin": "ast",
       "id": "services_transcriber_py_path",
-      "community": 6,
+      "community": 21,
       "norm_label": "path"
     },
     {
@@ -12718,7 +12928,7 @@
       "source_location": "L282",
       "_origin": "ast",
       "id": "services_transcriber_transcribe",
-      "community": 6,
+      "community": 21,
       "norm_label": "transcribe()"
     },
     {
@@ -12728,7 +12938,7 @@
       "source_location": "L286",
       "_origin": "ast",
       "id": "services_transcriber_transcribe_with_progress",
-      "community": 11,
+      "community": 21,
       "norm_label": "transcribe_with_progress()"
     },
     {
@@ -12748,7 +12958,7 @@
       "source_location": "L417",
       "_origin": "ast",
       "id": "services_transcriber_chunk_file_for_index",
-      "community": 6,
+      "community": 21,
       "norm_label": "_chunk_file_for_index()"
     },
     {
@@ -12758,7 +12968,7 @@
       "source_location": "L427",
       "_origin": "ast",
       "id": "services_transcriber_chunk_batches",
-      "community": 6,
+      "community": 21,
       "norm_label": "_chunk_batches()"
     },
     {
@@ -12778,7 +12988,7 @@
       "source_location": "L467",
       "_origin": "ast",
       "id": "services_transcriber_transcribe_chunk_isolated",
-      "community": 6,
+      "community": 21,
       "norm_label": "_transcribe_chunk_isolated()"
     },
     {
@@ -12788,7 +12998,7 @@
       "source_location": "L523",
       "_origin": "ast",
       "id": "services_transcriber_transcribe_chunks_isolated",
-      "community": 6,
+      "community": 21,
       "norm_label": "_transcribe_chunks_isolated()"
     },
     {
@@ -12798,7 +13008,7 @@
       "source_location": "L632",
       "_origin": "ast",
       "id": "services_transcriber_transcribe_chunk_worker_main",
-      "community": 6,
+      "community": 21,
       "norm_label": "_transcribe_chunk_worker_main()"
     },
     {
@@ -12808,7 +13018,7 @@
       "source_location": "L668",
       "_origin": "ast",
       "id": "services_transcriber_transcribe_chunks_worker_main",
-      "community": 6,
+      "community": 21,
       "norm_label": "_transcribe_chunks_worker_main()"
     },
     {
@@ -12818,7 +13028,7 @@
       "source_location": "L712",
       "_origin": "ast",
       "id": "services_transcriber_compact_subprocess_output",
-      "community": 6,
+      "community": 21,
       "norm_label": "_compact_subprocess_output()"
     },
     {
@@ -12828,7 +13038,7 @@
       "source_location": "L719",
       "_origin": "ast",
       "id": "services_transcriber_stable_cache_key_for_source",
-      "community": 14,
+      "community": 21,
       "norm_label": "stable_cache_key_for_source()"
     },
     {
@@ -12838,7 +13048,7 @@
       "source_location": "L726",
       "_origin": "ast",
       "id": "services_transcriber_chunk_cache_dir",
-      "community": 11,
+      "community": 21,
       "norm_label": "_chunk_cache_dir()"
     },
     {
@@ -12948,7 +13158,7 @@
       "source_location": "L936",
       "_origin": "ast",
       "id": "services_transcriber_voice_energy_path",
-      "community": 14,
+      "community": 21,
       "norm_label": "_voice_energy_path()"
     },
     {
@@ -12958,7 +13168,7 @@
       "source_location": "L943",
       "_origin": "ast",
       "id": "services_transcriber_save_voice_energy",
-      "community": 14,
+      "community": 11,
       "norm_label": "save_voice_energy()"
     },
     {
@@ -12968,7 +13178,7 @@
       "source_location": "L965",
       "_origin": "ast",
       "id": "services_transcriber_load_voice_energy",
-      "community": 14,
+      "community": 11,
       "norm_label": "load_voice_energy()"
     },
     {
@@ -12978,7 +13188,7 @@
       "source_location": "L987",
       "_origin": "ast",
       "id": "services_transcriber_filter_transcribable_chunks",
-      "community": 6,
+      "community": 21,
       "norm_label": "_filter_transcribable_chunks()"
     },
     {
@@ -12988,7 +13198,7 @@
       "source_location": "L1002",
       "_origin": "ast",
       "id": "services_transcriber_chunk_frame_count",
-      "community": 6,
+      "community": 21,
       "norm_label": "_chunk_frame_count()"
     },
     {
@@ -13008,7 +13218,7 @@
       "source_location": "L1031",
       "_origin": "ast",
       "id": "services_transcriber_transcribe_chunk",
-      "community": 6,
+      "community": 21,
       "norm_label": "_transcribe_chunk()"
     },
     {
@@ -13028,7 +13238,7 @@
       "source_location": "L1054",
       "_origin": "ast",
       "id": "services_transcriber_transcribe_chunk_faster",
-      "community": 6,
+      "community": 21,
       "norm_label": "_transcribe_chunk_faster()"
     },
     {
@@ -13038,7 +13248,7 @@
       "source_location": "L1085",
       "_origin": "ast",
       "id": "services_transcriber_validated_segments_payload",
-      "community": 6,
+      "community": 21,
       "norm_label": "_validated_segments_payload()"
     },
     {
@@ -13168,7 +13378,7 @@
       "source_location": "L202",
       "_origin": "ast",
       "id": "services_transcriber_rationale_202",
-      "community": 1,
+      "community": 20,
       "norm_label": "how many whisper instances the gpu can hold concurrently.      auto-derived from"
     },
     {
@@ -13218,7 +13428,7 @@
       "source_location": "L944",
       "_origin": "ast",
       "id": "services_transcriber_rationale_944",
-      "community": 14,
+      "community": 11,
       "norm_label": "persist per-segment voice energy so transcript-cache hits keep the signal."
     },
     {
@@ -13228,7 +13438,7 @@
       "source_location": "L966",
       "_origin": "ast",
       "id": "services_transcriber_rationale_966",
-      "community": 14,
+      "community": 11,
       "norm_label": "return per-segment energy scores aligned to `segments`, or none on cache miss."
     },
     {
@@ -13646,7 +13856,7 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "tests_test_build_outcome_holdout_dataset",
-      "community": 25,
+      "community": 23,
       "norm_label": "test_build_outcome_holdout_dataset.py"
     },
     {
@@ -13656,7 +13866,7 @@
       "source_location": "L6",
       "_origin": "ast",
       "id": "tests_test_build_outcome_holdout_dataset_buildoutcomeholdoutdatasettests",
-      "community": 25,
+      "community": 23,
       "norm_label": "buildoutcomeholdoutdatasettests"
     },
     {
@@ -13666,7 +13876,7 @@
       "source_location": "L7",
       "_origin": "ast",
       "id": "tests_test_build_outcome_holdout_dataset_buildoutcomeholdoutdatasettests_test_builds_positive_cross_platform_and_negative_auto_outcome_holdout",
-      "community": 25,
+      "community": 23,
       "norm_label": ".test_builds_positive_cross_platform_and_negative_auto_outcome_holdout()"
     },
     {
@@ -13676,7 +13886,7 @@
       "source_location": "L39",
       "_origin": "ast",
       "id": "tests_test_build_outcome_holdout_dataset_buildoutcomeholdoutdatasettests_test_skips_duplicate_identities_across_positive_and_negative_sources",
-      "community": 25,
+      "community": 23,
       "norm_label": ".test_skips_duplicate_identities_across_positive_and_negative_sources()"
     },
     {
@@ -13686,7 +13896,7 @@
       "source_location": "L55",
       "_origin": "ast",
       "id": "tests_test_build_outcome_holdout_dataset_buildoutcomeholdoutdatasettests_test_builds_outcome_train_split",
-      "community": 25,
+      "community": 23,
       "norm_label": ".test_builds_outcome_train_split()"
     },
     {
@@ -13696,7 +13906,7 @@
       "source_location": "L79",
       "_origin": "ast",
       "id": "tests_test_build_outcome_holdout_dataset_buildoutcomeholdoutdatasettests_test_replays_features_for_cross_platform_rows_before_filtering",
-      "community": 25,
+      "community": 23,
       "norm_label": ".test_replays_features_for_cross_platform_rows_before_filtering()"
     },
     {
@@ -13706,7 +13916,7 @@
       "source_location": "L105",
       "_origin": "ast",
       "id": "tests_test_build_outcome_holdout_dataset_buildoutcomeholdoutdatasettests_test_auto_split_keeps_same_vod_in_one_split",
-      "community": 25,
+      "community": 23,
       "norm_label": ".test_auto_split_keeps_same_vod_in_one_split()"
     },
     {
@@ -13716,7 +13926,7 @@
       "source_location": "L131",
       "_origin": "ast",
       "id": "tests_test_build_outcome_holdout_dataset_buildoutcomeholdoutdatasettests_test_ignores_top_viewed_rows",
-      "community": 25,
+      "community": 23,
       "norm_label": ".test_ignores_top_viewed_rows()"
     },
     {
@@ -13726,7 +13936,7 @@
       "source_location": "L141",
       "_origin": "ast",
       "id": "tests_test_build_outcome_holdout_dataset_cross_platform_row",
-      "community": 25,
+      "community": 23,
       "norm_label": "_cross_platform_row()"
     },
     {
@@ -13736,7 +13946,7 @@
       "source_location": "L162",
       "_origin": "ast",
       "id": "tests_test_build_outcome_holdout_dataset_top_viewed_row",
-      "community": 25,
+      "community": 23,
       "norm_label": "_top_viewed_row()"
     },
     {
@@ -13746,7 +13956,7 @@
       "source_location": "L175",
       "_origin": "ast",
       "id": "tests_test_build_outcome_holdout_dataset_auto_negative_row",
-      "community": 25,
+      "community": 23,
       "norm_label": "_auto_negative_row()"
     },
     {
@@ -14178,6 +14388,186 @@
       "id": "tests_test_config_configpathtests_test_prepare_local_cache_path_skips_existing_unwritable_directory",
       "community": 44,
       "norm_label": ".test_prepare_local_cache_path_skips_existing_unwritable_directory()"
+    },
+    {
+      "label": "test_directional_eval.py",
+      "file_type": "code",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L1",
+      "_origin": "ast",
+      "id": "tests_test_directional_eval",
+      "community": 9,
+      "norm_label": "test_directional_eval.py"
+    },
+    {
+      "label": "_vod()",
+      "file_type": "code",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L6",
+      "_origin": "ast",
+      "id": "tests_test_directional_eval_vod",
+      "community": 9,
+      "norm_label": "_vod()"
+    },
+    {
+      "label": "_hit()",
+      "file_type": "code",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L10",
+      "_origin": "ast",
+      "id": "tests_test_directional_eval_hit",
+      "community": 9,
+      "norm_label": "_hit()"
+    },
+    {
+      "label": "AggregateTierTests",
+      "file_type": "code",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L14",
+      "_origin": "ast",
+      "id": "tests_test_directional_eval_aggregatetiertests",
+      "community": 9,
+      "norm_label": "aggregatetiertests"
+    },
+    {
+      "label": ".setUp()",
+      "file_type": "code",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L15",
+      "_origin": "ast",
+      "id": "tests_test_directional_eval_aggregatetiertests_setup",
+      "community": 9,
+      "norm_label": ".setup()"
+    },
+    {
+      "label": ".test_floor_counts_all_gold_and_exposes_ranking_gap()",
+      "file_type": "code",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L29",
+      "_origin": "ast",
+      "id": "tests_test_directional_eval_aggregatetiertests_test_floor_counts_all_gold_and_exposes_ranking_gap",
+      "community": 9,
+      "norm_label": ".test_floor_counts_all_gold_and_exposes_ranking_gap()"
+    },
+    {
+      "label": ".test_headline_tier_filters_by_views()",
+      "file_type": "code",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L40",
+      "_origin": "ast",
+      "id": "tests_test_directional_eval_aggregatetiertests_test_headline_tier_filters_by_views",
+      "community": 9,
+      "norm_label": ".test_headline_tier_filters_by_views()"
+    },
+    {
+      "label": ".test_empty_tier_yields_none_recall()",
+      "file_type": "code",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L47",
+      "_origin": "ast",
+      "id": "tests_test_directional_eval_aggregatetiertests_test_empty_tier_yields_none_recall",
+      "community": 9,
+      "norm_label": ".test_empty_tier_yields_none_recall()"
+    },
+    {
+      "label": "TwoTierRecallTests",
+      "file_type": "code",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L55",
+      "_origin": "ast",
+      "id": "tests_test_directional_eval_twotierrecalltests",
+      "community": 9,
+      "norm_label": "twotierrecalltests"
+    },
+    {
+      "label": ".test_reports_floor_and_headline_with_threshold()",
+      "file_type": "code",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L56",
+      "_origin": "ast",
+      "id": "tests_test_directional_eval_twotierrecalltests_test_reports_floor_and_headline_with_threshold",
+      "community": 9,
+      "norm_label": ".test_reports_floor_and_headline_with_threshold()"
+    },
+    {
+      "label": "MissingPredictionVodsTests",
+      "file_type": "code",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L72",
+      "_origin": "ast",
+      "id": "tests_test_directional_eval_missingpredictionvodstests",
+      "community": 9,
+      "norm_label": "missingpredictionvodstests"
+    },
+    {
+      "label": ".test_surfaces_gold_vods_without_predictions()",
+      "file_type": "code",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L73",
+      "_origin": "ast",
+      "id": "tests_test_directional_eval_missingpredictionvodstests_test_surfaces_gold_vods_without_predictions",
+      "community": 9,
+      "norm_label": ".test_surfaces_gold_vods_without_predictions()"
+    },
+    {
+      "label": ".test_vods_without_gold_are_ignored()",
+      "file_type": "code",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L81",
+      "_origin": "ast",
+      "id": "tests_test_directional_eval_missingpredictionvodstests_test_vods_without_gold_are_ignored",
+      "community": 9,
+      "norm_label": ".test_vods_without_gold_are_ignored()"
+    },
+    {
+      "label": "GoldManifestTests",
+      "file_type": "code",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L89",
+      "_origin": "ast",
+      "id": "tests_test_directional_eval_goldmanifesttests",
+      "community": 9,
+      "norm_label": "goldmanifesttests"
+    },
+    {
+      "label": ".test_keeps_only_gold_and_drops_empty_vods()",
+      "file_type": "code",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L90",
+      "_origin": "ast",
+      "id": "tests_test_directional_eval_goldmanifesttests_test_keeps_only_gold_and_drops_empty_vods",
+      "community": 9,
+      "norm_label": ".test_keeps_only_gold_and_drops_empty_vods()"
+    },
+    {
+      "label": "RunTests",
+      "file_type": "code",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L107",
+      "_origin": "ast",
+      "id": "tests_test_directional_eval_runtests",
+      "community": 9,
+      "norm_label": "runtests"
+    },
+    {
+      "label": ".test_end_to_end_two_tier_with_missing_predictions()",
+      "file_type": "code",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L108",
+      "_origin": "ast",
+      "id": "tests_test_directional_eval_runtests_test_end_to_end_two_tier_with_missing_predictions",
+      "community": 9,
+      "norm_label": ".test_end_to_end_two_tier_with_missing_predictions()"
+    },
+    {
+      "label": ".test_report_renders_both_tiers()",
+      "file_type": "code",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L132",
+      "_origin": "ast",
+      "id": "tests_test_directional_eval_runtests_test_report_renders_both_tiers",
+      "community": 9,
+      "norm_label": ".test_report_renders_both_tiers()"
     },
     {
       "label": "test_downloader.py",
@@ -14626,7 +15016,7 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "tests_test_eval_clip_finder",
-      "community": 1,
+      "community": 9,
       "norm_label": "test_eval_clip_finder.py"
     },
     {
@@ -14636,7 +15026,7 @@
       "source_location": "L6",
       "_origin": "ast",
       "id": "tests_test_eval_clip_finder_filtermanifesttierstests",
-      "community": 1,
+      "community": 9,
       "norm_label": "filtermanifesttierstests"
     },
     {
@@ -14646,7 +15036,7 @@
       "source_location": "L7",
       "_origin": "ast",
       "id": "tests_test_eval_clip_finder_filtermanifesttierstests_test_filter_keeps_only_requested_tiers",
-      "community": 1,
+      "community": 9,
       "norm_label": ".test_filter_keeps_only_requested_tiers()"
     },
     {
@@ -15536,7 +15926,7 @@
       "source_location": "L8",
       "_origin": "ast",
       "id": "tests_test_job_session_jobsessiontests",
-      "community": 86,
+      "community": 24,
       "norm_label": "jobsessiontests"
     },
     {
@@ -15546,7 +15936,7 @@
       "source_location": "L9",
       "_origin": "ast",
       "id": "tests_test_job_session_jobsessiontests_setup",
-      "community": 86,
+      "community": 24,
       "norm_label": ".setup()"
     },
     {
@@ -15556,7 +15946,7 @@
       "source_location": "L16",
       "_origin": "ast",
       "id": "tests_test_job_session_jobsessiontests_teardown",
-      "community": 86,
+      "community": 24,
       "norm_label": ".teardown()"
     },
     {
@@ -15566,7 +15956,7 @@
       "source_location": "L23",
       "_origin": "ast",
       "id": "tests_test_job_session_jobsessiontests_test_session_expiry_cancels_running_job",
-      "community": 86,
+      "community": 24,
       "norm_label": ".test_session_expiry_cancels_running_job()"
     },
     {
@@ -15576,7 +15966,7 @@
       "source_location": "L35",
       "_origin": "ast",
       "id": "tests_test_job_session_jobsessiontests_test_touch_job_session_renews_matching_session",
-      "community": 86,
+      "community": 24,
       "norm_label": ".test_touch_job_session_renews_matching_session()"
     },
     {
@@ -17806,7 +18196,7 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "tests_test_vod_download_preflight",
-      "community": 134,
+      "community": 22,
       "norm_label": "test_vod_download_preflight.py"
     },
     {
@@ -17816,7 +18206,7 @@
       "source_location": "L8",
       "_origin": "ast",
       "id": "tests_test_vod_download_preflight_test_ensure_vod_sources_uses_existing_cache_file",
-      "community": 134,
+      "community": 22,
       "norm_label": "test_ensure_vod_sources_uses_existing_cache_file()"
     },
     {
@@ -17826,7 +18216,7 @@
       "source_location": "L8",
       "_origin": "ast",
       "id": "tests_test_vod_download_preflight_py_path",
-      "community": 134,
+      "community": 22,
       "norm_label": "path"
     },
     {
@@ -17836,7 +18226,7 @@
       "source_location": "L26",
       "_origin": "ast",
       "id": "tests_test_vod_download_preflight_test_ensure_vod_sources_downloads_missing_vod",
-      "community": 134,
+      "community": 22,
       "norm_label": "test_ensure_vod_sources_downloads_missing_vod()"
     },
     {
@@ -17846,7 +18236,7 @@
       "source_location": "L50",
       "_origin": "ast",
       "id": "tests_test_vod_download_preflight_test_ensure_vod_sources_raises_when_required_download_fails",
-      "community": 134,
+      "community": 22,
       "norm_label": "test_ensure_vod_sources_raises_when_required_download_fails()"
     },
     {
@@ -26631,6 +27021,365 @@
     {
       "relation": "contains",
       "confidence": "EXTRACTED",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L86",
+      "weight": 1.0,
+      "source": "ml_directional_eval",
+      "target": "ml_directional_eval_aggregate_tier",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L194",
+      "weight": 1.0,
+      "source": "ml_directional_eval",
+      "target": "ml_directional_eval_fmt",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L211",
+      "weight": 1.0,
+      "source": "ml_directional_eval",
+      "target": "ml_directional_eval_format_report",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L55",
+      "weight": 1.0,
+      "source": "ml_directional_eval",
+      "target": "ml_directional_eval_gold_manifest",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L249",
+      "weight": 1.0,
+      "source": "ml_directional_eval",
+      "target": "ml_directional_eval_main",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L70",
+      "weight": 1.0,
+      "source": "ml_directional_eval",
+      "target": "ml_directional_eval_missing_prediction_vods",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L155",
+      "weight": 1.0,
+      "source": "ml_directional_eval",
+      "target": "ml_directional_eval_run",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L202",
+      "weight": 1.0,
+      "source": "ml_directional_eval",
+      "target": "ml_directional_eval_tier_line",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L137",
+      "weight": 1.0,
+      "source": "ml_directional_eval",
+      "target": "ml_directional_eval_two_tier_recall",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports_from",
+      "context": "submodule_import",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L43",
+      "weight": 1.0,
+      "source": "ml_directional_eval",
+      "target": "ml_eval_clip_finder",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "context": "import",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L44",
+      "weight": 1.0,
+      "source": "ml_directional_eval",
+      "target": "ml_eval_clip_finder_evaluate_vod",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "context": "import",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L44",
+      "weight": 1.0,
+      "source": "ml_directional_eval",
+      "target": "ml_eval_clip_finder_load_manifest",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "context": "import",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L44",
+      "weight": 1.0,
+      "source": "ml_directional_eval",
+      "target": "ml_eval_clip_finder_load_predictions",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L1",
+      "weight": 1.0,
+      "source": "ml_directional_eval_rationale_1",
+      "target": "ml_directional_eval",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports_from",
+      "context": "submodule_import",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L3",
+      "weight": 1.0,
+      "source": "tests_test_directional_eval",
+      "target": "ml_directional_eval",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L269",
+      "weight": 1.0,
+      "source": "ml_directional_eval_main",
+      "target": "ml_directional_eval_gold_manifest",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L59",
+      "weight": 1.0,
+      "source": "ml_directional_eval_rationale_59",
+      "target": "ml_directional_eval_gold_manifest",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L168",
+      "weight": 1.0,
+      "source": "ml_directional_eval_run",
+      "target": "ml_directional_eval_gold_manifest",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L273",
+      "weight": 1.0,
+      "source": "ml_directional_eval_main",
+      "target": "ml_directional_eval_missing_prediction_vods",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L74",
+      "weight": 1.0,
+      "source": "ml_directional_eval_rationale_74",
+      "target": "ml_directional_eval_missing_prediction_vods",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L169",
+      "weight": 1.0,
+      "source": "ml_directional_eval_run",
+      "target": "ml_directional_eval_missing_prediction_vods",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L92",
+      "weight": 1.0,
+      "source": "ml_directional_eval_rationale_92",
+      "target": "ml_directional_eval_aggregate_tier",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L146",
+      "weight": 1.0,
+      "source": "ml_directional_eval_two_tier_recall",
+      "target": "ml_directional_eval_aggregate_tier",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L143",
+      "weight": 1.0,
+      "source": "ml_directional_eval_rationale_143",
+      "target": "ml_directional_eval_two_tier_recall",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L175",
+      "weight": 1.0,
+      "source": "ml_directional_eval_run",
+      "target": "ml_directional_eval_two_tier_recall",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L281",
+      "weight": 1.0,
+      "source": "ml_directional_eval_main",
+      "target": "ml_directional_eval_run",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L163",
+      "weight": 1.0,
+      "source": "ml_directional_eval_rationale_163",
+      "target": "ml_directional_eval_run",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L172",
+      "weight": 1.0,
+      "source": "ml_directional_eval_run",
+      "target": "ml_eval_clip_finder_evaluate_vod",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "context": "parameter_type",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L194",
+      "weight": 1.0,
+      "source": "ml_directional_eval_fmt",
+      "target": "ml_directional_eval_py_any",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L204",
+      "weight": 1.0,
+      "source": "ml_directional_eval_tier_line",
+      "target": "ml_directional_eval_fmt",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L235",
+      "weight": 1.0,
+      "source": "ml_directional_eval_format_report",
+      "target": "ml_directional_eval_tier_line",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L288",
+      "weight": 1.0,
+      "source": "ml_directional_eval_main",
+      "target": "ml_directional_eval_format_report",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L268",
+      "weight": 1.0,
+      "source": "ml_directional_eval_main",
+      "target": "ml_eval_clip_finder_load_manifest",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/directional_eval.py",
+      "source_location": "L270",
+      "weight": 1.0,
+      "source": "ml_directional_eval_main",
+      "target": "ml_eval_clip_finder_load_predictions",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
       "source_file": "ml/discover_iboclipss_clips.py",
       "source_location": "L122",
       "weight": 1.0,
@@ -27412,6 +28161,16 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "ml/eval_clip_finder.py",
+      "source_location": "L289",
+      "weight": 1.0,
+      "source": "ml_eval_clip_finder",
+      "target": "ml_eval_clip_finder_finder_moments_path",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/eval_clip_finder.py",
       "source_location": "L52",
       "weight": 1.0,
       "confidence_score": 1.0,
@@ -27427,6 +28186,16 @@
       "confidence_score": 1.0,
       "source": "ml_eval_clip_finder",
       "target": "ml_eval_clip_finder_load_manifest"
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/eval_clip_finder.py",
+      "source_location": "L296",
+      "weight": 1.0,
+      "source": "ml_eval_clip_finder",
+      "target": "ml_eval_clip_finder_load_predictions",
+      "confidence_score": 1.0
     },
     {
       "relation": "contains",
@@ -27640,6 +28409,28 @@
       "target": "ml_eval_clip_finder_load_manifest"
     },
     {
+      "relation": "references",
+      "context": "return_type",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/eval_clip_finder.py",
+      "source_location": "L289",
+      "weight": 1.0,
+      "source": "ml_eval_clip_finder_finder_moments_path",
+      "target": "ml_eval_clip_finder_py_path",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "context": "parameter_type",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/eval_clip_finder.py",
+      "source_location": "L296",
+      "weight": 1.0,
+      "source": "ml_eval_clip_finder_load_predictions",
+      "target": "ml_eval_clip_finder_py_path",
+      "confidence_score": 1.0
+    },
+    {
       "relation": "calls",
       "context": "call",
       "confidence": "EXTRACTED",
@@ -27762,11 +28553,64 @@
       "context": "call",
       "confidence": "EXTRACTED",
       "source_file": "ml/eval_clip_finder.py",
+      "source_location": "L318",
+      "weight": 1.0,
+      "source": "ml_eval_clip_finder_load_predictions",
+      "target": "ml_eval_clip_finder_read_moments_jsonl",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/eval_clip_finder.py",
       "source_location": "L349",
       "weight": 1.0,
       "confidence_score": 1.0,
       "source": "ml_eval_clip_finder_main",
       "target": "ml_eval_clip_finder_read_moments_jsonl"
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/eval_clip_finder.py",
+      "source_location": "L310",
+      "weight": 1.0,
+      "source": "ml_eval_clip_finder_load_predictions",
+      "target": "ml_eval_clip_finder_finder_moments_path",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/eval_clip_finder.py",
+      "source_location": "L290",
+      "weight": 1.0,
+      "source": "ml_eval_clip_finder_rationale_290",
+      "target": "ml_eval_clip_finder_finder_moments_path",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/eval_clip_finder.py",
+      "source_location": "L382",
+      "weight": 1.0,
+      "source": "ml_eval_clip_finder_main",
+      "target": "ml_eval_clip_finder_load_predictions",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/eval_clip_finder.py",
+      "source_location": "L301",
+      "weight": 1.0,
+      "source": "ml_eval_clip_finder_rationale_301",
+      "target": "ml_eval_clip_finder_load_predictions",
+      "confidence_score": 1.0
     },
     {
       "relation": "calls",
@@ -27783,11 +28627,11 @@
       "relation": "rationale_for",
       "confidence": "EXTRACTED",
       "source_file": "ml/eval_clip_finder.py",
-      "source_location": "L299",
+      "source_location": "L332",
       "weight": 1.0,
-      "confidence_score": 1.0,
-      "source": "ml_eval_clip_finder_rationale_299",
-      "target": "ml_eval_clip_finder_evaluate_all"
+      "source": "ml_eval_clip_finder_rationale_332",
+      "target": "ml_eval_clip_finder_evaluate_all",
+      "confidence_score": 1.0
     },
     {
       "relation": "imports",
@@ -35858,9 +36702,9 @@
       "source_file": "tests/test_matcher_hardening.py",
       "source_location": "L5",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_matcher_hardening",
-      "target": "ml_match_cross_platform_audio_fingerprints",
-      "confidence_score": 1.0
+      "target": "ml_match_cross_platform_audio_fingerprints"
     },
     {
       "relation": "imports_from",
@@ -36412,9 +37256,9 @@
       "source_file": "ml/match_cross_platform_transcripts.py",
       "source_location": "L1275",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_match_cross_platform_transcripts",
-      "target": "ml_match_cross_platform_transcripts_audio_peak_margin",
-      "confidence_score": 1.0
+      "target": "ml_match_cross_platform_transcripts_audio_peak_margin"
     },
     {
       "relation": "contains",
@@ -38335,9 +39179,9 @@
       "source_file": "ml/match_cross_platform_transcripts.py",
       "source_location": "L861",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_match_cross_platform_transcripts_rationale_861",
-      "target": "ml_match_cross_platform_transcripts_flag_ambiguous_position",
-      "confidence_score": 1.0
+      "target": "ml_match_cross_platform_transcripts_flag_ambiguous_position"
     },
     {
       "relation": "references",
@@ -38653,9 +39497,9 @@
       "source_file": "ml/match_cross_platform_transcripts.py",
       "source_location": "L1243",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_match_cross_platform_transcripts_audio_fingerprint_fallback",
-      "target": "ml_match_cross_platform_transcripts_audio_peak_margin",
-      "confidence_score": 1.0
+      "target": "ml_match_cross_platform_transcripts_audio_peak_margin"
     },
     {
       "relation": "calls",
@@ -38674,9 +39518,9 @@
       "source_file": "ml/match_cross_platform_transcripts.py",
       "source_location": "L1281",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_match_cross_platform_transcripts_rationale_1281",
-      "target": "ml_match_cross_platform_transcripts_audio_peak_margin",
-      "confidence_score": 1.0
+      "target": "ml_match_cross_platform_transcripts_audio_peak_margin"
     },
     {
       "relation": "calls",
@@ -38782,9 +39626,9 @@
       "source_file": "ml/match_cross_platform_transcripts.py",
       "source_location": "L1486",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_match_cross_platform_transcripts_rationale_1486",
-      "target": "ml_match_cross_platform_transcripts_idf_weighted_recall",
-      "confidence_score": 1.0
+      "target": "ml_match_cross_platform_transcripts_idf_weighted_recall"
     },
     {
       "relation": "calls",
@@ -55510,6 +56354,220 @@
     {
       "relation": "contains",
       "confidence": "EXTRACTED",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L14",
+      "weight": 1.0,
+      "source": "tests_test_directional_eval",
+      "target": "tests_test_directional_eval_aggregatetiertests",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L89",
+      "weight": 1.0,
+      "source": "tests_test_directional_eval",
+      "target": "tests_test_directional_eval_goldmanifesttests",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L10",
+      "weight": 1.0,
+      "source": "tests_test_directional_eval",
+      "target": "tests_test_directional_eval_hit",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L72",
+      "weight": 1.0,
+      "source": "tests_test_directional_eval",
+      "target": "tests_test_directional_eval_missingpredictionvodstests",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L107",
+      "weight": 1.0,
+      "source": "tests_test_directional_eval",
+      "target": "tests_test_directional_eval_runtests",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L55",
+      "weight": 1.0,
+      "source": "tests_test_directional_eval",
+      "target": "tests_test_directional_eval_twotierrecalltests",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L6",
+      "weight": 1.0,
+      "source": "tests_test_directional_eval",
+      "target": "tests_test_directional_eval_vod",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L20",
+      "weight": 1.0,
+      "source": "tests_test_directional_eval_aggregatetiertests_setup",
+      "target": "tests_test_directional_eval_vod",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L57",
+      "weight": 1.0,
+      "source": "tests_test_directional_eval_twotierrecalltests_test_reports_floor_and_headline_with_threshold",
+      "target": "tests_test_directional_eval_vod",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L21",
+      "weight": 1.0,
+      "source": "tests_test_directional_eval_aggregatetiertests_setup",
+      "target": "tests_test_directional_eval_hit",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L57",
+      "weight": 1.0,
+      "source": "tests_test_directional_eval_twotierrecalltests_test_reports_floor_and_headline_with_threshold",
+      "target": "tests_test_directional_eval_hit",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L15",
+      "weight": 1.0,
+      "source": "tests_test_directional_eval_aggregatetiertests",
+      "target": "tests_test_directional_eval_aggregatetiertests_setup",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L47",
+      "weight": 1.0,
+      "source": "tests_test_directional_eval_aggregatetiertests",
+      "target": "tests_test_directional_eval_aggregatetiertests_test_empty_tier_yields_none_recall",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L29",
+      "weight": 1.0,
+      "source": "tests_test_directional_eval_aggregatetiertests",
+      "target": "tests_test_directional_eval_aggregatetiertests_test_floor_counts_all_gold_and_exposes_ranking_gap",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L40",
+      "weight": 1.0,
+      "source": "tests_test_directional_eval_aggregatetiertests",
+      "target": "tests_test_directional_eval_aggregatetiertests_test_headline_tier_filters_by_views",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L56",
+      "weight": 1.0,
+      "source": "tests_test_directional_eval_twotierrecalltests",
+      "target": "tests_test_directional_eval_twotierrecalltests_test_reports_floor_and_headline_with_threshold",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L73",
+      "weight": 1.0,
+      "source": "tests_test_directional_eval_missingpredictionvodstests",
+      "target": "tests_test_directional_eval_missingpredictionvodstests_test_surfaces_gold_vods_without_predictions",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L81",
+      "weight": 1.0,
+      "source": "tests_test_directional_eval_missingpredictionvodstests",
+      "target": "tests_test_directional_eval_missingpredictionvodstests_test_vods_without_gold_are_ignored",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L90",
+      "weight": 1.0,
+      "source": "tests_test_directional_eval_goldmanifesttests",
+      "target": "tests_test_directional_eval_goldmanifesttests_test_keeps_only_gold_and_drops_empty_vods",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L108",
+      "weight": 1.0,
+      "source": "tests_test_directional_eval_runtests",
+      "target": "tests_test_directional_eval_runtests_test_end_to_end_two_tier_with_missing_predictions",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_directional_eval.py",
+      "source_location": "L132",
+      "weight": 1.0,
+      "source": "tests_test_directional_eval_runtests",
+      "target": "tests_test_directional_eval_runtests_test_report_renders_both_tiers",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
       "source_file": "tests/test_downloader.py",
       "source_location": "L41",
       "weight": 1.0,
@@ -58032,9 +59090,9 @@
       "source_file": "tests/test_matcher_hardening.py",
       "source_location": "L122",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_matcher_hardening",
-      "target": "tests_test_matcher_hardening_audiopeakmargintests",
-      "confidence_score": 1.0
+      "target": "tests_test_matcher_hardening_audiopeakmargintests"
     },
     {
       "relation": "contains",
@@ -58062,9 +59120,9 @@
       "source_file": "tests/test_matcher_hardening.py",
       "source_location": "L9",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_matcher_hardening",
-      "target": "tests_test_matcher_hardening_random_walk_values",
-      "confidence_score": 1.0
+      "target": "tests_test_matcher_hardening_random_walk_values"
     },
     {
       "relation": "contains",
@@ -58093,9 +59151,9 @@
       "source_file": "tests/test_matcher_hardening.py",
       "source_location": "L136",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_matcher_hardening_audiopeakmargintests_test_repeated_occurrence_yields_no_margin",
-      "target": "tests_test_matcher_hardening_random_walk_values",
-      "confidence_score": 1.0
+      "target": "tests_test_matcher_hardening_random_walk_values"
     },
     {
       "relation": "calls",
@@ -58104,9 +59162,9 @@
       "source_file": "tests/test_matcher_hardening.py",
       "source_location": "L124",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_matcher_hardening_audiopeakmargintests_test_unique_occurrence_yields_sharp_peak",
-      "target": "tests_test_matcher_hardening_random_walk_values",
-      "confidence_score": 1.0
+      "target": "tests_test_matcher_hardening_random_walk_values"
     },
     {
       "relation": "references",
@@ -58169,9 +59227,9 @@
       "source_file": "tests/test_matcher_hardening.py",
       "source_location": "L25",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_matcher_hardening_rationale_25",
-      "target": "tests_test_matcher_hardening_vod_with_catchphrase_decoy",
-      "confidence_score": 1.0
+      "target": "tests_test_matcher_hardening_vod_with_catchphrase_decoy"
     },
     {
       "relation": "references",
@@ -58283,9 +59341,9 @@
       "source_file": "tests/test_matcher_hardening.py",
       "source_location": "L135",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_matcher_hardening_audiopeakmargintests",
-      "target": "tests_test_matcher_hardening_audiopeakmargintests_test_repeated_occurrence_yields_no_margin",
-      "confidence_score": 1.0
+      "target": "tests_test_matcher_hardening_audiopeakmargintests_test_repeated_occurrence_yields_no_margin"
     },
     {
       "relation": "method",
@@ -58293,9 +59351,9 @@
       "source_file": "tests/test_matcher_hardening.py",
       "source_location": "L123",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_matcher_hardening_audiopeakmargintests",
-      "target": "tests_test_matcher_hardening_audiopeakmargintests_test_unique_occurrence_yields_sharp_peak",
-      "confidence_score": 1.0
+      "target": "tests_test_matcher_hardening_audiopeakmargintests_test_unique_occurrence_yields_sharp_peak"
     },
     {
       "relation": "contains",
@@ -60211,5 +61269,5 @@
       "source_file": "data/README.md"
     }
   ],
-  "built_at_commit": "87bbb5f568d0d572aaa3ddc69833d54c3a1595c1"
+  "built_at_commit": "e1b5649b7a1fd5f7484793b2ce45b7cf817e9c1e"
 }

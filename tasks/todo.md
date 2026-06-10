@@ -6382,3 +6382,52 @@ Kernprobleme: kleines Goldlabeled-Dataset, Train-Holdout-Gap, twitch_proxy schad
 - [x] Ergebnis-Dateien: matches_open_gate.jsonl + match_diagnostics_open_gate.json im Run-Dir, Audit in ml/artifacts/gt_match_recall_audit_open_gate.json
 - [ ] Offen: GT-Manifeste neu bauen (alle gt_runs re-matchen + build_eval_manifest), damit die Eval die neuen Matches nutzt
 - Audit-Output: backend/ml/artifacts/gt_match_recall_audit.json
+
+---
+
+# Issue #4 — GT Flywheel 1/5: Directional finder eval (raw recall@50 vs recall@10)
+
+Parent PRD #3. Localize whether the LLM finder's gap is **generation** (never
+surfaces the viral moment) or **ranking** (surfaces it, not top-K), scoring it
+against *verified gold* GT — before changing the finder.
+
+## Findings (current data)
+- gt_match_verification.jsonl: 230 rows -> gold=62, silver=111, review=24,
+  unverifiable=33. Gold spans 26 VODs; 25 gold >=100k views, 6 >=500k.
+- "gold-filtered" == tier `gold` (confirmed). silver/review == not_confirmed;
+  unverifiable == vod/repost_unavailable. Filtering to `gold` exactly drops
+  not_confirmed + vod_unavailable (AC1).
+- 16/26 gold VODs already have finder predictions in tmp/storage; 10 missing.
+- eval_clip_finder already has: 50%-coverage hit rule, recall@K, --ks 5,10,20,50,
+  --tiers gold. Missing: two-tier (view) recall + a missing-prediction guard.
+
+## Plan (reuse-first; new module ml/directional_eval.py)
+- [ ] Extract load_predictions(...) from eval_clip_finder.main (no behaviour change).
+- [ ] Pure seams in ml/directional_eval.py: aggregate_tier, two_tier_recall,
+      missing_prediction_vods, gold_manifest, run(), format_report().
+- [ ] CLI python -m ml.directional_eval --headline-min-views 100000 --ks 5,10,20,50:
+      log paid-LLM gap (missing preds) before scoring; print floor + headline
+      recall@5/10/20/50.
+
+## AC mapping
+- AC1 -> gold_manifest. AC2 -> missing_prediction_vods + CLI warn.
+- AC3 -> reuse evaluate_vod/is_hit + default ks. AC4 -> two_tier_recall + report.
+- AC5 -> --headline-min-views + --manifest (no code change to re-run).
+
+## Review (done)
+- Added `ml/directional_eval.py`: gold-filtered two-tier recall (floor + headline)
+  with a missing-prediction guard. Reuses eval_clip_finder (evaluate_vod/is_hit,
+  load_manifest, filter_manifest_tiers, load_predictions).
+- Refactored eval_clip_finder: extracted `load_predictions()` + `_finder_moments_path()`
+  out of `main` (no behaviour change; main now calls the helper).
+- Tests: `tests/test_directional_eval.py` (10 cases) — all green.
+- Real run on current gold (26 gold VODs, 62 gold moments): FLOOR r@10=0.065
+  r@50=0.145; HEADLINE(>=100k, n=25) r@10=0.120 r@50=0.160. 10/26 gold VODs lack
+  finder predictions and are surfaced (counted as misses) — paid-finder gap, not
+  silently buried. recall@50 only modestly above recall@10 + low absolute recall
+  => looks generation-leaning, but confounded by the 10 missing-pred VODs; close
+  that gap (run finder over them) before concluding.
+- Verification: directly-related suites pass (test_directional_eval,
+  test_eval_clip_finder, test_verify_gt_matches, test_build_eval_manifest). The 8
+  failing + 10 erroring tests are pre-existing (missing torch; root-only unwritable
+  test) and reproduce with my edit reverted.
