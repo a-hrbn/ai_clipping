@@ -6431,3 +6431,24 @@ against *verified gold* GT — before changing the finder.
   test_eval_clip_finder, test_verify_gt_matches, test_build_eval_manifest). The 8
   failing + 10 erroring tests are pre-existing (missing torch; root-only unwritable
   test) and reproduce with my edit reverted.
+
+## RALPH — GT Flywheel 2/5: Capture core (one VOD) — issue #5
+
+- Built the decoupled, fingerprint-first capture core for a single VOD (no
+  scheduling yet — that is #6). New torch-free modules so the core is unit-testable
+  without the ML stack:
+  - `backend/ml/gt_transcript_artifact.py`: extracted the transcript-cache
+    serializer/version/fields into one source of truth (matcher-compatible format).
+  - `backend/ml/gt_capture.py`: pure seams `validate_full_duration_fingerprint`
+    (rejects prefix-only ≈<4 items/s) and `build_provenance`; thin `capture_vod`
+    orchestrator with injectable collaborators — download → fingerprint-first
+    (validated) → extract audio → transcript (CUDA/base/chunk-isolated/diarization
+    off) → persist fingerprint+transcript+provenance → delete media.
+  - Refactored `build_gt_vod_transcripts._write_transcript_cache` to delegate to the
+    shared serializer (no format drift).
+- Tests: `backend/tests/test_gt_capture.py` (9) — pure guards, provenance, serializer
+  round-trip, and capture_vod behavior (artifacts persisted, fingerprint-before-
+  transcript ordering, media deleted, prefix-only rejected before transcription).
+- Verification: 43 torch-free GT tests pass (incl. new file); py_compile OK on all
+  three changed files. `npm run test/typecheck` N/A (Python project, no npm scripts);
+  full pytest suite needs torch/whisper (pre-existing env limitation).
