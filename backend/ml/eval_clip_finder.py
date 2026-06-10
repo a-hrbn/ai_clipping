@@ -239,6 +239,18 @@ def load_manifest(path: pathlib.Path = DEFAULT_MANIFEST) -> dict[str, list[dict]
     return result
 
 
+def filter_manifest_tiers(manifest: dict[str, list[dict]], tiers: set[str]) -> dict[str, list[dict]]:
+    """Keep only GT moments whose gt_tier is in `tiers`.
+
+    Moments without a gt_tier (manifest not yet verified via
+    ml.verify_gt_matches) are excluded when a filter is requested.
+    """
+    return {
+        vod_id: [m for m in moments if str(m.get("gt_tier") or "") in tiers]
+        for vod_id, moments in manifest.items()
+    }
+
+
 def read_anchor_vod_ids(path: pathlib.Path = DEFAULT_ANCHOR_CSV) -> list[str]:
     """Read anchor VOD IDs from CSV (lightweight, no heavy imports)."""
     if not path.exists():
@@ -323,10 +335,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--workflow-id", default="", help="Workflow ID to resolve job paths")
     parser.add_argument("--ks", default="5,10,20,50", help="Recall@K comma-separated")
     parser.add_argument("--json", dest="output_json", action="store_true")
+    parser.add_argument("--tiers", default="",
+                        help="Only score GT moments with these gt_tier values, e.g. gold,silver (default: all)")
     args = parser.parse_args(argv)
 
     ks = tuple(int(k.strip()) for k in args.ks.split(",") if k.strip())
     manifest = load_manifest(pathlib.Path(args.manifest))
+    if args.tiers.strip():
+        manifest = filter_manifest_tiers(manifest, {t.strip() for t in args.tiers.split(",") if t.strip()})
     anchor_ids = read_anchor_vod_ids(pathlib.Path(args.vods))
     storage = pathlib.Path(args.predictions_dir)
 

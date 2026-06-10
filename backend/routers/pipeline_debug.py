@@ -420,22 +420,47 @@ async def _mirror_job_progress(
     span = max(int(80 / max(vod_count, 1)), 1)
     last: tuple[str, int] | None = None
     while not stop.is_set():
-        job = get_job(job_id)
-        if job is not None and (job.status, job.progress_pct) != last:
-            last = (job.status, job.progress_pct)
-            stage = _JOB_STATE_TO_WORKFLOW_STAGE.get(job.status, "transcribe")
-            progress = min(base + int((job.progress_pct / 100.0) * span), 95)
+        # Read the worker's own progress side-file rather than the shared job
+        # registry: jobs.json is mutated by multiple processes with unreliable
+        # mtime-based reloads on bind mounts, so it can show a stale phase.
+        prog = _read_job_progress(job_id)
+        if prog is not None and prog != last:
+            last = prog
+            status, pct = prog
+            stage = _JOB_STATE_TO_WORKFLOW_STAGE.get(status, "transcribe")
+            progress = min(base + int((pct / 100.0) * span), 95)
             _update_status(
                 workflow_id,
                 status="running",
                 stage=stage,
                 progress_pct=progress,
-                message=f"VOD {vod_index + 1}/{vod_count} ({vod_id}): {job.status} {job.progress_pct}%",
+                message=f"VOD {vod_index + 1}/{vod_count} ({vod_id}): {status} {pct}%",
             )
         try:
             await asyncio.wait_for(stop.wait(), timeout=poll_sec)
         except asyncio.TimeoutError:
             pass
+
+
+def _read_job_progress(job_id: str) -> tuple[str, int] | None:
+    """Return (status, progress_pct) from the worker's per-job progress file.
+
+    None if the file is missing/unreadable (worker hasn't created its workspace
+    yet) — the caller then keeps the last known status.
+    """
+    path = pathlib.Path(settings.storage_dir) / job_id / "progress.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    status = str(data.get("status") or "").strip()
+    if not status:
+        return None
+    try:
+        pct = int(data.get("progress_pct") or 0)
+    except (TypeError, ValueError):
+        pct = 0
+    return status, pct
 
 
 def _run_workflow_sync(workflow_id: str, request: dict[str, Any]) -> None:
@@ -478,69 +503,97 @@ async def _run_workflow(workflow_id: str, request: dict[str, Any]) -> None:
             message=f"Running pipeline for {vod_count} VOD(s).",
         )
 
-        for vod_index, vod_id in enumerate(vod_ids):
+        # Run VODs with bounded concurrency: Whisper is serialized per-GPU via a
+        # cross-process lock in the transcriber, so a second worker overlaps its
+        # download/ffmpeg/chat stages with the first worker's transcription.
+        # Status messages flap between in-flight VODs; acceptable for a debug UI.
+        vod_concurrency = int(getattr(settings, "pipeline_debug_vod_concurrency", 0) or 0)
+        if vod_concurrency <= 0:
+            from services.transcriber import transcription_slots
+            vod_concurrency = min(4, transcription_slots() + 1)
+        vod_semaphore = asyncio.Semaphore(max(vod_concurrency, 1))
+
+        async def _run_one_vod(vod_index: int, vod_id: str) -> tuple[list[dict], int] | None:
+            """Run one VOD's pipeline; returns (rows, llm_count) or None on failure."""
             job_id = f"pipeline_debug_{workflow_id}_{vod_id}"
             url = f"https://www.twitch.tv/videos/{vod_id}"
-            progress = 5 + int((vod_index / max(vod_count, 1)) * 80)
-            vod_start = time.monotonic()
+            async with vod_semaphore:
+                progress = 5 + int((vod_index / max(vod_count, 1)) * 80)
+                vod_start = time.monotonic()
 
-            logger.info(
-                "pipeline_debug_vod_start workflow_id=%s vod=%s job_id=%s [%d/%d]",
-                workflow_id, vod_id, job_id, vod_index + 1, vod_count,
-            )
-            _update_status(
-                workflow_id,
-                status="running",
-                stage="transcribe",
-                progress_pct=progress,
-                message=f"VOD {vod_index + 1}/{vod_count}: {vod_id}",
-            )
-
-            create_job(job_id, profile=profile)
-
-            stop_mirror = asyncio.Event()
-            mirror_task = asyncio.create_task(
-                _mirror_job_progress(
-                    workflow_id=workflow_id,
-                    job_id=job_id,
-                    vod_id=vod_id,
-                    vod_index=vod_index,
-                    vod_count=vod_count,
-                    stop=stop_mirror,
+                logger.info(
+                    "pipeline_debug_vod_start workflow_id=%s vod=%s job_id=%s [%d/%d]",
+                    workflow_id, vod_id, job_id, vod_index + 1, vod_count,
                 )
-            )
-            try:
-                returncode = await run_job_subprocess(
-                    job_id=job_id,
-                    url=url,
-                    profile=profile,
-                    strategy=strategy,
+                _update_status(
+                    workflow_id,
+                    status="running",
+                    stage="transcribe",
+                    progress_pct=progress,
+                    message=f"VOD {vod_index + 1}/{vod_count}: {vod_id}",
                 )
-            finally:
-                stop_mirror.set()
-                await mirror_task
 
-            vod_elapsed = round(time.monotonic() - vod_start, 1)
-            if returncode != 0:
-                job = get_job(job_id)
-                err = str(job.error if job else "") or f"exit code {returncode}"
-                logger.warning(
-                    "pipeline_debug_vod_failed workflow_id=%s vod=%s job_id=%s elapsed=%.1fs error=%r",
-                    workflow_id, vod_id, job_id, vod_elapsed, err,
+                create_job(job_id, profile=profile)
+
+                stop_mirror = asyncio.Event()
+                mirror_task = asyncio.create_task(
+                    _mirror_job_progress(
+                        workflow_id=workflow_id,
+                        job_id=job_id,
+                        vod_id=vod_id,
+                        vod_index=vod_index,
+                        vod_count=vod_count,
+                        stop=stop_mirror,
+                    )
+                )
+                try:
+                    returncode = await run_job_subprocess(
+                        job_id=job_id,
+                        url=url,
+                        profile=profile,
+                        strategy=strategy,
+                    )
+                finally:
+                    stop_mirror.set()
+                    await mirror_task
+
+                vod_elapsed = round(time.monotonic() - vod_start, 1)
+                if returncode != 0:
+                    job = get_job(job_id)
+                    err = str(job.error if job else "") or f"exit code {returncode}"
+                    logger.warning(
+                        "pipeline_debug_vod_failed workflow_id=%s vod=%s job_id=%s elapsed=%.1fs error=%r",
+                        workflow_id, vod_id, job_id, vod_elapsed, err,
+                    )
+                    return None
+
+                vod_rows, vod_llm_count = _build_review_rows(workflow_id=workflow_id, vod_id=vod_id, job_id=job_id)
+                clips_ready = sum(1 for r in vod_rows if r.get("clip_status") == "ready")
+                logger.info(
+                    "pipeline_debug_vod_done workflow_id=%s vod=%s elapsed=%.1fs"
+                    " llm_moments=%d rows=%d clips_ready=%d clips_missing=%d",
+                    workflow_id, vod_id, vod_elapsed,
+                    vod_llm_count, len(vod_rows), clips_ready, len(vod_rows) - clips_ready,
+                )
+                return vod_rows, vod_llm_count
+
+        results = await asyncio.gather(
+            *(_run_one_vod(i, v) for i, v in enumerate(vod_ids)),
+            return_exceptions=True,
+        )
+        for vod_id, result in zip(vod_ids, results):
+            if isinstance(result, BaseException):
+                logger.error(
+                    "pipeline_debug_vod_crashed workflow_id=%s vod=%s error=%r",
+                    workflow_id, vod_id, result,
                 )
                 failed_vods.append(vod_id)
-                continue
-
-            vod_rows, vod_llm_count = _build_review_rows(workflow_id=workflow_id, vod_id=vod_id, job_id=job_id)
-            clips_ready = sum(1 for r in vod_rows if r.get("clip_status") == "ready")
-            all_rows.extend(vod_rows)
-            total_llm_moment_count += vod_llm_count
-            logger.info(
-                "pipeline_debug_vod_done workflow_id=%s vod=%s elapsed=%.1fs"
-                " llm_moments=%d rows=%d clips_ready=%d clips_missing=%d",
-                workflow_id, vod_id, vod_elapsed,
-                vod_llm_count, len(vod_rows), clips_ready, len(vod_rows) - clips_ready,
-            )
+            elif result is None:
+                failed_vods.append(vod_id)
+            else:
+                vod_rows, vod_llm_count = result
+                all_rows.extend(vod_rows)
+                total_llm_moment_count += vod_llm_count
 
         _write_jsonl(_review_jsonl_path(root), all_rows)
 

@@ -5,13 +5,14 @@ import concurrent.futures
 import difflib
 import hashlib
 import json
+import math
 import pathlib
 import re
 import shutil
 import sys
 import time
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace as dataclass_replace
 from typing import Any
 
 BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -71,6 +72,22 @@ TRANSCRIPT_MATCH_SOURCE = "cross_platform_transcript_match"
 _SHORT_TRANSCRIPT_CACHE_VERSION = 1
 _MULTI_WINDOW_NEAR_DUPLICATE_MERGE_GAP_SEC = 30.0
 _CROSS_VOD_WEAK_TOKEN_RECALL_THRESHOLD = 0.55
+# A merged multi-window span may not exceed the repost length by more than
+# this factor/padding — [min(starts), max(ends)] merges were observed to
+# produce 84s GT windows for <=60s Shorts.
+_MULTI_WINDOW_MERGE_SPAN_FACTOR = 1.2
+_MULTI_WINDOW_MERGE_SPAN_PAD_SEC = 5.0
+# If the best window's score beats the best alternative position (different
+# VOD or >60s away) by less than this margin, the placement is ambiguous —
+# Jynxzi repeats catchphrases, so near-ties are routed to review instead of
+# being silently accepted.
+_POSITION_AMBIGUITY_MARGIN = 0.08
+_POSITION_AMBIGUITY_DISTANCE_SEC = 60.0
+# Audio-fallback acceptance additionally requires the best alignment peak to
+# beat the best peak elsewhere in the VOD by this margin. Measured on the
+# 5-anchor set: noise-only margins have median 0.007 / max 0.033, real
+# scoped confirmations sit at 0.04+; 0.02 keeps only plausible candidates.
+_AUDIO_FALLBACK_MIN_PEAK_MARGIN = 0.02
 _TOKEN_RE = re.compile(r"[a-z0-9']+")
 _STOPWORDS = {
     "a",
@@ -122,6 +139,8 @@ class TranscriptMatch:
     chunk_index: int | None = None
     chunk_count: int = 1
     audio_confidence: float | None = None
+    rank_score: float | None = None
+    position_ambiguous: bool = False
 
 
 @dataclass(frozen=True)
@@ -137,6 +156,7 @@ class RepostTranscriptChunk:
 class RepostTranscriptMatchResult:
     best: TranscriptMatch | None
     chunk_matches: tuple[TranscriptMatch, ...] = ()
+    repost_duration: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -152,6 +172,7 @@ class VodTranscript:
     segments: list
     segment_tokens: list[list[str]]
     token_to_indices: dict[str, list[int]]
+    token_idf: dict[str, float] = field(default_factory=dict)
 
 
 def main() -> int:
@@ -403,7 +424,11 @@ def match_reposts_to_vods_with_diagnostics(
                     view_weighted_accepts += 1
         multi_window_chunk_matches += chunk_accepts
 
-        if not single_decision.accepted and _should_try_audio_fallback(repost, best, threshold):
+        # Audio fallback only when the transcript produced no accepted window
+        # at all: accepted chunk windows are high-precision anchors, and a
+        # whole-short audio alignment added next to them is more likely a
+        # misplaced duplicate than a real extra segment.
+        if not accepted_matches and _should_try_audio_fallback(repost, best, threshold):
             audio_fallback_attempts += 1
             if audio_vod_fps is None:
                 audio_vod_fps = _load_audio_vod_fingerprints(vod_rows)
@@ -421,7 +446,10 @@ def match_reposts_to_vods_with_diagnostics(
                     audio_fallback_matches += 1
 
         accepted_rows_before_cleanup += len(accepted_matches)
-        accepted_matches, cleanup_stats = _clean_accepted_matches(accepted_matches)
+        accepted_matches, cleanup_stats = _clean_accepted_matches(
+            accepted_matches,
+            repost_duration=match_result.repost_duration or _safe_float(repost.get("duration")),
+        )
         multi_window_cross_vod_filtered += cleanup_stats["multi_window_cross_vod_filtered"]
         multi_window_near_duplicate_merges += cleanup_stats["multi_window_near_duplicate_merges"]
         best_match_rows.append(
@@ -565,7 +593,11 @@ def _match_repost_input(
         )
         if chunk_best is not None:
             chunk_matches.append(chunk_best)
-    return index, repost, RepostTranscriptMatchResult(best=best, chunk_matches=tuple(chunk_matches))
+    return index, repost, RepostTranscriptMatchResult(
+        best=best,
+        chunk_matches=tuple(chunk_matches),
+        repost_duration=float(repost_duration or 0.0),
+    )
 
 
 def _load_vod_transcript(vod: dict, *, vod_cache_root: pathlib.Path) -> VodTranscript | None:
@@ -579,12 +611,27 @@ def _load_vod_transcript(vod: dict, *, vod_cache_root: pathlib.Path) -> VodTrans
     segments = [segment for segment in transcript if str(getattr(segment, "text", "") or "").strip()]
     if not segments:
         return None
+    return _build_vod_transcript(vod, segments)
+
+
+def _build_vod_transcript(vod: dict, segments: list) -> VodTranscript:
     segment_tokens = [_tokens(str(getattr(segment, "text", "") or "")) for segment in segments]
     token_to_indices: dict[str, list[int]] = {}
     for index, tokens in enumerate(segment_tokens):
         for token in set(tokens):
             token_to_indices.setdefault(token, []).append(index)
-    return VodTranscript(row=vod, segments=segments, segment_tokens=segment_tokens, token_to_indices=token_to_indices)
+    n_segments = max(len(segments), 1)
+    token_idf = {
+        token: math.log(1.0 + n_segments / len(indices))
+        for token, indices in token_to_indices.items()
+    }
+    return VodTranscript(
+        row=vod,
+        segments=segments,
+        segment_tokens=segment_tokens,
+        token_to_indices=token_to_indices,
+        token_idf=token_idf,
+    )
 
 
 def _load_or_build_repost_transcript(
@@ -779,6 +826,7 @@ def _best_transcript_match(
     chunk_count: int = 1,
 ) -> TranscriptMatch | None:
     best: TranscriptMatch | None = None
+    top_candidates: list[TranscriptMatch] = []
     target_duration = max(float(repost_duration or 0.0), _safe_float(repost.get("duration")), 8.0)
     for vod_transcript in vod_transcripts:
         for start_index in _candidate_start_indices(vod_transcript, repost_tokens):
@@ -794,9 +842,41 @@ def _best_transcript_match(
             )
             if candidate is None:
                 continue
-            if best is None or candidate.score > best.score:
+            if best is None or _ranking_score(candidate) > _ranking_score(best):
                 best = candidate
-    return best
+            top_candidates.append(candidate)
+            if len(top_candidates) > 24:
+                top_candidates.sort(key=_ranking_score, reverse=True)
+                del top_candidates[12:]
+    if best is None:
+        return None
+    return _flag_ambiguous_position(best, top_candidates)
+
+
+def _ranking_score(match: TranscriptMatch) -> float:
+    return float(match.rank_score if match.rank_score is not None else match.score)
+
+
+def _flag_ambiguous_position(best: TranscriptMatch, candidates: list[TranscriptMatch]) -> TranscriptMatch:
+    """Mark the best window ambiguous when a competing position (different VOD
+    or far away in the same VOD) scores almost as high."""
+    best_vod = str(best.vod.get("vod_id") or "")
+    second_score: float | None = None
+    for candidate in candidates:
+        if candidate is best:
+            continue
+        same_vod = str(candidate.vod.get("vod_id") or "") == best_vod
+        if same_vod and abs(float(candidate.start) - float(best.start)) <= _POSITION_AMBIGUITY_DISTANCE_SEC:
+            continue
+        if second_score is None or float(candidate.score) > second_score:
+            second_score = float(candidate.score)
+    if second_score is None or float(best.score) - second_score >= _POSITION_AMBIGUITY_MARGIN:
+        return best
+    return _copy_match(best, position_ambiguous=True)
+
+
+def _copy_match(match: TranscriptMatch, **overrides: Any) -> TranscriptMatch:
+    return dataclass_replace(match, **overrides)
 
 
 def _candidate_start_indices(vod_transcript: VodTranscript, repost_tokens: list[str]) -> list[int]:
@@ -848,14 +928,21 @@ def _score_window(
     window_tokens = _tokens(window_text)
     if not window_tokens:
         return None
-    token_recall = _counter_recall(Counter(repost_tokens), Counter(window_tokens))
+    repost_counter = Counter(repost_tokens)
+    window_counter = Counter(window_tokens)
+    token_recall = _counter_recall(repost_counter, window_counter)
     bigram_recall = _counter_recall(Counter(_bigrams(repost_tokens)), Counter(_bigrams(window_tokens)))
     sequence_ratio = 0.0
     if token_recall >= 0.15 or bigram_recall >= 0.10:
         sequence_ratio = difflib.SequenceMatcher(None, _compact_text(repost_text), _compact_text(window_text)).ratio()
     score = (0.55 * token_recall) + (0.35 * bigram_recall) + (0.10 * sequence_ratio)
+    # Rank candidates with rare-token emphasis so catchphrase-heavy windows
+    # lose against content-specific ones; acceptance uses the plain score.
+    idf_recall = _idf_weighted_recall(repost_counter, window_counter, vod_transcript.token_idf)
+    rank_score = (0.55 * idf_recall) + (0.35 * bigram_recall) + (0.10 * sequence_ratio)
     return TranscriptMatch(
         score=round(max(0.0, min(1.0, score)), 6),
+        rank_score=round(max(0.0, min(1.0, rank_score)), 6),
         token_recall=round(token_recall, 6),
         bigram_recall=round(bigram_recall, 6),
         sequence_ratio=round(sequence_ratio, 6),
@@ -894,23 +981,11 @@ def _view_weighted_similarity_threshold(repost: dict, match: TranscriptMatch, ba
 
 
 def _with_acceptance(match: TranscriptMatch, decision: MatchDecision) -> TranscriptMatch:
-    return TranscriptMatch(
-        score=match.score,
-        token_recall=match.token_recall,
-        bigram_recall=match.bigram_recall,
-        sequence_ratio=match.sequence_ratio,
-        start=match.start,
-        end=match.end,
-        vod=match.vod,
-        vod_excerpt=match.vod_excerpt,
-        repost_excerpt=match.repost_excerpt,
-        match_kind=match.match_kind,
+    return dataclass_replace(
+        match,
         acceptance_reason=decision.reason,
         acceptance_threshold=round(float(decision.threshold), 6),
         source_score=match.source_score if match.source_score is not None else match.score,
-        chunk_index=match.chunk_index,
-        chunk_count=match.chunk_count,
-        audio_confidence=match.audio_confidence,
     )
 
 
@@ -924,16 +999,21 @@ def _append_unique_match(matches: list[TranscriptMatch], candidate: TranscriptMa
     return True
 
 
-def _clean_accepted_matches(matches: list[TranscriptMatch]) -> tuple[list[TranscriptMatch], dict[str, int]]:
+def _clean_accepted_matches(
+    matches: list[TranscriptMatch],
+    *,
+    repost_duration: float = 0.0,
+) -> tuple[list[TranscriptMatch], dict[str, int]]:
     stats = {
         "multi_window_cross_vod_filtered": 0,
         "multi_window_near_duplicate_merges": 0,
+        "multi_window_merge_span_capped": 0,
     }
     if len(matches) <= 1:
         return list(matches), stats
 
     filtered = _filter_multi_window_matches_to_top_vod(matches, stats)
-    cleaned = _merge_near_duplicate_accepted_matches(filtered, stats)
+    cleaned = _merge_near_duplicate_accepted_matches(filtered, stats, repost_duration=repost_duration)
     return cleaned, stats
 
 
@@ -996,6 +1076,8 @@ def _dominant_vod_strong_match_weight(match: TranscriptMatch) -> float:
 def _merge_near_duplicate_accepted_matches(
     matches: list[TranscriptMatch],
     stats: dict[str, int],
+    *,
+    repost_duration: float = 0.0,
 ) -> list[TranscriptMatch]:
     if len(matches) <= 1:
         return list(matches)
@@ -1015,11 +1097,11 @@ def _merge_near_duplicate_accepted_matches(
                 cluster.append(match)
                 cluster_end = max(cluster_end, float(match.end))
                 continue
-            cleaned.append(_merge_match_cluster(cluster, stats))
+            cleaned.append(_merge_match_cluster(cluster, stats, repost_duration=repost_duration))
             cluster = [match]
             cluster_end = float(match.end)
         if cluster:
-            cleaned.append(_merge_match_cluster(cluster, stats))
+            cleaned.append(_merge_match_cluster(cluster, stats, repost_duration=repost_duration))
     return sorted(cleaned, key=lambda match: (_match_vod_id(match), float(match.start), float(match.end)))
 
 
@@ -1030,18 +1112,38 @@ def _accepted_matches_by_vod(matches: list[TranscriptMatch]) -> dict[str, list[T
     return grouped
 
 
-def _merge_match_cluster(matches: list[TranscriptMatch], stats: dict[str, int]) -> TranscriptMatch:
+def _merge_match_cluster(
+    matches: list[TranscriptMatch],
+    stats: dict[str, int],
+    *,
+    repost_duration: float = 0.0,
+) -> TranscriptMatch:
     if len(matches) == 1:
         return matches[0]
     stats["multi_window_near_duplicate_merges"] += len(matches) - 1
     best = max(matches, key=lambda match: float(match.score))
+    start = min(float(match.start) for match in matches)
+    end = max(float(match.end) for match in matches)
+    if repost_duration > 0:
+        # The merged GT window may not exceed the repost length by much —
+        # uncapped [min(starts), max(ends)] merges produced 84s windows for
+        # <=60s Shorts, which poisons the coverage-based eval.
+        span_cap = max(
+            repost_duration * _MULTI_WINDOW_MERGE_SPAN_FACTOR + _MULTI_WINDOW_MERGE_SPAN_PAD_SEC,
+            float(best.end) - float(best.start),
+        )
+        if end - start > span_cap:
+            stats["multi_window_merge_span_capped"] = stats.get("multi_window_merge_span_capped", 0) + 1
+            slack = span_cap - (float(best.end) - float(best.start))
+            start = max(start, float(best.start) - slack / 2)
+            end = min(end, start + span_cap)
     return TranscriptMatch(
         score=max(float(match.score) for match in matches),
         token_recall=max(float(match.token_recall) for match in matches),
         bigram_recall=max(float(match.bigram_recall) for match in matches),
         sequence_ratio=max(float(match.sequence_ratio) for match in matches),
-        start=min(float(match.start) for match in matches),
-        end=max(float(match.end) for match in matches),
+        start=start,
+        end=end,
         vod=best.vod,
         vod_excerpt=_short_text(" | ".join(match.vod_excerpt for match in matches if match.vod_excerpt), 260),
         repost_excerpt=_short_text(" | ".join(match.repost_excerpt for match in matches if match.repost_excerpt), 260),
@@ -1055,6 +1157,11 @@ def _merge_match_cluster(matches: list[TranscriptMatch], stats: dict[str, int]) 
             (float(match.audio_confidence) for match in matches if match.audio_confidence is not None),
             default=None,
         ),
+        rank_score=max(
+            (float(match.rank_score) for match in matches if match.rank_score is not None),
+            default=None,
+        ),
+        position_ambiguous=any(match.position_ambiguous for match in matches),
     )
 
 
@@ -1071,12 +1178,12 @@ def _window_overlap_ratio(left_start: float, left_end: float, right_start: float
 
 
 def _should_try_audio_fallback(repost: dict, best: TranscriptMatch, base_threshold: float) -> bool:
-    if best.score >= float(base_threshold):
-        return False
-    views = _safe_float(repost.get("views") or repost.get("view_count"))
-    if best.score >= 0.35 and best.token_recall >= 0.30:
-        return True
-    return views >= 500_000 and best.score >= 0.32 and best.token_recall >= 0.25
+    # Audio fingerprinting needs no speech, so the fallback must not be gated
+    # on transcript quality: low-speech clips (screams, mod trolls, visual
+    # gags) score near zero on transcripts and are exactly the ones the
+    # fallback exists for. Precision is guarded by
+    # _audio_fallback_confidence_threshold instead.
+    return best.score < float(base_threshold)
 
 
 def _audio_fallback_confidence_threshold(repost: dict, best: TranscriptMatch) -> float:
@@ -1133,6 +1240,13 @@ def _audio_fingerprint_fallback(
     confidence, offset_index, vod, vod_fp = best_audio
     if confidence < _audio_fallback_confidence_threshold(repost, transcript_best):
         return None
+    peak_margin = _audio_peak_margin(repost_fp, vod_fp, confidence, offset_index)
+    if peak_margin < _AUDIO_FALLBACK_MIN_PEAK_MARGIN:
+        # The best alignment barely beats the second-best peak elsewhere in
+        # the VOD — over a multi-hour fingerprint the max of pure noise sits
+        # at this level (measured 2026-06: noise margins median 0.007), so
+        # this "match" is most likely a random peak, not the repost.
+        return None
     seconds_per_item = vod_fp.duration / max(len(vod_fp.values), 1)
     scoped_start = max(offset_index * seconds_per_item, 0.0)
     source_offset = _safe_float(
@@ -1156,6 +1270,26 @@ def _audio_fingerprint_fallback(
         source_score=transcript_best.score,
         audio_confidence=round(float(confidence), 6),
     )
+
+
+def _audio_peak_margin(
+    repost_fp: "audio_matcher.Fingerprint",
+    vod_fp: "audio_matcher.Fingerprint",
+    best_confidence: float,
+    best_index: int,
+) -> float:
+    """Peak sharpness: best alignment vs the best peak outside ±60s of it."""
+    values = vod_fp.values
+    if not values or vod_fp.duration <= 0:
+        return 0.0
+    rate = len(values) / vod_fp.duration
+    exclusion = int(60.0 * rate)
+    second = 0.0
+    for part in (values[: max(best_index - exclusion, 0)], values[best_index + exclusion:]):
+        if len(part) >= len(repost_fp.values):
+            confidence, _index = audio_matcher.best_fingerprint_alignment(repost_fp.values, part)
+            second = max(second, confidence)
+    return float(best_confidence) - second
 
 
 def _matched_row(repost: dict, match: TranscriptMatch) -> dict:
@@ -1190,6 +1324,7 @@ def _matched_row(repost: dict, match: TranscriptMatch) -> dict:
         "transcript_source_score": round(float(match.source_score if match.source_score is not None else match.score), 6),
         "transcript_repost_excerpt": match.repost_excerpt,
         "transcript_vod_excerpt": match.vod_excerpt,
+        "transcript_position_ambiguous": bool(match.position_ambiguous),
         "profile_filter_version": int(_safe_float(repost.get("profile_filter_version"))),
     }
     if match.chunk_index is not None:
@@ -1344,6 +1479,22 @@ def _counter_recall(needle: Counter, haystack: Counter) -> float:
     if total <= 0:
         return 0.0
     overlap = sum(min(count, haystack.get(token, 0)) for token, count in needle.items())
+    return max(0.0, min(1.0, overlap / total))
+
+
+def _idf_weighted_recall(needle: Counter, haystack: Counter, token_idf: dict[str, float]) -> float:
+    """Token recall with rare-token emphasis: ubiquitous catchphrase tokens
+    contribute almost nothing, content-specific tokens dominate. Used only to
+    RANK candidate windows — acceptance thresholds stay on the unweighted
+    score so they keep their calibration."""
+    total = 0.0
+    overlap = 0.0
+    for token, count in needle.items():
+        weight = token_idf.get(token, 1.0)
+        total += count * weight
+        overlap += min(count, haystack.get(token, 0)) * weight
+    if total <= 0:
+        return 0.0
     return max(0.0, min(1.0, overlap / total))
 
 

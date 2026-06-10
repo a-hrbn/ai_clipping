@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import logging
 import math
@@ -9,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import wave
 from dataclasses import dataclass, field
 from hashlib import sha256
@@ -189,6 +192,70 @@ _EMPTY_TRANSCRIBE_ERROR_SNIPPET = "cannot reshape tensor of 0 elements"
 _MIN_SEGMENT_DURATION_SECONDS = 0.01
 _WORKER_RESULT_PREFIX = "TRANSCRIBER_CHUNK_RESULT "
 
+# Container-local path (NOT the bind mount — flock on drvfs/9p is unreliable).
+# Slot 0 keeps the historical name so old and new worker processes contend on
+# the same file across a mid-run code rollout.
+_TRANSCRIPTION_LOCK_PATH = pathlib.Path(tempfile.gettempdir()) / "ai_clipping_transcription.lock"
+
+
+def transcription_slots() -> int:
+    """How many Whisper instances the GPU can hold concurrently.
+
+    Auto-derived from VRAM (~2.5GB per large-v3-turbo int8 instance plus
+    headroom => one slot per ~5GB). Override via settings.transcription_gpu_slots.
+    CPU-only setups get 1 (serialization avoids RAM thrash there too).
+    """
+    override = int(getattr(settings, "transcription_gpu_slots", 0) or 0)
+    if override > 0:
+        return override
+    try:
+        if torch.cuda.is_available():
+            vram_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
+            return max(1, int(vram_gb // 5))
+    except Exception:
+        pass
+    return 1
+
+
+def _slot_lock_path(slot: int) -> pathlib.Path:
+    if slot == 0:
+        return _TRANSCRIPTION_LOCK_PATH
+    return _TRANSCRIPTION_LOCK_PATH.with_name(f"ai_clipping_transcription.slot{slot}.lock")
+
+
+@contextlib.contextmanager
+def _transcription_lock():
+    """Bound concurrent Whisper inference across worker processes.
+
+    Acquires one of N slot locks (N = transcription_slots()): on a 6GB consumer
+    GPU exactly one model lives in VRAM while other workers overlap their
+    download/ffmpeg/chat stages; bigger GPUs transcribe N VODs concurrently.
+    """
+    slots = transcription_slots()
+    handles = [(_slot_lock_path(i)).open("a") for i in range(slots)]
+    acquired: int | None = None
+    try:
+        if slots == 1:
+            fcntl.flock(handles[0], fcntl.LOCK_EX)  # blocking: instant handover
+            acquired = 0
+        else:
+            while acquired is None:
+                for i, handle in enumerate(handles):
+                    try:
+                        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        acquired = i
+                        break
+                    except OSError:
+                        continue
+                if acquired is None:
+                    time.sleep(5.0)
+        yield
+    finally:
+        if acquired is not None:
+            fcntl.flock(handles[acquired], fcntl.LOCK_UN)
+        for handle in handles:
+            handle.close()
+
 
 @dataclass
 class RichSegment:
@@ -269,41 +336,45 @@ def transcribe_with_progress(
     if isolate_chunks:
         for chunk_batch in _chunk_batches(pending_chunks, _worker_batch_size()):
             chunk_by_idx = {int(chunk_idx): chunk_file for chunk_idx, chunk_file in chunk_batch}
-            for chunk_idx, result in _transcribe_chunks_isolated(chunk_batch):
-                chunk_file = chunk_by_idx.get(int(chunk_idx))
-                if chunk_file is None:
-                    raise RuntimeError(f"isolated Whisper worker returned unknown chunk index {chunk_idx}")
+            with _transcription_lock():
+                for chunk_idx, result in _transcribe_chunks_isolated(chunk_batch):
+                    chunk_file = chunk_by_idx.get(int(chunk_idx))
+                    if chunk_file is None:
+                        raise RuntimeError(f"isolated Whisper worker returned unknown chunk index {chunk_idx}")
+                    chunk_segments = _rich_segments_from_result(result, chunk_idx=chunk_idx, chunk_file=chunk_file)
+                    segments_by_chunk[chunk_idx] = chunk_segments
+                    _write_chunk_cache(chunk_cache_dir, chunk_idx, chunk_segments)
+
+                    if progress_cb is not None and total_chunks > 0:
+                        progress_cb(progress_index_by_chunk[chunk_idx], total_chunks, chunk_file)
+    elif pending_chunks:
+        # Non-isolated path keeps the model in this process; the lock spans the
+        # whole loop so a second worker never loads a model alongside it.
+        with _transcription_lock():
+            for chunk_idx, chunk_file in pending_chunks:
+                try:
+                    if model is None:
+                        model = _get_model()
+                    result = _transcribe_chunk(model, chunk_file)
+                except RuntimeError as exc:
+                    if _EMPTY_TRANSCRIBE_ERROR_SNIPPET not in str(exc):
+                        raise
+                    logger.warning(
+                        "transcriber_skip_chunk chunk=%s reason=empty_tensor_runtime_error",
+                        chunk_file,
+                    )
+                    segments_by_chunk[chunk_idx] = []
+                    if progress_cb is not None and total_chunks > 0:
+                        progress_cb(progress_index_by_chunk[chunk_idx], total_chunks, chunk_file)
+                    _write_chunk_cache(chunk_cache_dir, chunk_idx, [])
+                    continue
+
                 chunk_segments = _rich_segments_from_result(result, chunk_idx=chunk_idx, chunk_file=chunk_file)
                 segments_by_chunk[chunk_idx] = chunk_segments
                 _write_chunk_cache(chunk_cache_dir, chunk_idx, chunk_segments)
 
                 if progress_cb is not None and total_chunks > 0:
                     progress_cb(progress_index_by_chunk[chunk_idx], total_chunks, chunk_file)
-    else:
-        for chunk_idx, chunk_file in pending_chunks:
-            try:
-                if model is None:
-                    model = _get_model()
-                result = _transcribe_chunk(model, chunk_file)
-            except RuntimeError as exc:
-                if _EMPTY_TRANSCRIBE_ERROR_SNIPPET not in str(exc):
-                    raise
-                logger.warning(
-                    "transcriber_skip_chunk chunk=%s reason=empty_tensor_runtime_error",
-                    chunk_file,
-                )
-                segments_by_chunk[chunk_idx] = []
-                if progress_cb is not None and total_chunks > 0:
-                    progress_cb(progress_index_by_chunk[chunk_idx], total_chunks, chunk_file)
-                _write_chunk_cache(chunk_cache_dir, chunk_idx, [])
-                continue
-
-            chunk_segments = _rich_segments_from_result(result, chunk_idx=chunk_idx, chunk_file=chunk_file)
-            segments_by_chunk[chunk_idx] = chunk_segments
-            _write_chunk_cache(chunk_cache_dir, chunk_idx, chunk_segments)
-
-            if progress_cb is not None and total_chunks > 0:
-                progress_cb(progress_index_by_chunk[chunk_idx], total_chunks, chunk_file)
 
     raw_segments: list[RichSegment] = []
     for chunk_idx, _chunk_file in chunk_files:
@@ -761,6 +832,12 @@ def _segment_from_cache_record(record: object) -> RichSegment:
 
 
 
+# Bump when the enrichment schema changes: caches written by older code are
+# treated as a miss and re-enriched. Version 2 added the emote class scores —
+# legacy caches (a bare list, no version field) silently zeroed hype/funny/shock.
+_CHAT_ENRICHMENT_VERSION = 2
+
+
 def _chat_enrichment_path(cache_key: str | None) -> pathlib.Path | None:
     digest = stable_cache_key_for_source(cache_key)
     if not digest:
@@ -790,10 +867,25 @@ def save_chat_enrichment(cache_key: str | None, segments: list[RichSegment]) -> 
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(records, ensure_ascii=True), encoding="utf-8")
+        tmp.write_text(
+            json.dumps({"version": _CHAT_ENRICHMENT_VERSION, "records": records}, ensure_ascii=True),
+            encoding="utf-8",
+        )
         tmp.replace(path)
     except OSError:
         pass
+
+
+def has_chat_enrichment(cache_key: str | None) -> bool:
+    """True if a current-version chat enrichment cache exists for cache_key."""
+    path = _chat_enrichment_path(cache_key)
+    if path is None or not path.exists():
+        return False
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return isinstance(payload, dict) and int(payload.get("version") or 0) == _CHAT_ENRICHMENT_VERSION
 
 
 def apply_chat_enrichment(
@@ -805,9 +897,12 @@ def apply_chat_enrichment(
     if path is None or not path.exists():
         return None
     try:
-        records: list[dict] = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
+    if not isinstance(payload, dict) or int(payload.get("version") or 0) != _CHAT_ENRICHMENT_VERSION:
+        return None  # legacy/unknown schema — treat as miss so enrichment reruns
+    records = payload.get("records")
     if not isinstance(records, list):
         return None
     lookup: dict[float, dict] = {round(r["start"], 3): r for r in records if isinstance(r, dict)}
@@ -824,11 +919,69 @@ def apply_chat_enrichment(
                 chat_hype_score=float(rec.get("chat_hype_score", 0.0)),
                 chat_funny_score=float(rec.get("chat_funny_score", 0.0)),
                 chat_shock_score=float(rec.get("chat_shock_score", 0.0)),
-                voice_energy_burst_score=float(rec.get("voice_energy_burst_score", 0.0)),
+                # Keep the segment's freshly computed energy when the cached
+                # record predates it — the energy stage runs before this one.
+                voice_energy_burst_score=float(
+                    rec.get("voice_energy_burst_score") or seg.voice_energy_burst_score or 0.0
+                ),
             ))
         else:
             result.append(seg)
     return result
+
+
+_VOICE_ENERGY_VERSION = 1
+
+
+def _voice_energy_path(cache_key: str | None) -> pathlib.Path | None:
+    digest = stable_cache_key_for_source(cache_key)
+    if not digest:
+        return None
+    return pathlib.Path(settings.storage_dir) / "_transcript_cache" / digest / "voice_energy.json"
+
+
+def save_voice_energy(cache_key: str | None, segments: list[RichSegment], scores: list[float]) -> None:
+    """Persist per-segment voice energy so transcript-cache hits keep the signal."""
+    path = _voice_energy_path(cache_key)
+    if path is None or len(scores) != len(segments):
+        return
+    records = [
+        {"start": round(seg.start, 3), "score": round(float(score), 4)}
+        for seg, score in zip(segments, scores)
+        if float(score) > 0
+    ]
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps({"version": _VOICE_ENERGY_VERSION, "records": records}, ensure_ascii=True),
+            encoding="utf-8",
+        )
+        tmp.replace(path)
+    except OSError:
+        pass
+
+
+def load_voice_energy(cache_key: str | None, segments: list[RichSegment]) -> list[float] | None:
+    """Return per-segment energy scores aligned to `segments`, or None on cache miss."""
+    path = _voice_energy_path(cache_key)
+    if path is None or not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict) or int(payload.get("version") or 0) != _VOICE_ENERGY_VERSION:
+        return None
+    records = payload.get("records")
+    if not isinstance(records, list):
+        return None
+    lookup = {
+        round(float(r["start"]), 3): float(r.get("score") or 0.0)
+        for r in records
+        if isinstance(r, dict) and "start" in r
+    }
+    return [lookup.get(round(seg.start, 3), 0.0) for seg in segments]
 
 
 def _filter_transcribable_chunks(
@@ -1190,6 +1343,10 @@ def format_jsonl(segments: list[RichSegment]) -> str:
             "words_per_second": seg.words_per_second,
             "chat_spike_score": seg.chat_spike_score,
             "chat_message_count": seg.chat_message_count,
+            "chat_hype_score": seg.chat_hype_score,
+            "chat_funny_score": seg.chat_funny_score,
+            "chat_shock_score": seg.chat_shock_score,
+            "voice_energy_burst_score": seg.voice_energy_burst_score,
         }))
     return "\n".join(lines)
 

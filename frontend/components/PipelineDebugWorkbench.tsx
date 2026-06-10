@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   deletePipelineDebugWorkflow,
@@ -712,7 +712,32 @@ function NumberField({
   );
 }
 
-function ReviewCard({
+function LazyClipVideo({ src }: { src: string }) {
+  // Runs with hundreds of clips mounted hundreds of <video> elements at once,
+  // which saturates the browser's media pipeline and freezes the whole app.
+  // Mount the player only while the card is near the viewport.
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    const node = ref.current;
+    if (!node) return;
+    const observer = new IntersectionObserver(
+      ([entry]) => setVisible(entry.isIntersecting),
+      { rootMargin: "400px 0px" }
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+  return (
+    <div ref={ref} className="aspect-video w-full border border-border bg-black">
+      {visible && (
+        <video src={src} controls preload="metadata" playsInline className="block h-full w-full bg-black" />
+      )}
+    </div>
+  );
+}
+
+const ReviewCard = memo(function ReviewCard({
   row,
   state,
   onPatch,
@@ -745,7 +770,7 @@ function ReviewCard({
 
       <div className="mt-3">
         {clipUrl && row.clip_status === "ready" ? (
-          <video src={clipUrl} controls preload="metadata" playsInline className="block w-full bg-black border border-border" />
+          <LazyClipVideo src={clipUrl} />
         ) : (
           <div className="flex aspect-video items-center justify-center border border-border bg-surface text-xs text-muted">
             {row.clip_status === "error" ? "Clip-Fehler" : "Clip nicht verfügbar"}
@@ -815,7 +840,11 @@ function ReviewCard({
       </div>
     </article>
   );
-}
+},
+// onPatch/onSave are recreated by the parent on every render; row and state
+// identity cover everything the card displays, so labeling one card no longer
+// re-renders the full grid.
+(prev, next) => prev.row === next.row && prev.state === next.state);
 
 function ToggleButton({
   active,

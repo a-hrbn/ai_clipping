@@ -1,4 +1,483 @@
+## 2026-06-10: GT-Matcher Praezisions-Plan (Phasen 0-4)
+
+Plan: /home/antonio/.claude/plans/analysiere-das-projekt-deep-jaunty-creek.md
+
+### Kernbefunde (verifiziert)
+- fpcalc-120s-Bug: `_fingerprint()` ohne `-length` => alle VOD-Fingerprints
+  deckten nur die ersten ~117s ab; alle 63 audio_fingerprint_fallback-Matches
+  des Open-Gate-Laufs waren Pseudo-Positionen. Echter Transcript-Recall ~36/108
+  (nicht 91.7%). Manifest selbst sauber (Fallback-Rows wurden verworfen).
+- Kein Praezisions-Audit vorhanden; Boundaries segment-granular.
+
+### Fortschritt
+- [x] Phase 0: fpcalc `-length`-Fix (2-stufiger Lauf) + Stale-Cache-Guard
+      (`_read_fingerprint_file` ValueError, `_fingerprint_from_row` Fallback)
+- [x] Phase 0b: 5 Anchor-VOD-Fingerprints regeneriert (8.076 items/sec, voll)
+- [x] Phase 1: `ml/verify_gt_matches.py` — scoped Audio-Konfirmation jedes
+      gt_moments, Null-Window-Guard, Tiers gold/silver/review/unverifiable,
+      `--apply`, `--apply-boundaries`, `--rejudge`, Review-CSV-Export.
+      Confirm-Regel empirisch kalibriert (Anchor-Set): Margin>=0.04 & |off|<=10s
+      ODER Margin>=0.02 & |off|<=5s; Range-Downloads +12s Bias-Toleranz.
+      Anchor-Zwischenstand: 10 gold / 17 silver / 1 review (28 Momente).
+- [x] `eval_clip_finder.py --tiers gold,silver` Filter
+- [x] `gt_pipeline._carry_over_verification`: Tiers/refined Boundaries
+      ueberleben Manifest-Re-Merges (same source_url + Overlap)
+- [x] Phase 3.1: audit_gt_match_recall ehrlich (Split nach match_kind,
+      Fallback zaehlt nicht als Match): echter Recall 36/108 = 33.3%
+- [x] Phase 3.2: Matcher-Re-Run mit vollen Fingerprints (matches_fixed_audio
+      .jsonl: 116 rows, 70 Fallback). Peak-Audit: Fallback-Margins median
+      0.007 => fast alles Rauschen; nur ~6 plausibel (>=0.02).
+      => `artifacts/gt_recovery_review.csv` (72 Rows, Deeplinks, manuell)
+- [x] Phase 4: IDF-Rank-Score (nur Auswahl, Akzeptanz-Skala unveraendert),
+      position_ambiguous-Flag (Second-Best-Margin 0.08/60s), Merge-Span-Cap
+      (1.2x+5s), Audio-Fallback-Peak-Margin-Gate (0.02)
+- [x] Verifikation aller 230 Momente DONE: 62 gold / 111 silver / 24 review /
+      33 unverifiable (32 Legacy-VODs von Twitch geloescht, 1 Repost weg).
+      Gold-Offsets |s|: median 5.5, p90 13.8. Confirmed-Rate nach kind:
+      single_window 5/9, multi_window_merged 41/123, multi_window_chunk 16/65
+      => Chunk-Matches sind die Risikopopulation.
+- [x] --apply + --apply-boundaries angewandt (230 Tiers, 9 Boundaries
+      audio-refined; Anchor-v1-Momente manual_edit-geschuetzt). Backup:
+      jynxzi_eval_manifest.pre_verification.bak.jsonl
+- [x] eval_clip_finder unveraendert vor/nach Apply (r@50 14.1%); --tiers
+      gold,silver: 167 GT statt 192
+- [x] Phase-4-Regressionsmessung DONE (matches_hardened.jsonl):
+      Transcript-Recall 36/108 unveraendert, Fallback 70->6 Rows (Peak-Gate),
+      3 position_ambiguous, Gold-Abgleich 12/13 (1 Abweichung vorbestehend).
+      Bugfix dabei: Merge-Cap brauchte transcript-berechnete repost_duration
+      (Repost-Rows haben kein duration-Feld) -> via RepostTranscriptMatchResult
+      durchgereicht; merged-Spans median 27.6->22.1s, Rest-77s-Fenster ist
+      legitimes 62s-Repost.
+- [ ] MANUELL (User): artifacts/gt_verification_review_queue.csv (72 Rows:
+      24 review + 33 unverifiable + 15 gold/silver-Stichprobe) und
+      artifacts/gt_recovery_review.csv (72 nicht gematchte Reposts)
+- [ ] Nach gt_batch_2-Ende: verify_gt_matches --apply erneut (Batch laeuft
+      mit altem Merge-Code ohne Tier-Carry-Over); Resume verifiziert nur neue
+      Momente. Danach optional matches_hardened als Referenz fuer gt_batch_3.
+
+### Review (Plan abgeschlossen 2026-06-11)
+Alle 5 Phasen des GT-Praezisions-Plans umgesetzt und gemessen. GT-Basis jetzt:
+62 audio-bestaetigte gold-Momente (median 5.5s Positionsfehler), 111 silver,
+24 review (manuell), 33 unverifiable (Plattform-Loeschungen). Eval kann per
+--tiers gold,silver auf die saubere 167er-Basis gefiltert werden.
+
+ACHTUNG: gt_batch_2 laeuft mit ALTEM gt_pipeline-Code (vor carry_over) —
+nach Batch-Ende Tiers via `verify_gt_matches --apply` neu anwenden.
+
+---
+
+## 2026-06-10: gt_batch_1b DONE + Zwischenanalyse | gt_batch_2 GESTARTET
+
+### gt_batch_1b: 8/8 VODs, 0 Fails, 4865 rows, 7.6h
+Eval (87 neue GT): recall@50=14.9% (13 Hits), recall@10=5.7%, avg_rank 18.
+Voll-Prediction-Analyse: GENERIERT 40/87 (46%) — deutlich unter den 71% der
+Anchor-VODs (all_v6). Median-Rang der generierten GTs: 144 (p75=309) =>
+RANKING ist der dominante Verlust (nur 13 von 40 in Top-50).
+
+### Befunde
+1. Fixed-K-Bias: preds skalieren mit VOD-Laenge (1.4h->112, 8.6h->1313);
+   recall@50 bestraft lange VODs systematisch (Top-50 = nur 4-8% der preds).
+   => Metrik-Frage fuer Eval v2: K pro Stunde oder Clip-Level-Recall nutzen.
+2. Generierungs-Gap neu vs Anchor (46% vs 71%): Hypothesen: (a) Anchor-GTs
+   waren manual_edit-kuratiert (genauere Fenster => 50%-Coverage leichter),
+   (b) Chat-Verfuegbarkeit/Signaldichte aelterer VODs, (c) Content-Aera.
+   => Miss-Analyse auf 1b-VODs nach gt_batch_2.
+3. Kombiniert (anchors all_v6 + 1b): n=122, generiert 65 (53%), Top-50 15.6%.
+
+### gt_batch_2 LAEUFT (20260610T155131718209Z)
+Alle 14 Rest-VODs (73 GT), aelteste zuerst. Monitor scharf. Speicher 296GB ok.
+
+---
+
+## 2026-06-10: gt_batch_2-Plan aktualisiert (User: ALLE restlichen VODs)
+
+Nach sauberem gt_batch_1b-Ende automatisch starten:
+gt_batch_2 = alle 14 verbleibenden erreichbaren Anchors (73 GT), sortiert
+AELTESTE ZUERST (Twitch-Verfallsschutz): 2744769396 2745548882 2747242788
+2748008198 2748783535 2754503460 2756055866 2764976309 2766519381
+2768960946 2770356205 2771207666 2772745645 2773650615.
+Vorher Read-only-Speichercheck (>=150GB frei; aktuell 273GB). KEIN Cleanup
+(User-Regel). ETA grob 7-10h (whisper-bound, ~60-70h Material).
+Danach: Gesamteval ueber alle Workflows (offline aggregierbar — eval nutzt
+raw-moments-Dateien der Job-Dirs; kein Re-Run der Anchors noetig).
+
+---
+
+## 2026-06-10: Scripts-Cleanup Phase A+B umgesetzt
+
+### Geloescht (git rm, alles in History)
+- scripts/run_serving_hard_negative_collection.sh + run_serving_recall_
+  holdout.sh (Backend-Module existieren seit LLM-Konsolidierung nicht mehr)
+- scripts/prewarm_sentence_transformer.py
+- Semantik-Block komplett (User-Entscheid B2): services/semantic_candidates
+  .py, ml/embed_reference_clips.py, ml/build_vector_reference_set.py,
+  tests/test_semantic_candidates.py, tests/test_pipeline_worker.py (enthielt
+  nur den Preload-Test)
+- config: semantic_device/semantic_batch_size; docker-compose.yml: ro-Mount
+  tmp/prewarmed_sentence_transformers_local (+ Host-Dir geloescht; greift
+  beim naechsten compose up)
+- lib_backend_container.sh 273 -> 151 Zeilen (Ollama-Block + 3 tote Helfer;
+  transitive Hülle von start_containerized verifiziert, bash -n gruen)
+
+### Speedup
+- pipeline_worker.py: SentenceTransformer-Preload entfernt — sparte gemessen
+  3.7s pro Worker-Start fuer einen ohnehin FEHLSCHLAGENDEN Ladeversuch
+  (Modellgewichte waren nie vorhanden, preload_model()==False; Begruendung
+  TF/DeepFace-Importreihenfolge laengst hinfaellig, CV-Stack entfernt).
+
+### Verifikation
+- Worker-Import im Container sofort nach Edit geprueft (Batch lief weiter).
+- Voll-Suite: exakt die bekannten 24 Vorbestands-Failures, 240 passed,
+  nichts Neues. Compose-Config valide. gt_batch_1b unbeeintraechtigt
+  (VOD 7/8 done waehrend des Cleanups).
+
+---
+
+## 2026-06-10: Minor-Bug notiert — progress.json friert bei Jobs >2h ein
+Job-TTL (2h) evictet langlaufende Jobs aus der Registry; danach no-opt
+update_job und progress.json bleibt auf dem letzten Stand stehen (VOD4
+zeigte 'downloading 5%' obwohl done). Rein kosmetisch (Workflow-Status
+stimmt), Fix-Idee: TTL fuer aktive Jobs verlaengern oder progress-Write
+von der Registry entkoppeln.
+
+## 2026-06-10: Cache-Write-Bottleneck gefunden (gt_batch_1b Statuscheck)
+
+- Befund: _store_in_cache kopierte Videos per shutil.copy2 in den Download-
+  Cache — ueber den drvfs-Bind-Mount nur ~10MB/s => 15-20 min pro 10GB-VOD,
+  Worker haengt derweil in p9_client_rpc (Status D). Cache->Job nutzte
+  laengst Hardlinks, Job->Cache nicht.
+- [x] Fix: os.link first, copy2-Fallback (services/downloader.py
+      _store_in_cache). Greift fuer alle ab jetzt gespawnten Worker
+      (Batch-VODs 6-8 + alle Folge-Batches). Downloader-Tests: 26 gruen,
+      1 Vorbestand (aria2 env).
+
+---
+
+## 2026-06-10: Hardware-adaptive Skalierung (User plant bessere GPU/CPU)
+
+- [x] transcriber.transcription_slots(): GPU-Slots auto aus VRAM (~5GB/Slot;
+      GTX1660=1 Slot = exakt bisheriges Verhalten; 24GB-Karte=4). Override:
+      transcription_gpu_slots. Slot-0-Lockpfad = alter Pfad (Mid-Run-Rollout
+      kollisionsfrei mit Alt-Workern).
+- [x] _transcription_lock: N Slot-Locks; slots==1 -> blockierendes flock
+      (sofortige Uebergabe), sonst Non-Blocking-Polling (5s).
+- [x] pipeline_debug_vod_concurrency: 0 = auto = min(4, slots+1)
+      (hier weiterhin 2). gt_pipeline Match-Worker-Cap 8 -> 16.
+- Verifiziert im Container: slots=1/conc=2 auf diesem Setup, N=1 serialisiert
+  mit 0.5s-Handover, simulierte 2 Slots lassen 2 parallel + 3. wartet.
+  25 Tests gruen. Auf staerkerer Hardware skaliert alles ohne Codeaenderung;
+  Modell-Cache auf langsamem Bind-Mount bleibt der einzige manuelle Punkt.
+
+---
+
+## 2026-06-10: GT-Pipeline-Optimierungen (run_gt_pipeline.sh-Analyse)
+
+### Analyse-Findings
+- Stufe 4 Matching: workers=1 hardcoded trotz fertigem ProcessPoolExecutor;
+  Repost-Transkription + Audio-Fallback laufen im Parent (GPU-safe fuer N Worker).
+- Stufe 2: fixes sleep(3) auch bei Cache-Hits (>12 min Schlaf bei Resume).
+- Stufe 5 KOPIERTE Run-Manifest blind ueber das kanonische Manifest ->
+  haette Manifest v2 (201 GT) + manual_edit-Kuratierung zerstoert.
+- Bereits ok: Repost-Fingerprint-Cache existiert (short_form_fingerprints);
+  GT- und Debug-Pipeline TEILEN den Transcript-Cache (twitch_vod:<id>) —
+  laufende gt_batches waermen kuenftige GT-Pipeline-Laeufe vor.
+
+### Umgesetzt (gt_pipeline.py; vom laufenden Batch ungenutzt -> gefahrlos)
+- [x] --match-workers (0=auto: min(8, cores-2)); Default-Aufloesung in
+      step_run_matcher. ~4-8x auf Stufe 4.
+- [x] sleep(3) nur noch nach echtem Download (elapsed > 1s).
+- [x] Stufe 5: MERGE statt Copy ins kanonische Manifest + timestamped Backup;
+      VODs mit manual_edit-Momenten werden nie ueberschrieben (Warnung).
+      Funktional getestet (manual_edit erhalten, fremde VODs erhalten,
+      Backup geschrieben, Original wiederhergestellt).
+- Offen (bewusst): Stufe-3-VOD-Parallelitaet wie Debug-Orchestrator —
+  lohnt erst beim naechsten grossen GT-Lauf; difflib->rapidfuzz nur mit
+  Schwellen-Revalidierung.
+
+---
+
+## 2026-06-10: PC-Crash waehrend gt_batch_1 + Recovery (gt_batch_1b)
+
+### Crash-Bilanz (Crash nach 03:40, Reboot ~08:08)
+- Orchestrator + Worker tot; Workflow-Zombie als failed markiert.
+- GERETTET: VOD 2757793134 (348 raw) + 2758541573 (609 raw) komplett durch
+  inkl. Clips; Transcripte/Chat/Energy/Videos gecacht -> Redo billig.
+  Review-Rows fehlten (werden erst am Workflow-Ende geschrieben).
+- VERLOREN: VOD 2768134699 (19G) + 2769594798 (13G) Downloads (nicht im
+  Download-Cache) -> Re-Download.
+
+### WICHTIGER BEFUND: 6 Anchor-VODs von Twitch GELOESCHT (zu alt)
+2739861273(10 GT) 2740841415(11) 2741600222(4) 2733238416(1) 2735012372(1)
+2736609674(1) => 28 GT dauerhaft unevaluierbar. In CSV auskommentiert.
+Evaluierbare GT: 202 ueber 31 VODs (Ziel >=200 knapp gehalten).
+LEKTION: Twitch-VODs verfallen (~60 Tage) — GT-Eval-Runs zeitnah nach dem
+Matching fahren; aelteste VODs zuerst.
+
+### Recovery
+- [x] gt_batch_1b gestartet (20260610T081357211707Z): 2757793134+2758541573
+  (Cache-Redo fuer Review-Rows) + 2751373742 + 2768134699 + 2769594798 +
+  2771989634 + 2752903388 + 2759304833. Monitor neu scharf.
+- Danach gt_batch_2 = restliche 13 erreichbare VODs (statt 16).
+
+---
+
+## 2026-06-10: gt_batch_1 Zwischenfall — jobs.json-Race (gefixt)
+
+- VOD 2751373742 (Batch-VOD 1) starb beim Start: _persist_jobs nutzte einen
+  festen Temp-Namen (jobs.json.tmp) + nur Thread-Lock — zwei parallele
+  Worker-Prozesse: A ersetzt tmp, Bs os.replace -> FileNotFoundError.
+  Durch die neue VOD-Parallelitaet erstmals ausgeloest.
+- [x] Fix: prozess-eindeutiger Temp-Name jobs.json.<pid>.tmp
+      (job_manager.py). 3-Prozess-Hammer-Test ok, 28 Job-Tests gruen.
+- [x] Folgeproblem: gescheiterter Worker hing ~5min am Chat-Prefetch-Thread
+      (asyncio joint Executor-Threads bei Loop-Close) und blockierte den
+      Semaphore-Slot. Fix: Prefetch laeuft als Daemon-Thread +
+      asyncio.wrap_future (pipeline.py). Haengenden Worker gekillt ->
+      VOD 3 startete sofort (Parallelitaet verifiziert).
+- Worker ab VOD 3 laufen mit gefixtem Code (frische Prozesse). Restrisiko:
+  Orchestrator + VOD-2-Worker sind Alt-Code (fester tmp-Name) bis VOD 2
+  fertig ist — Kollision untereinander unwahrscheinlich, schlimmstenfalls
+  ein einzelner VOD-Fail (re-runnbar).
+- [ ] VOD 2751373742 (15 GT!) nach Batch-Ende erneut laufen lassen
+      (in gt_batch_2 aufnehmen).
+- Speicher: D: 193GB frei. Batch 1 passt (~85GB). Batch 2+3 brauchen ~130GB.
+  USER raeumt selbst auf — KEIN automatisches Cleanup. Vor gt_batch_2 nur
+  Read-only-Check (>=100GB frei), sonst anhalten und melden.
+
+---
+
+## 2026-06-10: Pipeline-Speedups (qualitaetsneutral) + gt_batch_1 gestartet
+
+### Befunde (gemessen)
+- Whisper laeuft real mit large-v3-turbo/CUDA (env > config-Default "base").
+  Modell-Load 39s warm / 184s kalt (Gewichte auf /mnt/d-Bind-Mount, 9p-I/O).
+  Mit Worker-Batch 12 (36min Audio) zahlte ein 5h-VOD ~9 Reloads.
+- Chat-Download (5-15 min/VOD) lief strikt seriell nach der Transkription.
+- Orchestrator verarbeitete VODs strikt sequenziell.
+
+### Umsetzungen
+- [x] TRANSCRIPTION_WORKER_BATCH_SIZE 12 -> 96 (backend/.env CRLF! + config-
+      Default mit Begruendung). Container neu erstellt (compose yml+dev+cuda).
+- [x] Chat-Prefetch: download_chat startet parallel zu Download/Whisper
+      (pipeline.py; transcriber.has_chat_enrichment als Cache-Check).
+- [x] VOD-Parallelitaet 2 im Debug-Orchestrator (pipeline_debug.py,
+      config: pipeline_debug_vod_concurrency) + prozessuebergreifender
+      Whisper-Lock (transcriber._transcription_lock, flock in /tmp —
+      NICHT auf Bind-Mount, drvfs-flock unzuverlaessig). GPU haelt so immer
+      nur 1 Modell; zweiter Worker ueberlappt Download/ffmpeg/Chat.
+- [x] Robustheit: _extract_audio_cached/Energy tolerieren extract()->None.
+- [x] Debug-Jobs schedulen kein _cleanup_later mehr (Gate war nie verdrahtet;
+      Test test_pipeline_debug_job_skips_cleanup_later kodierte die Absicht).
+- [x] 3 stale Test-Stubs gefixt (raw_moments, cut_clips progress_cb).
+- Verifikation: Voll-Suite vorher 25 / nachher 24 Failures, Diff = exakt 1
+  von mir gefixter Test; alle uebrigen 24 sind Vorbestand. Bekanntes Problem
+  notiert: test_pipeline_integration._import_pipeline_with_stubs leakt
+  sys.modules-Stubs in nachfolgende Testmodule (vergiftet transcriber-Tests
+  in der Full-Suite). Lock-Serialisierung im Container smoke-getestet.
+
+### gt_batch_1 (Workflow 20260610T003259968947Z) LAEUFT
+10 GT-staerkste neue VODs (108 GT): 2751373742 2757793134 2758541573
+2740841415 2739861273 2768134699 2769594798 2771989634 2752903388 2759304833.
+2 Worker parallel bestaetigt. ETA ~4-6h (GPU-bound). Danach: Eval auf
+n=143 GT (35 Anchor + 108) moeglich; Batch 2 (10 VODs) + Batch 3 (5) offen.
+
+---
+
+## 2026-06-10: Eval-Manifest v2 — 230 GT ueber 37 VODs
+
+- [x] ml/expand_eval_manifest.py: promotet die 196 kuratierten cross_platform_
+      outcome_positives (Match-Metadaten + sim>=0.55) aus den Training-Rows
+      ins Eval-Manifest. 227 Legacy-Rows ohne Metadaten verworfen (96%
+      Fenster-Duplikate). Fenster-Dedupe (overlap>=0.5), Dauer 4-120s.
+- [x] jynxzi_eval_manifest.jsonl: 5 -> 37 VODs, 35 -> 230 GT, 185 distinkte
+      Clips (clip_group aus source_url fuer Clip-Level-Recall). Anchor-GTs
+      byte-identisch erhalten (verifiziert). Backup: .v1.jsonl. Versions-
+      Stempel: jynxzi_eval_manifest.meta.json (version=2).
+- [x] ml/jynxzi_gt_vods.csv: +25 VODs mit >=3 GT (Anchors jetzt 30, 220 GT).
+      7 VODs mit 1-2 GT bleiben nur im Manifest (Transkription lohnt nicht).
+- Statistik-Ziel erreicht: n=220 => SE ~2.7pp, 95%-CI ~±5pp; 110/110
+  Tune/Holdout-Split moeglich.
+- ACHTUNG: Die Debug-UI preselektiert jetzt 30 Anchors — ein Full-Run
+  transkribiert ~25 neue VODs (einmalig, lokale GPU, mehrere Stunden;
+  LLM ~$0.07/VOD). Empfehlung: in Batches fahren (z.B. 2x 10 + 1x 5),
+  danach ist alles gecacht (~$2/Eval-Iteration).
+- Leakage-Hinweis: Quelle ist gold_holdout_split=train — fuer LLM-only ok;
+  falls wieder ein trainierter Ranker kommt, vorher neu splitten.
+
+---
+
+## 2026-06-10: all_v6-Evaluation (Signal-Fixes End-to-End)
+
+### Signale verifiziert LIVE (Prompt VOD 2774440901)
+2074 chat=-Marker (vorher nur >=0.4), 987 mit hype/funny/shock-Label,
+290 vol=-Marker. segments.jsonl zeigte faelschlich 0 — format_jsonl
+serialisierte die neuen Felder nicht; gefixt (transcriber.py).
+
+### Ergebnis vs v4-Baseline (35 GT)
+- Generierungs-Recall (cov>=0.5, beliebiger Rang): 21 -> 25 (60% -> 71%).
+  8 vorher unsichtbare GTs jetzt generiert — exakt die Miss-Analyse-
+  Kategorien (Fanmail/visuell/low-spike): GTA6, Kitten, Goldbarren, cute
+  picture, World Cup, Ronaldo-Setup, Miners, Pokemon-Fenster 3.
+- recall@50: 17.1% (6/35) vs 20.0% — flach; recall@10 VERDOPPELT
+  (5.7% -> 11.4%), avg_rank 20.7 -> 11.8. Pokemon 3/3 (R8,9,10),
+  OhnePixel-Mogging R4 (war 79), Darth Mog R18 (war 210).
+- Trade-off: VOD 2780984594 systematisch schlechter (Balright-Cluster
+  verloren, Ex-R8-Hit auf R182); M&K-banned (v4 R1) nicht mehr generiert.
+  Run-zu-Run-Varianz + Marker-Flut verschiebt LLM-Aufmerksamkeit.
+
+### Engpass jetzt: RANKING (25 generiert, nur 6 in Top-50, 19 auf R72-576)
+Spike-Blend-Experiment (rank = composite + a*max_chat_spike):
+- v6-Daten: a=0.3 -> recall@50 25.7% (bester Wert bisher)
+- v4-Daten: a=0.3 -> 17.1% (SCHLECHTER als 20% Basis) => nicht robust,
+  nicht shippen. 35 GT zu klein zum Feature-Tuning.
+
+### Naechste Schritte (priorisiert)
+- [ ] GT-Datensatz vergroessern (Matching-Schwellen 0.60->0.55, View-Gate
+      500k->250k, mehr VODs) — Voraussetzung fuer jedes Ranking-Tuning
+- [ ] Danach: Ranking-Features (Spike/Emote/Vol-Blend) auf groesserem GT
+- [ ] Optional: 2-Pass-Generierung (Union) gegen Run-Varianz testen
+
+---
+
+## 2026-06-09: Signal-Fixes umgesetzt (aus Miss-Analyse) + all_v6
+
+- [x] Chat-Enrichment-Cache versioniert (services/transcriber.py,
+      _CHAT_ENRICHMENT_VERSION=2): Legacy-Caches (bare list, ohne Emote-
+      Klassen) gelten als Miss => Re-Enrichment laeuft. apply_ erhaelt
+      ausserdem frisch berechnete voice_energy, wenn der Record keine hat.
+- [x] Voice-Energy-Side-Cache (save/load_voice_energy, voice_energy.json im
+      Transcript-Cache). pipeline.py: Energy wird bei Cache-Hits aus dem
+      Cache geladen, sonst berechnet (Audio wird bei Bedarf nachextrahiert)
+      und persistiert. `vol=`-Marker existieren damit auch in Eval-Runs.
+- [x] chat=-Marker-Schwelle 0.4 -> 0.25 (ml/llm_moment_finder.py) +
+      Prompt-Regel fuer 0.25-0.40-Band (Recall-Nudge).
+- [x] Smoke-Tests: Legacy-Cache=MISS, Marker@0.31 ja/@0.20 nein,
+      Energy-Roundtrip, v2-Roundtrip mit Energy-Preserve. 35 Tests gruen
+      (2 Failures in test_pipeline_integration sind Vorbestand, auch auf HEAD).
+- [ ] all_v6 (20260609T194905641314Z) laeuft: Recall@50-Vergleich vs 20%
+      Baseline. Achtung: Run dauert laenger (Chat-Re-Download + Audio-
+      Extraktion fuer alle 5 VODs wegen Cache-Invalidierung).
+
+---
+
+## 2026-06-09: Normalisierung deaktiviert + Miss-Analyse all_v5
+
+### Deaktivierung
+- [x] find_moments: rank_score_fn=None, rank_key=_llm_moment_composite
+      (services/moment_finder.py). _cross_chunk_rank_scores + Bugfix + Test
+      bleiben fuer config-gated Experimente erhalten. 16 Tests gruen.
+
+### Miss-Analyse (35 GT: 6 Hit@50, 15 GEN-aber-Rang>50, 14 NOTGEN)
+Transcript-Coverage ist NICHT das Problem: GT-Segmente stehen zu ~100% im
+Prompt (Noise-Filter unschuldig). Keine Truncation in all_v5.
+
+ROOT CAUSE 1 — Signal-Verhungern (alle 5 Anchor-VODs betroffen):
+- voice_energy_burst_score fehlt KOMPLETT: wird nur bei audio_path != None
+  berechnet (pipeline.py:451) — Transcript-Cache-Hit => nie. `vol=`-Marker
+  existieren in keinem Eval-Prompt.
+- chat_hype/funny/shock fehlen KOMPLETT: chat_enriched.json im Transcript-
+  Cache hat altes Schema (chat_category, keine Emote-Klassen); 
+  apply_chat_enrichment fuellt still 0.0. Kein Cache-Versions-Stempel.
+- chat_spike vorhanden, aber Prompt-Marker erst ab 0.4: die meisten GT-
+  Fenster liegen bei 0.23-0.38 => fuer den LLM unsichtbar. Nur 6/35 GT-
+  Fenster hatten ueberhaupt einen chat=-Marker; 3 der 6 Hits hatten welche.
+
+ROOT CAUSE 2 — Visuelle Payoffs (NOTGEN-Cluster):
+- R6-News-Reactions (4x VOD 2774440901): Transcript = Narration des
+  Reaction-VIDEOS, nicht Jynxzis Reaktion => textlich unsichtbar.
+- Fanmail-Reveals (Goldbarren, Kitten-Costume, cute picture): Payoff ist
+  visuell, Text banal.
+- Mogging-Momente: GENeriert aber Rang 271/283 (1M-Views-GT!) — ohne
+  Signale stuft der LLM sie als generisch ein.
+
+### Fix-Kandidaten (priorisiert, noch offen)
+- [ ] Chat-Enrichment-Cache versionieren/invalidieren => Emote-Klassen live
+- [ ] chat=-Marker-Schwelle 0.4 -> ~0.25 (oder Score immer zeigen ab 0.2)
+- [ ] Voice-Energy bei Cache-Hits: Energy-Scores mit ins Transcript-Cache
+- [ ] Langfristig: Vision-Signal fuer visuelle Payoffs (Fanmail/Mogging)
+
+---
+
+## 2026-06-09: all_v5-Analyse — Normalisierung-Bug + Verdikt
+
+### Bug gefunden (Recall@50 8.6% statt erwartet ~55%)
+`_cross_chunk_rank_scores` gab fuer Chunk-Tops percentile 1.0 + Tiebreak > 1.0
+zurueck; `_virality_to_pipeline_score` interpretiert > 1.0 als bereits 1-10-
+skaliert und ueberspringt das x10 → jeder Chunk-Beste strandete bei ~1.0
+(Rest ~9.9). v4-Rang-1-GT fiel so auf Rang 356.
+- [x] Fix: Tiebreak wird subtrahiert, Score bleibt strikt < 1.0
+      (services/moment_finder.py::_cross_chunk_rank_scores)
+- [x] Regressionstest test_moment_finder.py::test_cross_chunk_rank_scores_...
+- [x] 16 Tests gruen (Container)
+
+### Offline-Simulation auf identischen v5-Moments (35-GT-Manifest)
+v4 und v5 enthalten EXAKT dieselben 2475 Moments (Gemini deterministisch) —
+nur Ranking unterscheidet sich. Simulation (reproduziert v4 = 7/35 exakt):
+- raw composite (v4-Logik):   7/35 = 20.0%  (hit_ranks 1,10,11,12,33,36,42)
+- percentile-Fix:             4/35 = 11.4%
+- z-score/chunk:              5/35 = 14.3%
+- blend 0.25/0.5 pct:         4/35 = 11.4%
+
+### Verdikt
+Per-Chunk-Normalisierung ist auf der echten Eval in JEDER Variante schlechter
+als rohes Composite-Ranking. Die all_v4-Diagnose (Score-Inkompatibilitaet
+begraebt GT auf Rang 70+) bestaetigt sich nicht. Empfehlung: Normalisierung
+deaktivieren/revertieren, Bugfix + Test behalten.
+Echte Limits: 14/35 GT werden gar nicht generiert (Generierungs-Recall 60%),
+von 21 generierten sind nur 7 in Top-50 → naechster Hebel ist Generierung
+(Miss-Analyse) + Ranking-Qualitaet, nicht Chunk-Fairness.
+
+---
+
 # Task Plan
+
+## 2026-06-09: Transcript-Chunking gegen Output-Truncation (Recall)
+
+### Root Cause (aus all_v3-Eval)
+Alle 5 VODs liefen ins `completion_tokens`-Limit (31990 ≈ max_tokens 32000). Der
+LLM bricht nach ~0.5–1.1h Transcript ab → späte GT strukturell unerreichbar.
+17 von 31 Misses = reine Truncation. Recall@50 nur 26%.
+
+### Fix: Chunking + Repair-Härtung
+- [x] `llm_moment_finder.split_segments_into_time_chunks` — ~45-min-Fenster mit
+      120s-Overlap, absolute Timestamps (keine Offset-Umrechnung). Konstanten
+      `DEFAULT_CHUNK_DURATION_SEC=2700`, `DEFAULT_CHUNK_OVERLAP_SEC=120`.
+- [x] `moment_finder.find_moments` — Chunk-Loop: pro Chunk ein LLM-Call mit
+      eigenem Output-Budget → Merge → Cross-Chunk-Dedupe (nur bei >1 Chunk, so
+      bleibt Single-Call-Verhalten exakt). Prompt/Response/Usage aggregiert,
+      `chunk_count` im Summary.
+- [x] `config`: `moment_finder_chunk_duration_sec`, `_chunk_overlap_sec`; in
+      `pipeline.py` durchgereicht. 0 = Chunking aus.
+- [x] **Repair-Härtung** (Chunking exponierte Pre-existing-Bug):
+      `repair_clock_encoded_timestamps(..., max_time_sec=...)` repariert nur noch
+      Out-of-Range-Werte → große Absolut-Sekunden (2600s) werden nicht mehr als
+      26:00=1560s verstümmelt. Default None = altes Verhalten (Tests grün).
+
+### Verifikation
+- [x] Split: 3h→4 Chunks, 0 Coverage-Lücken, Single-Chunk für kurze VODs.
+- [x] Mock-Roundtrip: Merge über Chunks, Overlap-Dup entfernt (4→3),
+      Timestamps korrekt (2600 bleibt ~2600, nicht 1560), Usage aggregiert.
+- [x] test_llm_moment_finder 13 passed; kanonischer find_moments-Test grün.
+- [x] End-to-End all_v4: recall@50 0.26→0.19 GEFALLEN. Diagnose: Chunking fixt
+      Coverage (VOD2 0.9h→4.8h, VOD5 0→2), aber Cross-Chunk-Score-Inkompatibilität
+      streut GT auf Rang 70+. 23/42 GT generiert+abgedeckt, davon 15 jenseits Rang 50.
+
+## 2026-06-09: Cross-Chunk-Rang-Normalisierung
+- [x] `moment_finder._cross_chunk_rank_scores` — Per-Chunk-Perzentil-Ranking
+      (Chunk-Zuordnung aus Timestamp → überlebt repair/dedupe/snap). Tiebreak
+      Composite×0.001 (< kleinster Perzentil-Schritt). Nur aktiv bei >1 Chunk.
+- [x] `llm_moments_to_post_processor_rows(rank_score_fn=...)` — composite_score
+      nutzt normalisierten Score; viral_score + Sub-Scores bleiben Roh-LLM.
+- [x] `find_moments`: rank_score_fn für beide Branches (raw + filtered); Single-
+      Chunk → None → exakt altes Verhalten.
+- [x] Verifiziert: gebuteter chunk0-Standout RAW Rang 41 → normalisiert Rang 2;
+      Single-Chunk unverändert; 13 Tests grün.
+- [ ] End-to-End: all_v5 → Recall-Vergleich (Ziel: Richtung 23/42 = 55%).
+
+---
+
+---
+
 
 ## 2026-06-09: Jobs sollen nicht unnötig abbrechen
 
@@ -72,6 +551,19 @@ Verifiziert (logs_test3): orchestrator.log = 5 strukturierte INFO-Zeilen, 0
       existiert → Moments 21+ = "missing". Keine Review-Logik-Änderung nötig.
 - [x] all_v3 neu gestartet (`20260609T114714136540Z`) — alter Run hatte VOD 1
       mit 65 Clips (Worker vor Edit); jetzt Cap auf allen 5 VODs.
+
+### Follow-up (2026-06-09): Status-Reporting-Fix (stale "downloading 5%")
+Root Cause: jobs.json wird von 3 Prozessen (Orchestrator/Worker/uvicorn) geteilt;
+Cross-Process-Sync via mtime-Reload ist auf WSL2/drvfs-Bind-Mount unzuverlässig →
+Lost Updates, jeder persistiert seinen vollen Snapshot → Status klebte auf
+"downloading 5%" (während des 15-min-LLM-Calls macht der Worker keinen update_job).
+- [x] `job_manager.update_job` schreibt per-Job `progress.json` (atomar, single
+      writer = Pipeline-Worker; legt keine Dirs an).
+- [x] Orchestrator-Mirror liest `progress.json` (`_read_job_progress`) statt
+      `get_job` → kein geteiltes Registry, keine mtime-Abhängigkeit.
+- [x] Roundtrip verifiziert: downloading/transcribing/analyzing/clipping korrekt
+      geschrieben + zurückgelesen. Gilt für neue Runs (laufender all_v3 behält
+      Alt-Verhalten, da Orchestrator/Worker vor dem Edit gestartet).
 
 ---
 
@@ -5878,3 +6370,15 @@ Kernprobleme: kleines Goldlabeled-Dataset, Train-Holdout-Gap, twitch_proxy schad
 - [ ] Import-Check: python -c "import pipeline, main"
 - [ ] Tests: python -m pytest backend/tests/ -q
 - [ ] Graphify update
+
+## GT Match-Recall Audit (2026-06-10)
+- [x] Neues Skript `backend/ml/audit_gt_match_recall.py` (joint iboclipss_discovered gegen matches.jsonl eines gt_runs)
+- [x] Ergebnis auf 5-VOD-Run: Clip-Match-Recall 36% (39/108), auch >=500k-Views-Clips nur 50%
+- [x] Bias bestätigt: talky-Clips matchen 58%, low-speech (Rage/Troll/Trap) nur 11%
+- [x] Ursache identifiziert: Audio-Fallback-Gate verlangt Transcript-Score >=0.35 (match_cross_platform_transcripts.py:1073) — Clips ohne Sprache kommen nie in den Fallback, obwohl der 86% Trefferquote hat (12/14)
+- [x] Audio-Fallback-Gate geöffnet (match_cross_platform_transcripts.py:_should_try_audio_fallback): Fallback bei jedem Transcript-Fehlschlag, Präzision weiter via Confidence-Threshold 0.56
+- [x] Zusätzlich: Fallback nur wenn KEIN Transcript-Fenster akzeptiert wurde (verhindert falsch platzierte Audio-Doppelfenster neben hochpräzisen Chunk-Matches; 5 solcher Konflikte im ersten Rerun, 0 danach)
+- [x] Rerun auf 5-VOD-Run: Clip-Match-Recall 36% -> 92% (99/108), view-gewichtet 94.5%, >=500k-Tier 100%; low-speech-Clips 8/9 statt 1/9; Audio-Fallback 63/70 Treffer; Tests gruen (13 passed)
+- [x] Ergebnis-Dateien: matches_open_gate.jsonl + match_diagnostics_open_gate.json im Run-Dir, Audit in ml/artifacts/gt_match_recall_audit_open_gate.json
+- [ ] Offen: GT-Manifeste neu bauen (alle gt_runs re-matchen + build_eval_manifest), damit die Eval die neuen Matches nutzt
+- Audit-Output: backend/ml/artifacts/gt_match_recall_audit.json

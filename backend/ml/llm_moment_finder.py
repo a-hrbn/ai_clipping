@@ -21,6 +21,11 @@ from config import settings
 
 DEFAULT_MAX_MOMENTS = 180
 DEFAULT_MAX_TOKENS = 32000
+# Long VODs are split into time windows so each LLM call gets its own output-token
+# budget — a single call truncates at ~max_tokens and silently drops the back of a
+# multi-hour stream. ~45 min/window keeps each call's output under the ceiling.
+DEFAULT_CHUNK_DURATION_SEC = 2700.0
+DEFAULT_CHUNK_OVERLAP_SEC = 120.0
 DEFAULT_TIMEOUT_SEC = 900.0
 DEFAULT_API_RETRIES = 2
 DEFAULT_RETRY_BACKOFF_SEC = 20.0
@@ -107,7 +112,9 @@ def _build_chat_marker(segment: "TranscriptSegment") -> str:
     parts: list[str] = []
 
     spike = float(getattr(segment, "chat_spike_score", 0.0) or 0.0)
-    if spike >= 0.4:
+    # 0.25 instead of 0.4: the all_v5 miss analysis showed most ground-truth
+    # viral windows spike at 0.23-0.38 — at 0.4 they carried no marker at all.
+    if spike >= 0.25:
         hype  = float(getattr(segment, "chat_hype_score",  0.0) or 0.0)
         funny = float(getattr(segment, "chat_funny_score", 0.0) or 0.0)
         shock = float(getattr(segment, "chat_shock_score", 0.0) or 0.0)
@@ -253,6 +260,40 @@ def format_transcript_for_prompt(
     )
 
 
+def split_segments_into_time_chunks(
+    segments: Sequence[TranscriptSegment],
+    *,
+    chunk_duration_sec: float = DEFAULT_CHUNK_DURATION_SEC,
+    chunk_overlap_sec: float = DEFAULT_CHUNK_OVERLAP_SEC,
+) -> list[list[TranscriptSegment]]:
+    """Split transcript segments into overlapping VOD-time windows.
+
+    Each window spans ``chunk_duration_sec`` of VOD time plus a
+    ``chunk_overlap_sec`` lead-in from the previous window, so a moment that
+    straddles a boundary can still be captured in the later window (the
+    resulting cross-chunk duplicate is removed afterwards by overlap dedupe).
+    Returns a single window when the transcript is shorter than one window.
+    """
+    segs = list(segments)
+    if not segs:
+        return []
+    t0 = min(float(s.start) for s in segs)
+    t_end = max(float(s.end) for s in segs)
+    if chunk_duration_sec <= 0 or (t_end - t0) <= chunk_duration_sec:
+        return [segs]
+    overlap = max(float(chunk_overlap_sec), 0.0)
+    chunks: list[list[TranscriptSegment]] = []
+    start = t0
+    while start < t_end:
+        end = start + chunk_duration_sec
+        lead = start - overlap
+        window = [s for s in segs if float(s.start) < end and float(s.end) > lead]
+        if window:
+            chunks.append(window)
+        start = end
+    return chunks or [segs]
+
+
 def transcript_noise_reason(segment: TranscriptSegment, text: str) -> str | None:
     normalized = normalize_transcript_text(text)
     if not normalized:
@@ -317,6 +358,7 @@ Return raw JSON only, no markdown. Use this exact shape:
 Rules:
 - Segments annotated with `chat=N.NN` had a live audience spike (message-rate N.NN × above local baseline, scale 0–1). Treat these as strong evidence that something viral happened — weigh them heavily. The optional label after the score tells you the *kind* of reaction the audience had: `hype` = clutch/win/pop-off; `funny` = comedy/laughing moment; `shock` = rage/meltdown/drama. Use the label to inform the clip archetype and score — e.g. a `funny` spike raises `hook` and `value` for a comedy clip, a `shock` spike raises `virality` for a rage/drama clip. A segment with no `chat=` annotation had a normal or low chat rate.
 - Segments with `chat=` ≥ 0.40 are strong recall signals — the live audience voted in real time. For each such cluster, you should almost always include a moment that covers the content that triggered the spike, even if the transcript text seems brief, confusing, or context-free. Anchor the moment so it starts just before the spike and ends after the audience reaction dies down. Use your normal virality-scoring judgment — do not artificially inflate or cap scores for spike regions.
+- Segments with `chat=` between 0.25 and 0.40 mark mildly elevated chat activity. Many proven viral moments only reach this band, so treat such a marker as a recall nudge: when the surrounding transcript shows any reaction, reveal, joke, or conflict, prefer including a borderline moment there over skipping it.
 - Segments annotated with `vol=N.NN` had a significant audio energy burst (relative loudness N.NN × above the local audio baseline, scale 0–1). This signals a shout, rage outburst, or sudden audio peak. A `vol=` burst on its own (without `chat=`) is still meaningful — it often marks the onset of a reaction before the audience has typed. A combined `chat=... shock` + `vol=` is a near-certain rage/meltdown moment.
 - Return at most {max_moments} moments.
 - **Virality scoring calibration:** Use the full 0.0–1.0 scale. Most moments should score 0.60–0.80. Reserve 0.85–0.95 for genuinely exceptional moments: rare verbal tics, massive chat spikes (≥ 0.50), emotional breakdowns, shocking reveals, or moments that match one of the priority archetypes above. Do not cluster moments at the same value — assign each score independently based on its own merit.
@@ -590,21 +632,31 @@ def parse_moments(text: str) -> list[LlmMoment]:
     return moments
 
 
-def repair_clock_encoded_timestamps(moments: Sequence[LlmMoment]) -> TimestampRepairResult:
+def repair_clock_encoded_timestamps(
+    moments: Sequence[LlmMoment],
+    *,
+    max_time_sec: float | None = None,
+) -> TimestampRepairResult:
     repaired: list[LlmMoment] = []
     repaired_count = 0
     for moment in moments:
-        repaired_moment = repair_clock_encoded_moment(moment)
+        repaired_moment = repair_clock_encoded_moment(moment, max_time_sec=max_time_sec)
         if repaired_moment != moment:
             repaired_count += 1
         repaired.append(repaired_moment)
     return TimestampRepairResult(moments=repaired, repaired_moment_count=repaired_count)
 
 
-def repair_clock_encoded_moment(moment: LlmMoment) -> LlmMoment:
+def repair_clock_encoded_moment(moment: LlmMoment, *, max_time_sec: float | None = None) -> LlmMoment:
     converted_start = compact_clock_to_seconds(moment.start)
     converted_end = compact_clock_to_seconds(moment.end)
     if converted_start is None or converted_end is None or converted_end <= converted_start:
+        return moment
+    # When the VOD length is known, only treat a value as clock-encoded if the
+    # literal seconds are IMPOSSIBLE (beyond the VOD). Otherwise a legitimate
+    # large absolute-second position — common once long VODs are chunked — would
+    # be wrongly shrunk (e.g. 2600s misread as 26:00 = 1560s).
+    if max_time_sec is not None and float(moment.start) <= float(max_time_sec) + 1.0:
         return moment
     return LlmMoment(
         start=round(float(converted_start), 3),

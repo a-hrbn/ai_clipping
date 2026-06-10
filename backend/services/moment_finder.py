@@ -47,6 +47,8 @@ def find_moments(
     api_retries: int = d0.DEFAULT_API_RETRIES,
     retry_backoff_sec: float = d0.DEFAULT_RETRY_BACKOFF_SEC,
     filter_transcript_noise: bool = True,
+    chunk_duration_sec: float = d0.DEFAULT_CHUNK_DURATION_SEC,
+    chunk_overlap_sec: float = d0.DEFAULT_CHUNK_OVERLAP_SEC,
 ) -> MomentFinderResult:
     transcript_segments = rich_segments_to_transcript_segments(segments)
     prompt_transcript = d0.format_transcript_for_prompt(
@@ -56,48 +58,86 @@ def find_moments(
     resolved_provider = d0.normalize_provider(provider)
     resolved_model = d0.resolve_provider_model(resolved_provider, model)
     profile_spec = d0.load_clip_profile(profile)
-    prompt = d0.build_moment_finder_prompt(
-        profile=profile,
-        vod_id=vod_id or "serving",
-        transcript_text=prompt_transcript.text,
-        max_moments=max_moments,
-        min_duration_sec=min_duration_sec,
-        max_duration_sec=max_duration_sec,
-        profile_spec=profile_spec,
-    )
+
+    # Split long VODs into time windows so each LLM call gets its own output-token
+    # budget. A single call truncates at ~max_tokens and silently drops the back
+    # half of a multi-hour stream — the dominant recall loss observed in eval.
+    chunks = d0.split_segments_into_time_chunks(
+        transcript_segments,
+        chunk_duration_sec=chunk_duration_sec,
+        chunk_overlap_sec=chunk_overlap_sec,
+    ) or [transcript_segments]
+
+    chunk_prompts: list[str] = []
+    chunk_responses: list[str] = []
+    chunk_usages: list[dict[str, Any]] = []
+    collected: list[d0.LlmMoment] = []
     try:
-        response_text, usage = d0.call_moment_finder_provider(
-            prompt,
-            provider=resolved_provider,
-            model=resolved_model,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            timeout_sec=timeout_sec,
-            retries=api_retries,
-            retry_backoff_sec=retry_backoff_sec,
-        )
-        raw_moments = d0.parse_moments(response_text)
-        timestamp_repair = d0.repair_clock_encoded_timestamps(raw_moments)
+        for chunk_segments in chunks:
+            chunk_transcript = d0.format_transcript_for_prompt(
+                chunk_segments,
+                filter_noise=filter_transcript_noise,
+            )
+            chunk_prompt = d0.build_moment_finder_prompt(
+                profile=profile,
+                vod_id=vod_id or "serving",
+                transcript_text=chunk_transcript.text,
+                max_moments=max_moments,
+                min_duration_sec=min_duration_sec,
+                max_duration_sec=max_duration_sec,
+                profile_spec=profile_spec,
+            )
+            chunk_response, chunk_usage = d0.call_moment_finder_provider(
+                chunk_prompt,
+                provider=resolved_provider,
+                model=resolved_model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                timeout_sec=timeout_sec,
+                retries=api_retries,
+                retry_backoff_sec=retry_backoff_sec,
+            )
+            collected.extend(d0.parse_moments(chunk_response))
+            chunk_prompts.append(chunk_prompt)
+            chunk_responses.append(chunk_response)
+            chunk_usages.append(dict(chunk_usage or {}))
+        max_time_sec = max((float(s.end) for s in transcript_segments), default=None)
+        timestamp_repair = d0.repair_clock_encoded_timestamps(collected, max_time_sec=max_time_sec)
         moments = timestamp_repair.moments
+        # Remove cross-chunk duplicates from the overlap regions (no-op for a
+        # single chunk, so single-call VODs keep their exact prior behaviour).
+        if len(chunks) > 1:
+            moments, _ = d0.dedupe_moments_by_overlap(moments)
     except SystemExit as exc:
         raise MomentFinderError(str(exc)) from exc
     except Exception as exc:
         raise MomentFinderError(str(exc)) from exc
+
+    prompt = _join_chunk_debug(chunk_prompts)
+    response_text = _join_chunk_debug(chunk_responses)
+    usage = _aggregate_chunk_usage(chunk_usages)
 
     length_discipline = d0.enforce_moment_length_discipline(
         moments,
         max_duration_sec=max_duration_sec,
         blob_drop_duration_sec=d0.DEFAULT_BLOB_DROP_DURATION_SEC,
     )
+    # Cross-chunk rank normalization is DISABLED: the all_v5 eval showed every
+    # per-chunk variant (percentile, z-score, blends) loses against raw composite
+    # ranking (recall@50 20% -> 11-14%) because weak chunks' tops flood the global
+    # top-K. _cross_chunk_rank_scores stays available for config-gated experiments.
+    rank_score_fn = None
+    rank_key = _llm_moment_composite
+
     # Raw branch: pre-dedupe, pre-diversity — measures true LLM recall for eval.
-    raw_ranked = sorted(length_discipline.moments, key=_llm_moment_composite, reverse=True)
-    raw_rows = llm_moments_to_post_processor_rows(raw_ranked)
+    raw_ranked = sorted(length_discipline.moments, key=rank_key, reverse=True)
+    raw_rows = llm_moments_to_post_processor_rows(raw_ranked, rank_score_fn=rank_score_fn)
     raw_snapped = post_processor.snap_boundaries(raw_rows, list(segments))
     raw_post_processed_rows = _rank_post_processed_rows(raw_snapped)
 
     deduped_moments, duplicate_moments = d0.dedupe_moments_by_overlap(length_discipline.moments)
-    ranked_moments = sorted(deduped_moments, key=_llm_moment_composite, reverse=True)
-    moment_rows = llm_moments_to_post_processor_rows(ranked_moments)
+    ranked_moments = sorted(deduped_moments, key=rank_key, reverse=True)
+    moment_rows = llm_moments_to_post_processor_rows(ranked_moments, rank_score_fn=rank_score_fn)
     snapped_rows = post_processor.snap_boundaries(moment_rows, list(segments))
     diverse_rows = post_processor.enforce_diversity(snapped_rows)
     post_processed_rows = _rank_post_processed_rows(diverse_rows)
@@ -123,6 +163,8 @@ def find_moments(
         "transcript_dropped_segments": prompt_transcript.dropped_segments,
         "transcript_filter_reasons": prompt_transcript.dropped_reasons,
         "prompt_chars": len(prompt),
+        "chunk_count": len(chunks),
+        "chunk_duration_sec": round(float(chunk_duration_sec), 3),
     }
     return MomentFinderResult(
         ranked_candidates=ranked_candidates,
@@ -133,6 +175,69 @@ def find_moments(
         usage=usage,
         summary=summary,
     )
+
+
+def _join_chunk_debug(parts: list[str]) -> str:
+    """Join per-chunk prompts/responses for the single debug artifact files."""
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        return parts[0]
+    total = len(parts)
+    return "\n\n".join(f"===== CHUNK {i + 1}/{total} =====\n{p}" for i, p in enumerate(parts))
+
+
+def _aggregate_chunk_usage(usages: list[dict[str, Any]]) -> dict[str, Any]:
+    """Sum token usage across chunks; keep the per-chunk breakdown for debugging."""
+    if not usages:
+        return {}
+    if len(usages) == 1:
+        return usages[0]
+    aggregated: dict[str, Any] = {"chunk_count": len(usages), "chunks": usages}
+    for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        aggregated[key] = sum(int(u.get(key) or 0) for u in usages)
+    return aggregated
+
+
+def _moment_key(moment: d0.LlmMoment) -> tuple[float, float]:
+    return (round(float(moment.start), 3), round(float(moment.end), 3))
+
+
+def _cross_chunk_rank_scores(
+    moments: Sequence[d0.LlmMoment],
+    chunk_duration_sec: float,
+    t0: float,
+) -> dict[tuple[float, float], float]:
+    """Per-chunk percentile rank score, so each chunk's standouts compete fairly.
+
+    Moments are grouped by their VOD-time window (derived from `start`, so the
+    grouping survives repair/dedupe/length-discipline). Within each window they
+    are ranked by raw composite; the returned score is the within-window
+    percentile (top moment ~1.0) plus a tiny composite tiebreak. Sorting all
+    moments by this score interleaves the chunks' best moments instead of letting
+    one chunk's score inflation dominate the global top-K.
+    """
+    from collections import defaultdict
+
+    groups: dict[int, list[d0.LlmMoment]] = defaultdict(list)
+    for moment in moments:
+        idx = int((float(moment.start) - t0) // chunk_duration_sec) if chunk_duration_sec > 0 else 0
+        groups[idx].append(moment)
+
+    scores: dict[tuple[float, float], float] = {}
+    for group in groups.values():
+        ordered = sorted(group, key=_llm_moment_composite, reverse=True)
+        n = len(ordered)
+        for rank, moment in enumerate(ordered):
+            percentile = 1.0 - (rank / n) if n > 1 else 1.0
+            # Composite tiebreak is kept < smallest percentile step (1/n, n<=~180)
+            # and pulls DOWN from the percentile so the score stays strictly < 1.0:
+            # _virality_to_pipeline_score treats values > 1.0 as already 1-10 scale,
+            # which stranded every chunk-top moment (percentile 1.0) at ~1.0 while
+            # the rest scaled to ~10 (all_v5: GT rank 1 -> 356).
+            composite = _llm_moment_composite(moment)
+            scores[_moment_key(moment)] = percentile - (1.0 + 1e-6 - composite) * 0.001
+    return scores
 
 
 def rich_segments_to_transcript_segments(segments: Sequence[RichSegment]) -> list[d0.TranscriptSegment]:
@@ -156,7 +261,11 @@ def rich_segments_to_transcript_segments(segments: Sequence[RichSegment]) -> lis
     return transcript_segments
 
 
-def llm_moments_to_post_processor_rows(moments: Sequence[d0.LlmMoment]) -> list[dict[str, Any]]:
+def llm_moments_to_post_processor_rows(
+    moments: Sequence[d0.LlmMoment],
+    *,
+    rank_score_fn=None,
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for index, moment in enumerate(moments, start=1):
         hook = round(float(moment.hook), 6)
@@ -164,13 +273,16 @@ def llm_moments_to_post_processor_rows(moments: Sequence[d0.LlmMoment]) -> list[
         value = round(float(moment.value), 6)
         trend = round(float(moment.trend), 6)
         virality = round(float(moment.virality), 6)
+        # Ranking uses the cross-chunk-normalized score when provided; viral_score
+        # and the sub-scores below stay the raw LLM values for display/features.
+        composite = rank_score_fn(moment) if rank_score_fn is not None else _llm_moment_composite(moment)
         rows.append(
             {
                 "rank": index,
                 "start_time": round(float(moment.start), 3),
                 "end_time": round(float(moment.end), 3),
                 "viral_score": _virality_to_pipeline_score(virality),
-                "composite_score": _virality_to_pipeline_score(_llm_moment_composite(moment)),
+                "composite_score": _virality_to_pipeline_score(composite),
                 "llm_virality": virality,
                 "hook": hook,
                 "flow": flow,

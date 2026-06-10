@@ -36,7 +36,6 @@ services:
     volumes:
       - ./backend/tmp:/app/backend/tmp
       - ./backend/ml/artifacts:/app/backend/ml/artifacts
-      - ./tmp/prewarmed_sentence_transformers_local:/app/backend/tmp/cache/sentence_transformers_local:ro
     ports:
       - "127.0.0.1:8000:8000"
     healthcheck:

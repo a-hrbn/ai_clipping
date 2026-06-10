@@ -119,7 +119,10 @@ def _persist_jobs() -> None:
     with _write_lock:
         with _lock:
             payload = [job.model_dump(mode="json") for job in _jobs.values()]
-        tmp_path = _jobs_file.with_suffix(_jobs_file.suffix + ".tmp")
+        # Per-process tmp name: jobs.json is written by several worker processes
+        # and _write_lock only serializes threads. A shared tmp path let one
+        # process os.replace() the other's tmp away mid-write (FileNotFoundError).
+        tmp_path = _jobs_file.parent / f"{_jobs_file.name}.{os.getpid()}.tmp"
         tmp_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
         os.replace(tmp_path, _jobs_file)
         _last_persisted_at = time.monotonic()
@@ -164,6 +167,7 @@ def get_job(job_id: str) -> JobStatus | None:
 
 def update_job(job_id: str, **kwargs) -> None:
     should_persist = False
+    progress_snapshot: tuple[str, int, str | None] | None = None
     with _lock:
         _reload_jobs_from_disk_if_changed()
         now = time.monotonic()
@@ -181,10 +185,37 @@ def update_job(job_id: str, **kwargs) -> None:
             _job_created_at[job_id] = now
         elif job_id not in _job_created_at:
             _job_created_at[job_id] = now
+        progress_snapshot = (job.status, int(job.progress_pct), job.error)
         if evicted or _should_persist_update(kwargs, now):
             should_persist = True
+    # Side-channel progress file (single writer = this job's worker process).
+    if progress_snapshot is not None:
+        _write_job_progress_file(job_id, *progress_snapshot)
     if should_persist:
         _persist_jobs()
+
+
+def _write_job_progress_file(job_id: str, status: str, progress_pct: int, error: str | None) -> None:
+    """Write a per-job progress side-file for reliable cross-process status reads.
+
+    jobs.json is a shared registry mutated by several processes with mtime-based
+    reload that is unreliable on bind-mounted filesystems, so the detached debug
+    orchestrator cannot observe a worker's live phase through it. This file has a
+    single writer — the process running the job's pipeline — so a reader always
+    sees the worker's true status. Best-effort; never raises, never creates dirs.
+    """
+    try:
+        job_dir = pathlib.Path(settings.storage_dir) / job_id
+        if not job_dir.is_dir():
+            return  # only write once the job owns a workspace
+        tmp = job_dir / "progress.json.tmp"
+        tmp.write_text(
+            json.dumps({"status": status, "progress_pct": int(progress_pct), "error": error}),
+            encoding="utf-8",
+        )
+        os.replace(tmp, job_dir / "progress.json")
+    except OSError:
+        pass
 
 
 def cancel_job(job_id: str) -> JobStatus | None:

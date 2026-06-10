@@ -1,6 +1,8 @@
 import contextlib
 import io
 import json
+import pathlib
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -8,6 +10,64 @@ from ml import match_cross_platform_audio_fingerprints as matcher
 
 
 class CrossPlatformFingerprintTests(unittest.TestCase):
+    def test_fingerprint_reruns_fpcalc_with_length_for_long_media(self) -> None:
+        prefix_only = matcher.Fingerprint(duration=13292.95, values=[1] * 948)
+        full = matcher.Fingerprint(duration=13292.95, values=[1] * 107_000)
+        calls: list[int | None] = []
+
+        def fake_run_fpcalc(path, fpcalc, *, length_sec=None):
+            calls.append(length_sec)
+            return full if length_sec else prefix_only
+
+        with patch("pathlib.Path.exists", return_value=True), \
+             patch.object(matcher, "_run_fpcalc", side_effect=fake_run_fpcalc):
+            fingerprint = matcher._fingerprint(pathlib.Path("/tmp/vod.mp4"), "/usr/bin/fpcalc")
+
+        self.assertEqual(calls, [None, 13293])
+        self.assertEqual(len(fingerprint.values), 107_000)
+
+    def test_fingerprint_keeps_single_run_for_short_media(self) -> None:
+        short = matcher.Fingerprint(duration=20.0, values=[1] * 161)
+        calls: list[int | None] = []
+
+        def fake_run_fpcalc(path, fpcalc, *, length_sec=None):
+            calls.append(length_sec)
+            return short
+
+        with patch("pathlib.Path.exists", return_value=True), \
+             patch.object(matcher, "_run_fpcalc", side_effect=fake_run_fpcalc):
+            fingerprint = matcher._fingerprint(pathlib.Path("/tmp/repost.mp4"), "/usr/bin/fpcalc")
+
+        self.assertEqual(calls, [None])
+        self.assertEqual(len(fingerprint.values), 161)
+
+    def test_read_fingerprint_file_rejects_stale_prefix_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_path = pathlib.Path(tmp) / "fingerprint.json"
+            cache_path.write_text(
+                json.dumps({"duration": 13292.95, "fingerprint": [1] * 948}),
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                matcher._read_fingerprint_file(cache_path)
+
+    def test_fingerprint_from_row_rebuilds_from_media_when_cache_stale(self) -> None:
+        rebuilt = matcher.Fingerprint(duration=100.0, values=[1] * 806)
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_path = pathlib.Path(tmp) / "fingerprint.json"
+            cache_path.write_text(
+                json.dumps({"duration": 13292.95, "fingerprint": [1] * 948}),
+                encoding="utf-8",
+            )
+            media_path = pathlib.Path(tmp) / "vod.mp4"
+            media_path.write_bytes(b"stub")
+            row = {"vod_id": "123", "fingerprint_path": str(cache_path), "video_path": str(media_path)}
+
+            with patch.object(matcher, "_fingerprint", return_value=rebuilt) as fingerprint_mock:
+                fingerprint = matcher._fingerprint_from_row(row, "/usr/bin/fpcalc")
+
+        fingerprint_mock.assert_called_once()
+        self.assertEqual(len(fingerprint.values), 806)
     def test_best_fingerprint_alignment_finds_repost_offset(self) -> None:
         needle = [10, 20, 30, 40]
         haystack = [1, 2, 3, *needle, 99, 100]

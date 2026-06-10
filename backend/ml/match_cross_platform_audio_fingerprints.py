@@ -337,15 +337,34 @@ class Fingerprint:
         self.values = values
 
 
+# Chromaprint emits ~8 fingerprint items per second of decoded audio. Anything
+# far below that means fpcalc only covered a prefix of the media (its implicit
+# default is the first 120s), so offsets derived from it are meaningless.
+_MIN_FINGERPRINT_ITEMS_PER_SEC = 4.0
+
+
 def _fingerprint(path: pathlib.Path, fpcalc: str) -> Fingerprint:
     if not path.exists():
         raise FileNotFoundError(path)
+    fingerprint = _run_fpcalc(path, fpcalc)
+    if fingerprint.duration > 0 and len(fingerprint.values) < fingerprint.duration * _MIN_FINGERPRINT_ITEMS_PER_SEC:
+        # fpcalc reported the full media duration but only fingerprinted its
+        # default 120s prefix — re-run covering the whole file.
+        fingerprint = _run_fpcalc(path, fpcalc, length_sec=int(fingerprint.duration) + 1)
+    return fingerprint
+
+
+def _run_fpcalc(path: pathlib.Path, fpcalc: str, *, length_sec: int | None = None) -> Fingerprint:
+    command = [fpcalc, "-raw", "-json", str(path)]
+    if length_sec is not None:
+        command[1:1] = ["-length", str(length_sec)]
+    timeout = 180 if length_sec is None else max(180, length_sec // 4 + 120)
     completed = subprocess.run(
-        [fpcalc, "-raw", "-json", str(path)],
+        command,
         check=True,
         capture_output=True,
         text=True,
-        timeout=180,
+        timeout=timeout,
     )
     payload = json.loads(completed.stdout)
     raw = payload.get("fingerprint") or []
@@ -375,7 +394,12 @@ def _fingerprint_from_row(row: dict, fpcalc: str) -> Fingerprint:
     if raw_fingerprint_path:
         fingerprint_path = _resolve_media_path(raw_fingerprint_path)
         if fingerprint_path is not None:
-            return _read_fingerprint_file(fingerprint_path)
+            try:
+                return _read_fingerprint_file(fingerprint_path)
+            except ValueError:
+                # Stale prefix-only cache from before the -length fix —
+                # rebuild from media if available.
+                pass
     media_path = _resolve_media_path(str(row.get("video_path") or ""))
     if media_path is None:
         raise FileNotFoundError(str(row.get("video_path") or row.get("fingerprint_path") or ""))
@@ -386,7 +410,12 @@ def _read_fingerprint_file(path: pathlib.Path) -> Fingerprint:
     payload = json.loads(path.read_text(encoding="utf-8"))
     raw = payload.get("fingerprint") or []
     values = [int(item) for item in raw]
-    return Fingerprint(duration=float(payload.get("duration") or 0.0), values=values)
+    duration = float(payload.get("duration") or 0.0)
+    if duration > 0 and len(values) < duration * _MIN_FINGERPRINT_ITEMS_PER_SEC:
+        raise ValueError(
+            f"stale fingerprint cache {path}: {len(values)} values for {duration:.0f}s of audio"
+        )
+    return Fingerprint(duration=duration, values=values)
 
 
 def _resolve_media_path(raw_path: str) -> pathlib.Path | None:

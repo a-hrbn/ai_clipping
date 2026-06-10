@@ -285,7 +285,14 @@ def _store_in_cache(source: pathlib.Path, cache_path: pathlib.Path, *, url: str,
             needs_refresh = True
     if needs_refresh:
         tmp_path = cache_path.with_suffix(f"{cache_path.suffix}.tmp")
-        shutil.copy2(source, tmp_path)
+        tmp_path.unlink(missing_ok=True)
+        try:
+            # Hardlink is instant and shares storage with the job copy — the
+            # cache->job direction already links. A 10GB shutil.copy2 over the
+            # drvfs bind mount (~10MB/s) costs 15-20 min per VOD otherwise.
+            os.link(source, tmp_path)
+        except OSError:
+            shutil.copy2(source, tmp_path)
         tmp_path.replace(cache_path)
     _write_cache_metadata(url, namespace, cache_path)
     return cache_path

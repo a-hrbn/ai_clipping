@@ -52,6 +52,9 @@
 - **No Laziness**: Find root causes. No temporary fixes. Senior developer standards.
 - **Minimal Impact**: Changes should only touch what's necessary. Avoid introducing bugs.
 
+## Further Project Specific Information
+ mein endziel ist es, einen Viral Clip finder auf der selben Stufe wie OpusClip Level zu bauen. Der unterschied ist, dass sie spezialisiert auf unterschiedliche streamer sein soll. als testversuch wird der streamer jynxzi genommen. Dabei geht es noch nicht um schnitt/editieren, sondern nur um die virale clipfindung. 
+
 ## graphify
 
 This project has a graphify knowledge graph at backend/graphify-out/.
@@ -60,3 +63,17 @@ Rules:
 - Before answering architecture or codebase questions, read backend/graphify-out/GRAPH_REPORT.md for god nodes and community structure
 - If backend/graphify-out/wiki/index.md exists, navigate it instead of reading raw files
 - After modifying backend code files in this session, run `python3 -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('backend'))"` to keep the graph current
+
+## Agent skills
+
+### Issue tracker
+
+Issues & PRDs live in GitHub Issues (`a-hrbn/ai_clipping`), via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Canonical label vocabulary (`needs-triage` / `needs-info` / `ready-for-agent` / `ready-for-human` / `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context layout (`CONTEXT.md` + `docs/adr/` at the repo root). See `docs/agents/domain.md`.

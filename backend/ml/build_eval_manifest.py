@@ -88,7 +88,7 @@ def _dedup_moments(rows: list[dict]) -> list[dict]:
         end = float(row.get("window_end") or 0)
         if end <= start:
             continue
-        moments.append({
+        moment = {
             "start": round(start, 2),
             "end": round(end, 2),
             "desc": str(row.get("repost_title") or ""),
@@ -96,7 +96,10 @@ def _dedup_moments(rows: list[dict]) -> list[dict]:
             "source_url": str(row.get("source_url") or ""),
             "match_similarity": round(float(row.get("transcript_similarity") or 0), 4),
             "match_kind": str(row.get("transcript_match_kind") or "single_window"),
-        })
+        }
+        if row.get("transcript_position_ambiguous"):
+            moment["position_ambiguous"] = True
+        moments.append(moment)
 
     moments.sort(key=lambda m: m["views"], reverse=True)
 

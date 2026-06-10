@@ -1,4 +1,5 @@
 import asyncio
+import concurrent.futures
 import json
 import logging
 import os
@@ -6,6 +7,7 @@ import pathlib
 import re
 import shutil
 import subprocess
+import threading
 import uuid
 from dataclasses import asdict, is_dataclass
 from config import settings
@@ -334,7 +336,7 @@ def _extract_audio_cached(
         return cached
     logger.info("pipeline_audio_cache_miss job_id=%s source=%s", job_id, cache_source)
     audio_path = audio_extractor.extract(video_path, job_id)
-    if cache_source:
+    if cache_source and audio_path is not None:
         _write_audio_cache(cache_source, video_path=video_path, audio_path=audio_path)
     return audio_path
 
@@ -384,6 +386,34 @@ async def run_pipeline(
     audio_path: pathlib.Path | None = None
     try:
         _raise_if_cancelled(job_id)
+        transcript_cache_source = (
+            _transcript_cache_source(url, video_path)
+            if _transcript_cache_enabled_for_job(job_id, url)
+            else None
+        )
+
+        # Prefetch Twitch chat in parallel with download/transcription — it only
+        # needs the URL and otherwise costs 5-15 serial minutes on cold VODs.
+        # Runs on a daemon thread (not the asyncio executor): if the pipeline
+        # fails mid-run, loop close would otherwise block worker exit for up to
+        # 300s joining the still-downloading prefetch thread.
+        chat_prefetch: concurrent.futures.Future | None = None
+        if settings.enable_chat_analysis and url and not transcriber.has_chat_enrichment(transcript_cache_source):
+            prefetch_debug_dir = pathlib.Path(settings.storage_dir) / job_id / "debug"
+            prefetch_debug_dir.mkdir(parents=True, exist_ok=True)
+            chat_prefetch = concurrent.futures.Future()
+
+            def _prefetch_chat(future: concurrent.futures.Future = chat_prefetch) -> None:
+                try:
+                    future.set_result(chat_signal.download_chat(
+                        url, job_id, prefetch_debug_dir,
+                        timeout_sec=settings.chat_download_timeout_sec,
+                    ))
+                except BaseException as exc:  # surfaces at the await site
+                    future.set_exception(exc)
+
+            threading.Thread(target=_prefetch_chat, name=f"chat-prefetch-{job_id}", daemon=True).start()
+
         if video_path is None:
             update_job(job_id, status="downloading", progress_pct=5)
             video_path = await loop.run_in_executor(None, downloader.download, url, job_id)
@@ -395,11 +425,6 @@ async def run_pipeline(
             update_job(job_id, status="transcribing", progress_pct=min(max(pct, 30), 55))
 
         _raise_if_cancelled(job_id)
-        transcript_cache_source = (
-            _transcript_cache_source(url, video_path)
-            if _transcript_cache_enabled_for_job(job_id, url)
-            else None
-        )
 
         update_job(job_id, status="transcribing", progress_pct=30)
         transcript = await loop.run_in_executor(
@@ -447,36 +472,59 @@ async def run_pipeline(
         debug_dir = job_dir / "debug"
         debug_dir.mkdir(parents=True, exist_ok=True)
 
-        # Compute audio energy before WAV cleanup (only available on non-cached runs).
-        if audio_path is not None:
-            energy_scores = await loop.run_in_executor(
-                None,
-                lambda: audio_energy.compute_segment_energy(audio_path, transcript),
-            )
+        # Voice energy burst: load from the transcript cache when possible; else
+        # compute it — extracting audio if the transcript cache hit skipped that —
+        # and persist it so cache-hit runs keep the signal too.
+        energy_scores = transcriber.load_voice_energy(transcript_cache_source, transcript)
+        if energy_scores is None:
+            if audio_path is None:
+                update_job(job_id, status="extracting_audio", progress_pct=56)
+                audio_path = await loop.run_in_executor(
+                    None,
+                    lambda: _extract_audio_cached(
+                        video_path,
+                        job_id,
+                        cache_source=transcript_cache_source,
+                    ),
+                )
+            if audio_path is not None:
+                energy_scores = await loop.run_in_executor(
+                    None,
+                    lambda: audio_energy.compute_segment_energy(audio_path, transcript),
+                )
+            else:
+                logger.warning("pipeline_voice_energy_skipped job_id=%s reason=no_audio", job_id)
             if energy_scores:
-                transcript = [
-                    seg.__class__(
-                        **{
-                            **{f.name: getattr(seg, f.name) for f in seg.__dataclass_fields__.values()},
-                            "voice_energy_burst_score": energy_scores[i],
-                        }
-                    )
-                    for i, seg in enumerate(transcript)
-                ]
+                transcriber.save_voice_energy(transcript_cache_source, transcript, energy_scores)
+        if energy_scores:
+            transcript = [
+                seg.__class__(
+                    **{
+                        **{f.name: getattr(seg, f.name) for f in seg.__dataclass_fields__.values()},
+                        "voice_energy_burst_score": energy_scores[i],
+                    }
+                )
+                for i, seg in enumerate(transcript)
+            ]
 
         if settings.enable_chat_analysis and url:
             update_job(job_id, status="downloading_chat", progress_pct=60)
             enriched = transcriber.apply_chat_enrichment(transcript_cache_source, transcript)
             if enriched is not None:
                 transcript = enriched
+                if chat_prefetch is not None:
+                    chat_prefetch.cancel()  # rare race: cache appeared after prefetch started
             else:
-                chat_path = await loop.run_in_executor(
-                    None,
-                    lambda: chat_signal.download_chat(
-                        url, job_id, debug_dir,
-                        timeout_sec=settings.chat_download_timeout_sec,
-                    ),
-                )
+                if chat_prefetch is not None:
+                    chat_path = await asyncio.wrap_future(chat_prefetch)
+                else:
+                    chat_path = await loop.run_in_executor(
+                        None,
+                        lambda: chat_signal.download_chat(
+                            url, job_id, debug_dir,
+                            timeout_sec=settings.chat_download_timeout_sec,
+                        ),
+                    )
                 if chat_path:
                     transcript = chat_signal.enrich_segments(transcript, chat_path)
                     if transcript_cache_source:
@@ -507,6 +555,8 @@ async def run_pipeline(
                     min_duration_sec=float(getattr(settings, "moment_finder_min_duration_sec", 8.0) or 8.0),
                     max_duration_sec=float(getattr(settings, "moment_finder_max_duration_sec", 90.0) or 90.0),
                     max_tokens=int(getattr(settings, "moment_finder_max_tokens", 32000) or 32000),
+                    chunk_duration_sec=float(getattr(settings, "moment_finder_chunk_duration_sec", 2700.0) or 0.0),
+                    chunk_overlap_sec=float(getattr(settings, "moment_finder_chunk_overlap_sec", 120.0) or 0.0),
                     temperature=0.0,
                     timeout_sec=float(getattr(settings, "moment_finder_timeout_sec", 900.0) or 900.0),
                     api_retries=int(getattr(settings, "moment_finder_api_retries", 2) or 0),
@@ -581,7 +631,10 @@ async def run_pipeline(
 
         update_job(job_id, status="done", progress_pct=100, clips=clips)
 
-        asyncio.create_task(_cleanup_later(job_id))
+        # Debug workflows manage their artifacts via the workflow delete
+        # endpoint; auto-expiry would pull clips out from under the review UI.
+        if not _debug_job(job_id):
+            asyncio.create_task(_cleanup_later(job_id))
 
     except (PipelineCancelledError, downloader.DownloadCancelledError):
         logger.info("Pipeline cancelled for job %s", job_id)

@@ -353,8 +353,10 @@ def step_download_iboclipss(
         elapsed = time.monotonic() - t0
         size_mb = video_path.stat().st_size / 1_048_576 if video_path.exists() else 0.0
         logger.info("      [%d/%d] OK  %.1fs  %.1f MB  → %s", i, len(pending), elapsed, size_mb, video_path.name)
-        # Small inter-clip pause to stay under YouTube's rate limit.
-        if i < len(pending):
+        # Small inter-clip pause to stay under YouTube's rate limit — but only
+        # after a real network download. Cache hits return in well under a
+        # second and need no backoff (saves minutes on resume runs).
+        if i < len(pending) and elapsed > 1.0:
             time.sleep(3)
 
         new_reposts.append({
@@ -462,6 +464,13 @@ def step_build_vod_transcripts(
 # Step 4 — Run transcript + audio matcher
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _default_match_workers() -> int:
+    """CPU scoring workers for the matcher. Repost transcription and the audio
+    fallback run in the parent process, so workers never touch the GPU."""
+    import os
+    return max(1, min(16, (os.cpu_count() or 4) - 2))
+
+
 def step_run_matcher(
     run_dir: pathlib.Path,
     state: dict,
@@ -470,6 +479,7 @@ def step_run_matcher(
     reposts: list[dict],
     min_similarity: float,
     vod_cache_root: pathlib.Path,
+    match_workers: int = 0,
 ) -> list[dict]:
     matches_path = run_dir / "matches.jsonl"
     if _is_done(state, "matching") and matches_path.exists():
@@ -492,13 +502,14 @@ def step_run_matcher(
     )
     t0 = time.monotonic()
 
+    workers = int(match_workers) if int(match_workers) > 0 else _default_match_workers()
     output_rows, diag = _matcher.match_reposts_to_vods_with_diagnostics(
         vod_manifest,
         reposts,
         min_similarity=min_similarity,
         vod_cache_root=vod_cache_root,
         log_progress=True,
-        transcript_match_workers=1,
+        transcript_match_workers=workers,
     )
 
     elapsed = time.monotonic() - t0
@@ -575,12 +586,77 @@ def step_build_eval_manifest(
     logger.info("[5/5] eval_manifest DONE: %d VODs  %d gt_moments → %s",
                 len(output_rows), total_moments, manifest_path.name)
 
+    # MERGE into the canonical manifest instead of overwriting it: the canonical
+    # file can contain VODs from other runs/sources (e.g. the training-positive
+    # expansion) and manually curated windows (manual_edit) that a blind copy
+    # would silently destroy.
     canonical = BACKEND_ROOT / "ml" / "artifacts" / "jynxzi_eval_manifest.jsonl"
     canonical.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(str(manifest_path), str(canonical))
-    logger.info("      Copied → %s", canonical)
+    existing_rows = _read_jsonl(canonical) if canonical.exists() else []
+    if existing_rows:
+        backup = canonical.with_name(
+            f"jynxzi_eval_manifest.pre_{datetime.now().strftime('%Y%m%dT%H%M%S')}.bak.jsonl"
+        )
+        shutil.copy2(str(canonical), str(backup))
+        logger.info("      Backup of canonical manifest → %s", backup.name)
+    merged: dict[str, dict] = {str(r.get("vod_id")): r for r in existing_rows if r.get("vod_id")}
+    replaced = 0
+    for row in output_rows:
+        vod_id = str(row.get("vod_id"))
+        previous = merged.get(vod_id)
+        if previous and any(m.get("manual_edit") for m in previous.get("gt_moments") or []):
+            logger.warning(
+                "      VOD %s: keeping existing manually curated gt_moments — "
+                "run output for this VOD is in %s, merge by hand if wanted.",
+                vod_id, manifest_path.name,
+            )
+            continue
+        if previous:
+            _carry_over_verification(previous.get("gt_moments") or [], row.get("gt_moments") or [])
+        merged[vod_id] = row
+        replaced += 1
+    merged_rows = [merged[k] for k in sorted(merged)]
+    _write_jsonl(canonical, merged_rows)
+    logger.info(
+        "      Merged → %s (%d VODs total, %d written by this run, %d untouched)",
+        canonical.name, len(merged_rows), replaced, len(merged_rows) - replaced,
+    )
 
     _log_eval_summary(output_rows)
+
+
+def _carry_over_verification(previous_moments: list[dict], new_moments: list[dict]) -> None:
+    """Preserve ml.verify_gt_matches results when a re-run replaces a VOD row.
+
+    A new run re-derives transcript windows, so verified tiers and
+    audio-refined boundaries would silently reset to unverified. Carry them
+    over when the new moment is the same repost (same source_url) at an
+    overlapping position; everything else stays unverified and goes through
+    verification again.
+    """
+    by_url: dict[str, list[dict]] = {}
+    for moment in previous_moments:
+        url = str(moment.get("source_url") or "")
+        if url and moment.get("gt_tier"):
+            by_url.setdefault(url, []).append(moment)
+    for moment in new_moments:
+        candidates = by_url.get(str(moment.get("source_url") or ""), [])
+        for previous in candidates:
+            prev_start = float(previous.get("transcript_start") or previous.get("start") or 0.0)
+            prev_end = float(previous.get("transcript_end") or previous.get("end") or 0.0)
+            start = float(moment.get("start") or 0.0)
+            end = float(moment.get("end") or 0.0)
+            overlap = min(end, prev_end) - max(start, prev_start)
+            if overlap <= 0:
+                continue
+            moment["gt_tier"] = previous["gt_tier"]
+            if previous.get("boundary_source") == "audio_refined":
+                moment["transcript_start"] = start
+                moment["transcript_end"] = end
+                moment["start"] = float(previous["start"])
+                moment["end"] = float(previous["end"])
+                moment["boundary_source"] = "audio_refined"
+            break
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -661,6 +737,8 @@ def main() -> int:
                         help=f"Max clips to fetch from channel listing (default: {_DEFAULT_MAX_CLIPS})")
     parser.add_argument("--min-similarity", type=float, default=_DEFAULT_MIN_SIMILARITY,
                         help=f"Transcript similarity threshold (default: {_DEFAULT_MIN_SIMILARITY})")
+    parser.add_argument("--match-workers", type=int, default=0,
+                        help="Parallel CPU workers for repost matching (0 = auto: min(8, cores-2)).")
     parser.add_argument("--vod-cache-root", default=str(_DEFAULT_VOD_CACHE_ROOT))
     parser.add_argument("--runs-root", default=str(_DEFAULT_RUNS_ROOT))
     parser.add_argument("--reset", action="store_true",
@@ -764,6 +842,7 @@ def main() -> int:
         matches = step_run_matcher(
             run_dir, state, vod_manifest=vod_manifest, reposts=reposts,
             min_similarity=args.min_similarity, vod_cache_root=vod_cache_root,
+            match_workers=args.match_workers,
         )
         _save_state(run_dir, state)
     except Exception:

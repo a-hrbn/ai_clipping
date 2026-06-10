@@ -104,3 +104,35 @@ def test_post_processed_rows_to_ranked_candidates_sorts_by_pipeline_score() -> N
     assert ranked[0].rank_score == 8.0
     assert ranked[0].features is not None
     assert ranked[0].features.source == "llm_moment_finder"
+
+
+def test_cross_chunk_rank_scores_keep_chunk_tops_on_top_after_pipeline_scaling() -> None:
+    """Regression: percentile 1.0 + additive tiebreak pushed chunk-top scores
+    above 1.0, so _virality_to_pipeline_score skipped the x10 scaling and every
+    chunk's best moment ranked near the bottom (all_v5: GT rank 1 -> 356)."""
+
+    def moment(start: float, virality: float) -> moment_finder.d0.LlmMoment:
+        return moment_finder.d0.LlmMoment(
+            start=start, end=start + 20.0,
+            hook=virality, flow=virality, value=virality, trend=virality,
+            virality=virality, rationale="",
+        )
+
+    # Two 2700s chunks; chunk 0 has the globally strongest moment.
+    chunk0 = [moment(100.0, 0.95), moment(400.0, 0.6), moment(900.0, 0.5)]
+    chunk1 = [moment(2800.0, 0.7), moment(3200.0, 0.4)]
+    moments = chunk0 + chunk1
+
+    scores = moment_finder._cross_chunk_rank_scores(moments, 2700.0, 0.0)
+    pipeline = {
+        key: moment_finder._virality_to_pipeline_score(score)
+        for key, score in scores.items()
+    }
+
+    # All rank scores stay in the 0-1 range so the x10 conversion is uniform.
+    assert all(score <= 1.0 for score in scores.values())
+    ranked = sorted(moments, key=lambda m: pipeline[moment_finder._moment_key(m)], reverse=True)
+    # Chunk tops (100s and 2800s) must occupy the global top ranks.
+    assert {ranked[0].start, ranked[1].start} == {100.0, 2800.0}
+    # Tiebreak between equal percentiles: higher raw composite wins.
+    assert ranked[0].start == 100.0

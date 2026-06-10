@@ -116,7 +116,19 @@ class Settings(BaseSettings):
     whisper_compute_type: str = ""
     whisper_word_timestamps: bool = False
     transcription_chunk_seconds: int = 180
-    transcription_worker_batch_size: int = 12
+    # Concurrent VODs in a pipeline-debug workflow. 0 = auto: GPU slots + 1
+    # (capped at 4), so one VOD can download/ffmpeg/chat while the GPU slots
+    # transcribe. Whisper concurrency itself is bounded by the slot locks.
+    pipeline_debug_vod_concurrency: int = 0
+    # Concurrent Whisper instances on the GPU. 0 = auto from VRAM (~5GB per
+    # slot: a 6GB consumer card serializes, a 24GB card runs 4).
+    transcription_gpu_slots: int = 0
+    # Chunks per isolated Whisper worker subprocess. Each subprocess pays a full
+    # model load (~40-180s for large-v3-turbo from the bind-mounted cache), so
+    # small batches dominate wall time on long VODs: at 12 (36 min audio) a 5h
+    # VOD spawns 9 workers. 96 (~4.8h audio) keeps most VODs at 1-2 loads while
+    # still bounding worker lifetime; per-chunk caching makes retries cheap.
+    transcription_worker_batch_size: int = 96
     # Comma-separated list in env (ALLOWED_ORIGINS="https://app.example.com,https://staging.example.com").
     # Defaults cover the common local dev frontend ports.
     allowed_origins: list[str] = [
@@ -196,8 +208,6 @@ class Settings(BaseSettings):
     video_feature_ffmpeg_timeout_sec: float = 120.0
     pipeline_isolate_transcription_chunks: bool = True
     pipeline_enable_diarization: bool = False
-    semantic_device: str = "auto"
-    semantic_batch_size: int = 0
     video_expression_sample_sec: int = 3
     shortlist_face_reaction_top_k: int = 12
     shortlist_face_reaction_sample_sec: int = 1
@@ -241,6 +251,10 @@ class Settings(BaseSettings):
     moment_finder_min_duration_sec: float = 8.0
     moment_finder_max_duration_sec: float = 90.0
     moment_finder_max_tokens: int = 32000
+    # Long VODs are split into ~45-min windows so each LLM call keeps its output
+    # under moment_finder_max_tokens. 0 disables chunking (single call per VOD).
+    moment_finder_chunk_duration_sec: float = 2700.0
+    moment_finder_chunk_overlap_sec: float = 120.0
     moment_finder_timeout_sec: float = 900.0
     moment_finder_api_retries: int = 2
     moment_finder_retry_backoff_sec: float = 20.0

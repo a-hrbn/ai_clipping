@@ -50,6 +50,7 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 RichSegment(start=20.0, end=35.0, text="clear payoff!"),
             ]
             llm_result = types.SimpleNamespace(
+                raw_moments=[],
                 ranked_candidates=[object()],
                 post_processed_moments=[
                     {"rank": 1, "start_time": 10.0, "end_time": 35.0, "viral_score": 9.5, "reason": "hook"},
@@ -60,7 +61,7 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 summary={"ranked_candidate_count": 1, "post_processed_moment_count": 1},
             )
 
-            def fake_cut_clips(_video_path, moments, job_id):
+            def fake_cut_clips(_video_path, moments, job_id, **_kwargs):
                 return [
                     ClipResult(
                         candidate_id=m["candidate_id"],
@@ -119,6 +120,7 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
             video_path.write_bytes(b"video")
             transcript = [RichSegment(start=0.0, end=10.0, text="moment")]
             llm_result = types.SimpleNamespace(
+                raw_moments=[],
                 ranked_candidates=[object()],
                 post_processed_moments=[{"rank": 1, "start_time": 0.0, "end_time": 10.0, "viral_score": 1.0}],
                 prompt="p",
@@ -233,6 +235,7 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 RichSegment(start=2.0, end=4.0, text="cached payoff", words_per_second=2.0),
             ]
             llm_result = types.SimpleNamespace(
+                raw_moments=[],
                 ranked_candidates=[object()],
                 post_processed_moments=[{"rank": 1, "start_time": 0.0, "end_time": 8.0, "viral_score": 8.0}],
                 prompt="p",

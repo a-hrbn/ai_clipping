@@ -5,7 +5,6 @@ import asyncio
 import json
 import logging
 import pathlib
-import sys
 
 from job_manager import update_job
 
@@ -32,29 +31,8 @@ def _load_strategy(raw: str) -> dict:
     return parsed
 
 
-def _preload_semantic_candidates_before_pipeline_import() -> bool:
-    """Load SentenceTransformer before pipeline imports TensorFlow/DeepFace.
-
-    The serving container can segfault when the semantic candidate model is
-    lazily imported later from an executor thread after the CV stack has already
-    initialized native libraries. The worker owns this import ordering because
-    it runs in the isolated subprocess.
-    """
-
-    try:
-        from services import semantic_candidates
-
-        preload = getattr(semantic_candidates, "preload_model", None)
-        if callable(preload):
-            return bool(preload())
-    except Exception as exc:
-        print(f"semantic_candidate_preload_failed error={exc}", file=sys.stderr)
-    return False
-
-
 async def _run(args: argparse.Namespace) -> None:
-    # Import inside the worker process so native CV stacks cannot crash FastAPI.
-    _preload_semantic_candidates_before_pipeline_import()
+    # Imported here so the worker subprocess owns all heavy native imports.
     from pipeline import run_pipeline
 
     video_path = pathlib.Path(args.video_path) if args.video_path else None

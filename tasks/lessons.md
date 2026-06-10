@@ -509,3 +509,30 @@
 - Do not assume the backend Docker image has zsh. Training launchers that run
   inside `ai-clipping-backend` / `ai-clipping-backend-cuda` should use
   `/bin/bash` or explicitly verify the shell exists in the image.
+- Domain fact (Antonio, 2026-06-10): @Iboclipss postet praktisch ALLE viralen
+  Jynxzi-Clips. GT-Kritik darf daher nicht auf "Recall-Bias der Quelle"
+  abstellen (verpasste virale Momente sind selten). Die offenen GT-Fragen sind
+  stattdessen: (a) Match-Recall des Transcript/Audio-Matchers (gepostete Clips,
+  die nicht ins VOD zurückgematcht werden, fehlen als Positives), und
+  (b) Precision-Seite: gepostet != viral — View-Schwelle fuer Positives klaeren.
+
+## 2026-06-10: Audio-Fingerprint-Matching — SNR-Grenzen und Max-Statistik
+
+- fpcalc fingerprintet ohne `-length` nur die ersten ~120s. Validierung fuer
+  jede Fingerprint-Pipeline: `len(values) / duration` muss ~8 items/sec sein;
+  Cache-Reader muessen Prefix-only-Dateien aktiv verwerfen (sonst werden
+  Offsets ueber das ganze VOD auf die ersten 2 Minuten gemappt).
+- Eine "Konfidenz ueber Threshold" ist bei Suche ueber lange Haystacks
+  wertlos, wenn der Threshold nicht die Max-Statistik beruecksichtigt: das
+  Maximum aus ~150k Rausch-Vergleichen liegt bei Chromaprint-XOR-Similarity
+  bereits bei 0.57-0.68 (Noise-Floor pro Fenster ~0.5). 70/70 Fallback-
+  "Matches" bestanden den 0.52-0.56-Threshold, waren aber fast alle Rauschen.
+- Robuster Test ist Peak-Schaerfe (best vs. second-best Peak ausserhalb
+  ±60s) plus Positions-Uebereinstimmung mit unabhaengiger Evidenz
+  (Transcript). Gemessen: Rausch-Margins median 0.007/max 0.033; echte
+  scoped Bestaetigungen ab ~0.04.
+- Iboclipss-Edits (Musik-Overlay, Captions, Re-Encoding) daempfen die
+  Chromaprint-Similarity an der echten Position auf 0.6-0.7 — Voll-VOD-
+  Chromaprint-Suche hat fuer solche Reposts zu wenig SNR. Scoped
+  Verifikation (±45s um behauptete Position) funktioniert dagegen gut,
+  weil die Positions-Uebereinstimmung selbst starke Evidenz ist.
