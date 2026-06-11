@@ -4,8 +4,8 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 from ml import llm_moment_finder as d0
-from services import post_processor
 from services.timeline_types import Candidate, CandidateFeatures, RankedCandidate
+from . import _post_processor
 from services.transcriber import RichSegment
 
 # Composite-score weights (must sum to 1.0). Tune against Holdout-Eval.
@@ -132,14 +132,14 @@ def find_moments(
     # Raw branch: pre-dedupe, pre-diversity — measures true LLM recall for eval.
     raw_ranked = sorted(length_discipline.moments, key=rank_key, reverse=True)
     raw_rows = llm_moments_to_post_processor_rows(raw_ranked, rank_score_fn=rank_score_fn)
-    raw_snapped = post_processor.snap_boundaries(raw_rows, list(segments))
+    raw_snapped = _post_processor.snap_boundaries(raw_rows, list(segments))
     raw_post_processed_rows = _rank_post_processed_rows(raw_snapped)
 
     deduped_moments, duplicate_moments = d0.dedupe_moments_by_overlap(length_discipline.moments)
     ranked_moments = sorted(deduped_moments, key=rank_key, reverse=True)
     moment_rows = llm_moments_to_post_processor_rows(ranked_moments, rank_score_fn=rank_score_fn)
-    snapped_rows = post_processor.snap_boundaries(moment_rows, list(segments))
-    diverse_rows = post_processor.enforce_diversity(snapped_rows)
+    snapped_rows = _post_processor.snap_boundaries(moment_rows, list(segments))
+    diverse_rows = _post_processor.enforce_diversity(snapped_rows)
     post_processed_rows = _rank_post_processed_rows(diverse_rows)
     ranked_candidates = post_processed_rows_to_ranked_candidates(post_processed_rows)
     summary = {
