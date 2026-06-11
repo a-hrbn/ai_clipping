@@ -11,6 +11,7 @@ from config import settings
 from job_manager import is_job_cancelled, update_job
 from producers.adapters import FsAudioCache
 from producers.audio import AudioResource
+from producers.transcript import TranscriptResource
 from services import (
     downloader,
     audio_extractor,
@@ -156,23 +157,6 @@ def _probe_media_duration_sec(video_path: pathlib.Path) -> float | None:
     return duration if duration > 0 else None
 
 
-def _load_complete_cached_transcript(
-    *,
-    cache_source: str | None,
-    video_path: pathlib.Path,
-    progress_cb,
-) -> list[transcriber.RichSegment] | None:
-    duration_sec = _probe_media_duration_sec(video_path)
-    if duration_sec is None:
-        return None
-    return transcriber.load_cached_transcript(
-        cache_source,
-        expected_duration_sec=duration_sec,
-        progress_cb=progress_cb,
-    )
-
-
-
 def _write_json(path: pathlib.Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -217,6 +201,21 @@ async def run_pipeline(
     audio: AudioResource | None = None
     try:
         _raise_if_cancelled(job_id)
+
+        async def run(call, *, status, band):
+            # Map a Producer's 0..1 progress onto an absolute % band and check
+            # cancellation BETWEEN Producers (cancel → no `failed` status). The
+            # Producer runs on the executor; status/progress stay a Conductor job.
+            _raise_if_cancelled(job_id)
+            lo, hi = band
+
+            def on_progress(fraction: float) -> None:
+                pct = lo + int(min(max(fraction, 0.0), 1.0) * (hi - lo))
+                update_job(job_id, status=status, progress_pct=pct)
+
+            on_progress(0.0)
+            return await loop.run_in_executor(None, lambda: call(progress=on_progress))
+
         transcript_cache_source = (
             _transcript_cache_source(url, video_path)
             if _transcript_cache_enabled_for_job(job_id, url)
@@ -265,45 +264,31 @@ async def run_pipeline(
             ),
         )
 
-        def _transcription_progress(done_chunks: int, total_chunks: int, _chunk_path) -> None:
-            pct = 30 + int((done_chunks / max(total_chunks, 1)) * 25)
-            update_job(job_id, status="transcribing", progress_pct=min(max(pct, 30), 55))
-
-        _raise_if_cancelled(job_id)
-
-        update_job(job_id, status="transcribing", progress_pct=30)
-        transcript = await loop.run_in_executor(
-            None,
-            lambda: (
-                _load_complete_cached_transcript(
-                    cache_source=transcript_cache_source,
-                    video_path=video_path,
-                    progress_cb=_transcription_progress,
-                )
-                if transcript_cache_source
-                else None
-            ),
+        # TranscriptResource folds the duration probe + cache hit/miss decision in:
+        # a hit returns without pulling audio (zero extraction); a miss pulls the
+        # shared AudioResource then transcribes. Audio extraction on a miss now
+        # shows under the `transcribing` band (the lazy pull lives in the Producer).
+        transcript_resource = TranscriptResource(
+            audio=audio,
+            cache_source=transcript_cache_source,
+            video_path=video_path,
+            isolate_chunks=bool(settings.pipeline_isolate_transcription_chunks),
+            enable_diarization=bool(settings.pipeline_enable_diarization),
+            load_cached=transcriber.load_cached_transcript,
+            transcribe=transcriber.transcribe_with_progress,
+            probe=_probe_media_duration_sec,
         )
-        if transcript is not None:
+        transcript = await run(
+            lambda *, progress: transcript_resource.segments(progress=progress),
+            status="transcribing",
+            band=(30, 55),
+        )
+        if transcript_resource.from_cache():
             logger.info(
                 "pipeline_transcript_cache_hit job_id=%s source=%s segments=%s",
                 job_id,
                 transcript_cache_source,
                 len(transcript),
-            )
-        else:
-            update_job(job_id, status="extracting_audio", progress_pct=20)
-            audio_path = await loop.run_in_executor(None, audio.path)
-            update_job(job_id, status="transcribing", progress_pct=30)
-            transcript = await loop.run_in_executor(
-                None,
-                lambda: transcriber.transcribe_with_progress(
-                    audio_path,
-                    _transcription_progress,
-                    cache_key=transcript_cache_source,
-                    isolate_chunks=bool(settings.pipeline_isolate_transcription_chunks),
-                    enable_diarization=bool(settings.pipeline_enable_diarization),
-                ),
             )
 
         job_dir = pathlib.Path(settings.storage_dir) / job_id

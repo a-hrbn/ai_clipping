@@ -253,8 +253,10 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     patch.object(pipeline, "update_job", side_effect=lambda job_id, **kwargs: job_updates.append({"job_id": job_id, **kwargs}))
                 )
                 stack.enter_context(patch.object(pipeline, "_probe_media_duration_sec", return_value=16720.0))
+                # TranscriptResource resolves the cache via the injected leaf op;
+                # a hit must skip transcription AND never pull the audio.
                 cache_mock = stack.enter_context(
-                    patch.object(pipeline, "_load_complete_cached_transcript", return_value=transcript)
+                    patch.object(pipeline.transcriber, "load_cached_transcript", return_value=transcript)
                 )
                 transcribe_mock = stack.enter_context(
                     patch.object(pipeline.transcriber, "transcribe_with_progress", side_effect=AssertionError("transcription should be skipped"))
