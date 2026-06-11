@@ -48,7 +48,6 @@ Backend dependencies now live in `backend/pyproject.toml`.
 ## Useful Commands
 
 ```bash
-python -m pytest backend/tests -q
 python3 -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('.'))"
 ```
 
