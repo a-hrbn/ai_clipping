@@ -45,6 +45,7 @@ _ROLE_PATHS: dict[str, str] = {
     "segments": f"{_DEBUG}/segments.jsonl",
     "final_moments": f"{_DEBUG}/final_moments.json",
     "feedback": f"{_DEBUG}/feedback.jsonl",
+    "review_candidates": f"{_DEBUG}/review_candidates.jsonl",
     "request_metadata": "request.json",
     "progress": "progress.json",
 }
@@ -176,6 +177,12 @@ class JobArtifactStore(abc.ABC):
 
     def write_feedback(self, job_id: str, rows: list[dict]) -> None:
         self._write_jsonl(job_id, _ROLE_PATHS["feedback"], rows)
+
+    def read_review_candidates(self, job_id: str) -> list[dict]:
+        return self._read_jsonl(job_id, _ROLE_PATHS["review_candidates"])
+
+    def write_review_candidates(self, job_id: str, rows: list[dict]) -> None:
+        self._write_jsonl(job_id, _ROLE_PATHS["review_candidates"], rows)
 
     def read_request_metadata(self, job_id: str) -> Any | None:
         return self._read_json(job_id, _ROLE_PATHS["request_metadata"])

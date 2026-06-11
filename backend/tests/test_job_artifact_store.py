@@ -23,7 +23,7 @@ from services.job_artifact_store import (
 _JOB = "job-1"
 
 _JSON_ROLES = ("stage", "usage", "final_moments", "request_metadata", "progress")
-_JSONL_ROLES = ("segments", "moments", "raw_moments", "feedback")
+_JSONL_ROLES = ("segments", "moments", "raw_moments", "feedback", "review_candidates")
 _TEXT_ROLES = ("prompt", "response")
 
 

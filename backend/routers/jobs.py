@@ -43,27 +43,6 @@ _PYANNOTE_MODEL = "speaker-diarization-3.1"
 _BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
-def _read_jsonl_rows(path: pathlib.Path) -> list[dict]:
-    if not path.exists():
-        return []
-    rows: list[dict] = []
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    value = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(value, dict):
-                    rows.append(value)
-    except OSError:
-        return rows
-    return rows
-
-
 def _metric(label: str, value) -> dict:
     return {"label": label, "value": value}
 
@@ -1096,19 +1075,19 @@ async def get_review_candidates(job_id: str, limit: int = 80):
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
     safe_limit = min(max(int(limit or 0), 1), 200)
-    debug_dir = pathlib.Path(settings.storage_dir) / job_id / "debug"
-    rows = _read_jsonl_rows(debug_dir / "review_candidates.jsonl")
+    store = RealFsJobArtifactStore(settings.storage_dir)
+    rows = store.read_review_candidates(job_id)
     if not rows:
-        rows = _review_candidates_from_feedback(debug_dir)
+        rows = _review_candidates_from_feedback(store, job_id)
     else:
-        rows = _merge_review_feedback(rows, debug_dir)
+        rows = _merge_review_feedback(rows, store, job_id)
     return {"job_id": job_id, "candidates": rows[:safe_limit]}
 
 
-def _merge_review_feedback(rows: list[dict], debug_dir: pathlib.Path) -> list[dict]:
+def _merge_review_feedback(rows: list[dict], store: JobArtifactStore, job_id: str) -> list[dict]:
     feedback_by_id = {
         str(row.get("candidate_id") or "").strip(): row
-        for row in _read_jsonl_rows(debug_dir / "feedback.jsonl")
+        for row in store.read_feedback(job_id)
         if str(row.get("candidate_id") or "").strip()
     }
     merged: list[dict] = []
@@ -1126,9 +1105,9 @@ def _merge_review_feedback(rows: list[dict], debug_dir: pathlib.Path) -> list[di
     return merged
 
 
-def _review_candidates_from_feedback(debug_dir: pathlib.Path) -> list[dict]:
+def _review_candidates_from_feedback(store: JobArtifactStore, job_id: str) -> list[dict]:
     rows: list[dict] = []
-    for row in _read_jsonl_rows(debug_dir / "feedback.jsonl"):
+    for row in store.read_feedback(job_id):
         candidate_id = str(row.get("candidate_id") or "").strip()
         start = _as_optional_float(row.get("final_start") if row.get("selected") else row.get("proposed_start"))
         end = _as_optional_float(row.get("final_end") if row.get("selected") else row.get("proposed_end"))

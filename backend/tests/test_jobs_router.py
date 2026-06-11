@@ -439,6 +439,72 @@ class JobsRouterTests(unittest.TestCase):
         # The fake reports no wall-clock mtime; the reader tolerates None.
         self.assertIsNone(result["last_modified"])
 
+    def test_merge_review_feedback_reads_feedback_through_store(self) -> None:
+        # Seed the in-memory fake and merge: the reader must pull feedback.jsonl
+        # through the store seam, not a debug_dir path it built itself.
+        from services.job_artifact_store import InMemoryJobArtifactStore
+
+        store = InMemoryJobArtifactStore()
+        store.write_feedback(
+            "job-1",
+            [{"candidate_id": "c1", "feedback_rating": 4, "feedback_tags": ["funny"], "feedback_notes": "nice"}],
+        )
+        rows = [{"candidate_id": "c1", "start_time": 1.0, "end_time": 5.0}]
+
+        merged = jobs._merge_review_feedback(rows, store, "job-1")
+
+        self.assertEqual(merged[0]["feedback_rating"], 4)
+        self.assertEqual(merged[0]["feedback_tags"], ["funny"])
+        self.assertEqual(merged[0]["feedback_notes"], "nice")
+
+    def test_review_candidates_from_feedback_reads_through_store(self) -> None:
+        from services.job_artifact_store import InMemoryJobArtifactStore
+
+        store = InMemoryJobArtifactStore()
+        store.write_feedback(
+            "job-1",
+            [
+                {
+                    "candidate_id": "c1",
+                    "proposed_start": 10.0,
+                    "proposed_end": 25.0,
+                    "selected": False,
+                    "judge_score": 0.8,
+                    "rank_score": 0.5,
+                }
+            ],
+        )
+
+        rows = jobs._review_candidates_from_feedback(store, "job-1")
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["candidate_id"], "c1")
+        self.assertEqual(rows[0]["start_time"], 10.0)
+        self.assertEqual(rows[0]["end_time"], 25.0)
+        self.assertEqual(rows[0]["duration"], 15.0)
+
+    def test_get_review_candidates_reads_through_store(self) -> None:
+        from services.job_artifact_store import InMemoryJobArtifactStore
+
+        store = InMemoryJobArtifactStore()
+        store.write_review_candidates(
+            "job-1",
+            [{"candidate_id": "c1", "start_time": 1.0, "end_time": 5.0, "duration": 4.0}],
+        )
+        store.write_feedback(
+            "job-1",
+            [{"candidate_id": "c1", "feedback_rating": 5, "feedback_tags": [], "feedback_notes": "great"}],
+        )
+
+        with patch.object(jobs, "get_job", return_value=JobStatus(job_id="job-1", status="done", clips=[])), \
+             patch.object(jobs, "RealFsJobArtifactStore", return_value=store):
+            result = asyncio.run(jobs.get_review_candidates("job-1"))
+
+        self.assertEqual(result["job_id"], "job-1")
+        self.assertEqual(len(result["candidates"]), 1)
+        self.assertEqual(result["candidates"][0]["candidate_id"], "c1")
+        self.assertEqual(result["candidates"][0]["feedback_rating"], 5)
+
     def test_submit_clip_feedback_accepts_gold_eval_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             response = ClipFeedbackResponse(

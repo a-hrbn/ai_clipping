@@ -22,10 +22,24 @@ from job_lifecycle import is_terminal
 from job_manager import create_job, delete_job, get_job
 from ml.llm_moment_finder import TranscriptSegment, transcript_excerpt
 from pipeline_runner import run_job_subprocess
+from services.job_artifact_store import JobArtifactStore, RealFsJobArtifactStore
 
 logger = logging.getLogger(__name__)
 
 _BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+
+def _job_store() -> JobArtifactStore:
+    """The Job-Artifact-Store reader seam for this router (real-FS adapter).
+
+    Job artifacts (progress.json, the ``llm_moment_finder_*`` dumps,
+    segments.jsonl) are read through the store so this router never spells an
+    artifact filename or re-implements the jsonl/json decode. Workflow-level
+    files (workflow.json, the review labels/events) are NOT job artifacts and
+    keep their own I/O below.
+    """
+    return RealFsJobArtifactStore(settings.storage_dir)
+
 
 router = APIRouter(prefix="/api/pipeline-debug", tags=["pipeline-debug"])
 
@@ -218,18 +232,11 @@ async def get_pipeline_debug_run_prompt(workflow_id: str, vod_id: str = "") -> d
     vod_id_clean = re.sub(r"[^0-9a-zA-Z_-]", "", str(vod_id or "").strip())
     if not vod_id_clean:
         raise HTTPException(status_code=400, detail="vod_id is required")
+    # job_id is built from the sanitized workflow_id + vod_id (no path-traversal
+    # chars), so the store resolves it safely under storage_dir/<job_id>/.
     job_id = f"pipeline_debug_{safe_id}_{vod_id_clean}"
-    storage_root = pathlib.Path(settings.storage_dir).resolve()
-    prompt_path = (storage_root / job_id / "debug" / "llm_moment_finder_prompt.txt").resolve()
-    try:
-        prompt_path.relative_to(storage_root)
-    except ValueError:
-        raise HTTPException(status_code=404, detail="Not found")
-    if not prompt_path.is_file():
-        return {"vod_id": vod_id_clean, "prompt": "", "exists": False}
-    try:
-        prompt_text = prompt_path.read_text(encoding="utf-8")
-    except OSError:
+    prompt_text = _job_store().read_prompt(job_id)
+    if prompt_text is None:
         return {"vod_id": vod_id_clean, "prompt": "", "exists": False}
     return {"vod_id": vod_id_clean, "prompt": prompt_text, "exists": True}
 
@@ -443,16 +450,17 @@ async def _mirror_job_progress(
             pass
 
 
-def _read_job_progress(job_id: str) -> tuple[str, int] | None:
-    """Return (status, progress_pct) from the worker's per-job progress file.
+def _read_job_progress(
+    job_id: str, *, store: JobArtifactStore | None = None
+) -> tuple[str, int] | None:
+    """Return (status, progress_pct) from the worker's per-job progress artifact.
 
-    None if the file is missing/unreadable (worker hasn't created its workspace
-    yet) — the caller then keeps the last known status.
+    None if the artifact is missing/unreadable (worker hasn't created its
+    workspace yet) — the caller then keeps the last known status.
     """
-    path = pathlib.Path(settings.storage_dir) / job_id / "progress.json"
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    store = store or _job_store()
+    data = store.read_progress(job_id)
+    if not isinstance(data, dict):
         return None
     status = str(data.get("status") or "").strip()
     if not status:
@@ -693,7 +701,9 @@ def _resolve_clip_for_raw_moment(
     return "missing", ""
 
 
-def _build_review_rows(*, workflow_id: str, vod_id: str, job_id: str) -> tuple[list[dict[str, Any]], int]:
+def _build_review_rows(
+    *, workflow_id: str, vod_id: str, job_id: str, store: JobArtifactStore | None = None
+) -> tuple[list[dict[str, Any]], int]:
     """Return (rows, raw_llm_moment_count).
 
     Rows are built from the pre-diversity raw moments so the eval and review UI
@@ -701,26 +711,24 @@ def _build_review_rows(*, workflow_id: str, vod_id: str, job_id: str) -> tuple[l
     the filtered (clipped) set via overlap — only moments that survived diversity
     filtering will have a playable clip.
     """
-    job_dir = pathlib.Path(settings.storage_dir) / job_id
-    debug_dir = job_dir / "debug"
-    raw_path = debug_dir / "llm_moment_finder_moments_raw.jsonl"
-    filtered_path = debug_dir / "llm_moment_finder_moments.jsonl"
-    segments_path = debug_dir / "segments.jsonl"
-    clips_dir = job_dir / "clips"
+    store = store or _job_store()
+    clips_dir = pathlib.Path(settings.storage_dir) / job_id / "clips"
 
-    # Prefer raw; fall back to filtered for backwards-compat with older workflow runs.
-    moments_path = raw_path if raw_path.exists() else filtered_path
-    moment_rows = _read_jsonl(moments_path)
+    # Prefer raw; fall back to filtered for backwards-compat with older workflow
+    # runs that wrote no raw artifact (filtered ⊆ raw, so empty raw ⇒ empty filtered).
+    filtered_moments = store.read_moments(job_id)
+    raw_moments = store.read_raw_moments(job_id)
+    moment_rows = raw_moments or filtered_moments
     raw_llm_count = len(moment_rows)
-    if not moments_path.exists():
+    if not moment_rows:
         logger.warning(
-            "pipeline_debug_build_rows_no_moments workflow_id=%s vod=%s path=%s",
-            workflow_id, vod_id, moments_path,
+            "pipeline_debug_build_rows_no_moments workflow_id=%s vod=%s job_id=%s",
+            workflow_id, vod_id, job_id,
         )
-    segment_records = _read_jsonl(segments_path)
+    segment_records = store.read_segments(job_id)
     logger.info(
         "pipeline_debug_build_rows workflow_id=%s vod=%s moments=%d segments=%d raw=%s",
-        workflow_id, vod_id, raw_llm_count, len(segment_records), raw_path.exists(),
+        workflow_id, vod_id, raw_llm_count, len(segment_records), bool(raw_moments),
     )
     segments = [
         TranscriptSegment(start=float(s.get("start") or 0), end=float(s.get("end") or 0), text=str(s.get("text") or ""))
@@ -729,7 +737,6 @@ def _build_review_rows(*, workflow_id: str, vod_id: str, job_id: str) -> tuple[l
     ]
 
     # Build clip map from filtered moments (clips are only cut for filtered set).
-    filtered_moments = _read_jsonl(filtered_path) if filtered_path.exists() else []
     clip_map = _build_filtered_clip_map(clips_dir, filtered_moments)
 
     rows: list[dict[str, Any]] = []
@@ -821,7 +828,9 @@ def _hydrate_review_rows(root: pathlib.Path, workflow_id: str) -> list[dict[str,
     return hydrated
 
 
-def _compute_eval(status: dict[str, Any]) -> dict[str, Any]:
+def _compute_eval(
+    status: dict[str, Any], *, store: JobArtifactStore | None = None
+) -> dict[str, Any]:
     """Compute baseline eval metrics live from disk. Never raises — returns {} on any error."""
     try:
         from ml.eval_clip_finder import (
@@ -829,6 +838,7 @@ def _compute_eval(status: dict[str, Any]) -> dict[str, Any]:
             load_manifest as _load_manifest,
             read_anchor_vod_ids as _read_anchors,
         )
+        store = store or _job_store()
         workflow_id = str(status.get("workflow_id") or "")
         if not workflow_id:
             return {}
@@ -836,15 +846,12 @@ def _compute_eval(status: dict[str, Any]) -> dict[str, Any]:
         run_vod_ids = [str(v) for v in ((status.get("request") or {}).get("vod_ids") or [])]
         if not run_vod_ids:
             run_vod_ids = _read_anchors()
-        storage = pathlib.Path(settings.storage_dir)
         predictions_by_vod: dict[str, list[dict[str, Any]]] = {}
         for vod_id in run_vod_ids:
             job_id = f"pipeline_debug_{workflow_id}_{vod_id}"
             # Prefer raw (pre-diversity) moments for eval; fall back to filtered for older runs.
-            raw_path = storage / job_id / "debug" / "llm_moment_finder_moments_raw.jsonl"
-            filtered_path = storage / job_id / "debug" / "llm_moment_finder_moments.jsonl"
-            moments_path = raw_path if raw_path.exists() else filtered_path
-            predictions_by_vod[vod_id] = _read_jsonl(moments_path)
+            raw_moments = store.read_raw_moments(job_id)
+            predictions_by_vod[vod_id] = raw_moments or store.read_moments(job_id)
         manifest = _load_manifest()
         manifest_vod_count = sum(1 for v in run_vod_ids if v in manifest)
         pred_counts = {v: len(p) for v, p in predictions_by_vod.items()}
