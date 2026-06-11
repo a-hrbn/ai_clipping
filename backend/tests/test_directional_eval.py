@@ -104,6 +104,73 @@ class GoldManifestTests(unittest.TestCase):
         self.assertEqual(gold["A"][0]["gt_tier"], "gold")
 
 
+class GenerationCeilingTests(unittest.TestCase):
+    def test_raw_any_covers_regardless_of_rank(self) -> None:
+        gold = {"A": [{"start": 100.0, "end": 120.0, "views": 300_000}]}
+        raw = {"A": [
+            {"start_time": 500.0, "end_time": 520.0},  # no cover
+            {"start_time": 101.0, "end_time": 119.0},  # covers, deep in the list
+        ]}
+
+        ceiling = directional_eval.generation_ceiling(gold, raw, min_views=0.0)
+
+        self.assertEqual(ceiling["gt_count"], 1)
+        self.assertEqual(ceiling["covered"], 1)
+        self.assertEqual(ceiling["recall_any"], 1.0)
+
+    def test_headline_filter_by_views(self) -> None:
+        gold = {"A": [
+            {"start": 100.0, "end": 120.0, "views": 50_000},
+            {"start": 200.0, "end": 220.0, "views": 300_000},
+        ]}
+        raw = {"A": [{"start_time": 201.0, "end_time": 219.0}]}  # covers only the 300k one
+
+        ceiling = directional_eval.generation_ceiling(gold, raw, min_views=100_000)
+
+        self.assertEqual(ceiling["gt_count"], 1)  # 50k moment filtered out
+        self.assertEqual(ceiling["recall_any"], 1.0)
+
+
+class TwoSourceRunTests(unittest.TestCase):
+    def test_raw_covers_beyond_topk_is_ceiling_hit_but_product_miss(self) -> None:
+        # The signature ranking gap: a covering candidate exists in the raw set
+        # but is truncated out of final_moments — product misses, ceiling hits.
+        manifest = {"A": [{"start": 100.0, "end": 120.0, "views": 300_000, "gt_tier": "gold"}]}
+        final = {"A": [{"start_time": 500.0, "end_time": 520.0, "rank": 1}]}  # no cover
+        raw = {"A": [
+            {"start_time": 500.0, "end_time": 520.0},
+            {"start_time": 101.0, "end_time": 119.0},  # covers gold
+        ]}
+
+        result = directional_eval.run(manifest, final, raw, ks=(5, 10, 20, 50))
+
+        self.assertEqual(result["floor"]["recall"]["20"], 0.0)        # product miss
+        self.assertEqual(result["generation"]["floor"]["recall_any"], 1.0)  # ceiling hit
+        self.assertEqual(result["generation"]["headline"]["recall_any"], 1.0)
+
+    def test_raw_defaults_to_final_backward_compatible(self) -> None:
+        manifest = {"A": [{"start": 100.0, "end": 120.0, "views": 50_000, "gt_tier": "gold"}]}
+        final = {"A": [{"start_time": 101.0, "end_time": 119.0, "rank": 1}]}
+
+        result = directional_eval.run(manifest, final, ks=(5, 10, 20))
+
+        self.assertEqual(result["floor"]["recall"]["20"], 1.0)
+        # raw defaulted to final → ceiling matches the product here
+        self.assertEqual(result["generation"]["floor"]["recall_any"], 1.0)
+
+    def test_report_shows_product_ceiling_and_gap(self) -> None:
+        manifest = {"A": [{"start": 100.0, "end": 120.0, "views": 300_000, "gt_tier": "gold"}]}
+        final = {"A": [{"start_time": 500.0, "end_time": 520.0, "rank": 1}]}
+        raw = {"A": [{"start_time": 101.0, "end_time": 119.0}]}
+
+        result = directional_eval.run(manifest, final, raw, ks=(5, 10, 20, 50))
+        report = directional_eval.format_report(result)
+
+        self.assertIn("PRODUCT", report.upper())
+        self.assertIn("raw@any", report)
+        self.assertIn("RANKING GAP", report.upper())
+
+
 class RunTests(unittest.TestCase):
     def test_end_to_end_two_tier_with_missing_predictions(self) -> None:
         manifest = {

@@ -5,13 +5,18 @@ whether its weakness is **generation** (it never surfaces the viral moment) or
 **ranking** (it surfaces it, just not in the top-K) — before changing anything
 about the finder.
 
+Two prediction sources, scored in one pass: the product's final_moments (post
+dedupe + enforce_diversity + top_k) feed product recall@K (headline K=20), while
+the raw finder output feeds the generation ceiling (raw@any) — the best the
+finder could surface at any rank.
+
 Two-tier recall:
   floor     every gold moment (the long tail)
   headline  gold moments with views >= --headline-min-views (interim 100k)
 
-Each tier reports raw recall@50 alongside recall@10 (and @5/@20). A wide gap
-between recall@50 and recall@10 is a *ranking* gap; a low recall@50 is a
-*generation* gap.
+A wide gap between the generation ceiling (raw@any) and product recall@20 is a
+*ranking* gap (surfaced, just not top-K); a low raw@any is a *generation* gap
+(never surfaced).
 
 "Gold" here means the `gold` verification tier only — i.e. audio-confirmed at
 the claimed position. That exactly drops the `not_confirmed` matches (silver/
@@ -41,11 +46,18 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from ml import eval_clip_finder
-from ml.eval_clip_finder import COVERAGE_THRESHOLD, evaluate_vod, load_manifest, load_predictions
+from ml.eval_clip_finder import (
+    COVERAGE_THRESHOLD,
+    evaluate_vod,
+    load_final_predictions,
+    load_manifest,
+    load_predictions,
+)
 
 DEFAULT_KS: tuple[int, ...] = (5, 10, 20, 50)
 DEFAULT_HEADLINE_MIN_VIEWS = 100_000
 GOLD_TIER = "gold"
+PRODUCT_HEADLINE_K = 20  # = clip_top_k; the headline product-recall column
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -148,13 +160,46 @@ def two_tier_recall(
     }
 
 
+def generation_ceiling(
+    gold: dict[str, list[dict]],
+    raw_predictions_by_vod: dict[str, list[dict]],
+    *,
+    min_views: float = 0.0,
+) -> dict:
+    """raw@any: fraction of gold moments (views >= min_views) that *any* raw
+    finder prediction covers, at any rank.
+
+    The generation ceiling — what the finder could surface, independent of K.
+    Uses the same bidirectional hit rule as the product tiers, so the only
+    difference from recall@K is the dropped rank bound. The gap between this and
+    product recall@20 is the ranking gap.
+    """
+    gt_count = 0
+    covered = 0
+    for vod_id, moments in gold.items():
+        raw = raw_predictions_by_vod.get(vod_id, [])
+        for m in moments:
+            if float(m.get("views") or 0.0) < min_views:
+                continue
+            gt_count += 1
+            if any(eval_clip_finder.is_hit(m, p) for p in raw):
+                covered += 1
+    return {
+        "min_views": min_views,
+        "gt_count": gt_count,
+        "covered": covered,
+        "recall_any": round(covered / gt_count, 6) if gt_count else None,
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Orchestrator
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run(
     manifest: dict[str, list[dict]],
-    predictions_by_vod: dict[str, list[dict]],
+    final_predictions_by_vod: dict[str, list[dict]],
+    raw_predictions_by_vod: dict[str, list[dict]] | None = None,
     *,
     ks: tuple[int, ...] = DEFAULT_KS,
     headline_min_views: float = DEFAULT_HEADLINE_MIN_VIEWS,
@@ -162,17 +207,32 @@ def run(
 ) -> dict:
     """Run the directional eval over the gold-filtered manifest.
 
-    Returns a structured result: two-tier recall plus the surfaced
+    Two prediction sources, scored in one pass:
+      * `final_predictions_by_vod` (final_moments, post dedupe + enforce_diversity
+        + top_k) feeds the product tiers → product recall@K.
+      * `raw_predictions_by_vod` (the raw finder output) feeds the generation
+        ceiling (raw@any). When omitted it defaults to the final set, so existing
+        callers stay backward-compatible.
+
+    Returns two-tier product recall, the generation ceiling, and the surfaced
     missing-prediction coverage gap.
     """
+    if raw_predictions_by_vod is None:
+        raw_predictions_by_vod = final_predictions_by_vod
+
     gold = gold_manifest(manifest, gold_tiers)
-    missing = missing_prediction_vods(gold, predictions_by_vod)
+    # A gold VOD with no raw finder output is one the finder never scored.
+    missing = missing_prediction_vods(gold, raw_predictions_by_vod)
 
     per_vod = [
-        evaluate_vod(gold[vod_id], predictions_by_vod.get(vod_id, []), ks, vod_id=vod_id)
+        evaluate_vod(gold[vod_id], final_predictions_by_vod.get(vod_id, []), ks, vod_id=vod_id)
         for vod_id in sorted(gold)
     ]
     tiers = two_tier_recall(per_vod, ks, headline_min_views=headline_min_views)
+    generation = {
+        "floor": generation_ceiling(gold, raw_predictions_by_vod, min_views=0.0),
+        "headline": generation_ceiling(gold, raw_predictions_by_vod, min_views=headline_min_views),
+    }
 
     return {
         "ks": list(ks),
@@ -182,6 +242,7 @@ def run(
         "headline_min_views": tiers["headline_min_views"],
         "floor": tiers["floor"],
         "headline": tiers["headline"],
+        "generation": generation,
         "coverage_threshold": COVERAGE_THRESHOLD,
         "per_vod": per_vod,
     }
@@ -208,11 +269,26 @@ def _tier_line(label: str, tier: dict, ks: list[int]) -> str:
     )
 
 
+def _ceiling_line(label: str, ceiling: dict) -> str:
+    return (
+        f"  {label:<9} n={ceiling['gt_count']:>3}            raw@any={_fmt(ceiling.get('recall_any'))}"
+        f"  (covered {ceiling['covered']}/{ceiling['gt_count']})"
+    )
+
+
+def _gap_line(label: str, product_tier: dict, ceiling: dict) -> str:
+    product = product_tier.get("recall", {}).get(str(PRODUCT_HEADLINE_K))
+    ceil_any = ceiling.get("recall_any")
+    gap = round(ceil_any - product, 6) if (product is not None and ceil_any is not None) else None
+    return f"  {label:<9} {_fmt(ceil_any)} − {_fmt(product)} = {_fmt(gap)}"
+
+
 def format_report(result: dict) -> str:
     ks = result["ks"]
+    generation = result.get("generation", {})
     lines = [
         "=" * 72,
-        f"Directional Finder Eval — generation vs ranking  (coverage>={result['coverage_threshold']})",
+        f"Directional Finder Eval — product vs generation ceiling  (coverage>={result['coverage_threshold']})",
         "=" * 72,
         f"Gold tiers: {','.join(result['gold_tiers'])}   Gold VODs: {result['gold_vods']}"
         f"   Headline: views>={int(result['headline_min_views']):,}",
@@ -232,12 +308,21 @@ def format_report(result: dict) -> str:
         lines.append("✓  Every gold VOD has finder predictions.")
 
     lines.append("")
+    lines.append(f"  PRODUCT (final_moments, recall@K — headline K={PRODUCT_HEADLINE_K}):")
     lines.append(_tier_line("FLOOR", result["floor"], ks))
     lines.append(_tier_line("HEADLINE", result["headline"], ks))
     lines.append("")
+    lines.append("  GENERATION CEILING (raw@any — best the finder could surface):")
+    lines.append(_ceiling_line("FLOOR", generation.get("floor", {})))
+    lines.append(_ceiling_line("HEADLINE", generation.get("headline", {})))
+    lines.append("")
+    lines.append(f"  RANKING GAP (raw@any − product r@{PRODUCT_HEADLINE_K}):")
+    lines.append(_gap_line("FLOOR", result["floor"], generation.get("floor", {})))
+    lines.append(_gap_line("HEADLINE", result["headline"], generation.get("headline", {})))
+    lines.append("")
     lines.append(
-        "Read: recall@50 ≫ recall@10 → ranking gap (surfaced, not top-K); "
-        "low recall@50 → generation gap (never surfaced)."
+        "Read: a wide product-to-ceiling gap → ranking gap (surfaced, not top-K); "
+        "a low raw@any → generation gap (never surfaced)."
     )
     return "\n".join(lines)
 
@@ -267,10 +352,12 @@ def main(argv: list[str] | None = None) -> int:
 
     manifest = load_manifest(pathlib.Path(args.manifest))
     gold = gold_manifest(manifest, gold_tiers)
-    predictions_by_vod = load_predictions(sorted(gold), pathlib.Path(args.predictions_dir), args.workflow_id)
+    storage = pathlib.Path(args.predictions_dir)
+    final_predictions_by_vod = load_final_predictions(sorted(gold), storage, args.workflow_id)
+    raw_predictions_by_vod = load_predictions(sorted(gold), storage, args.workflow_id)
 
     # Surface the paid-finder gap before scoring (also embedded in the result).
-    missing = missing_prediction_vods(gold, predictions_by_vod)
+    missing = missing_prediction_vods(gold, raw_predictions_by_vod)
     if missing:
         print(
             f"WARNING: {len(missing)}/{len(gold)} gold VODs lack finder predictions; "
@@ -278,7 +365,7 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
 
-    result = run(manifest, predictions_by_vod, ks=ks,
+    result = run(manifest, final_predictions_by_vod, raw_predictions_by_vod, ks=ks,
                  headline_min_views=args.headline_min_views, gold_tiers=gold_tiers)
     result["computed_at"] = datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00", "Z")
 

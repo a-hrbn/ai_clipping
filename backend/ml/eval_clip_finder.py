@@ -312,6 +312,38 @@ def _read_moments_jsonl(path: pathlib.Path) -> list[dict]:
     return rows
 
 
+def _read_final_moments_json(path: pathlib.Path) -> list[dict]:
+    """Read the product's final_moments.json -> moment list (order = product rank)."""
+    if not path.exists():
+        return []
+    try:
+        obj = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    moments = obj.get("moments") if isinstance(obj, dict) else None
+    return [m for m in (moments or []) if isinstance(m, dict)]
+
+
+def _resolve_job_dir(
+    storage: pathlib.Path,
+    vod_id: str,
+    workflow_id: str,
+) -> pathlib.Path | None:
+    """Resolve a VOD's pipeline_debug job dir.
+
+    With a workflow_id, points at that exact run; otherwise the most-recently
+    modified pipeline_debug job for the VOD. None if no job exists.
+    """
+    if workflow_id:
+        return storage / f"pipeline_debug_{workflow_id}_{vod_id}"
+    candidates = sorted(
+        storage.glob(f"pipeline_debug_*_{vod_id}"),
+        key=lambda p: p.stat().st_mtime if p.exists() else 0,
+        reverse=True,
+    )
+    return candidates[0] if candidates else None
+
+
 def _finder_moments_path(job_dir: pathlib.Path) -> pathlib.Path:
     """Prefer the raw (pre-filter) finder moments, fall back to the filtered set."""
     raw_path = job_dir / "debug" / "llm_moment_finder_moments_raw.jsonl"
@@ -324,24 +356,37 @@ def load_predictions(
     storage: pathlib.Path,
     workflow_id: str = "",
 ) -> dict[str, list[dict]]:
-    """Load finder predictions per VOD from pipeline_debug job dirs.
+    """Load *raw* finder predictions per VOD from pipeline_debug job dirs.
 
     With a workflow_id, reads that exact run; otherwise picks the most-recently
     modified pipeline_debug job for each VOD. VODs with no job map to [].
     """
     predictions_by_vod: dict[str, list[dict]] = {}
     for vod_id in anchor_ids:
-        if workflow_id:
-            job_dir = storage / f"pipeline_debug_{workflow_id}_{vod_id}"
-            moments_path = _finder_moments_path(job_dir)
-        else:
-            candidates = sorted(
-                storage.glob(f"pipeline_debug_*_{vod_id}"),
-                key=lambda p: p.stat().st_mtime if p.exists() else 0,
-                reverse=True,
-            )
-            moments_path = _finder_moments_path(candidates[0]) if candidates else pathlib.Path("/dev/null")
+        job_dir = _resolve_job_dir(storage, vod_id, workflow_id)
+        moments_path = _finder_moments_path(job_dir) if job_dir else pathlib.Path("/dev/null")
         predictions_by_vod[vod_id] = _read_moments_jsonl(moments_path)
+    return predictions_by_vod
+
+
+def load_final_predictions(
+    anchor_ids: list[str],
+    storage: pathlib.Path,
+    workflow_id: str = "",
+) -> dict[str, list[dict]]:
+    """Load the product's *final* moments per VOD (post dedupe + enforce_diversity
+    + top_k) from each pipeline_debug job's final_moments.json.
+
+    The counterpart to load_predictions (which returns the raw finder moments):
+    final_moments are what the product actually ships, and share the
+    start_time/end_time keys, so the same hit logic applies. List order is the
+    product rank. VODs with no job map to [].
+    """
+    predictions_by_vod: dict[str, list[dict]] = {}
+    for vod_id in anchor_ids:
+        job_dir = _resolve_job_dir(storage, vod_id, workflow_id)
+        moments_path = job_dir / "debug" / "final_moments.json" if job_dir else pathlib.Path("/dev/null")
+        predictions_by_vod[vod_id] = _read_final_moments_json(moments_path)
     return predictions_by_vod
 
 
