@@ -2,8 +2,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Any
+
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
+
+from ml.row_identity import window_overlap_ratio  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -223,12 +230,9 @@ def _row_has_effective_stage(row: dict[str, Any], stage: str) -> bool:
 def _window_overlap_ratio(pos_start: float, pos_end: float, row_start: Any, row_end: Any) -> float:
     start = _as_float(row_start)
     end = _as_float(row_end)
-    if start is None or end is None or end <= start or pos_end <= pos_start:
+    if start is None or end is None:
         return 0.0
-    overlap = max(0.0, min(pos_end, end) - max(pos_start, start))
-    if overlap <= 0.0:
-        return 0.0
-    return max(overlap / max(pos_end - pos_start, 1e-6), overlap / max(end - start, 1e-6))
+    return window_overlap_ratio(pos_start, pos_end, start, end)
 
 
 def _job_vod_id(debug_dir: Path) -> str:

@@ -11,6 +11,7 @@ BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
+from ml.row_identity import window_overlap_ratio
 from services.gold_eval_policy import GOLD_HOLDOUT_SPLIT_FIELD
 
 
@@ -469,10 +470,7 @@ def _parse_vod_ids(raw: str) -> set[str]:
 
 
 def _window_overlap_ratio(start: float, end: float, pos_start: float, pos_end: float) -> float:
-    overlap = max(0.0, min(end, pos_end) - max(start, pos_start))
-    if overlap <= 0.0 or end <= start or pos_end <= pos_start:
-        return 0.0
-    return max(overlap / max(end - start, 1e-6), overlap / max(pos_end - pos_start, 1e-6))
+    return window_overlap_ratio(start, end, pos_start, pos_end)
 
 
 def _debug_dirs(storage_dir: pathlib.Path) -> list[pathlib.Path]:

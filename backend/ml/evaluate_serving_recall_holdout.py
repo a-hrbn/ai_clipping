@@ -11,6 +11,7 @@ from typing import Any
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from ml import evaluate_candidate_funnel
+from ml.row_identity import window_overlap_ratio
 
 
 DEFAULT_PROFILE = "jynxzi"
@@ -525,12 +526,7 @@ def _window_overlap_ratio(positive: dict[str, Any], row: dict[str, Any]) -> floa
     row_end = _as_float(row.get("end"))
     if pos_start is None or pos_end is None or row_start is None or row_end is None:
         return 0.0
-    if pos_end <= pos_start or row_end <= row_start:
-        return 0.0
-    overlap = max(0.0, min(pos_end, row_end) - max(pos_start, row_start))
-    if overlap <= 0.0:
-        return 0.0
-    return max(overlap / max(pos_end - pos_start, 1e-6), overlap / max(row_end - row_start, 1e-6))
+    return window_overlap_ratio(pos_start, pos_end, row_start, row_end)
 
 
 def _normalized_k_values(values: list[int]) -> list[int]:

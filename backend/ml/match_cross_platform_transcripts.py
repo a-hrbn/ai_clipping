@@ -1170,6 +1170,11 @@ def _match_vod_id(match: TranscriptMatch) -> str:
 
 
 def _window_overlap_ratio(left_start: float, left_end: float, right_start: float, right_end: float) -> float:
+    # Bewusst NICHT an row_identity.window_overlap_ratio delegiert: der GT-Matcher
+    # nudged entartete Fenster (end = max(end, start + 0.001)) zero-length-tolerant,
+    # was für solche Fenster ein anderes Ergebnis liefert als die strikte
+    # row_identity-Geometrie (zero-length -> 0.0). Dieser Kern prägt Gold und bleibt
+    # darum eigenständig.
     left_end = max(float(left_end), float(left_start) + 0.001)
     right_end = max(float(right_end), float(right_start) + 0.001)
     overlap = max(0.0, min(left_end, right_end) - max(float(left_start), float(right_start)))

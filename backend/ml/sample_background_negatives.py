@@ -2,7 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import random
+import sys
 from dataclasses import dataclass
+from pathlib import Path
+
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
+
+from ml.row_identity import window_overlap_ratio  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -63,10 +71,4 @@ def _stable_seed(value: str) -> int:
 def _overlap_ratio(left: tuple[float, float], right: tuple[float, float]) -> float:
     left_start, left_end = left
     right_start, right_end = right
-    overlap = min(left_end, right_end) - max(left_start, right_start)
-    if overlap <= 0:
-        return 0.0
-    shorter = min(left_end - left_start, right_end - right_start)
-    if shorter <= 0:
-        return 0.0
-    return overlap / shorter
+    return window_overlap_ratio(left_start, left_end, right_start, right_end)
