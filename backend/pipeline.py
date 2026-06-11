@@ -11,6 +11,7 @@ from config import settings
 from job_manager import is_job_cancelled, update_job
 from producers.adapters import FsAudioCache
 from producers.audio import AudioResource
+from producers.chat import ChatEnrichment
 from producers.energy import VoiceEnergy
 from producers.transcript import TranscriptResource
 from services import (
@@ -315,30 +316,35 @@ async def run_pipeline(
         )
 
         if settings.enable_chat_analysis and url:
-            update_job(job_id, status="downloading_chat", progress_pct=60)
-            enriched = transcriber.apply_chat_enrichment(transcript_cache_source, transcript)
-            if enriched is not None:
-                transcript = enriched
+            # The prefetch (daemon thread) stays a Conductor concern; the Producer
+            # only sees a chat_source callable that blocks on the prefetched result
+            # OR downloads — no thread/future knowledge. apply_cached + enrich +
+            # save are injected; the run() helper maps its work onto the
+            # `downloading_chat` band.
+            def chat_source() -> pathlib.Path | None:
                 if chat_prefetch is not None:
-                    chat_prefetch.cancel()  # rare race: cache appeared after prefetch started
-            else:
-                if chat_prefetch is not None:
-                    chat_path = await asyncio.wrap_future(chat_prefetch)
-                else:
-                    chat_path = await loop.run_in_executor(
-                        None,
-                        lambda: chat_signal.download_chat(
-                            url, job_id, debug_dir,
-                            timeout_sec=settings.chat_download_timeout_sec,
-                        ),
-                    )
-                if chat_path:
-                    transcript = chat_signal.enrich_segments(transcript, chat_path)
-                    if transcript_cache_source:
-                        await loop.run_in_executor(
-                            None,
-                            lambda: transcriber.save_chat_enrichment(transcript_cache_source, transcript),
-                        )
+                    return chat_prefetch.result()
+                return chat_signal.download_chat(
+                    url, job_id, debug_dir,
+                    timeout_sec=settings.chat_download_timeout_sec,
+                )
+
+            chat_enrichment = ChatEnrichment(
+                cache_source=transcript_cache_source,
+                chat_source=chat_source,
+                apply_cached=transcriber.apply_chat_enrichment,
+                enrich=chat_signal.enrich_segments,
+                save=transcriber.save_chat_enrichment,
+            )
+            transcript = await run(
+                lambda *, progress: chat_enrichment.apply(transcript),
+                status="downloading_chat",
+                band=(60, 72),
+            )
+            if chat_prefetch is not None:
+                # Best-effort: a no-op once the future was consumed by chat_source;
+                # on a cache hit (chat_source untouched) it frees the prefetch.
+                chat_prefetch.cancel()
 
         llm_stage: dict[str, object] = {
             "attempted": True,

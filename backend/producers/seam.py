@@ -43,6 +43,16 @@ ComputeEnergyFn = Callable[[pathlib.Path, "list[RichSegment]"], "list[float]"]  
 LoadVoiceEnergyFn = Callable[["str | None", "list[RichSegment]"], "list[float] | None"]  # transcriber.load_voice_energy
 SaveVoiceEnergyFn = Callable[["str | None", "list[RichSegment]", "list[float]"], None]  # transcriber.save_voice_energy
 
+# Leaf-op ports for the chat-enrichment step. The Conductor owns the prefetch
+# thread and hands the Producer a ``chat_source`` callable that blocks on the
+# prefetched result OR downloads — so the Producer never sees a thread/future.
+# ``apply_cached`` reuses the persisted enrichment; ``enrich`` annotates from a
+# freshly downloaded chat path; ``save`` persists it under the transcript cache.
+ChatSourceFn = Callable[[], "pathlib.Path | None"]  # prefetch result OR chat_signal.download_chat
+ApplyChatEnrichmentFn = Callable[["str | None", "list[RichSegment]"], "list[RichSegment] | None"]  # transcriber.apply_chat_enrichment
+EnrichFn = Callable[["list[RichSegment]", pathlib.Path], "list[RichSegment]"]  # chat_signal.enrich_segments
+SaveChatEnrichmentFn = Callable[["str | None", "list[RichSegment]"], None]  # transcriber.save_chat_enrichment
+
 
 class AudioCache(Protocol):
     """The per-source audio cache. Two adapters justify the port: ``FsAudioCache``
