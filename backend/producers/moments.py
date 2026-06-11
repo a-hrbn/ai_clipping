@@ -1,48 +1,36 @@
 """MomentFinding — turns a transcript into ranked viral moments via the LLM finder.
 
-Owns the ``llm_moment_finder_stage.json`` running/ok/failed contract the job
-router reads, plus the prompt / response / usage / moments(.raw).jsonl debug dumps.
-Pure: the ~17 ``moment_finder_*`` settings are bound into an injected
-:class:`MomentParams` snapshot and ``find`` is injected, so it never reads
-``config.settings`` or touches job state. Empty ``post_processed_moments`` (the
+Owns the ``stage`` running/ok/failed contract the job router reads, plus the
+prompt / response / usage / moments(.raw) debug dumps. Pure: the ~17
+``moment_finder_*`` settings are bound into an injected :class:`MomentParams`
+snapshot, ``find`` is injected, and the artifacts are written through the injected
+:class:`~services.job_artifact_store.JobArtifactStore` (the same injection slot
+``debug_dir`` used to fill) — so it never reads ``config.settings``, touches job
+state, or spells an artifact filename. Empty ``post_processed_moments`` (the
 serving currency) is a failure — it writes the failed marker, then raises the
 injected ``MomentFinderError`` (which is also injected rather than imported, since
 the real ``moment_finder`` service pulls torch via ``RichSegment``). The eval-only
-``moments_raw.jsonl`` is written only when the snapshot's ``eval_recall`` is on.
+raw-moments artifact is written only when the snapshot's ``eval_recall`` is on.
 """
 from __future__ import annotations
 
 import dataclasses
 import json
 import logging
-import pathlib
 from typing import TYPE_CHECKING
 
 from .seam import FindMomentsFn, Progress
 
 if TYPE_CHECKING:
+    from services.job_artifact_store import JobArtifactStore
     from services.moment_finder import MomentFinderResult
     from services.transcriber import RichSegment
 
 logger = logging.getLogger(__name__)
 
-_STAGE_FILE = "llm_moment_finder_stage.json"
-
 
 def _noop_progress(_fraction: float) -> None:
     pass
-
-
-def _write_json(path: pathlib.Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
-
-
-def _write_jsonl(path: pathlib.Path, rows: list[dict]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "\n".join(json.dumps(row, ensure_ascii=True) for row in rows), encoding="utf-8"
-    )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -74,14 +62,16 @@ class MomentFinding:
         *,
         profile: str,
         vod_id: str,
-        debug_dir: pathlib.Path,
+        job_id: str,
+        store: "JobArtifactStore",
         params: MomentParams,
         find: FindMomentsFn,
         error: type[Exception],
     ) -> None:
         self._profile = profile
         self._vod_id = vod_id
-        self._debug_dir = debug_dir
+        self._job_id = job_id
+        self._store = store
         self._params = params
         self._find = find
         self._error = error
@@ -106,7 +96,7 @@ class MomentFinding:
             "model": p.model,
             "max_moments": p.max_moments,
         }
-        self._write_stage(stage)
+        self._store.write_stage(self._job_id, stage)
         try:
             result = self._find(
                 transcript,
@@ -130,27 +120,19 @@ class MomentFinding:
             if not result.post_processed_moments:
                 raise self._error("LLM moment finder returned no moments.")
             stage.update({"status": "ok", **result.summary})
-            (self._debug_dir / "llm_moment_finder_prompt.txt").write_text(
-                result.prompt, encoding="utf-8"
-            )
-            (self._debug_dir / "llm_moment_finder_response.txt").write_text(
-                result.response_text, encoding="utf-8"
-            )
-            self._write_stage(stage)
-            _write_json(self._debug_dir / "llm_moment_finder_usage.json", result.usage)
-            _write_jsonl(
-                self._debug_dir / "llm_moment_finder_moments.jsonl", result.post_processed_moments
-            )
+            self._store.write_prompt(self._job_id, result.prompt)
+            self._store.write_response(self._job_id, result.response_text)
+            self._store.write_stage(self._job_id, stage)
+            self._store.write_usage(self._job_id, result.usage)
+            self._store.write_moments(self._job_id, result.post_processed_moments)
             # Eval-only artifact: skipped on serving runs (no raw branch computed),
             # so the debug dir holds only what was actually produced.
             if p.eval_recall:
-                _write_jsonl(
-                    self._debug_dir / "llm_moment_finder_moments_raw.jsonl", result.raw_moments
-                )
+                self._store.write_raw_moments(self._job_id, result.raw_moments)
             return result
         except self._error as exc:
             stage.update({"status": "failed", "error_type": type(exc).__name__, "error": str(exc)})
-            self._write_stage(stage)
+            self._store.write_stage(self._job_id, stage)
             logger.error(
                 json.dumps(
                     {
@@ -164,6 +146,3 @@ class MomentFinding:
                 )
             )
             raise
-
-    def _write_stage(self, stage: dict) -> None:
-        _write_json(self._debug_dir / _STAGE_FILE, stage)

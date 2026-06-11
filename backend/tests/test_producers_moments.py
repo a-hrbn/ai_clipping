@@ -1,10 +1,10 @@
-import json
 import types
 import unittest
-from pathlib import Path
-from tempfile import TemporaryDirectory
 
 from producers.moments import MomentFinding, MomentParams
+from services.job_artifact_store import InMemoryJobArtifactStore
+
+_JOB = "job-1"
 
 
 class _FakeMomentFinderError(RuntimeError):
@@ -58,125 +58,126 @@ def _result(ranked: list, *, post_processed=None, raw=None) -> types.SimpleNames
 
 class MomentFindingTests(unittest.TestCase):
     def test_success_writes_running_then_ok_stage_with_summary_and_artifacts(self) -> None:
-        with TemporaryDirectory() as tmp:
-            debug = Path(tmp)
-            find_calls: list = []
-            mf = MomentFinding(
-                profile="jynxzi",
-                vod_id="123",
-                debug_dir=debug,
-                params=_params(),
-                find=lambda _segs, **kw: find_calls.append(kw) or _result([object()]),
-                error=_FakeMomentFinderError,
-            )
+        # Artifacts are asserted in-memory against the injected fake store, never a
+        # tmp directory: the producer owns no filenames, only artifact roles.
+        store = InMemoryJobArtifactStore()
+        find_calls: list = []
+        mf = MomentFinding(
+            profile="jynxzi",
+            vod_id="123",
+            job_id=_JOB,
+            store=store,
+            params=_params(),
+            find=lambda _segs, **kw: find_calls.append(kw) or _result([object()]),
+            error=_FakeMomentFinderError,
+        )
 
-            out = mf.find([object()])
+        out = mf.find([object()])
 
-            stage = json.loads((debug / "llm_moment_finder_stage.json").read_text(encoding="utf-8"))
-            self.assertEqual(stage["status"], "ok")
-            self.assertEqual(stage["provider"], "gemini")
-            self.assertEqual(stage["model"], "gemini-2.0")
-            self.assertEqual(stage["max_moments"], 180)
-            self.assertEqual(stage["ranked_candidate_count"], 1)  # merged-in summary
-            self.assertEqual((debug / "llm_moment_finder_prompt.txt").read_text(encoding="utf-8"), "PROMPT")
-            self.assertEqual((debug / "llm_moment_finder_response.txt").read_text(encoding="utf-8"), "RESPONSE")
-            self.assertEqual(
-                len((debug / "llm_moment_finder_moments.jsonl").read_text(encoding="utf-8").splitlines()), 1
-            )
-            # eval_recall is off by default, so the eval-only raw artifact is not written.
-            self.assertEqual(find_calls[0]["eval_recall"], False)
-            self.assertFalse((debug / "llm_moment_finder_moments_raw.jsonl").exists())
-            self.assertTrue((debug / "llm_moment_finder_usage.json").exists())
-            self.assertIs(out.ranked_candidates[0], find_calls[0] and out.ranked_candidates[0])
+        stage = store.read_stage(_JOB)
+        self.assertEqual(stage["status"], "ok")
+        self.assertEqual(stage["provider"], "gemini")
+        self.assertEqual(stage["model"], "gemini-2.0")
+        self.assertEqual(stage["max_moments"], 180)
+        self.assertEqual(stage["ranked_candidate_count"], 1)  # merged-in summary
+        self.assertEqual(store.read_prompt(_JOB), "PROMPT")
+        self.assertEqual(store.read_response(_JOB), "RESPONSE")
+        self.assertEqual(len(store.read_moments(_JOB)), 1)
+        # eval_recall is off by default, so the eval-only raw artifact is not written.
+        self.assertEqual(find_calls[0]["eval_recall"], False)
+        self.assertEqual(store.read_raw_moments(_JOB), [])
+        self.assertIsNotNone(store.read_usage(_JOB))
+        self.assertIs(out.ranked_candidates[0], find_calls[0] and out.ranked_candidates[0])
 
     def test_eval_recall_passes_flag_and_writes_raw_artifact(self) -> None:
-        with TemporaryDirectory() as tmp:
-            debug = Path(tmp)
-            captured: dict = {}
-            mf = MomentFinding(
-                profile="jynxzi",
-                vod_id="123",
-                debug_dir=debug,
-                params=_params(eval_recall=True),
-                find=lambda _segs, **kw: captured.update(kw) or _result([object()]),
-                error=_FakeMomentFinderError,
-            )
+        store = InMemoryJobArtifactStore()
+        captured: dict = {}
+        mf = MomentFinding(
+            profile="jynxzi",
+            vod_id="123",
+            job_id=_JOB,
+            store=store,
+            params=_params(eval_recall=True),
+            find=lambda _segs, **kw: captured.update(kw) or _result([object()]),
+            error=_FakeMomentFinderError,
+        )
 
-            mf.find([object()])
+        mf.find([object()])
 
-            self.assertEqual(captured["eval_recall"], True)
-            self.assertTrue((debug / "llm_moment_finder_moments_raw.jsonl").exists())
+        self.assertEqual(captured["eval_recall"], True)
+        self.assertEqual(store.read_raw_moments(_JOB), [{"raw": 1}])
 
     def test_params_and_identity_are_passed_through_to_find(self) -> None:
         # purity: every find_moments arg is resolved from the injected params /
         # identity, never from config.settings.
-        with TemporaryDirectory() as tmp:
-            captured: dict = {}
-            mf = MomentFinding(
-                profile="elias",
-                vod_id="vod-9",
-                debug_dir=Path(tmp),
-                params=_params(provider="ollama", max_moments=42, temperature=0.0),
-                find=lambda _segs, **kw: captured.update(kw) or _result([object()]),
-                error=_FakeMomentFinderError,
-            )
+        store = InMemoryJobArtifactStore()
+        captured: dict = {}
+        mf = MomentFinding(
+            profile="elias",
+            vod_id="vod-9",
+            job_id=_JOB,
+            store=store,
+            params=_params(provider="ollama", max_moments=42, temperature=0.0),
+            find=lambda _segs, **kw: captured.update(kw) or _result([object()]),
+            error=_FakeMomentFinderError,
+        )
 
-            mf.find([object()])
+        mf.find([object()])
 
-            self.assertEqual(captured["profile"], "elias")
-            self.assertEqual(captured["vod_id"], "vod-9")
-            self.assertEqual(captured["provider"], "ollama")
-            self.assertEqual(captured["max_moments"], 42)
-            self.assertEqual(captured["min_duration_sec"], 8.0)
-            self.assertEqual(captured["filter_transcript_noise"], True)
-            self.assertEqual(captured["temperature"], 0.0)
-            self.assertEqual(captured["eval_recall"], False)
+        self.assertEqual(captured["profile"], "elias")
+        self.assertEqual(captured["vod_id"], "vod-9")
+        self.assertEqual(captured["provider"], "ollama")
+        self.assertEqual(captured["max_moments"], 42)
+        self.assertEqual(captured["min_duration_sec"], 8.0)
+        self.assertEqual(captured["filter_transcript_noise"], True)
+        self.assertEqual(captured["temperature"], 0.0)
+        self.assertEqual(captured["eval_recall"], False)
 
     def test_empty_post_processed_moments_raises_and_marks_stage_failed(self) -> None:
-        with TemporaryDirectory() as tmp:
-            debug = Path(tmp)
-            mf = MomentFinding(
-                profile="jynxzi",
-                vod_id="123",
-                debug_dir=debug,
-                params=_params(),
-                find=lambda _segs, **kw: _result([]),  # no serving moments
-                error=_FakeMomentFinderError,
-            )
+        store = InMemoryJobArtifactStore()
+        mf = MomentFinding(
+            profile="jynxzi",
+            vod_id="123",
+            job_id=_JOB,
+            store=store,
+            params=_params(),
+            find=lambda _segs, **kw: _result([]),  # no serving moments
+            error=_FakeMomentFinderError,
+        )
 
-            with self.assertRaises(_FakeMomentFinderError):
-                mf.find([object()])
+        with self.assertRaises(_FakeMomentFinderError):
+            mf.find([object()])
 
-            stage = json.loads((debug / "llm_moment_finder_stage.json").read_text(encoding="utf-8"))
-            self.assertEqual(stage["status"], "failed")
-            self.assertEqual(stage["error_type"], "_FakeMomentFinderError")
-            self.assertIn("no moments", stage["error"])
-            # ok-path artifacts are not written on the failure path
-            self.assertFalse((debug / "llm_moment_finder_moments.jsonl").exists())
-            self.assertFalse((debug / "llm_moment_finder_prompt.txt").exists())
+        stage = store.read_stage(_JOB)
+        self.assertEqual(stage["status"], "failed")
+        self.assertEqual(stage["error_type"], "_FakeMomentFinderError")
+        self.assertIn("no moments", stage["error"])
+        # ok-path artifacts are not written on the failure path
+        self.assertEqual(store.read_moments(_JOB), [])
+        self.assertIsNone(store.read_prompt(_JOB))
 
     def test_find_failure_marks_stage_failed_and_reraises(self) -> None:
-        with TemporaryDirectory() as tmp:
-            debug = Path(tmp)
+        store = InMemoryJobArtifactStore()
 
-            def boom(_segs, **_kw):
-                raise _FakeMomentFinderError("provider exploded")
+        def boom(_segs, **_kw):
+            raise _FakeMomentFinderError("provider exploded")
 
-            mf = MomentFinding(
-                profile="jynxzi",
-                vod_id="123",
-                debug_dir=debug,
-                params=_params(),
-                find=boom,
-                error=_FakeMomentFinderError,
-            )
+        mf = MomentFinding(
+            profile="jynxzi",
+            vod_id="123",
+            job_id=_JOB,
+            store=store,
+            params=_params(),
+            find=boom,
+            error=_FakeMomentFinderError,
+        )
 
-            with self.assertRaises(_FakeMomentFinderError):
-                mf.find([object()])
+        with self.assertRaises(_FakeMomentFinderError):
+            mf.find([object()])
 
-            stage = json.loads((debug / "llm_moment_finder_stage.json").read_text(encoding="utf-8"))
-            self.assertEqual(stage["status"], "failed")
-            self.assertIn("provider exploded", stage["error"])
+        stage = store.read_stage(_JOB)
+        self.assertEqual(stage["status"], "failed")
+        self.assertIn("provider exploded", stage["error"])
 
 
 if __name__ == "__main__":

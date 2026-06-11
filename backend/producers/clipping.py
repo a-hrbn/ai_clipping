@@ -1,12 +1,14 @@
 """Clipping — turns ranked moments into cut clips.
 
 Post-processes the moment-finder rows into clip candidates, selects the top-K,
-writes ``final_moments.json``, then cuts the clips — mapping the cutter's
+writes the ``final_moments`` artifact, then cuts the clips — mapping the cutter's
 ``(so_far, done, total)`` callback onto a 0..1 progress fraction. Pure:
-``job_id`` / ``debug_dir`` / ``top_k`` / ``platform`` and the ``cut`` leaf op are
-injected, so it never reads ``config.settings``. The partial-clips streaming
-(``update_job(clips=so_far)``) stays a Conductor concern — the Conductor injects
-a ``cut`` that wraps the real cutter with that streaming.
+``job_id`` / ``top_k`` / ``platform``, the injected
+:class:`~services.job_artifact_store.JobArtifactStore` (the same injection slot
+``debug_dir`` used to fill), and the ``cut`` leaf op are injected, so it never
+reads ``config.settings`` or spells an artifact filename. The partial-clips
+streaming (``update_job(clips=so_far)``) stays a Conductor concern — the Conductor
+injects a ``cut`` that wraps the real cutter with that streaming.
 """
 from __future__ import annotations
 
@@ -19,6 +21,7 @@ from .seam import CutClipsFn, Progress
 
 if TYPE_CHECKING:
     from models import ClipResult
+    from services.job_artifact_store import JobArtifactStore
     from services.moment_finder import MomentFinderResult
 
 logger = logging.getLogger(__name__)
@@ -26,11 +29,6 @@ logger = logging.getLogger(__name__)
 
 def _noop_progress(_fraction: float) -> None:
     pass
-
-
-def _write_json(path: pathlib.Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
 
 
 def _moments_from_post_processed(rows: list[dict], platform: str) -> list[dict]:
@@ -60,13 +58,13 @@ class Clipping:
         self,
         *,
         job_id: str,
-        debug_dir: pathlib.Path,
+        store: "JobArtifactStore",
         top_k: int,
         platform: str,
         cut: CutClipsFn,
     ) -> None:
         self._job_id = job_id
-        self._debug_dir = debug_dir
+        self._store = store
         self._top_k = top_k
         self._platform = platform
         self._cut = cut
@@ -78,7 +76,7 @@ class Clipping:
         *,
         progress: Progress = _noop_progress,
     ) -> "list[ClipResult]":
-        """Post-process → top-K select → write final_moments.json → cut.
+        """Post-process → top-K select → write the final_moments artifact → cut.
 
         ``top_k > 0`` truncates to the K highest-ranked moments; otherwise all are
         kept (the full candidate set stays in the moment-finder debug JSONLs). The
@@ -89,8 +87,8 @@ class Clipping:
         progress(0.0)
         candidates = _moments_from_post_processed(result.post_processed_moments, self._platform)
         moments = candidates[: self._top_k] if self._top_k > 0 else candidates
-        _write_json(
-            self._debug_dir / "final_moments.json", {"moments": moments, "count": len(moments)}
+        self._store.write_final_moments(
+            self._job_id, {"moments": moments, "count": len(moments)}
         )
         logger.info(
             json.dumps(

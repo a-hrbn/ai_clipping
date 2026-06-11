@@ -16,6 +16,7 @@ from producers.clipping import Clipping
 from producers.energy import VoiceEnergy
 from producers.moments import MomentFinding, MomentParams
 from producers.transcript import TranscriptResource
+from services.job_artifact_store import RealFsJobArtifactStore
 from services import (
     downloader,
     audio_extractor,
@@ -290,6 +291,13 @@ async def run_pipeline(
         debug_dir = job_dir / "debug"
         debug_dir.mkdir(parents=True, exist_ok=True)
 
+        # The single owner of the job-artifact names + I/O. Injected into the
+        # writer Producers (same slot debug_dir used to fill) and used for the
+        # Conductor's own segments artifact, so a rename lives in one place and the
+        # router readers (which already go through the store) cannot drift. The raw
+        # chat download below still takes debug_dir — its files are not store roles.
+        store = RealFsJobArtifactStore(settings.storage_dir)
+
         # Voice energy burst: load from the transcript cache when possible; else
         # compute it — pulling the SAME AudioResource transcription used, so audio
         # is extracted at most once — and persist it so cache-hit runs keep the
@@ -348,7 +356,8 @@ async def run_pipeline(
         moment_finding = MomentFinding(
             profile=effective_profile,
             vod_id=_source_twitch_vod_id(url) or job_id,
-            debug_dir=debug_dir,
+            job_id=job_id,
+            store=store,
             params=_moment_params(),
             find=moment_finder.find_moments,
             error=moment_finder.MomentFinderError,
@@ -363,7 +372,7 @@ async def run_pipeline(
         transcripts_dir.mkdir(exist_ok=True)
         (transcripts_dir / f"{job_id}.txt").write_text(transcriber.format_transcript(transcript), encoding="utf-8")
         (transcripts_dir / f"{job_id}.jsonl").write_text(transcriber.format_jsonl(transcript), encoding="utf-8")
-        _write_jsonl(debug_dir / "segments.jsonl", _segment_records(transcript))
+        store.write_segments(job_id, _segment_records(transcript))
 
         # Clipping post-processes the moment rows, selects top-K, writes
         # final_moments.json, then cuts the clips. Pure: top_k/platform/debug_dir/
@@ -383,7 +392,7 @@ async def run_pipeline(
 
         clipping = Clipping(
             job_id=job_id,
-            debug_dir=debug_dir,
+            store=store,
             top_k=int(getattr(settings, "clip_top_k", 0) or 0),
             platform=str(normalized_strategy.get("platform") or "general"),
             cut=cut_with_clip_streaming,
@@ -425,14 +434,6 @@ async def _cleanup_later(job_id: str) -> None:
     job_dir = pathlib.Path(settings.storage_dir) / job_id
     if job_dir.exists():
         shutil.rmtree(job_dir)
-
-
-def _write_jsonl(path: pathlib.Path, rows: list[dict]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "\n".join(json.dumps(row, ensure_ascii=True) for row in rows),
-        encoding="utf-8",
-    )
 
 
 def _segment_records(transcript) -> list[dict]:
