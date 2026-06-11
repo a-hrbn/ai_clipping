@@ -12,6 +12,7 @@ import pathlib
 from typing import TYPE_CHECKING, Callable, Protocol
 
 if TYPE_CHECKING:  # keep runtime import-light — RichSegment pulls torch/whisper
+    from services.moment_finder import MomentFinderResult
     from services.transcriber import RichSegment
 
 
@@ -52,6 +53,12 @@ ChatSourceFn = Callable[[], "pathlib.Path | None"]  # prefetch result OR chat_si
 ApplyChatEnrichmentFn = Callable[["str | None", "list[RichSegment]"], "list[RichSegment] | None"]  # transcriber.apply_chat_enrichment
 EnrichFn = Callable[["list[RichSegment]", pathlib.Path], "list[RichSegment]"]  # chat_signal.enrich_segments
 SaveChatEnrichmentFn = Callable[["str | None", "list[RichSegment]"], None]  # transcriber.save_chat_enrichment
+
+# Leaf-op port for the moment-finding step. The Conductor wires the untouched
+# ``moment_finder.find_moments`` (kwargs bound from the injected MomentParams);
+# tests pass a canned ``MomentFinderResult``. Importing the real service pulls
+# torch via RichSegment, so MomentFinding keeps it behind this Callable alias.
+FindMomentsFn = Callable[..., "MomentFinderResult"]  # moment_finder.find_moments
 
 
 class AudioCache(Protocol):

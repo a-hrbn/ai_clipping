@@ -1,0 +1,161 @@
+"""MomentFinding — turns a transcript into ranked viral moments via the LLM finder.
+
+Owns the ``llm_moment_finder_stage.json`` running/ok/failed contract the job
+router reads, plus the prompt / response / usage / moments(.raw).jsonl debug dumps.
+Pure: the ~17 ``moment_finder_*`` settings are bound into an injected
+:class:`MomentParams` snapshot and ``find`` is injected, so it never reads
+``config.settings`` or touches job state. Empty ``ranked_candidates`` is a
+failure — it writes the failed marker, then raises the injected
+``MomentFinderError`` (which is also injected rather than imported, since the real
+``moment_finder`` service pulls torch via ``RichSegment``).
+"""
+from __future__ import annotations
+
+import dataclasses
+import json
+import logging
+import pathlib
+from typing import TYPE_CHECKING
+
+from .seam import FindMomentsFn, Progress
+
+if TYPE_CHECKING:
+    from services.moment_finder import MomentFinderResult
+    from services.transcriber import RichSegment
+
+logger = logging.getLogger(__name__)
+
+_STAGE_FILE = "llm_moment_finder_stage.json"
+
+
+def _noop_progress(_fraction: float) -> None:
+    pass
+
+
+def _write_json(path: pathlib.Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+
+
+def _write_jsonl(path: pathlib.Path, rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join(json.dumps(row, ensure_ascii=True) for row in rows), encoding="utf-8"
+    )
+
+
+@dataclasses.dataclass(frozen=True)
+class MomentParams:
+    """Frozen snapshot of the ~17 ``moment_finder_*`` settings the Conductor reads
+    once and injects, so the Producer never touches ``config.settings``."""
+
+    provider: str
+    model: str
+    max_moments: int
+    min_duration_sec: float
+    max_duration_sec: float
+    max_tokens: int
+    chunk_duration_sec: float
+    chunk_overlap_sec: float
+    timeout_sec: float
+    api_retries: int
+    retry_backoff_sec: float
+    filter_transcript_noise: bool
+    temperature: float = 0.0
+
+
+class MomentFinding:
+    def __init__(
+        self,
+        *,
+        profile: str,
+        vod_id: str,
+        debug_dir: pathlib.Path,
+        params: MomentParams,
+        find: FindMomentsFn,
+        error: type[Exception],
+    ) -> None:
+        self._profile = profile
+        self._vod_id = vod_id
+        self._debug_dir = debug_dir
+        self._params = params
+        self._find = find
+        self._error = error
+
+    def find(
+        self, transcript: list["RichSegment"], *, progress: Progress = _noop_progress
+    ) -> "MomentFinderResult":
+        """Run the LLM moment finder, owning its stage.json + debug-artifact contract.
+
+        Writes ``stage.json="running"`` on entry, ``="ok"`` merged with the
+        result summary on success, and ``="failed"`` with the error in the except
+        BEFORE re-raising. Empty ``ranked_candidates`` raises the injected error
+        after the failed marker is written. ``find_moments`` exposes no sub-step
+        progress, so ``progress`` is emitted once at the band start.
+        """
+        progress(0.0)
+        p = self._params
+        stage: dict[str, object] = {
+            "attempted": True,
+            "status": "running",
+            "provider": p.provider,
+            "model": p.model,
+            "max_moments": p.max_moments,
+        }
+        self._write_stage(stage)
+        try:
+            result = self._find(
+                transcript,
+                profile=self._profile,
+                vod_id=self._vod_id,
+                provider=p.provider,
+                model=p.model,
+                max_moments=p.max_moments,
+                min_duration_sec=p.min_duration_sec,
+                max_duration_sec=p.max_duration_sec,
+                max_tokens=p.max_tokens,
+                chunk_duration_sec=p.chunk_duration_sec,
+                chunk_overlap_sec=p.chunk_overlap_sec,
+                temperature=p.temperature,
+                timeout_sec=p.timeout_sec,
+                api_retries=p.api_retries,
+                retry_backoff_sec=p.retry_backoff_sec,
+                filter_transcript_noise=p.filter_transcript_noise,
+            )
+            if not result.ranked_candidates:
+                raise self._error("LLM moment finder returned no ranked candidates.")
+            stage.update({"status": "ok", **result.summary})
+            (self._debug_dir / "llm_moment_finder_prompt.txt").write_text(
+                result.prompt, encoding="utf-8"
+            )
+            (self._debug_dir / "llm_moment_finder_response.txt").write_text(
+                result.response_text, encoding="utf-8"
+            )
+            self._write_stage(stage)
+            _write_json(self._debug_dir / "llm_moment_finder_usage.json", result.usage)
+            _write_jsonl(
+                self._debug_dir / "llm_moment_finder_moments.jsonl", result.post_processed_moments
+            )
+            _write_jsonl(
+                self._debug_dir / "llm_moment_finder_moments_raw.jsonl", result.raw_moments
+            )
+            return result
+        except self._error as exc:
+            stage.update({"status": "failed", "error_type": type(exc).__name__, "error": str(exc)})
+            self._write_stage(stage)
+            logger.error(
+                json.dumps(
+                    {
+                        "event": "llm_moment_finder_failed",
+                        "vod_id": self._vod_id,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    },
+                    ensure_ascii=True,
+                    sort_keys=True,
+                )
+            )
+            raise
+
+    def _write_stage(self, stage: dict) -> None:
+        _write_json(self._debug_dir / _STAGE_FILE, stage)

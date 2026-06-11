@@ -13,6 +13,7 @@ from producers.adapters import FsAudioCache
 from producers.audio import AudioResource
 from producers.chat import ChatEnrichment
 from producers.energy import VoiceEnergy
+from producers.moments import MomentFinding, MomentParams
 from producers.transcript import TranscriptResource
 from services import (
     downloader,
@@ -164,6 +165,26 @@ def _write_json(path: pathlib.Path, payload: dict) -> None:
     path.write_text(
         json.dumps(payload, ensure_ascii=True, indent=2),
         encoding="utf-8",
+    )
+
+
+def _moment_params() -> MomentParams:
+    """Snapshot the ~17 ``moment_finder_*`` settings once, so the MomentFinding
+    Producer is handed plain values and never reads ``config.settings``."""
+    return MomentParams(
+        provider=str(getattr(settings, "moment_finder_provider", "gemini") or "gemini"),
+        model=str(getattr(settings, "moment_finder_model", "") or ""),
+        max_moments=int(getattr(settings, "moment_finder_max_moments", 180) or 180),
+        min_duration_sec=float(getattr(settings, "moment_finder_min_duration_sec", 8.0) or 8.0),
+        max_duration_sec=float(getattr(settings, "moment_finder_max_duration_sec", 90.0) or 90.0),
+        max_tokens=int(getattr(settings, "moment_finder_max_tokens", 32000) or 32000),
+        chunk_duration_sec=float(getattr(settings, "moment_finder_chunk_duration_sec", 2700.0) or 0.0),
+        chunk_overlap_sec=float(getattr(settings, "moment_finder_chunk_overlap_sec", 120.0) or 0.0),
+        timeout_sec=float(getattr(settings, "moment_finder_timeout_sec", 900.0) or 900.0),
+        api_retries=int(getattr(settings, "moment_finder_api_retries", 2) or 0),
+        retry_backoff_sec=float(getattr(settings, "moment_finder_retry_backoff_sec", 20.0) or 20.0),
+        filter_transcript_noise=bool(getattr(settings, "moment_finder_filter_transcript_noise", True)),
+        temperature=0.0,
     )
 
 
@@ -346,57 +367,25 @@ async def run_pipeline(
                 # on a cache hit (chat_source untouched) it frees the prefetch.
                 chat_prefetch.cancel()
 
-        llm_stage: dict[str, object] = {
-            "attempted": True,
-            "status": "running",
-            "provider": str(getattr(settings, "moment_finder_provider", "gemini") or "gemini"),
-            "model": str(getattr(settings, "moment_finder_model", "") or ""),
-            "max_moments": int(getattr(settings, "moment_finder_max_moments", 180) or 180),
-        }
-        _write_json(debug_dir / "llm_moment_finder_stage.json", llm_stage)
-        update_job(job_id, status="analyzing", progress_pct=73)
-        try:
-            llm_result = await loop.run_in_executor(
-                None,
-                lambda: moment_finder.find_moments(
-                    transcript,
-                    profile=effective_profile,
-                    vod_id=_source_twitch_vod_id(url) or job_id,
-                    provider=str(getattr(settings, "moment_finder_provider", "gemini") or "gemini"),
-                    model=str(getattr(settings, "moment_finder_model", "") or ""),
-                    max_moments=int(getattr(settings, "moment_finder_max_moments", 180) or 180),
-                    min_duration_sec=float(getattr(settings, "moment_finder_min_duration_sec", 8.0) or 8.0),
-                    max_duration_sec=float(getattr(settings, "moment_finder_max_duration_sec", 90.0) or 90.0),
-                    max_tokens=int(getattr(settings, "moment_finder_max_tokens", 32000) or 32000),
-                    chunk_duration_sec=float(getattr(settings, "moment_finder_chunk_duration_sec", 2700.0) or 0.0),
-                    chunk_overlap_sec=float(getattr(settings, "moment_finder_chunk_overlap_sec", 120.0) or 0.0),
-                    temperature=0.0,
-                    timeout_sec=float(getattr(settings, "moment_finder_timeout_sec", 900.0) or 900.0),
-                    api_retries=int(getattr(settings, "moment_finder_api_retries", 2) or 0),
-                    retry_backoff_sec=float(getattr(settings, "moment_finder_retry_backoff_sec", 20.0) or 20.0),
-                    filter_transcript_noise=bool(getattr(settings, "moment_finder_filter_transcript_noise", True)),
-                ),
-            )
-            if not llm_result.ranked_candidates:
-                raise moment_finder.MomentFinderError("LLM moment finder returned no ranked candidates.")
-            llm_stage.update({"status": "ok", **llm_result.summary})
-            (debug_dir / "llm_moment_finder_prompt.txt").write_text(llm_result.prompt, encoding="utf-8")
-            (debug_dir / "llm_moment_finder_response.txt").write_text(llm_result.response_text, encoding="utf-8")
-            _write_json(debug_dir / "llm_moment_finder_stage.json", llm_stage)
-            _write_json(debug_dir / "llm_moment_finder_usage.json", llm_result.usage)
-            _write_jsonl(debug_dir / "llm_moment_finder_moments.jsonl", llm_result.post_processed_moments)
-            _write_jsonl(debug_dir / "llm_moment_finder_moments_raw.jsonl", llm_result.raw_moments)
-        except moment_finder.MomentFinderError as exc:
-            llm_stage.update({"status": "failed", "error_type": type(exc).__name__, "error": str(exc)})
-            _write_json(debug_dir / "llm_moment_finder_stage.json", llm_stage)
-            logger.error(
-                json.dumps(
-                    {"event": "llm_moment_finder_failed", "job_id": job_id,
-                     "error_type": type(exc).__name__, "error": str(exc)},
-                    ensure_ascii=True, sort_keys=True,
-                )
-            )
-            raise
+        # MomentFinding owns the llm_moment_finder_stage.json running/ok/failed
+        # contract and the prompt/response/usage/moments(.raw).jsonl debug dumps.
+        # It is pure: the ~17 moment_finder_* settings are snapshotted into
+        # MomentParams and find/error are injected (the real service pulls torch,
+        # so the error class is injected rather than imported). The run() helper
+        # maps its work onto the `analyzing` 73–87 band.
+        moment_finding = MomentFinding(
+            profile=effective_profile,
+            vod_id=_source_twitch_vod_id(url) or job_id,
+            debug_dir=debug_dir,
+            params=_moment_params(),
+            find=moment_finder.find_moments,
+            error=moment_finder.MomentFinderError,
+        )
+        llm_result = await run(
+            lambda *, progress: moment_finding.find(transcript, progress=progress),
+            status="analyzing",
+            band=(73, 87),
+        )
 
         transcripts_dir = pathlib.Path(__file__).parents[1] / "transcripts"
         transcripts_dir.mkdir(exist_ok=True)
