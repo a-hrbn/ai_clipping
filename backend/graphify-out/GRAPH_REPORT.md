@@ -1,16 +1,16 @@
 # Graph Report - backend  (2026-06-11)
 
 ## Corpus Check
-- 137 files · ~97,277 words
+- 139 files · ~99,045 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1967 nodes · 4188 edges · 74 communities (58 shown, 16 thin omitted)
+- 2005 nodes · 4253 edges · 83 communities (66 shown, 17 thin omitted)
 - Extraction: 97% EXTRACTED · 3% INFERRED · 0% AMBIGUOUS · INFERRED: 133 edges (avg confidence: 0.52)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `eddccd83`
+- Built from commit: `059e8fb6`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -41,9 +41,18 @@
 - [[_COMMUNITY_Community 23|Community 23]]
 - [[_COMMUNITY_Community 24|Community 24]]
 - [[_COMMUNITY_Community 25|Community 25]]
+- [[_COMMUNITY_Community 26|Community 26]]
+- [[_COMMUNITY_Community 27|Community 27]]
+- [[_COMMUNITY_Community 28|Community 28]]
+- [[_COMMUNITY_Community 29|Community 29]]
+- [[_COMMUNITY_Community 30|Community 30]]
+- [[_COMMUNITY_Community 31|Community 31]]
 - [[_COMMUNITY_Community 32|Community 32]]
+- [[_COMMUNITY_Community 33|Community 33]]
+- [[_COMMUNITY_Community 34|Community 34]]
 - [[_COMMUNITY_Community 35|Community 35]]
 - [[_COMMUNITY_Community 36|Community 36]]
+- [[_COMMUNITY_Community 37|Community 37]]
 - [[_COMMUNITY_Community 44|Community 44]]
 - [[_COMMUNITY_Community 47|Community 47]]
 - [[_COMMUNITY_Community 49|Community 49]]
@@ -122,23 +131,23 @@
 - **Trend Prior Update Inputs** — readme_update_process, readme_qualitative_review, readme_creator_domain_needs, readme_offline_eval_results [EXTRACTED 1.00]
 - **Shorts Pattern Seed Domains** — readme_seed_phrases, readme_short_categories, readme_hook_patterns_manifest [EXTRACTED 1.00]
 
-## Communities (74 total, 16 thin omitted)
+## Communities (83 total, 17 thin omitted)
 
 ### Community 0 - "Community 0"
-Cohesion: 0.10
-Nodes (43): _dedup_moments(), main(), _overlap_ratio(), Path, Convert cross-platform match rows into a fixed eval manifest.  Reads iboclipss_m, Deduplicate near-overlapping windows per VOD. Highest views wins a slot., _read_jsonl(), main() (+35 more)
+Cohesion: 0.39
+Nodes (7): _dedup_moments(), main(), _overlap_ratio(), Path, Convert cross-platform match rows into a fixed eval manifest.  Reads iboclipss_m, Deduplicate near-overlapping windows per VOD. Highest views wins a slot., _read_jsonl()
 
 ### Community 1 - "Community 1"
-Cohesion: 0.09
-Nodes (65): Event, transcript_excerpt(), TranscriptSegment, main(), build_subprocess_command(), build_subprocess_env(), _json_safe(), Path (+57 more)
+Cohesion: 0.19
+Nodes (34): main(), _annotate_rows_with_gt(), _compute_eval(), delete_pipeline_debug_workflow(), get_active_clip_profile(), get_pipeline_debug_anchors(), get_pipeline_debug_run_prompt(), get_pipeline_debug_workflow() (+26 more)
 
 ### Community 2 - "Community 2"
 Cohesion: 0.08
 Nodes (26): _build_gql_payload(), _build_per_second_counts(), _build_per_second_emote_classes(), _classify_emote(), _compute_spike_scores(), download_chat(), enrich_segments(), _extract_vod_id() (+18 more)
 
 ### Community 3 - "Community 3"
-Cohesion: 0.09
-Nodes (35): _anchor_vod_media(), _append_jsonl(), apply_tiers(), assign_tier(), _base_row(), export_review_csv(), fingerprint_rate(), is_confirmed() (+27 more)
+Cohesion: 0.24
+Nodes (17): _anchor_vod_media(), _append_jsonl(), apply_tiers(), assign_tier(), _base_row(), export_review_csv(), is_confirmed(), judge_row() (+9 more)
 
 ### Community 4 - "Community 4"
 Cohesion: 0.20
@@ -157,16 +166,16 @@ Cohesion: 0.23
 Nodes (13): build_audit(), _classify_title(), main(), _newest_run_dir(), Path, Audit GT match recall: which discovered Iboclipss reposts never made it into GT., Normalize YouTube URL forms (shorts/<id>, watch?v=<id>, youtu.be/<id>)., _read_jsonl() (+5 more)
 
 ### Community 9 - "Community 9"
-Cohesion: 0.05
-Nodes (48): aggregate_tier(), _fmt(), format_report(), gold_manifest(), main(), missing_prediction_vods(), Any, Directional finder eval — localize the LLM moment finder's gap.  Scores the curr (+40 more)
+Cohesion: 0.13
+Nodes (25): aggregate_overall(), coverage_ratio(), evaluate_all(), evaluate_vod(), filter_manifest_tiers(), _finder_moments_path(), is_hit(), load_manifest() (+17 more)
 
 ### Community 10 - "Community 10"
 Cohesion: 0.15
 Nodes (10): AudioPeakMarginTests, IdfRankingTests, MergeSpanCapTests, SimpleNamespace, TranscriptMatch, _random_walk_values(), A VOD where the catchphrase occurs everywhere but the unique content     ('gotha, _segment() (+2 more)
 
 ### Community 11 - "Community 11"
-Cohesion: 0.05
-Nodes (87): ndarray, Segment, compute_segment_energy(), _mean_rms(), Path, RichSegment, Compute per-segment RMS energy from a WAV file.  Uses only the Python standard l, Compute RMS energy for each integer second of audio. (+79 more)
+Cohesion: 0.07
+Nodes (74): Segment, apply_chat_enrichment(), _calc_tempo(), _chat_enrichment_path(), _chunk_batches(), _chunk_cache_dir(), _chunk_cache_metadata(), _chunk_cache_path() (+66 more)
 
 ### Community 12 - "Community 12"
 Cohesion: 0.23
@@ -193,16 +202,16 @@ Cohesion: 0.30
 Nodes (16): _collection_chunks(), _covered_date_ranges(), _date_range_payload(), _intersecting_date_ranges(), _label_date_ranges(), _label_vod_count(), main(), _merge_date_ranges() (+8 more)
 
 ### Community 18 - "Community 18"
-Cohesion: 0.22
-Nodes (12): Downloader, ensure_vod_sources(), Any, Path, resolve_downloader(), source_video_path(), twitch_vod_url(), VodDownloadPreflightError (+4 more)
+Cohesion: 0.08
+Nodes (51): Downloader, Lock, ensure_vod_sources(), Any, Path, resolve_downloader(), source_video_path(), twitch_vod_url() (+43 more)
 
 ### Community 19 - "Community 19"
 Cohesion: 0.35
 Nodes (9): collect_clip_labels(), collect_clip_labels_with_summary(), _collection_input_summary(), _get_clips(), _get_user(), _get_vods(), TwitchClient, _write_cache() (+1 more)
 
 ### Community 20 - "Community 20"
-Cohesion: 0.24
-Nodes (12): _blended_gap_duration(), _clamp_negative_duration(), _cycled_duration(), _dedupe_negative_rows(), _duration_for_positive_window(), _interstitial_window_starts(), _mine_background_negatives(), _mine_boundary_negatives() (+4 more)
+Cohesion: 0.18
+Nodes (17): build_captured_vod_rows(), build_manifest_from_matches(), filter_gold_manifest(), _make_default_load_fingerprint(), _make_default_match(), _make_default_verify(), match_and_verify(), MatchVerifyResult (+9 more)
 
 ### Community 21 - "Community 21"
 Cohesion: 0.29
@@ -216,13 +225,45 @@ Nodes (9): Path, _read_jsonl(), _read_progress_file(), _read_source_manifest(), 
 Cohesion: 0.06
 Nodes (53): build_outcome_holdout_dataset(), _fallback_candidate_id(), _feature_replay_index(), _is_cross_platform_positive_split(), main(), _normalize_split(), _prepare_rows(), Counter (+45 more)
 
+### Community 26 - "Community 26"
+Cohesion: 0.14
+Nodes (7): AggregateTierTests, GoldManifestTests, _hit(), MissingPredictionVodsTests, RunTests, TwoTierRecallTests, _vod()
+
+### Community 27 - "Community 27"
+Cohesion: 0.19
+Nodes (16): aggregate_tier(), _fmt(), format_report(), gold_manifest(), main(), missing_prediction_vods(), Any, Directional finder eval — localize the LLM moment finder's gap.  Scores the curr (+8 more)
+
+### Community 28 - "Community 28"
+Cohesion: 0.17
+Nodes (7): ApplyTiersTests, _full_vod_fingerprint(), _pseudo_random_values(), Fingerprint, Random walk over 32-bit values: like real chromaprint output, adjacent     items, VerifyGtMatchesHelperTests, VerifyMomentTests
+
+### Community 29 - "Community 29"
+Cohesion: 0.17
+Nodes (5): BuildCapturedVodRowsTests, BuildManifestFromMatchesTests, _match_row(), MatchAndVerifyTests, VerdictCountsTests
+
+### Community 30 - "Community 30"
+Cohesion: 0.15
+Nodes (14): transcript_excerpt(), TranscriptSegment, _build_filtered_clip_map(), _build_review_rows(), _clip_overlap(), PipelineDebugStartRequest, FileResponse, Overlap fraction of [start,end] covered by [clip_start,clip_end]. (+6 more)
+
+### Community 31 - "Community 31"
+Cohesion: 0.27
+Nodes (11): fingerprint_rate(), null_window_start(), BaseException, Fingerprint, Deterministic start of a wrong window far away from the claimed scope., Slice [start_sec, end_sec] out of a full fingerprint.      Returns (values, actu, _repost_fingerprint(), _scoped_remote_fingerprint() (+3 more)
+
 ### Community 32 - "Community 32"
 Cohesion: 0.07
 Nodes (29): Trend Prior Data, Candidate Clip, Clip-Worthy Topics, Cheap Deterministic Prior Rationale, High-Performing Short-Form Hooks, hook_patterns.json Manifest, Judge, Avoid Scraping Proprietary or Copyrighted Corpora Rationale (+21 more)
 
+### Community 33 - "Community 33"
+Cohesion: 0.36
+Nodes (9): build_subprocess_command(), build_subprocess_env(), _json_safe(), Path, run_job_subprocess(), _subprocess_error(), _writable_cache_dir(), Launch the workflow orchestrator as a fully detached subprocess.      Running in (+1 more)
+
+### Community 34 - "Community 34"
+Cohesion: 0.29
+Nodes (8): Event, _mirror_job_progress(), Mirror the running worker's job status into the workflow status.      The orches, Return (status, progress_pct) from the worker's per-job progress file.      None, _read_job_progress(), _run_workflow(), How many Whisper instances the GPU can hold concurrently.      Auto-derived from, transcription_slots()
+
 ### Community 35 - "Community 35"
-Cohesion: 0.13
-Nodes (37): configure_job_logging(), Configure root logging for a detached pipeline subprocess.      The orchestrator, _audio_cache_metadata(), _audio_cache_metadata_path(), _audio_cache_path(), _cleanup_audio_artifacts(), _cleanup_later(), _cleanup_serving_source_media() (+29 more)
+Cohesion: 0.08
+Nodes (50): configure_job_logging(), Configure root logging for a detached pipeline subprocess.      The orchestrator, ndarray, _audio_cache_metadata(), _audio_cache_metadata_path(), _audio_cache_path(), _cleanup_audio_artifacts(), _cleanup_later() (+42 more)
 
 ### Community 36 - "Community 36"
 Cohesion: 0.08
@@ -269,8 +310,8 @@ Cohesion: 0.17
 Nodes (32): _as_float(), _debug_dirs(), export_serving_hard_negatives(), _fair_cap_rows_by_vod(), _feature_similarity(), _hard_negative_rows_for_job(), _holdout_vod_ids(), main() (+24 more)
 
 ### Community 89 - "Community 89"
-Cohesion: 0.17
-Nodes (24): build_label_rows(), _classify_clip_views(), _clip_merge_end(), _clip_window_bounds(), _creator_density_bonus(), _default_view_thresholds(), _finalize_clip_region(), _label_row_key() (+16 more)
+Cohesion: 0.12
+Nodes (36): _blended_gap_duration(), build_label_rows(), _clamp_negative_duration(), _classify_clip_views(), _clip_merge_end(), _clip_window_bounds(), _creator_density_bonus(), _cycled_duration() (+28 more)
 
 ### Community 113 - "Community 113"
 Cohesion: 0.19
@@ -289,8 +330,8 @@ Cohesion: 0.13
 Nodes (17): append_annotations(), _apply_manual_label(), _manual_label_class(), _manual_ordinal_label(), merge_annotations(), Path, read_annotations(), _sample_id() (+9 more)
 
 ### Community 134 - "Community 134"
-Cohesion: 0.05
-Nodes (76): Lock, _build_date_windows(), _coerce_publish_timestamp(), _coerce_upload_date(), _download_clips(), _enrich_with_upload_dates(), _entry_date(), _fetch_single_video_metadata() (+68 more)
+Cohesion: 0.06
+Nodes (73): main(), _process_vod(), Path, Download Jynxzi VODs, transcribe them, and write transcript + fingerprint caches, _read_vod_csv(), _write_transcript_cache(), _build_date_windows(), _coerce_publish_timestamp() (+65 more)
 
 ### Community 136 - "Community 136"
 Cohesion: 0.22
@@ -351,22 +392,22 @@ Nodes (4): reason, review_required, rows, status
 ## Knowledge Gaps
 - **56 isolated node(s):** `version`, `updated_at`, `source_note`, `hook_patterns`, `topic_patterns` (+51 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **16 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **17 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `RichSegment` connect `Community 11` to `Community 2`, `Community 36`, `Community 136`, `Community 141`, `Community 115`?**
-  _High betweenness centrality (0.046) - this node is a cross-community bridge._
-- **Why does `load_manifest()` connect `Community 9` to `Community 1`?**
-  _High betweenness centrality (0.039) - this node is a cross-community bridge._
+- **Why does `load_manifest()` connect `Community 9` to `Community 1`, `Community 27`?**
+  _High betweenness centrality (0.054) - this node is a cross-community bridge._
+- **Why does `RichSegment` connect `Community 11` to `Community 2`, `Community 35`, `Community 36`, `Community 136`, `Community 141`, `Community 115`?**
+  _High betweenness centrality (0.047) - this node is a cross-community bridge._
+- **Why does `RankedCandidate` connect `Community 115` to `Community 4`, `Community 86`?**
+  _High betweenness centrality (0.035) - this node is a cross-community bridge._
 - **Are the 28 inferred relationships involving `RichSegment` (e.g. with `CandidateFeatures` and `LlmMoment`) actually correct?**
   _`RichSegment` has 28 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 3 inferred relationships involving `JobsRouterTests` (e.g. with `ClipFeedbackPayload` and `ClipFeedbackResponse`) actually correct?**
   _`JobsRouterTests` has 3 INFERRED edges - model-reasoned connections that need verification._
 - **What connects `version`, `updated_at`, `source_note` to the rest of the system?**
-  _177 weakly-connected nodes found - possible documentation gaps or missing edges._
-- **Should `Community 0` be split into smaller, more focused modules?**
-  _Cohesion score 0.10285714285714286 - nodes in this community are weakly interconnected._
-- **Should `Community 1` be split into smaller, more focused modules?**
-  _Cohesion score 0.08779631255487269 - nodes in this community are weakly interconnected._
+  _184 weakly-connected nodes found - possible documentation gaps or missing edges._
+- **Should `Community 2` be split into smaller, more focused modules?**
+  _Cohesion score 0.07822410147991543 - nodes in this community are weakly interconnected._
