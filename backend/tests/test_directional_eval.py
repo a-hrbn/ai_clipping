@@ -171,8 +171,76 @@ class TwoSourceRunTests(unittest.TestCase):
         self.assertIn("RANKING GAP", report.upper())
 
 
+class CoverageGapDenominatorTests(unittest.TestCase):
+    def test_no_pred_gold_vod_is_coverage_gap_not_a_miss(self) -> None:
+        # B has gold but no finder predictions: it is a coverage gap, surfaced
+        # separately, and must NOT drag the with-pred recall denominator.
+        manifest = {
+            "A": [{"start": 10.0, "end": 30.0, "views": 300_000, "gt_tier": "gold"}],
+            "B": [{"start": 10.0, "end": 30.0, "views": 300_000, "gt_tier": "gold"}],
+        }
+        final = {"A": [{"start_time": 11.0, "end_time": 29.0, "rank": 1}]}
+
+        result = directional_eval.run(manifest, final, ks=(5, 10, 20))
+
+        self.assertEqual(result["gold_vods"], 2)
+        self.assertEqual(result["scored_vods"], 1)          # only A is scored
+        self.assertEqual(result["missing_prediction_vods"], ["B"])
+        # floor counts only A's gold moment (a hit) — B does not appear as a miss
+        self.assertEqual(result["floor"]["gt_count"], 1)
+        self.assertEqual(result["floor"]["recall"]["20"], 1.0)
+
+    def test_report_shows_coverage_gap_not_a_miss(self) -> None:
+        manifest = {
+            "A": [{"start": 10.0, "end": 30.0, "views": 300_000, "gt_tier": "gold"}],
+            "B": [{"start": 10.0, "end": 30.0, "views": 300_000, "gt_tier": "gold"}],
+        }
+        final = {"A": [{"start_time": 11.0, "end_time": 29.0, "rank": 1}]}
+
+        result = directional_eval.run(manifest, final, ks=(10, 20))
+        report = directional_eval.format_report(result)
+
+        self.assertIn("coverage gap", report.lower())
+        self.assertIn("excluded from recall", report.lower())
+        self.assertIn("B", report)  # the gap VOD id is listed
+
+
+class AnchorRestrictionTests(unittest.TestCase):
+    def test_non_anchor_gold_vod_excluded_from_canonical(self) -> None:
+        manifest = {
+            "A": [{"start": 10.0, "end": 30.0, "views": 300_000, "gt_tier": "gold"}],
+            "2749590872": [{"start": 10.0, "end": 30.0, "views": 300_000, "gt_tier": "gold"}],
+        }
+        preds = {
+            "A": [{"start_time": 11.0, "end_time": 29.0, "rank": 1}],
+            "2749590872": [{"start_time": 11.0, "end_time": 29.0, "rank": 1}],
+        }
+
+        result = directional_eval.run(manifest, preds, anchor_vod_ids=["A"], ks=(5, 10, 20))
+
+        self.assertTrue(result["anchor_restricted"])
+        self.assertEqual(result["gold_vods"], 1)            # the non-anchor VOD is gone
+        self.assertEqual(result["scored_vods"], 1)
+        self.assertEqual(result["floor"]["gt_count"], 1)    # only A's moment counted
+
+    def test_no_anchor_arg_keeps_all_gold(self) -> None:
+        manifest = {
+            "A": [{"start": 10.0, "end": 30.0, "views": 300_000, "gt_tier": "gold"}],
+            "C": [{"start": 10.0, "end": 30.0, "views": 300_000, "gt_tier": "gold"}],
+        }
+        preds = {
+            "A": [{"start_time": 11.0, "end_time": 29.0, "rank": 1}],
+            "C": [{"start_time": 11.0, "end_time": 29.0, "rank": 1}],
+        }
+
+        result = directional_eval.run(manifest, preds, ks=(5, 10, 20))
+
+        self.assertFalse(result["anchor_restricted"])
+        self.assertEqual(result["gold_vods"], 2)
+
+
 class RunTests(unittest.TestCase):
-    def test_end_to_end_two_tier_with_missing_predictions(self) -> None:
+    def test_end_to_end_two_tier_with_coverage_gap(self) -> None:
         manifest = {
             "A": [
                 {"start": 10.0, "end": 30.0, "views": 50_000, "gt_tier": "gold"},
@@ -187,14 +255,15 @@ class RunTests(unittest.TestCase):
         )
 
         self.assertEqual(result["gold_vods"], 2)
-        self.assertEqual(result["missing_prediction_vods"], ["B"])
+        self.assertEqual(result["scored_vods"], 1)
+        self.assertEqual(result["missing_prediction_vods"], ["B"])  # coverage gap, not a miss
         self.assertEqual(result["headline_min_views"], 100_000)
-        # floor: A's gold hit at rank 2, B's gold a miss (no preds); silver excluded
-        self.assertEqual(result["floor"]["gt_count"], 2)
-        self.assertEqual(result["floor"]["recall"]["5"], 0.5)
-        # headline (>=100k): only B's 300k gold moment, which is a miss
-        self.assertEqual(result["headline"]["gt_count"], 1)
-        self.assertEqual(result["headline"]["recall"]["5"], 0.0)
+        # floor: only A is scored (B is a coverage gap); A's 50k gold hits at rank 2
+        self.assertEqual(result["floor"]["gt_count"], 1)
+        self.assertEqual(result["floor"]["recall"]["5"], 1.0)
+        # headline (>=100k): A's gold is 50k (below tier), B excluded as a gap -> empty tier
+        self.assertEqual(result["headline"]["gt_count"], 0)
+        self.assertIsNone(result["headline"]["recall"]["5"])
 
     def test_report_renders_both_tiers(self) -> None:
         manifest = {"A": [{"start": 10.0, "end": 30.0, "views": 200_000, "gt_tier": "gold"}]}

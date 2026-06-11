@@ -52,6 +52,7 @@ from ml.eval_clip_finder import (
     load_final_predictions,
     load_manifest,
     load_predictions,
+    read_anchor_vod_ids,
 )
 
 DEFAULT_KS: tuple[int, ...] = (5, 10, 20, 50)
@@ -201,6 +202,7 @@ def run(
     final_predictions_by_vod: dict[str, list[dict]],
     raw_predictions_by_vod: dict[str, list[dict]] | None = None,
     *,
+    anchor_vod_ids: list[str] | None = None,
     ks: tuple[int, ...] = DEFAULT_KS,
     headline_min_views: float = DEFAULT_HEADLINE_MIN_VIEWS,
     gold_tiers: set[str] | tuple[str, ...] = (GOLD_TIER,),
@@ -214,30 +216,45 @@ def run(
         ceiling (raw@any). When omitted it defaults to the final set, so existing
         callers stay backward-compatible.
 
+    Honest denominator: recall and the ceiling are computed only over gold VODs
+    the finder actually scored (those with raw predictions). Gold VODs with no
+    predictions are a coverage gap — surfaced separately, never folded in as
+    silent misses. With `anchor_vod_ids`, the eval is restricted to that anchor
+    set (the canonical comparison set); non-anchor gold VODs are dropped.
+
     Returns two-tier product recall, the generation ceiling, and the surfaced
-    missing-prediction coverage gap.
+    coverage gap.
     """
     if raw_predictions_by_vod is None:
         raw_predictions_by_vod = final_predictions_by_vod
 
     gold = gold_manifest(manifest, gold_tiers)
-    # A gold VOD with no raw finder output is one the finder never scored.
+    if anchor_vod_ids is not None:
+        anchor_set = set(anchor_vod_ids)
+        gold = {vod_id: moments for vod_id, moments in gold.items() if vod_id in anchor_set}
+
+    # Coverage gap: gold VODs the finder never scored (no raw output). Surfaced,
+    # not folded into the denominator. The scored set is everything else.
     missing = missing_prediction_vods(gold, raw_predictions_by_vod)
+    scored = [vod_id for vod_id in sorted(gold) if raw_predictions_by_vod.get(vod_id)]
+    scored_gold = {vod_id: gold[vod_id] for vod_id in scored}
 
     per_vod = [
         evaluate_vod(gold[vod_id], final_predictions_by_vod.get(vod_id, []), ks, vod_id=vod_id)
-        for vod_id in sorted(gold)
+        for vod_id in scored
     ]
     tiers = two_tier_recall(per_vod, ks, headline_min_views=headline_min_views)
     generation = {
-        "floor": generation_ceiling(gold, raw_predictions_by_vod, min_views=0.0),
-        "headline": generation_ceiling(gold, raw_predictions_by_vod, min_views=headline_min_views),
+        "floor": generation_ceiling(scored_gold, raw_predictions_by_vod, min_views=0.0),
+        "headline": generation_ceiling(scored_gold, raw_predictions_by_vod, min_views=headline_min_views),
     }
 
     return {
         "ks": list(ks),
         "gold_tiers": sorted(gold_tiers),
+        "anchor_restricted": anchor_vod_ids is not None,
         "gold_vods": len(gold),
+        "scored_vods": len(scored),
         "missing_prediction_vods": missing,
         "headline_min_views": tiers["headline_min_views"],
         "floor": tiers["floor"],
@@ -291,14 +308,16 @@ def format_report(result: dict) -> str:
         f"Directional Finder Eval — product vs generation ceiling  (coverage>={result['coverage_threshold']})",
         "=" * 72,
         f"Gold tiers: {','.join(result['gold_tiers'])}   Gold VODs: {result['gold_vods']}"
+        f"   Scored: {result.get('scored_vods', result['gold_vods'])}"
+        f"{'  (anchor-restricted)' if result.get('anchor_restricted') else ''}"
         f"   Headline: views>={int(result['headline_min_views']):,}",
     ]
 
     missing = result["missing_prediction_vods"]
     if missing:
         lines.append(
-            f"⚠  {len(missing)}/{result['gold_vods']} gold VODs have NO finder predictions "
-            f"(counted as misses): {', '.join(missing)}"
+            f"⚠  Coverage gap: {len(missing)}/{result['gold_vods']} gold VODs have NO finder "
+            f"predictions — excluded from recall, NOT counted as misses: {', '.join(missing)}"
         )
         lines.append(
             "   Close this gap by running the LLM moment finder over them "
@@ -344,6 +363,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="Min views for the headline tier (interim 100000)")
     parser.add_argument("--gold-tiers", default=GOLD_TIER,
                         help="Verification tiers treated as gold (default: gold)")
+    parser.add_argument("--anchor-csv", default=str(eval_clip_finder.DEFAULT_ANCHOR_CSV),
+                        help="CSV of anchor VOD IDs the canonical eval is restricted to")
+    parser.add_argument("--all-gold", action="store_true",
+                        help="Score every gold VOD, not just the anchor set (off the canonical metric)")
     parser.add_argument("--json", dest="output_json", action="store_true")
     args = parser.parse_args(argv)
 
@@ -352,21 +375,27 @@ def main(argv: list[str] | None = None) -> int:
 
     manifest = load_manifest(pathlib.Path(args.manifest))
     gold = gold_manifest(manifest, gold_tiers)
-    storage = pathlib.Path(args.predictions_dir)
-    final_predictions_by_vod = load_final_predictions(sorted(gold), storage, args.workflow_id)
-    raw_predictions_by_vod = load_predictions(sorted(gold), storage, args.workflow_id)
+    anchor_vod_ids = None if args.all_gold else (read_anchor_vod_ids(pathlib.Path(args.anchor_csv)) or None)
 
-    # Surface the paid-finder gap before scoring (also embedded in the result).
-    missing = missing_prediction_vods(gold, raw_predictions_by_vod)
+    # Load predictions only for the VODs that will actually be scored.
+    load_ids = sorted(gold) if anchor_vod_ids is None else sorted(set(gold) & set(anchor_vod_ids))
+    storage = pathlib.Path(args.predictions_dir)
+    final_predictions_by_vod = load_final_predictions(load_ids, storage, args.workflow_id)
+    raw_predictions_by_vod = load_predictions(load_ids, storage, args.workflow_id)
+
+    result = run(manifest, final_predictions_by_vod, raw_predictions_by_vod,
+                 anchor_vod_ids=anchor_vod_ids, ks=ks,
+                 headline_min_views=args.headline_min_views, gold_tiers=gold_tiers)
+
+    # Surface the paid-finder coverage gap (also embedded in the result).
+    missing = result["missing_prediction_vods"]
     if missing:
         print(
-            f"WARNING: {len(missing)}/{len(gold)} gold VODs lack finder predictions; "
+            f"WARNING: {len(missing)}/{result['gold_vods']} gold VODs lack finder predictions; "
             f"generating them is a paid LLM finder run: {', '.join(missing)}",
             file=sys.stderr,
         )
 
-    result = run(manifest, final_predictions_by_vod, raw_predictions_by_vod, ks=ks,
-                 headline_min_views=args.headline_min_views, gold_tiers=gold_tiers)
     result["computed_at"] = datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00", "Z")
 
     if args.output_json:
