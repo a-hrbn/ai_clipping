@@ -1308,7 +1308,7 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "ml_build_eval_manifest",
-      "community": 0,
+      "community": 134,
       "norm_label": "build_eval_manifest.py"
     },
     {
@@ -1318,7 +1318,7 @@
       "source_location": "L33",
       "_origin": "ast",
       "id": "ml_build_eval_manifest_main",
-      "community": 0,
+      "community": 134,
       "norm_label": "main()"
     },
     {
@@ -1328,7 +1328,7 @@
       "source_location": "L83",
       "_origin": "ast",
       "id": "ml_build_eval_manifest_dedup_moments",
-      "community": 0,
+      "community": 134,
       "norm_label": "_dedup_moments()"
     },
     {
@@ -1338,7 +1338,7 @@
       "source_location": "L114",
       "_origin": "ast",
       "id": "ml_build_eval_manifest_overlap_ratio",
-      "community": 0,
+      "community": 134,
       "norm_label": "_overlap_ratio()"
     },
     {
@@ -1348,7 +1348,7 @@
       "source_location": "L124",
       "_origin": "ast",
       "id": "ml_build_eval_manifest_read_jsonl",
-      "community": 0,
+      "community": 134,
       "norm_label": "_read_jsonl()"
     },
     {
@@ -1358,7 +1358,7 @@
       "source_location": "L124",
       "_origin": "ast",
       "id": "ml_build_eval_manifest_py_path",
-      "community": 0,
+      "community": 134,
       "norm_label": "path"
     },
     {
@@ -1368,7 +1368,7 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "ml_build_eval_manifest_rationale_1",
-      "community": 0,
+      "community": 134,
       "norm_label": "convert cross-platform match rows into a fixed eval manifest.  reads iboclipss_m"
     },
     {
@@ -1378,7 +1378,7 @@
       "source_location": "L84",
       "_origin": "ast",
       "id": "ml_build_eval_manifest_rationale_84",
-      "community": 0,
+      "community": 134,
       "norm_label": "deduplicate near-overlapping windows per vod. highest views wins a slot."
     },
     {
@@ -2638,7 +2638,7 @@
       "source_location": "L692",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_sample_negative_rows",
-      "community": 89,
+      "community": 31,
       "norm_label": "_sample_negative_rows()"
     },
     {
@@ -2648,7 +2648,7 @@
       "source_location": "L730",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_mine_boundary_negatives",
-      "community": 89,
+      "community": 31,
       "norm_label": "_mine_boundary_negatives()"
     },
     {
@@ -2658,7 +2658,7 @@
       "source_location": "L779",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_mine_interstitial_negatives",
-      "community": 89,
+      "community": 31,
       "norm_label": "_mine_interstitial_negatives()"
     },
     {
@@ -2668,7 +2668,7 @@
       "source_location": "L831",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_mine_background_negatives",
-      "community": 89,
+      "community": 31,
       "norm_label": "_mine_background_negatives()"
     },
     {
@@ -2678,7 +2678,7 @@
       "source_location": "L885",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_interstitial_window_starts",
-      "community": 89,
+      "community": 31,
       "norm_label": "_interstitial_window_starts()"
     },
     {
@@ -2688,7 +2688,7 @@
       "source_location": "L906",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_negative_target_durations",
-      "community": 89,
+      "community": 31,
       "norm_label": "_negative_target_durations()"
     },
     {
@@ -2698,7 +2698,7 @@
       "source_location": "L917",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_duration_for_positive_window",
-      "community": 89,
+      "community": 31,
       "norm_label": "_duration_for_positive_window()"
     },
     {
@@ -2708,7 +2708,7 @@
       "source_location": "L921",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_blended_gap_duration",
-      "community": 89,
+      "community": 31,
       "norm_label": "_blended_gap_duration()"
     },
     {
@@ -2718,7 +2718,7 @@
       "source_location": "L927",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_clamp_negative_duration",
-      "community": 89,
+      "community": 31,
       "norm_label": "_clamp_negative_duration()"
     },
     {
@@ -2728,7 +2728,7 @@
       "source_location": "L934",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_cycled_duration",
-      "community": 89,
+      "community": 31,
       "norm_label": "_cycled_duration()"
     },
     {
@@ -2738,7 +2738,7 @@
       "source_location": "L940",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_dedupe_negative_rows",
-      "community": 89,
+      "community": 31,
       "norm_label": "_dedupe_negative_rows()"
     },
     {
@@ -2888,7 +2888,7 @@
       "source_location": "L1137",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_overlaps_any",
-      "community": 89,
+      "community": 31,
       "norm_label": "_overlaps_any()"
     },
     {
@@ -2918,7 +2918,7 @@
       "source_location": "L1159",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_label_row_key",
-      "community": 89,
+      "community": 25,
       "norm_label": "_label_row_key()"
     },
     {
@@ -3178,7 +3178,7 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "ml_directional_eval",
-      "community": 27,
+      "community": 9,
       "norm_label": "directional_eval.py"
     },
     {
@@ -3188,7 +3188,7 @@
       "source_location": "L55",
       "_origin": "ast",
       "id": "ml_directional_eval_gold_manifest",
-      "community": 27,
+      "community": 9,
       "norm_label": "gold_manifest()"
     },
     {
@@ -3198,7 +3198,7 @@
       "source_location": "L70",
       "_origin": "ast",
       "id": "ml_directional_eval_missing_prediction_vods",
-      "community": 27,
+      "community": 9,
       "norm_label": "missing_prediction_vods()"
     },
     {
@@ -3208,7 +3208,7 @@
       "source_location": "L86",
       "_origin": "ast",
       "id": "ml_directional_eval_aggregate_tier",
-      "community": 27,
+      "community": 9,
       "norm_label": "aggregate_tier()"
     },
     {
@@ -3218,7 +3218,7 @@
       "source_location": "L137",
       "_origin": "ast",
       "id": "ml_directional_eval_two_tier_recall",
-      "community": 27,
+      "community": 9,
       "norm_label": "two_tier_recall()"
     },
     {
@@ -3228,7 +3228,7 @@
       "source_location": "L155",
       "_origin": "ast",
       "id": "ml_directional_eval_run",
-      "community": 27,
+      "community": 9,
       "norm_label": "run()"
     },
     {
@@ -3238,7 +3238,7 @@
       "source_location": "L194",
       "_origin": "ast",
       "id": "ml_directional_eval_fmt",
-      "community": 27,
+      "community": 9,
       "norm_label": "_fmt()"
     },
     {
@@ -3248,7 +3248,7 @@
       "source_location": "L194",
       "_origin": "ast",
       "id": "ml_directional_eval_py_any",
-      "community": 27,
+      "community": 9,
       "norm_label": "any"
     },
     {
@@ -3258,7 +3258,7 @@
       "source_location": "L202",
       "_origin": "ast",
       "id": "ml_directional_eval_tier_line",
-      "community": 27,
+      "community": 9,
       "norm_label": "_tier_line()"
     },
     {
@@ -3268,7 +3268,7 @@
       "source_location": "L211",
       "_origin": "ast",
       "id": "ml_directional_eval_format_report",
-      "community": 27,
+      "community": 9,
       "norm_label": "format_report()"
     },
     {
@@ -3278,7 +3278,7 @@
       "source_location": "L249",
       "_origin": "ast",
       "id": "ml_directional_eval_main",
-      "community": 27,
+      "community": 9,
       "norm_label": "main()"
     },
     {
@@ -3288,7 +3288,7 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "ml_directional_eval_rationale_1",
-      "community": 27,
+      "community": 9,
       "norm_label": "directional finder eval \u2014 localize the llm moment finder's gap.  scores the curr"
     },
     {
@@ -3298,7 +3298,7 @@
       "source_location": "L59",
       "_origin": "ast",
       "id": "ml_directional_eval_rationale_59",
-      "community": 27,
+      "community": 9,
       "norm_label": "gold-filtered manifest: keep only gt_moments in `tiers`, drop empty vods.      w"
     },
     {
@@ -3308,7 +3308,7 @@
       "source_location": "L74",
       "_origin": "ast",
       "id": "ml_directional_eval_rationale_74",
-      "community": 27,
+      "community": 9,
       "norm_label": "gold vods (>=1 gold moment) with no finder predictions, sorted.      these are c"
     },
     {
@@ -3318,7 +3318,7 @@
       "source_location": "L92",
       "_origin": "ast",
       "id": "ml_directional_eval_rationale_92",
-      "community": 27,
+      "community": 9,
       "norm_label": "micro-averaged recall over gold gt_hits with views >= min_views.      operates o"
     },
     {
@@ -3328,7 +3328,7 @@
       "source_location": "L143",
       "_origin": "ast",
       "id": "ml_directional_eval_rationale_143",
-      "community": 27,
+      "community": 9,
       "norm_label": "floor (all gold) + headline (gold with views >= headline_min_views)."
     },
     {
@@ -3338,7 +3338,7 @@
       "source_location": "L163",
       "_origin": "ast",
       "id": "ml_directional_eval_rationale_163",
-      "community": 27,
+      "community": 9,
       "norm_label": "run the directional eval over the gold-filtered manifest.      returns a structu"
     },
     {
@@ -6032,6 +6032,306 @@
       "norm_label": "match a batch of reposts against captured vods and auto-mint gold.      collabor"
     },
     {
+      "label": "gt_match_verify_weekly.py",
+      "file_type": "code",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L1",
+      "_origin": "ast",
+      "id": "ml_gt_match_verify_weekly",
+      "community": 20,
+      "norm_label": "gt_match_verify_weekly.py"
+    },
+    {
+      "label": "_repost_id()",
+      "file_type": "code",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L69",
+      "_origin": "ast",
+      "id": "ml_gt_match_verify_weekly_repost_id",
+      "community": 20,
+      "norm_label": "_repost_id()"
+    },
+    {
+      "label": "select_new_reposts()",
+      "file_type": "code",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L82",
+      "_origin": "ast",
+      "id": "ml_gt_match_verify_weekly_select_new_reposts",
+      "community": 20,
+      "norm_label": "select_new_reposts()"
+    },
+    {
+      "label": "_moment_key()",
+      "file_type": "code",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L105",
+      "_origin": "ast",
+      "id": "ml_gt_match_verify_weekly_moment_key",
+      "community": 20,
+      "norm_label": "_moment_key()"
+    },
+    {
+      "label": "merge_manifests()",
+      "file_type": "code",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L113",
+      "_origin": "ast",
+      "id": "ml_gt_match_verify_weekly_merge_manifests",
+      "community": 20,
+      "norm_label": "merge_manifests()"
+    },
+    {
+      "label": "gold_accrual()",
+      "file_type": "code",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L139",
+      "_origin": "ast",
+      "id": "ml_gt_match_verify_weekly_gold_accrual",
+      "community": 20,
+      "norm_label": "gold_accrual()"
+    },
+    {
+      "label": "matched_ids()",
+      "file_type": "code",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L171",
+      "_origin": "ast",
+      "id": "ml_gt_match_verify_weekly_matched_ids",
+      "community": 20,
+      "norm_label": "matched_ids()"
+    },
+    {
+      "label": "load_match_state()",
+      "file_type": "code",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L176",
+      "_origin": "ast",
+      "id": "ml_gt_match_verify_weekly_load_match_state",
+      "community": 20,
+      "norm_label": "load_match_state()"
+    },
+    {
+      "label": "Path",
+      "file_type": "code",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L176",
+      "_origin": "ast",
+      "id": "ml_gt_match_verify_weekly_py_path",
+      "community": 20,
+      "norm_label": "path"
+    },
+    {
+      "label": "save_match_state()",
+      "file_type": "code",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L193",
+      "_origin": "ast",
+      "id": "ml_gt_match_verify_weekly_save_match_state",
+      "community": 20,
+      "norm_label": "save_match_state()"
+    },
+    {
+      "label": "_read_jsonl()",
+      "file_type": "code",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L202",
+      "_origin": "ast",
+      "id": "ml_gt_match_verify_weekly_read_jsonl",
+      "community": 20,
+      "norm_label": "_read_jsonl()"
+    },
+    {
+      "label": "_write_jsonl()",
+      "file_type": "code",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L214",
+      "_origin": "ast",
+      "id": "ml_gt_match_verify_weekly_write_jsonl",
+      "community": 20,
+      "norm_label": "_write_jsonl()"
+    },
+    {
+      "label": "RepostDiscoveryZeroed",
+      "file_type": "code",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L223",
+      "_origin": "ast",
+      "id": "ml_gt_match_verify_weekly_repostdiscoveryzeroed",
+      "community": 20,
+      "norm_label": "repostdiscoveryzeroed"
+    },
+    {
+      "label": "list_iboclipss_reposts()",
+      "file_type": "code",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L232",
+      "_origin": "ast",
+      "id": "ml_gt_match_verify_weekly_list_iboclipss_reposts",
+      "community": 20,
+      "norm_label": "list_iboclipss_reposts()"
+    },
+    {
+      "label": "load_captured_vod_ids()",
+      "file_type": "code",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L287",
+      "_origin": "ast",
+      "id": "ml_gt_match_verify_weekly_load_captured_vod_ids",
+      "community": 20,
+      "norm_label": "load_captured_vod_ids()"
+    },
+    {
+      "label": "run_weekly_match_verify()",
+      "file_type": "code",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L296",
+      "_origin": "ast",
+      "id": "ml_gt_match_verify_weekly_run_weekly_match_verify",
+      "community": 20,
+      "norm_label": "run_weekly_match_verify()"
+    },
+    {
+      "label": "main()",
+      "file_type": "code",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L395",
+      "_origin": "ast",
+      "id": "ml_gt_match_verify_weekly_main",
+      "community": 20,
+      "norm_label": "main()"
+    },
+    {
+      "label": "GT-flywheel weekly match+verify job \u2014 the gold-minting wrapper (issue #8 / PRD #",
+      "file_type": "rationale",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L1",
+      "_origin": "ast",
+      "id": "ml_gt_match_verify_weekly_rationale_1",
+      "community": 20,
+      "norm_label": "gt-flywheel weekly match+verify job \u2014 the gold-minting wrapper (issue #8 / prd #"
+    },
+    {
+      "label": "Normalize a repost record (or bare id) to a stable string id.      Prefers the d",
+      "file_type": "rationale",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L70",
+      "_origin": "ast",
+      "id": "ml_gt_match_verify_weekly_rationale_70",
+      "community": 20,
+      "norm_label": "normalize a repost record (or bare id) to a stable string id.      prefers the d"
+    },
+    {
+      "label": "Pure new-repost-selection diff.      Given scanned @Iboclipss repost records and",
+      "file_type": "rationale",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L83",
+      "_origin": "ast",
+      "id": "ml_gt_match_verify_weekly_rationale_83",
+      "community": 20,
+      "norm_label": "pure new-repost-selection diff.      given scanned @iboclipss repost records and"
+    },
+    {
+      "label": "Identity of a matched moment within a VOD: its repost URL, else its span.",
+      "file_type": "rationale",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L106",
+      "_origin": "ast",
+      "id": "ml_gt_match_verify_weekly_rationale_106",
+      "community": 20,
+      "norm_label": "identity of a matched moment within a vod: its repost url, else its span."
+    },
+    {
+      "label": "Union a fresh batch's manifest into the accumulated one, per VOD.      Moments a",
+      "file_type": "rationale",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L114",
+      "_origin": "ast",
+      "id": "ml_gt_match_verify_weekly_rationale_114",
+      "community": 20,
+      "norm_label": "union a fresh batch's manifest into the accumulated one, per vod.      moments a"
+    },
+    {
+      "label": "Confirmed-gold accrual across the manifest, as progress toward the target.",
+      "file_type": "rationale",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L140",
+      "_origin": "ast",
+      "id": "ml_gt_match_verify_weekly_rationale_140",
+      "community": 20,
+      "norm_label": "confirmed-gold accrual across the manifest, as progress toward the target."
+    },
+    {
+      "label": "The set of repost ids recorded as already matched in ``state``.",
+      "file_type": "rationale",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L172",
+      "_origin": "ast",
+      "id": "ml_gt_match_verify_weekly_rationale_172",
+      "community": 20,
+      "norm_label": "the set of repost ids recorded as already matched in ``state``."
+    },
+    {
+      "label": "Load the already-matched state. Missing/unreadable \u2192 empty (safe restart).",
+      "file_type": "rationale",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L177",
+      "_origin": "ast",
+      "id": "ml_gt_match_verify_weekly_rationale_177",
+      "community": 20,
+      "norm_label": "load the already-matched state. missing/unreadable \u2192 empty (safe restart)."
+    },
+    {
+      "label": "Atomically persist the already-matched state (tmp file + replace).",
+      "file_type": "rationale",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L194",
+      "_origin": "ast",
+      "id": "ml_gt_match_verify_weekly_rationale_194",
+      "community": 20,
+      "norm_label": "atomically persist the already-matched state (tmp file + replace)."
+    },
+    {
+      "label": "Raised when the @Iboclipss scan returns nothing / errors.      Bot-protection (\"",
+      "file_type": "rationale",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L224",
+      "_origin": "ast",
+      "id": "ml_gt_match_verify_weekly_rationale_224",
+      "community": 20,
+      "norm_label": "raised when the @iboclipss scan returns nothing / errors.      bot-protection (\""
+    },
+    {
+      "label": "Re-scan @Iboclipss shorts, reusing the cookie-auth + pacing wiring.      Lists t",
+      "file_type": "rationale",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L233",
+      "_origin": "ast",
+      "id": "ml_gt_match_verify_weekly_rationale_233",
+      "community": 20,
+      "norm_label": "re-scan @iboclipss shorts, reusing the cookie-auth + pacing wiring.      lists t"
+    },
+    {
+      "label": "The VOD ids captured by the daily job \u2014 the corpus to match reposts against.",
+      "file_type": "rationale",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L288",
+      "_origin": "ast",
+      "id": "ml_gt_match_verify_weekly_rationale_288",
+      "community": 20,
+      "norm_label": "the vod ids captured by the daily job \u2014 the corpus to match reposts against."
+    },
+    {
+      "label": "Re-scan reposts, match+verify the new ones, rebuild the gold manifest.      ``sc",
+      "file_type": "rationale",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L310",
+      "_origin": "ast",
+      "id": "ml_gt_match_verify_weekly_rationale_310",
+      "community": 20,
+      "norm_label": "re-scan reposts, match+verify the new ones, rebuild the gold manifest.      ``sc"
+    },
+    {
       "label": "gt_pipeline.py",
       "file_type": "code",
       "source_file": "ml/gt_pipeline.py",
@@ -6728,7 +7028,7 @@
       "source_location": "L48",
       "_origin": "ast",
       "id": "ml_llm_moment_finder_transcriptsegment",
-      "community": 30,
+      "community": 1,
       "norm_label": "transcriptsegment"
     },
     {
@@ -6938,7 +7238,7 @@
       "source_location": "L383",
       "_origin": "ast",
       "id": "ml_llm_moment_finder_transcript_excerpt",
-      "community": 30,
+      "community": 1,
       "norm_label": "transcript_excerpt()"
     },
     {
@@ -9248,7 +9548,7 @@
       "source_location": "L89",
       "_origin": "ast",
       "id": "ml_verify_gt_matches_fingerprint_rate",
-      "community": 31,
+      "community": 3,
       "norm_label": "fingerprint_rate()"
     },
     {
@@ -9258,7 +9558,7 @@
       "source_location": "L89",
       "_origin": "ast",
       "id": "ml_verify_gt_matches_py_fingerprint",
-      "community": 31,
+      "community": 3,
       "norm_label": "fingerprint"
     },
     {
@@ -9268,7 +9568,7 @@
       "source_location": "L95",
       "_origin": "ast",
       "id": "ml_verify_gt_matches_slice_fingerprint_values",
-      "community": 31,
+      "community": 3,
       "norm_label": "slice_fingerprint_values()"
     },
     {
@@ -9278,7 +9578,7 @@
       "source_location": "L110",
       "_origin": "ast",
       "id": "ml_verify_gt_matches_null_window_start",
-      "community": 31,
+      "community": 3,
       "norm_label": "null_window_start()"
     },
     {
@@ -9348,7 +9648,7 @@
       "source_location": "L197",
       "_origin": "ast",
       "id": "ml_verify_gt_matches_repost_fingerprint",
-      "community": 31,
+      "community": 3,
       "norm_label": "_repost_fingerprint()"
     },
     {
@@ -9358,7 +9658,7 @@
       "source_location": "L210",
       "_origin": "ast",
       "id": "ml_verify_gt_matches_scoped_remote_fingerprint",
-      "community": 31,
+      "community": 3,
       "norm_label": "_scoped_remote_fingerprint()"
     },
     {
@@ -9378,7 +9678,7 @@
       "source_location": "L243",
       "_origin": "ast",
       "id": "ml_verify_gt_matches_verify_moment",
-      "community": 31,
+      "community": 3,
       "norm_label": "verify_moment()"
     },
     {
@@ -9388,7 +9688,7 @@
       "source_location": "L315",
       "_origin": "ast",
       "id": "ml_verify_gt_matches_short_error",
-      "community": 31,
+      "community": 3,
       "norm_label": "_short_error()"
     },
     {
@@ -9398,7 +9698,7 @@
       "source_location": "L315",
       "_origin": "ast",
       "id": "ml_verify_gt_matches_py_baseexception",
-      "community": 31,
+      "community": 3,
       "norm_label": "baseexception"
     },
     {
@@ -9488,7 +9788,7 @@
       "source_location": "L96",
       "_origin": "ast",
       "id": "ml_verify_gt_matches_rationale_96",
-      "community": 31,
+      "community": 3,
       "norm_label": "slice [start_sec, end_sec] out of a full fingerprint.      returns (values, actu"
     },
     {
@@ -9498,7 +9798,7 @@
       "source_location": "L111",
       "_origin": "ast",
       "id": "ml_verify_gt_matches_rationale_111",
-      "community": 31,
+      "community": 3,
       "norm_label": "deterministic start of a wrong window far away from the claimed scope."
     },
     {
@@ -10108,7 +10408,7 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "pipeline_runner",
-      "community": 33,
+      "community": 1,
       "norm_label": "pipeline_runner.py"
     },
     {
@@ -10118,7 +10418,7 @@
       "source_location": "L17",
       "_origin": "ast",
       "id": "pipeline_runner_build_subprocess_command",
-      "community": 33,
+      "community": 1,
       "norm_label": "build_subprocess_command()"
     },
     {
@@ -10128,7 +10428,7 @@
       "source_location": "L17",
       "_origin": "ast",
       "id": "pipeline_runner_py_path",
-      "community": 33,
+      "community": 1,
       "norm_label": "path"
     },
     {
@@ -10138,7 +10438,7 @@
       "source_location": "L42",
       "_origin": "ast",
       "id": "pipeline_runner_build_subprocess_env",
-      "community": 33,
+      "community": 1,
       "norm_label": "build_subprocess_env()"
     },
     {
@@ -10148,7 +10448,7 @@
       "source_location": "L75",
       "_origin": "ast",
       "id": "pipeline_runner_run_job_subprocess",
-      "community": 33,
+      "community": 1,
       "norm_label": "run_job_subprocess()"
     },
     {
@@ -10158,7 +10458,7 @@
       "source_location": "L103",
       "_origin": "ast",
       "id": "pipeline_runner_subprocess_error",
-      "community": 33,
+      "community": 1,
       "norm_label": "_subprocess_error()"
     },
     {
@@ -10168,7 +10468,7 @@
       "source_location": "L112",
       "_origin": "ast",
       "id": "pipeline_runner_writable_cache_dir",
-      "community": 33,
+      "community": 1,
       "norm_label": "_writable_cache_dir()"
     },
     {
@@ -10178,7 +10478,7 @@
       "source_location": "L127",
       "_origin": "ast",
       "id": "pipeline_runner_json_safe",
-      "community": 33,
+      "community": 1,
       "norm_label": "_json_safe()"
     },
     {
@@ -10788,7 +11088,7 @@
       "source_location": "L60",
       "_origin": "ast",
       "id": "routers_pipeline_debug_pipelinedebugstartrequest",
-      "community": 30,
+      "community": 1,
       "norm_label": "pipelinedebugstartrequest"
     },
     {
@@ -10958,7 +11258,7 @@
       "source_location": "L160",
       "_origin": "ast",
       "id": "workflowstatus",
-      "community": 30,
+      "community": 1,
       "norm_label": "workflowstatus"
     },
     {
@@ -10968,7 +11268,7 @@
       "source_location": "L160",
       "_origin": "ast",
       "id": "workflowstage",
-      "community": 30,
+      "community": 1,
       "norm_label": "workflowstage"
     },
     {
@@ -11018,7 +11318,7 @@
       "source_location": "L282",
       "_origin": "ast",
       "id": "routers_pipeline_debug_spawn_detached_orchestrator",
-      "community": 33,
+      "community": 1,
       "norm_label": "_spawn_detached_orchestrator()"
     },
     {
@@ -11078,7 +11378,7 @@
       "source_location": "L390",
       "_origin": "ast",
       "id": "routers_pipeline_debug_py_fileresponse",
-      "community": 30,
+      "community": 1,
       "norm_label": "fileresponse"
     },
     {
@@ -11088,7 +11388,7 @@
       "source_location": "L403",
       "_origin": "ast",
       "id": "routers_pipeline_debug_mirror_job_progress",
-      "community": 34,
+      "community": 1,
       "norm_label": "_mirror_job_progress()"
     },
     {
@@ -11098,7 +11398,7 @@
       "source_location": "L403",
       "_origin": "ast",
       "id": "event",
-      "community": 34,
+      "community": 1,
       "norm_label": "event"
     },
     {
@@ -11108,7 +11408,7 @@
       "source_location": "L445",
       "_origin": "ast",
       "id": "routers_pipeline_debug_read_job_progress",
-      "community": 34,
+      "community": 1,
       "norm_label": "_read_job_progress()"
     },
     {
@@ -11128,7 +11428,7 @@
       "source_location": "L475",
       "_origin": "ast",
       "id": "routers_pipeline_debug_run_workflow",
-      "community": 34,
+      "community": 1,
       "norm_label": "_run_workflow()"
     },
     {
@@ -11138,7 +11438,7 @@
       "source_location": "L660",
       "_origin": "ast",
       "id": "routers_pipeline_debug_clip_overlap",
-      "community": 30,
+      "community": 1,
       "norm_label": "_clip_overlap()"
     },
     {
@@ -11148,7 +11448,7 @@
       "source_location": "L667",
       "_origin": "ast",
       "id": "routers_pipeline_debug_build_filtered_clip_map",
-      "community": 30,
+      "community": 1,
       "norm_label": "_build_filtered_clip_map()"
     },
     {
@@ -11158,7 +11458,7 @@
       "source_location": "L675",
       "_origin": "ast",
       "id": "routers_pipeline_debug_resolve_clip_for_raw_moment",
-      "community": 30,
+      "community": 1,
       "norm_label": "_resolve_clip_for_raw_moment()"
     },
     {
@@ -11168,7 +11468,7 @@
       "source_location": "L695",
       "_origin": "ast",
       "id": "routers_pipeline_debug_build_review_rows",
-      "community": 30,
+      "community": 1,
       "norm_label": "_build_review_rows()"
     },
     {
@@ -11228,7 +11528,7 @@
       "source_location": "L283",
       "_origin": "ast",
       "id": "routers_pipeline_debug_rationale_283",
-      "community": 33,
+      "community": 1,
       "norm_label": "launch the workflow orchestrator as a fully detached subprocess.      running in"
     },
     {
@@ -11238,7 +11538,7 @@
       "source_location": "L413",
       "_origin": "ast",
       "id": "routers_pipeline_debug_rationale_413",
-      "community": 34,
+      "community": 1,
       "norm_label": "mirror the running worker's job status into the workflow status.      the orches"
     },
     {
@@ -11248,7 +11548,7 @@
       "source_location": "L446",
       "_origin": "ast",
       "id": "routers_pipeline_debug_rationale_446",
-      "community": 34,
+      "community": 1,
       "norm_label": "return (status, progress_pct) from the worker's per-job progress file.      none"
     },
     {
@@ -11258,7 +11558,7 @@
       "source_location": "L661",
       "_origin": "ast",
       "id": "routers_pipeline_debug_rationale_661",
-      "community": 30,
+      "community": 1,
       "norm_label": "overlap fraction of [start,end] covered by [clip_start,clip_end]."
     },
     {
@@ -11268,7 +11568,7 @@
       "source_location": "L668",
       "_origin": "ast",
       "id": "routers_pipeline_debug_rationale_668",
-      "community": 30,
+      "community": 1,
       "norm_label": "map (start_time, end_time) \u2192 clip filename for each filtered moment by position."
     },
     {
@@ -11278,7 +11578,7 @@
       "source_location": "L682",
       "_origin": "ast",
       "id": "routers_pipeline_debug_rationale_682",
-      "community": 30,
+      "community": 1,
       "norm_label": "return (clip_status, clip_url) for a raw moment by matching against filtered cli"
     },
     {
@@ -11288,7 +11588,7 @@
       "source_location": "L696",
       "_origin": "ast",
       "id": "routers_pipeline_debug_rationale_696",
-      "community": 30,
+      "community": 1,
       "norm_label": "return (rows, raw_llm_moment_count).      rows are built from the pre-diversity"
     },
     {
@@ -11328,7 +11628,7 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "services_audio_energy",
-      "community": 35,
+      "community": 27,
       "norm_label": "audio_energy.py"
     },
     {
@@ -11338,7 +11638,7 @@
       "source_location": "L29",
       "_origin": "ast",
       "id": "services_audio_energy_compute_segment_energy",
-      "community": 35,
+      "community": 27,
       "norm_label": "compute_segment_energy()"
     },
     {
@@ -11348,7 +11648,7 @@
       "source_location": "L29",
       "_origin": "ast",
       "id": "services_audio_energy_py_path",
-      "community": 35,
+      "community": 27,
       "norm_label": "path"
     },
     {
@@ -11358,7 +11658,7 @@
       "source_location": "L29",
       "_origin": "ast",
       "id": "services_audio_energy_py_richsegment",
-      "community": 35,
+      "community": 27,
       "norm_label": "richsegment"
     },
     {
@@ -11368,7 +11668,7 @@
       "source_location": "L77",
       "_origin": "ast",
       "id": "services_audio_energy_read_wav_mono_float",
-      "community": 35,
+      "community": 27,
       "norm_label": "_read_wav_mono_float()"
     },
     {
@@ -11378,7 +11678,7 @@
       "source_location": "L77",
       "_origin": "ast",
       "id": "ndarray",
-      "community": 35,
+      "community": 27,
       "norm_label": "ndarray"
     },
     {
@@ -11388,7 +11688,7 @@
       "source_location": "L100",
       "_origin": "ast",
       "id": "services_audio_energy_rms_per_second",
-      "community": 35,
+      "community": 27,
       "norm_label": "_rms_per_second()"
     },
     {
@@ -11398,7 +11698,7 @@
       "source_location": "L115",
       "_origin": "ast",
       "id": "services_audio_energy_mean_rms",
-      "community": 35,
+      "community": 27,
       "norm_label": "_mean_rms()"
     },
     {
@@ -11408,7 +11708,7 @@
       "source_location": "L122",
       "_origin": "ast",
       "id": "services_audio_energy_relative_energy_score",
-      "community": 35,
+      "community": 27,
       "norm_label": "_relative_energy_score()"
     },
     {
@@ -11418,7 +11718,7 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "services_audio_energy_rationale_1",
-      "community": 35,
+      "community": 27,
       "norm_label": "compute per-segment rms energy from a wav file.  uses only the python standard l"
     },
     {
@@ -11428,7 +11728,7 @@
       "source_location": "L33",
       "_origin": "ast",
       "id": "services_audio_energy_rationale_33",
-      "community": 35,
+      "community": 27,
       "norm_label": "return a per-segment relative rms energy score in [0, 1].      returns a list of"
     },
     {
@@ -11438,7 +11738,7 @@
       "source_location": "L78",
       "_origin": "ast",
       "id": "services_audio_energy_rationale_78",
-      "community": 35,
+      "community": 27,
       "norm_label": "read wav file as a normalised float32 mono array."
     },
     {
@@ -11448,7 +11748,7 @@
       "source_location": "L101",
       "_origin": "ast",
       "id": "services_audio_energy_rationale_101",
-      "community": 35,
+      "community": 27,
       "norm_label": "compute rms energy for each integer second of audio."
     },
     {
@@ -11458,7 +11758,7 @@
       "source_location": "L128",
       "_origin": "ast",
       "id": "services_audio_energy_rationale_128",
-      "community": 35,
+      "community": 27,
       "norm_label": "normalise seg_rms vs. local baseline (sliding window \u00b1_energy_baseline_window_se"
     },
     {
@@ -12088,7 +12388,7 @@
       "source_location": "L79",
       "_origin": "ast",
       "id": "services_downloader_apply_short_form_sleep_opts",
-      "community": 18,
+      "community": 20,
       "norm_label": "_apply_short_form_sleep_opts()"
     },
     {
@@ -13548,7 +13848,7 @@
       "source_location": "L201",
       "_origin": "ast",
       "id": "services_transcriber_transcription_slots",
-      "community": 34,
+      "community": 1,
       "norm_label": "transcription_slots()"
     },
     {
@@ -13558,7 +13858,7 @@
       "source_location": "L220",
       "_origin": "ast",
       "id": "services_transcriber_slot_lock_path",
-      "community": 11,
+      "community": 38,
       "norm_label": "_slot_lock_path()"
     },
     {
@@ -13578,7 +13878,7 @@
       "source_location": "L227",
       "_origin": "ast",
       "id": "services_transcriber_transcription_lock",
-      "community": 11,
+      "community": 38,
       "norm_label": "_transcription_lock()"
     },
     {
@@ -13588,7 +13888,7 @@
       "source_location": "L261",
       "_origin": "ast",
       "id": "services_transcriber_richsegment",
-      "community": 11,
+      "community": 26,
       "norm_label": "richsegment"
     },
     {
@@ -13598,7 +13898,7 @@
       "source_location": "L278",
       "_origin": "ast",
       "id": "services_transcriber_richsegment_to_tuple",
-      "community": 11,
+      "community": 34,
       "norm_label": ".to_tuple()"
     },
     {
@@ -13608,7 +13908,7 @@
       "source_location": "L278",
       "_origin": "ast",
       "id": "segment",
-      "community": 11,
+      "community": 34,
       "norm_label": "segment"
     },
     {
@@ -13628,7 +13928,7 @@
       "source_location": "L286",
       "_origin": "ast",
       "id": "services_transcriber_transcribe_with_progress",
-      "community": 11,
+      "community": 26,
       "norm_label": "transcribe_with_progress()"
     },
     {
@@ -13638,7 +13938,7 @@
       "source_location": "L392",
       "_origin": "ast",
       "id": "services_transcriber_load_cached_transcript",
-      "community": 11,
+      "community": 26,
       "norm_label": "load_cached_transcript()"
     },
     {
@@ -13728,7 +14028,7 @@
       "source_location": "L719",
       "_origin": "ast",
       "id": "services_transcriber_stable_cache_key_for_source",
-      "community": 11,
+      "community": 28,
       "norm_label": "stable_cache_key_for_source()"
     },
     {
@@ -13738,7 +14038,7 @@
       "source_location": "L726",
       "_origin": "ast",
       "id": "services_transcriber_chunk_cache_dir",
-      "community": 11,
+      "community": 26,
       "norm_label": "_chunk_cache_dir()"
     },
     {
@@ -13748,7 +14048,7 @@
       "source_location": "L735",
       "_origin": "ast",
       "id": "services_transcriber_chunk_cache_path",
-      "community": 11,
+      "community": 26,
       "norm_label": "_chunk_cache_path()"
     },
     {
@@ -13768,7 +14068,7 @@
       "source_location": "L753",
       "_origin": "ast",
       "id": "services_transcriber_load_chunk_cache",
-      "community": 11,
+      "community": 26,
       "norm_label": "_load_chunk_cache()"
     },
     {
@@ -13778,7 +14078,7 @@
       "source_location": "L778",
       "_origin": "ast",
       "id": "services_transcriber_write_chunk_cache",
-      "community": 11,
+      "community": 26,
       "norm_label": "_write_chunk_cache()"
     },
     {
@@ -13788,7 +14088,7 @@
       "source_location": "L807",
       "_origin": "ast",
       "id": "services_transcriber_segment_cache_record",
-      "community": 11,
+      "community": 26,
       "norm_label": "_segment_cache_record()"
     },
     {
@@ -13798,7 +14098,7 @@
       "source_location": "L818",
       "_origin": "ast",
       "id": "services_transcriber_segment_from_cache_record",
-      "community": 11,
+      "community": 26,
       "norm_label": "_segment_from_cache_record()"
     },
     {
@@ -13808,7 +14108,7 @@
       "source_location": "L841",
       "_origin": "ast",
       "id": "services_transcriber_chat_enrichment_path",
-      "community": 11,
+      "community": 28,
       "norm_label": "_chat_enrichment_path()"
     },
     {
@@ -13818,7 +14118,7 @@
       "source_location": "L848",
       "_origin": "ast",
       "id": "services_transcriber_save_chat_enrichment",
-      "community": 11,
+      "community": 28,
       "norm_label": "save_chat_enrichment()"
     },
     {
@@ -13828,7 +14128,7 @@
       "source_location": "L879",
       "_origin": "ast",
       "id": "services_transcriber_has_chat_enrichment",
-      "community": 11,
+      "community": 28,
       "norm_label": "has_chat_enrichment()"
     },
     {
@@ -13838,7 +14138,7 @@
       "source_location": "L891",
       "_origin": "ast",
       "id": "services_transcriber_apply_chat_enrichment",
-      "community": 11,
+      "community": 28,
       "norm_label": "apply_chat_enrichment()"
     },
     {
@@ -13848,7 +14148,7 @@
       "source_location": "L936",
       "_origin": "ast",
       "id": "services_transcriber_voice_energy_path",
-      "community": 11,
+      "community": 28,
       "norm_label": "_voice_energy_path()"
     },
     {
@@ -13858,7 +14158,7 @@
       "source_location": "L943",
       "_origin": "ast",
       "id": "services_transcriber_save_voice_energy",
-      "community": 11,
+      "community": 28,
       "norm_label": "save_voice_energy()"
     },
     {
@@ -13868,7 +14168,7 @@
       "source_location": "L965",
       "_origin": "ast",
       "id": "services_transcriber_load_voice_energy",
-      "community": 11,
+      "community": 28,
       "norm_label": "load_voice_energy()"
     },
     {
@@ -13968,7 +14268,7 @@
       "source_location": "L1162",
       "_origin": "ast",
       "id": "services_transcriber_diarize",
-      "community": 11,
+      "community": 33,
       "norm_label": "_diarize()"
     },
     {
@@ -13978,7 +14278,7 @@
       "source_location": "L1216",
       "_origin": "ast",
       "id": "services_transcriber_load_pyannote_pipeline",
-      "community": 11,
+      "community": 33,
       "norm_label": "_load_pyannote_pipeline()"
     },
     {
@@ -13988,7 +14288,7 @@
       "source_location": "L1230",
       "_origin": "ast",
       "id": "services_transcriber_diarization_failure_reason",
-      "community": 11,
+      "community": 33,
       "norm_label": "_diarization_failure_reason()"
     },
     {
@@ -13998,7 +14298,7 @@
       "source_location": "L1230",
       "_origin": "ast",
       "id": "services_transcriber_py_exception",
-      "community": 11,
+      "community": 33,
       "norm_label": "exception"
     },
     {
@@ -14008,7 +14308,7 @@
       "source_location": "L1249",
       "_origin": "ast",
       "id": "services_transcriber_compact_exception_message",
-      "community": 11,
+      "community": 33,
       "norm_label": "_compact_exception_message()"
     },
     {
@@ -14018,7 +14318,7 @@
       "source_location": "L1256",
       "_origin": "ast",
       "id": "services_transcriber_dominant_speaker",
-      "community": 11,
+      "community": 33,
       "norm_label": "_dominant_speaker()"
     },
     {
@@ -14028,7 +14328,7 @@
       "source_location": "L1274",
       "_origin": "ast",
       "id": "services_transcriber_deduplicate",
-      "community": 11,
+      "community": 26,
       "norm_label": "_deduplicate()"
     },
     {
@@ -14038,7 +14338,7 @@
       "source_location": "L1290",
       "_origin": "ast",
       "id": "services_transcriber_format_transcript",
-      "community": 11,
+      "community": 34,
       "norm_label": "format_transcript()"
     },
     {
@@ -14048,7 +14348,7 @@
       "source_location": "L1331",
       "_origin": "ast",
       "id": "services_transcriber_format_jsonl",
-      "community": 11,
+      "community": 26,
       "norm_label": "format_jsonl()"
     },
     {
@@ -14058,7 +14358,7 @@
       "source_location": "L1354",
       "_origin": "ast",
       "id": "services_transcriber_fmt",
-      "community": 11,
+      "community": 34,
       "norm_label": "_fmt()"
     },
     {
@@ -14068,7 +14368,7 @@
       "source_location": "L202",
       "_origin": "ast",
       "id": "services_transcriber_rationale_202",
-      "community": 34,
+      "community": 1,
       "norm_label": "how many whisper instances the gpu can hold concurrently.      auto-derived from"
     },
     {
@@ -14078,7 +14378,7 @@
       "source_location": "L228",
       "_origin": "ast",
       "id": "services_transcriber_rationale_228",
-      "community": 11,
+      "community": 38,
       "norm_label": "bound concurrent whisper inference across worker processes.      acquires one of"
     },
     {
@@ -14088,7 +14388,7 @@
       "source_location": "L849",
       "_origin": "ast",
       "id": "services_transcriber_rationale_849",
-      "community": 11,
+      "community": 28,
       "norm_label": "persist chat fields from enriched segments alongside the transcript chunk cache."
     },
     {
@@ -14098,7 +14398,7 @@
       "source_location": "L880",
       "_origin": "ast",
       "id": "services_transcriber_rationale_880",
-      "community": 11,
+      "community": 28,
       "norm_label": "true if a current-version chat enrichment cache exists for cache_key."
     },
     {
@@ -14108,7 +14408,7 @@
       "source_location": "L895",
       "_origin": "ast",
       "id": "services_transcriber_rationale_895",
-      "community": 11,
+      "community": 28,
       "norm_label": "load cached chat enrichment and apply it to segments. returns none on cache miss"
     },
     {
@@ -14118,7 +14418,7 @@
       "source_location": "L944",
       "_origin": "ast",
       "id": "services_transcriber_rationale_944",
-      "community": 11,
+      "community": 28,
       "norm_label": "persist per-segment voice energy so transcript-cache hits keep the signal."
     },
     {
@@ -14128,7 +14428,7 @@
       "source_location": "L966",
       "_origin": "ast",
       "id": "services_transcriber_rationale_966",
-      "community": 11,
+      "community": 28,
       "norm_label": "return per-segment energy scores aligned to `segments`, or none on cache miss."
     },
     {
@@ -14148,7 +14448,7 @@
       "source_location": "L1261",
       "_origin": "ast",
       "id": "services_transcriber_rationale_1261",
-      "community": 11,
+      "community": 33,
       "norm_label": "return the speaker with the most overlap with [seg_start, seg_end]."
     },
     {
@@ -14158,7 +14458,7 @@
       "source_location": "L1294",
       "_origin": "ast",
       "id": "services_transcriber_rationale_1294",
-      "community": 11,
+      "community": 34,
       "norm_label": "format segments as a transcript string.      args:         segments: list of ric"
     },
     {
@@ -14168,7 +14468,7 @@
       "source_location": "L1332",
       "_origin": "ast",
       "id": "services_transcriber_rationale_1332",
-      "community": 11,
+      "community": 26,
       "norm_label": "return one json object per line, preserving all numerical features."
     },
     {
@@ -15086,7 +15386,7 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "tests_test_directional_eval",
-      "community": 26,
+      "community": 9,
       "norm_label": "test_directional_eval.py"
     },
     {
@@ -15096,7 +15396,7 @@
       "source_location": "L6",
       "_origin": "ast",
       "id": "tests_test_directional_eval_vod",
-      "community": 26,
+      "community": 9,
       "norm_label": "_vod()"
     },
     {
@@ -15106,7 +15406,7 @@
       "source_location": "L10",
       "_origin": "ast",
       "id": "tests_test_directional_eval_hit",
-      "community": 26,
+      "community": 9,
       "norm_label": "_hit()"
     },
     {
@@ -15116,7 +15416,7 @@
       "source_location": "L14",
       "_origin": "ast",
       "id": "tests_test_directional_eval_aggregatetiertests",
-      "community": 26,
+      "community": 9,
       "norm_label": "aggregatetiertests"
     },
     {
@@ -15126,7 +15426,7 @@
       "source_location": "L15",
       "_origin": "ast",
       "id": "tests_test_directional_eval_aggregatetiertests_setup",
-      "community": 26,
+      "community": 9,
       "norm_label": ".setup()"
     },
     {
@@ -15136,7 +15436,7 @@
       "source_location": "L29",
       "_origin": "ast",
       "id": "tests_test_directional_eval_aggregatetiertests_test_floor_counts_all_gold_and_exposes_ranking_gap",
-      "community": 26,
+      "community": 9,
       "norm_label": ".test_floor_counts_all_gold_and_exposes_ranking_gap()"
     },
     {
@@ -15146,7 +15446,7 @@
       "source_location": "L40",
       "_origin": "ast",
       "id": "tests_test_directional_eval_aggregatetiertests_test_headline_tier_filters_by_views",
-      "community": 26,
+      "community": 9,
       "norm_label": ".test_headline_tier_filters_by_views()"
     },
     {
@@ -15156,7 +15456,7 @@
       "source_location": "L47",
       "_origin": "ast",
       "id": "tests_test_directional_eval_aggregatetiertests_test_empty_tier_yields_none_recall",
-      "community": 26,
+      "community": 9,
       "norm_label": ".test_empty_tier_yields_none_recall()"
     },
     {
@@ -15166,7 +15466,7 @@
       "source_location": "L55",
       "_origin": "ast",
       "id": "tests_test_directional_eval_twotierrecalltests",
-      "community": 26,
+      "community": 9,
       "norm_label": "twotierrecalltests"
     },
     {
@@ -15176,7 +15476,7 @@
       "source_location": "L56",
       "_origin": "ast",
       "id": "tests_test_directional_eval_twotierrecalltests_test_reports_floor_and_headline_with_threshold",
-      "community": 26,
+      "community": 9,
       "norm_label": ".test_reports_floor_and_headline_with_threshold()"
     },
     {
@@ -15186,7 +15486,7 @@
       "source_location": "L72",
       "_origin": "ast",
       "id": "tests_test_directional_eval_missingpredictionvodstests",
-      "community": 26,
+      "community": 9,
       "norm_label": "missingpredictionvodstests"
     },
     {
@@ -15196,7 +15496,7 @@
       "source_location": "L73",
       "_origin": "ast",
       "id": "tests_test_directional_eval_missingpredictionvodstests_test_surfaces_gold_vods_without_predictions",
-      "community": 26,
+      "community": 9,
       "norm_label": ".test_surfaces_gold_vods_without_predictions()"
     },
     {
@@ -15206,7 +15506,7 @@
       "source_location": "L81",
       "_origin": "ast",
       "id": "tests_test_directional_eval_missingpredictionvodstests_test_vods_without_gold_are_ignored",
-      "community": 26,
+      "community": 9,
       "norm_label": ".test_vods_without_gold_are_ignored()"
     },
     {
@@ -15216,7 +15516,7 @@
       "source_location": "L89",
       "_origin": "ast",
       "id": "tests_test_directional_eval_goldmanifesttests",
-      "community": 26,
+      "community": 9,
       "norm_label": "goldmanifesttests"
     },
     {
@@ -15226,7 +15526,7 @@
       "source_location": "L90",
       "_origin": "ast",
       "id": "tests_test_directional_eval_goldmanifesttests_test_keeps_only_gold_and_drops_empty_vods",
-      "community": 26,
+      "community": 9,
       "norm_label": ".test_keeps_only_gold_and_drops_empty_vods()"
     },
     {
@@ -15236,7 +15536,7 @@
       "source_location": "L107",
       "_origin": "ast",
       "id": "tests_test_directional_eval_runtests",
-      "community": 26,
+      "community": 9,
       "norm_label": "runtests"
     },
     {
@@ -15246,7 +15546,7 @@
       "source_location": "L108",
       "_origin": "ast",
       "id": "tests_test_directional_eval_runtests_test_end_to_end_two_tier_with_missing_predictions",
-      "community": 26,
+      "community": 9,
       "norm_label": ".test_end_to_end_two_tier_with_missing_predictions()"
     },
     {
@@ -15256,7 +15556,7 @@
       "source_location": "L132",
       "_origin": "ast",
       "id": "tests_test_directional_eval_runtests_test_report_renders_both_tiers",
-      "community": 26,
+      "community": 9,
       "norm_label": ".test_report_renders_both_tiers()"
     },
     {
@@ -16986,7 +17286,7 @@
       "source_location": "L69",
       "_origin": "ast",
       "id": "tests_test_gt_match_verify_filtergoldmanifesttests",
-      "community": 37,
+      "community": 29,
       "norm_label": "filtergoldmanifesttests"
     },
     {
@@ -16996,7 +17296,7 @@
       "source_location": "L70",
       "_origin": "ast",
       "id": "tests_test_gt_match_verify_filtergoldmanifesttests_manifest",
-      "community": 37,
+      "community": 29,
       "norm_label": "._manifest()"
     },
     {
@@ -17006,7 +17306,7 @@
       "source_location": "L90",
       "_origin": "ast",
       "id": "tests_test_gt_match_verify_filtergoldmanifesttests_test_keeps_only_gold_and_silver_and_drops_emptied_vods",
-      "community": 37,
+      "community": 29,
       "norm_label": ".test_keeps_only_gold_and_silver_and_drops_emptied_vods()"
     },
     {
@@ -17016,7 +17316,7 @@
       "source_location": "L97",
       "_origin": "ast",
       "id": "tests_test_gt_match_verify_filtergoldmanifesttests_test_keep_silver_false_keeps_only_gold",
-      "community": 37,
+      "community": 29,
       "norm_label": ".test_keep_silver_false_keeps_only_gold()"
     },
     {
@@ -17098,6 +17398,296 @@
       "id": "tests_test_gt_match_verify_matchandverifytests_test_confirms_from_stored_fingerprint_when_vod_media_is_gone",
       "community": 29,
       "norm_label": ".test_confirms_from_stored_fingerprint_when_vod_media_is_gone()"
+    },
+    {
+      "label": "test_gt_match_verify_weekly.py",
+      "file_type": "code",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L1",
+      "_origin": "ast",
+      "id": "tests_test_gt_match_verify_weekly",
+      "community": 0,
+      "norm_label": "test_gt_match_verify_weekly.py"
+    },
+    {
+      "label": "_repost()",
+      "file_type": "code",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L10",
+      "_origin": "ast",
+      "id": "tests_test_gt_match_verify_weekly_repost",
+      "community": 0,
+      "norm_label": "_repost()"
+    },
+    {
+      "label": "_manifest_row()",
+      "file_type": "code",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L19",
+      "_origin": "ast",
+      "id": "tests_test_gt_match_verify_weekly_manifest_row",
+      "community": 0,
+      "norm_label": "_manifest_row()"
+    },
+    {
+      "label": "_moment()",
+      "file_type": "code",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L23",
+      "_origin": "ast",
+      "id": "tests_test_gt_match_verify_weekly_moment",
+      "community": 0,
+      "norm_label": "_moment()"
+    },
+    {
+      "label": "SelectNewRepostsTests",
+      "file_type": "code",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L36",
+      "_origin": "ast",
+      "id": "tests_test_gt_match_verify_weekly_selectnewrepoststests",
+      "community": 0,
+      "norm_label": "selectnewrepoststests"
+    },
+    {
+      "label": ".test_excludes_already_matched_and_returns_only_new()",
+      "file_type": "code",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L37",
+      "_origin": "ast",
+      "id": "tests_test_gt_match_verify_weekly_selectnewrepoststests_test_excludes_already_matched_and_returns_only_new",
+      "community": 0,
+      "norm_label": ".test_excludes_already_matched_and_returns_only_new()"
+    },
+    {
+      "label": ".test_empty_inputs_yield_nothing()",
+      "file_type": "code",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L43",
+      "_origin": "ast",
+      "id": "tests_test_gt_match_verify_weekly_selectnewrepoststests_test_empty_inputs_yield_nothing",
+      "community": 0,
+      "norm_label": ".test_empty_inputs_yield_nothing()"
+    },
+    {
+      "label": ".test_deduplicates_keeping_first_occurrence()",
+      "file_type": "code",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L47",
+      "_origin": "ast",
+      "id": "tests_test_gt_match_verify_weekly_selectnewrepoststests_test_deduplicates_keeping_first_occurrence",
+      "community": 0,
+      "norm_label": ".test_deduplicates_keeping_first_occurrence()"
+    },
+    {
+      "label": ".test_skips_records_without_a_usable_id()",
+      "file_type": "code",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L53",
+      "_origin": "ast",
+      "id": "tests_test_gt_match_verify_weekly_selectnewrepoststests_test_skips_records_without_a_usable_id",
+      "community": 0,
+      "norm_label": ".test_skips_records_without_a_usable_id()"
+    },
+    {
+      "label": ".test_falls_back_to_source_url_when_no_clip_id()",
+      "file_type": "code",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L59",
+      "_origin": "ast",
+      "id": "tests_test_gt_match_verify_weekly_selectnewrepoststests_test_falls_back_to_source_url_when_no_clip_id",
+      "community": 0,
+      "norm_label": ".test_falls_back_to_source_url_when_no_clip_id()"
+    },
+    {
+      "label": "MergeManifestsTests",
+      "file_type": "code",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L70",
+      "_origin": "ast",
+      "id": "tests_test_gt_match_verify_weekly_mergemanifeststests",
+      "community": 0,
+      "norm_label": "mergemanifeststests"
+    },
+    {
+      "label": ".test_appends_new_moments_per_vod_and_preserves_existing()",
+      "file_type": "code",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L71",
+      "_origin": "ast",
+      "id": "tests_test_gt_match_verify_weekly_mergemanifeststests_test_appends_new_moments_per_vod_and_preserves_existing",
+      "community": 0,
+      "norm_label": ".test_appends_new_moments_per_vod_and_preserves_existing()"
+    },
+    {
+      "label": ".test_new_verdict_for_same_repost_overwrites_old()",
+      "file_type": "code",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L85",
+      "_origin": "ast",
+      "id": "tests_test_gt_match_verify_weekly_mergemanifeststests_test_new_verdict_for_same_repost_overwrites_old",
+      "community": 0,
+      "norm_label": ".test_new_verdict_for_same_repost_overwrites_old()"
+    },
+    {
+      "label": "GoldAccrualTests",
+      "file_type": "code",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L98",
+      "_origin": "ast",
+      "id": "tests_test_gt_match_verify_weekly_goldaccrualtests",
+      "community": 0,
+      "norm_label": "goldaccrualtests"
+    },
+    {
+      "label": ".test_counts_gold_moments_and_vods_against_target()",
+      "file_type": "code",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L99",
+      "_origin": "ast",
+      "id": "tests_test_gt_match_verify_weekly_goldaccrualtests_test_counts_gold_moments_and_vods_against_target",
+      "community": 0,
+      "norm_label": ".test_counts_gold_moments_and_vods_against_target()"
+    },
+    {
+      "label": ".test_target_reached_when_both_thresholds_met()",
+      "file_type": "code",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L114",
+      "_origin": "ast",
+      "id": "tests_test_gt_match_verify_weekly_goldaccrualtests_test_target_reached_when_both_thresholds_met",
+      "community": 0,
+      "norm_label": ".test_target_reached_when_both_thresholds_met()"
+    },
+    {
+      "label": "MatchStateTests",
+      "file_type": "code",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L126",
+      "_origin": "ast",
+      "id": "tests_test_gt_match_verify_weekly_matchstatetests",
+      "community": 0,
+      "norm_label": "matchstatetests"
+    },
+    {
+      "label": ".setUp()",
+      "file_type": "code",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L127",
+      "_origin": "ast",
+      "id": "tests_test_gt_match_verify_weekly_matchstatetests_setup",
+      "community": 0,
+      "norm_label": ".setup()"
+    },
+    {
+      "label": ".test_missing_state_loads_empty()",
+      "file_type": "code",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L132",
+      "_origin": "ast",
+      "id": "tests_test_gt_match_verify_weekly_matchstatetests_test_missing_state_loads_empty",
+      "community": 0,
+      "norm_label": ".test_missing_state_loads_empty()"
+    },
+    {
+      "label": ".test_save_then_load_roundtrips()",
+      "file_type": "code",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L136",
+      "_origin": "ast",
+      "id": "tests_test_gt_match_verify_weekly_matchstatetests_test_save_then_load_roundtrips",
+      "community": 0,
+      "norm_label": ".test_save_then_load_roundtrips()"
+    },
+    {
+      "label": ".test_unreadable_state_falls_back_to_empty()",
+      "file_type": "code",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L145",
+      "_origin": "ast",
+      "id": "tests_test_gt_match_verify_weekly_matchstatetests_test_unreadable_state_falls_back_to_empty",
+      "community": 0,
+      "norm_label": ".test_unreadable_state_falls_back_to_empty()"
+    },
+    {
+      "label": "RunWeeklyMatchVerifyTests",
+      "file_type": "code",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L154",
+      "_origin": "ast",
+      "id": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests",
+      "community": 0,
+      "norm_label": "runweeklymatchverifytests"
+    },
+    {
+      "label": ".setUp()",
+      "file_type": "code",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L155",
+      "_origin": "ast",
+      "id": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests_setup",
+      "community": 0,
+      "norm_label": ".setup()"
+    },
+    {
+      "label": "._fake_match_and_verify_factory()",
+      "file_type": "code",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L165",
+      "_origin": "ast",
+      "id": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests_fake_match_and_verify_factory",
+      "community": 0,
+      "norm_label": "._fake_match_and_verify_factory()"
+    },
+    {
+      "label": "._run()",
+      "file_type": "code",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L189",
+      "_origin": "ast",
+      "id": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests_run",
+      "community": 0,
+      "norm_label": "._run()"
+    },
+    {
+      "label": ".test_matches_new_reposts_writes_gold_manifest_and_summarizes()",
+      "file_type": "code",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L205",
+      "_origin": "ast",
+      "id": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests_test_matches_new_reposts_writes_gold_manifest_and_summarizes",
+      "community": 0,
+      "norm_label": ".test_matches_new_reposts_writes_gold_manifest_and_summarizes()"
+    },
+    {
+      "label": ".test_only_new_reposts_are_matched_and_manifest_accumulates()",
+      "file_type": "code",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L230",
+      "_origin": "ast",
+      "id": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests_test_only_new_reposts_are_matched_and_manifest_accumulates",
+      "community": 0,
+      "norm_label": ".test_only_new_reposts_are_matched_and_manifest_accumulates()"
+    },
+    {
+      "label": ".test_reports_new_vods_captured_since_last_run()",
+      "file_type": "code",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L246",
+      "_origin": "ast",
+      "id": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests_test_reports_new_vods_captured_since_last_run",
+      "community": 0,
+      "norm_label": ".test_reports_new_vods_captured_since_last_run()"
+    },
+    {
+      "label": ".test_zeroed_discovery_does_not_advance_state_or_clobber_manifest()",
+      "file_type": "code",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L254",
+      "_origin": "ast",
+      "id": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests_test_zeroed_discovery_does_not_advance_state_or_clobber_manifest",
+      "community": 0,
+      "norm_label": ".test_zeroed_discovery_does_not_advance_state_or_clobber_manifest()"
     },
     {
       "label": "test_gt_pipeline_merge.py",
@@ -18396,7 +18986,7 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "tests_test_moment_finder",
-      "community": 11,
+      "community": 26,
       "norm_label": "test_moment_finder.py"
     },
     {
@@ -18406,7 +18996,7 @@
       "source_location": "L9",
       "_origin": "ast",
       "id": "tests_test_moment_finder_test_find_moments_reuses_d0_prompt_filters_noise_and_builds_ranked_candidates",
-      "community": 11,
+      "community": 26,
       "norm_label": "test_find_moments_reuses_d0_prompt_filters_noise_and_builds_ranked_candidates()"
     },
     {
@@ -18416,7 +19006,7 @@
       "source_location": "L83",
       "_origin": "ast",
       "id": "tests_test_moment_finder_test_post_processed_rows_to_ranked_candidates_sorts_by_pipeline_score",
-      "community": 11,
+      "community": 26,
       "norm_label": "test_post_processed_rows_to_ranked_candidates_sorts_by_pipeline_score()"
     },
     {
@@ -18476,7 +19066,7 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "tests_test_pipeline_integration",
-      "community": 141,
+      "community": 30,
       "norm_label": "test_pipeline_integration.py"
     },
     {
@@ -18486,7 +19076,7 @@
       "source_location": "L16",
       "_origin": "ast",
       "id": "tests_test_pipeline_integration_ffmpegstub",
-      "community": 141,
+      "community": 37,
       "norm_label": "_ffmpegstub"
     },
     {
@@ -18496,7 +19086,7 @@
       "source_location": "L17",
       "_origin": "ast",
       "id": "tests_test_pipeline_integration_ffmpegstub_input",
-      "community": 141,
+      "community": 37,
       "norm_label": ".input()"
     },
     {
@@ -18506,7 +19096,7 @@
       "source_location": "L20",
       "_origin": "ast",
       "id": "tests_test_pipeline_integration_ffmpegstub_output",
-      "community": 141,
+      "community": 37,
       "norm_label": ".output()"
     },
     {
@@ -18516,7 +19106,7 @@
       "source_location": "L23",
       "_origin": "ast",
       "id": "tests_test_pipeline_integration_ffmpegstub_overwrite_output",
-      "community": 141,
+      "community": 37,
       "norm_label": ".overwrite_output()"
     },
     {
@@ -18526,7 +19116,7 @@
       "source_location": "L26",
       "_origin": "ast",
       "id": "tests_test_pipeline_integration_ffmpegstub_run",
-      "community": 141,
+      "community": 37,
       "norm_label": ".run()"
     },
     {
@@ -18536,7 +19126,7 @@
       "source_location": "L37",
       "_origin": "ast",
       "id": "tests_test_pipeline_integration_noop_cleanup_later",
-      "community": 141,
+      "community": 30,
       "norm_label": "_noop_cleanup_later()"
     },
     {
@@ -18546,7 +19136,7 @@
       "source_location": "L41",
       "_origin": "ast",
       "id": "tests_test_pipeline_integration_pipelineintegrationtests",
-      "community": 141,
+      "community": 30,
       "norm_label": "pipelineintegrationtests"
     },
     {
@@ -18556,7 +19146,7 @@
       "source_location": "L42",
       "_origin": "ast",
       "id": "tests_test_pipeline_integration_pipelineintegrationtests_test_run_pipeline_lean_path",
-      "community": 141,
+      "community": 30,
       "norm_label": ".test_run_pipeline_lean_path()"
     },
     {
@@ -18566,7 +19156,7 @@
       "source_location": "L115",
       "_origin": "ast",
       "id": "tests_test_pipeline_integration_pipelineintegrationtests_test_pipeline_debug_job_skips_cleanup_later",
-      "community": 141,
+      "community": 30,
       "norm_label": ".test_pipeline_debug_job_skips_cleanup_later()"
     },
     {
@@ -18576,7 +19166,7 @@
       "source_location": "L149",
       "_origin": "ast",
       "id": "tests_test_pipeline_integration_pipelineintegrationtests_test_serving_source_media_cleanup_preserves_training_vod",
-      "community": 141,
+      "community": 30,
       "norm_label": ".test_serving_source_media_cleanup_preserves_training_vod()"
     },
     {
@@ -18586,7 +19176,7 @@
       "source_location": "L171",
       "_origin": "ast",
       "id": "tests_test_pipeline_integration_pipelineintegrationtests_test_serving_source_media_cleanup_preserves_pipeline_debug_job",
-      "community": 141,
+      "community": 30,
       "norm_label": ".test_serving_source_media_cleanup_preserves_pipeline_debug_job()"
     },
     {
@@ -18596,7 +19186,7 @@
       "source_location": "L194",
       "_origin": "ast",
       "id": "tests_test_pipeline_integration_pipelineintegrationtests_test_frontend_cache_setting_disables_serving_job_cache_keys",
-      "community": 141,
+      "community": 30,
       "norm_label": ".test_frontend_cache_setting_disables_serving_job_cache_keys()"
     },
     {
@@ -18606,7 +19196,7 @@
       "source_location": "L201",
       "_origin": "ast",
       "id": "tests_test_pipeline_integration_pipelineintegrationtests_test_frontend_transcript_cache_uses_stable_twitch_vod_key_without_media_cache",
-      "community": 141,
+      "community": 30,
       "norm_label": ".test_frontend_transcript_cache_uses_stable_twitch_vod_key_without_media_cache()"
     },
     {
@@ -18616,7 +19206,7 @@
       "source_location": "L226",
       "_origin": "ast",
       "id": "tests_test_pipeline_integration_pipelineintegrationtests_test_run_pipeline_uses_complete_transcript_cache_without_retranscribing",
-      "community": 141,
+      "community": 30,
       "norm_label": ".test_run_pipeline_uses_complete_transcript_cache_without_retranscribing()"
     },
     {
@@ -18626,7 +19216,7 @@
       "source_location": "L278",
       "_origin": "ast",
       "id": "tests_test_pipeline_integration_read_jsonl",
-      "community": 141,
+      "community": 30,
       "norm_label": "_read_jsonl()"
     },
     {
@@ -18636,7 +19226,7 @@
       "source_location": "L278",
       "_origin": "ast",
       "id": "tests_test_pipeline_integration_py_path",
-      "community": 141,
+      "community": 30,
       "norm_label": "path"
     },
     {
@@ -18646,7 +19236,7 @@
       "source_location": "L289",
       "_origin": "ast",
       "id": "tests_test_pipeline_integration_import_pipeline_with_stubs",
-      "community": 141,
+      "community": 30,
       "norm_label": "_import_pipeline_with_stubs()"
     },
     {
@@ -18656,7 +19246,7 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "tests_test_post_processor",
-      "community": 11,
+      "community": 26,
       "norm_label": "test_post_processor.py"
     },
     {
@@ -18666,7 +19256,7 @@
       "source_location": "L11",
       "_origin": "ast",
       "id": "tests_test_post_processor_postprocessortests",
-      "community": 11,
+      "community": 26,
       "norm_label": "postprocessortests"
     },
     {
@@ -18676,7 +19266,7 @@
       "source_location": "L12",
       "_origin": "ast",
       "id": "tests_test_post_processor_postprocessortests_test_snap_boundaries_extends_too_short_clip",
-      "community": 11,
+      "community": 26,
       "norm_label": ".test_snap_boundaries_extends_too_short_clip()"
     },
     {
@@ -19466,7 +20056,7 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "tests_test_verify_gt_matches",
-      "community": 28,
+      "community": 3,
       "norm_label": "test_verify_gt_matches.py"
     },
     {
@@ -19476,7 +20066,7 @@
       "source_location": "L12",
       "_origin": "ast",
       "id": "tests_test_verify_gt_matches_pseudo_random_values",
-      "community": 28,
+      "community": 3,
       "norm_label": "_pseudo_random_values()"
     },
     {
@@ -19486,7 +20076,7 @@
       "source_location": "L22",
       "_origin": "ast",
       "id": "tests_test_verify_gt_matches_full_vod_fingerprint",
-      "community": 28,
+      "community": 3,
       "norm_label": "_full_vod_fingerprint()"
     },
     {
@@ -19496,7 +20086,7 @@
       "source_location": "L22",
       "_origin": "ast",
       "id": "tests_test_verify_gt_matches_py_fingerprint",
-      "community": 28,
+      "community": 3,
       "norm_label": "fingerprint"
     },
     {
@@ -19506,7 +20096,7 @@
       "source_location": "L26",
       "_origin": "ast",
       "id": "tests_test_verify_gt_matches_verifygtmatcheshelpertests",
-      "community": 28,
+      "community": 3,
       "norm_label": "verifygtmatcheshelpertests"
     },
     {
@@ -19516,7 +20106,7 @@
       "source_location": "L27",
       "_origin": "ast",
       "id": "tests_test_verify_gt_matches_verifygtmatcheshelpertests_test_slice_fingerprint_values_maps_seconds_to_items",
-      "community": 28,
+      "community": 3,
       "norm_label": ".test_slice_fingerprint_values_maps_seconds_to_items()"
     },
     {
@@ -19526,7 +20116,7 @@
       "source_location": "L36",
       "_origin": "ast",
       "id": "tests_test_verify_gt_matches_verifygtmatcheshelpertests_test_null_window_start_avoids_claimed_scope",
-      "community": 28,
+      "community": 3,
       "norm_label": ".test_null_window_start_avoids_claimed_scope()"
     },
     {
@@ -19536,7 +20126,7 @@
       "source_location": "L42",
       "_origin": "ast",
       "id": "tests_test_verify_gt_matches_verifygtmatcheshelpertests_test_is_confirmed_combines_margin_and_position_agreement",
-      "community": 28,
+      "community": 3,
       "norm_label": ".test_is_confirmed_combines_margin_and_position_agreement()"
     },
     {
@@ -19546,7 +20136,7 @@
       "source_location": "L49",
       "_origin": "ast",
       "id": "tests_test_verify_gt_matches_verifygtmatcheshelpertests_test_is_confirmed_tolerates_positive_range_download_bias",
-      "community": 28,
+      "community": 3,
       "norm_label": ".test_is_confirmed_tolerates_positive_range_download_bias()"
     },
     {
@@ -19556,7 +20146,7 @@
       "source_location": "L53",
       "_origin": "ast",
       "id": "tests_test_verify_gt_matches_verifygtmatcheshelpertests_test_assign_tier_policy",
-      "community": 28,
+      "community": 3,
       "norm_label": ".test_assign_tier_policy()"
     },
     {
@@ -19566,7 +20156,7 @@
       "source_location": "L60",
       "_origin": "ast",
       "id": "tests_test_verify_gt_matches_verifymomenttests",
-      "community": 28,
+      "community": 3,
       "norm_label": "verifymomenttests"
     },
     {
@@ -19576,7 +20166,7 @@
       "source_location": "L61",
       "_origin": "ast",
       "id": "tests_test_verify_gt_matches_verifymomenttests_test_verify_moment_confirms_and_refines_true_position",
-      "community": 28,
+      "community": 3,
       "norm_label": ".test_verify_moment_confirms_and_refines_true_position()"
     },
     {
@@ -19586,7 +20176,7 @@
       "source_location": "L79",
       "_origin": "ast",
       "id": "tests_test_verify_gt_matches_verifymomenttests_test_verify_moment_rejects_wrong_claimed_position",
-      "community": 28,
+      "community": 3,
       "norm_label": ".test_verify_moment_rejects_wrong_claimed_position()"
     },
     {
@@ -19596,7 +20186,7 @@
       "source_location": "L93",
       "_origin": "ast",
       "id": "tests_test_verify_gt_matches_verifymomenttests_test_verify_moment_marks_unavailable_repost",
-      "community": 28,
+      "community": 3,
       "norm_label": ".test_verify_moment_marks_unavailable_repost()"
     },
     {
@@ -19606,7 +20196,7 @@
       "source_location": "L106",
       "_origin": "ast",
       "id": "tests_test_verify_gt_matches_applytierstests",
-      "community": 28,
+      "community": 3,
       "norm_label": "applytierstests"
     },
     {
@@ -19616,7 +20206,7 @@
       "source_location": "L107",
       "_origin": "ast",
       "id": "tests_test_verify_gt_matches_applytierstests_test_apply_tiers_writes_tiers_and_refines_gold_boundaries",
-      "community": 28,
+      "community": 3,
       "norm_label": ".test_apply_tiers_writes_tiers_and_refines_gold_boundaries()"
     },
     {
@@ -19626,7 +20216,7 @@
       "source_location": "L13",
       "_origin": "ast",
       "id": "tests_test_verify_gt_matches_rationale_13",
-      "community": 28,
+      "community": 3,
       "norm_label": "random walk over 32-bit values: like real chromaprint output, adjacent     items"
     },
     {
@@ -23539,9 +24129,9 @@
       "source_file": "ml/gt_match_verify.py",
       "source_location": "L41",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_match_verify",
-      "target": "ml_build_eval_manifest",
-      "confidence_score": 1.0
+      "target": "ml_build_eval_manifest"
     },
     {
       "relation": "imports_from",
@@ -23615,9 +24205,9 @@
       "source_file": "ml/gt_match_verify.py",
       "source_location": "L41",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_match_verify",
-      "target": "ml_build_eval_manifest_dedup_moments",
-      "confidence_score": 1.0
+      "target": "ml_build_eval_manifest_dedup_moments"
     },
     {
       "relation": "calls",
@@ -23626,9 +24216,9 @@
       "source_file": "ml/gt_match_verify.py",
       "source_location": "L115",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_match_verify_build_manifest_from_matches",
-      "target": "ml_build_eval_manifest_dedup_moments",
-      "confidence_score": 1.0
+      "target": "ml_build_eval_manifest_dedup_moments"
     },
     {
       "relation": "imports",
@@ -34957,9 +35547,9 @@
       "source_file": "ml/gt_match_verify.py",
       "source_location": "L38",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_match_verify",
-      "target": "ml_gt_capture",
-      "confidence_score": 1.0
+      "target": "ml_gt_capture"
     },
     {
       "relation": "imports_from",
@@ -35256,6 +35846,17 @@
       "relation": "imports_from",
       "context": "submodule_import",
       "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L43",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly",
+      "target": "ml_gt_capture_daily",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports_from",
+      "context": "submodule_import",
+      "confidence": "EXTRACTED",
       "source_file": "tests/test_gt_capture_daily.py",
       "source_location": "L6",
       "weight": 1.0,
@@ -35479,6 +36080,16 @@
     {
       "relation": "inherits",
       "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L223",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_repostdiscoveryzeroed",
+      "target": "runtimeerror",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "inherits",
+      "confidence": "EXTRACTED",
       "source_file": "ml/vod_download_preflight.py",
       "source_location": "L12",
       "weight": 1.0,
@@ -35647,9 +36258,9 @@
       "source_file": "ml/gt_match_verify.py",
       "source_location": "L76",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_match_verify",
-      "target": "ml_gt_match_verify_build_captured_vod_rows",
-      "confidence_score": 1.0
+      "target": "ml_gt_match_verify_build_captured_vod_rows"
     },
     {
       "relation": "contains",
@@ -35657,9 +36268,9 @@
       "source_file": "ml/gt_match_verify.py",
       "source_location": "L101",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_match_verify",
-      "target": "ml_gt_match_verify_build_manifest_from_matches",
-      "confidence_score": 1.0
+      "target": "ml_gt_match_verify_build_manifest_from_matches"
     },
     {
       "relation": "contains",
@@ -35667,9 +36278,9 @@
       "source_file": "ml/gt_match_verify.py",
       "source_location": "L120",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_match_verify",
-      "target": "ml_gt_match_verify_filter_gold_manifest",
-      "confidence_score": 1.0
+      "target": "ml_gt_match_verify_filter_gold_manifest"
     },
     {
       "relation": "contains",
@@ -35677,9 +36288,9 @@
       "source_file": "ml/gt_match_verify.py",
       "source_location": "L164",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_match_verify",
-      "target": "ml_gt_match_verify_make_default_load_fingerprint",
-      "confidence_score": 1.0
+      "target": "ml_gt_match_verify_make_default_load_fingerprint"
     },
     {
       "relation": "contains",
@@ -35687,9 +36298,9 @@
       "source_file": "ml/gt_match_verify.py",
       "source_location": "L148",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_match_verify",
-      "target": "ml_gt_match_verify_make_default_match",
-      "confidence_score": 1.0
+      "target": "ml_gt_match_verify_make_default_match"
     },
     {
       "relation": "contains",
@@ -35697,9 +36308,9 @@
       "source_file": "ml/gt_match_verify.py",
       "source_location": "L179",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_match_verify",
-      "target": "ml_gt_match_verify_make_default_verify",
-      "confidence_score": 1.0
+      "target": "ml_gt_match_verify_make_default_verify"
     },
     {
       "relation": "contains",
@@ -35707,9 +36318,9 @@
       "source_file": "ml/gt_match_verify.py",
       "source_location": "L195",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_match_verify",
-      "target": "ml_gt_match_verify_match_and_verify",
-      "confidence_score": 1.0
+      "target": "ml_gt_match_verify_match_and_verify"
     },
     {
       "relation": "contains",
@@ -35717,9 +36328,9 @@
       "source_file": "ml/gt_match_verify.py",
       "source_location": "L58",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_match_verify",
-      "target": "ml_gt_match_verify_matchverifyresult",
-      "confidence_score": 1.0
+      "target": "ml_gt_match_verify_matchverifyresult"
     },
     {
       "relation": "contains",
@@ -35727,9 +36338,9 @@
       "source_file": "ml/gt_match_verify.py",
       "source_location": "L136",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_match_verify",
-      "target": "ml_gt_match_verify_verdict_counts",
-      "confidence_score": 1.0
+      "target": "ml_gt_match_verify_verdict_counts"
     },
     {
       "relation": "imports_from",
@@ -35738,9 +36349,9 @@
       "source_file": "ml/gt_match_verify.py",
       "source_location": "L39",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_match_verify",
-      "target": "ml_match_cross_platform_audio_fingerprints",
-      "confidence_score": 1.0
+      "target": "ml_match_cross_platform_audio_fingerprints"
     },
     {
       "relation": "imports_from",
@@ -35749,9 +36360,9 @@
       "source_file": "ml/gt_match_verify.py",
       "source_location": "L151",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_match_verify",
-      "target": "ml_match_cross_platform_transcripts",
-      "confidence_score": 1.0
+      "target": "ml_match_cross_platform_transcripts"
     },
     {
       "relation": "imports_from",
@@ -35760,9 +36371,9 @@
       "source_file": "ml/gt_match_verify.py",
       "source_location": "L40",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_match_verify",
-      "target": "ml_verify_gt_matches",
-      "confidence_score": 1.0
+      "target": "ml_verify_gt_matches"
     },
     {
       "relation": "rationale_for",
@@ -35770,7 +36381,18 @@
       "source_file": "ml/gt_match_verify.py",
       "source_location": "L1",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_match_verify_rationale_1",
+      "target": "ml_gt_match_verify"
+    },
+    {
+      "relation": "imports_from",
+      "context": "submodule_import",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L44",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly",
       "target": "ml_gt_match_verify",
       "confidence_score": 1.0
     },
@@ -35781,7 +36403,18 @@
       "source_file": "tests/test_gt_match_verify.py",
       "source_location": "L5",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_match_verify",
+      "target": "ml_gt_match_verify"
+    },
+    {
+      "relation": "imports_from",
+      "context": "submodule_import",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L6",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly",
       "target": "ml_gt_match_verify",
       "confidence_score": 1.0
     },
@@ -35792,9 +36425,9 @@
       "source_file": "ml/gt_match_verify.py",
       "source_location": "L195",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_match_verify_match_and_verify",
-      "target": "ml_gt_match_verify_matchverifyresult",
-      "confidence_score": 1.0
+      "target": "ml_gt_match_verify_matchverifyresult"
     },
     {
       "relation": "rationale_for",
@@ -35802,9 +36435,9 @@
       "source_file": "ml/gt_match_verify.py",
       "source_location": "L59",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_match_verify_rationale_59",
-      "target": "ml_gt_match_verify_matchverifyresult",
-      "confidence_score": 1.0
+      "target": "ml_gt_match_verify_matchverifyresult"
     },
     {
       "relation": "references",
@@ -35813,9 +36446,9 @@
       "source_file": "ml/gt_match_verify.py",
       "source_location": "L76",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_match_verify_build_captured_vod_rows",
-      "target": "ml_gt_match_verify_py_path",
-      "confidence_score": 1.0
+      "target": "ml_gt_match_verify_py_path"
     },
     {
       "relation": "calls",
@@ -35824,9 +36457,9 @@
       "source_file": "ml/gt_match_verify.py",
       "source_location": "L232",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_match_verify_match_and_verify",
-      "target": "ml_gt_match_verify_build_captured_vod_rows",
-      "confidence_score": 1.0
+      "target": "ml_gt_match_verify_build_captured_vod_rows"
     },
     {
       "relation": "rationale_for",
@@ -35834,9 +36467,9 @@
       "source_file": "ml/gt_match_verify.py",
       "source_location": "L77",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_match_verify_rationale_77",
-      "target": "ml_gt_match_verify_build_captured_vod_rows",
-      "confidence_score": 1.0
+      "target": "ml_gt_match_verify_build_captured_vod_rows"
     },
     {
       "relation": "references",
@@ -35845,9 +36478,9 @@
       "source_file": "ml/gt_match_verify.py",
       "source_location": "L164",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_match_verify_make_default_load_fingerprint",
-      "target": "ml_gt_match_verify_py_path",
-      "confidence_score": 1.0
+      "target": "ml_gt_match_verify_py_path"
     },
     {
       "relation": "references",
@@ -35856,9 +36489,9 @@
       "source_file": "ml/gt_match_verify.py",
       "source_location": "L148",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_match_verify_make_default_match",
-      "target": "ml_gt_match_verify_py_path",
-      "confidence_score": 1.0
+      "target": "ml_gt_match_verify_py_path"
     },
     {
       "relation": "references",
@@ -35867,9 +36500,9 @@
       "source_file": "ml/gt_match_verify.py",
       "source_location": "L195",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_match_verify_match_and_verify",
-      "target": "ml_gt_match_verify_py_path",
-      "confidence_score": 1.0
+      "target": "ml_gt_match_verify_py_path"
     },
     {
       "relation": "calls",
@@ -35878,9 +36511,9 @@
       "source_file": "ml/gt_match_verify.py",
       "source_location": "L234",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_match_verify_match_and_verify",
-      "target": "ml_gt_match_verify_build_manifest_from_matches",
-      "confidence_score": 1.0
+      "target": "ml_gt_match_verify_build_manifest_from_matches"
     },
     {
       "relation": "rationale_for",
@@ -35888,9 +36521,9 @@
       "source_file": "ml/gt_match_verify.py",
       "source_location": "L102",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_match_verify_rationale_102",
-      "target": "ml_gt_match_verify_build_manifest_from_matches",
-      "confidence_score": 1.0
+      "target": "ml_gt_match_verify_build_manifest_from_matches"
     },
     {
       "relation": "calls",
@@ -35899,9 +36532,9 @@
       "source_file": "ml/gt_match_verify.py",
       "source_location": "L250",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_match_verify_match_and_verify",
-      "target": "ml_gt_match_verify_filter_gold_manifest",
-      "confidence_score": 1.0
+      "target": "ml_gt_match_verify_filter_gold_manifest"
     },
     {
       "relation": "rationale_for",
@@ -35909,9 +36542,9 @@
       "source_file": "ml/gt_match_verify.py",
       "source_location": "L121",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_match_verify_rationale_121",
-      "target": "ml_gt_match_verify_filter_gold_manifest",
-      "confidence_score": 1.0
+      "target": "ml_gt_match_verify_filter_gold_manifest"
     },
     {
       "relation": "calls",
@@ -35920,9 +36553,9 @@
       "source_file": "ml/gt_match_verify.py",
       "source_location": "L251",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_match_verify_match_and_verify",
-      "target": "ml_gt_match_verify_verdict_counts",
-      "confidence_score": 1.0
+      "target": "ml_gt_match_verify_verdict_counts"
     },
     {
       "relation": "rationale_for",
@@ -35930,9 +36563,9 @@
       "source_file": "ml/gt_match_verify.py",
       "source_location": "L137",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_match_verify_rationale_137",
-      "target": "ml_gt_match_verify_verdict_counts",
-      "confidence_score": 1.0
+      "target": "ml_gt_match_verify_verdict_counts"
     },
     {
       "relation": "calls",
@@ -35941,9 +36574,9 @@
       "source_file": "ml/gt_match_verify.py",
       "source_location": "L220",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_match_verify_match_and_verify",
-      "target": "ml_gt_match_verify_make_default_match",
-      "confidence_score": 1.0
+      "target": "ml_gt_match_verify_make_default_match"
     },
     {
       "relation": "calls",
@@ -35952,9 +36585,9 @@
       "source_file": "ml/gt_match_verify.py",
       "source_location": "L222",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_match_verify_match_and_verify",
-      "target": "ml_gt_match_verify_make_default_load_fingerprint",
-      "confidence_score": 1.0
+      "target": "ml_gt_match_verify_make_default_load_fingerprint"
     },
     {
       "relation": "calls",
@@ -35963,9 +36596,9 @@
       "source_file": "ml/gt_match_verify.py",
       "source_location": "L230",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_match_verify_match_and_verify",
-      "target": "ml_gt_match_verify_make_default_verify",
-      "confidence_score": 1.0
+      "target": "ml_gt_match_verify_make_default_verify"
     },
     {
       "relation": "calls",
@@ -35984,8 +36617,596 @@
       "source_file": "ml/gt_match_verify.py",
       "source_location": "L208",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_match_verify_rationale_208",
-      "target": "ml_gt_match_verify_match_and_verify",
+      "target": "ml_gt_match_verify_match_and_verify"
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L355",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_run_weekly_match_verify",
+      "target": "ml_gt_match_verify_match_and_verify"
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L139",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly",
+      "target": "ml_gt_match_verify_weekly_gold_accrual",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L232",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly",
+      "target": "ml_gt_match_verify_weekly_list_iboclipss_reposts",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L287",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly",
+      "target": "ml_gt_match_verify_weekly_load_captured_vod_ids",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L176",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly",
+      "target": "ml_gt_match_verify_weekly_load_match_state",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L395",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly",
+      "target": "ml_gt_match_verify_weekly_main",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L171",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly",
+      "target": "ml_gt_match_verify_weekly_matched_ids",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L113",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly",
+      "target": "ml_gt_match_verify_weekly_merge_manifests",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L105",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly",
+      "target": "ml_gt_match_verify_weekly_moment_key",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L202",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly",
+      "target": "ml_gt_match_verify_weekly_read_jsonl",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L69",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly",
+      "target": "ml_gt_match_verify_weekly_repost_id",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L223",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly",
+      "target": "ml_gt_match_verify_weekly_repostdiscoveryzeroed",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L296",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly",
+      "target": "ml_gt_match_verify_weekly_run_weekly_match_verify",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L193",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly",
+      "target": "ml_gt_match_verify_weekly_save_match_state",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L82",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly",
+      "target": "ml_gt_match_verify_weekly_select_new_reposts",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L214",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly",
+      "target": "ml_gt_match_verify_weekly_write_jsonl",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "context": "import",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L243",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly",
+      "target": "services_downloader_apply_short_form_sleep_opts",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "context": "import",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L244",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly",
+      "target": "services_yt_dlp_auth_apply_yt_dlp_auth_options",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L1",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_rationale_1",
+      "target": "ml_gt_match_verify_weekly",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports_from",
+      "context": "submodule_import",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L7",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly",
+      "target": "ml_gt_match_verify_weekly",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L70",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_rationale_70",
+      "target": "ml_gt_match_verify_weekly_repost_id",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L363",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_run_weekly_match_verify",
+      "target": "ml_gt_match_verify_weekly_repost_id",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L94",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_select_new_reposts",
+      "target": "ml_gt_match_verify_weekly_repost_id",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L83",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_rationale_83",
+      "target": "ml_gt_match_verify_weekly_select_new_reposts",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L346",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_run_weekly_match_verify",
+      "target": "ml_gt_match_verify_weekly_select_new_reposts",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L129",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_merge_manifests",
+      "target": "ml_gt_match_verify_weekly_moment_key",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L106",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_rationale_106",
+      "target": "ml_gt_match_verify_weekly_moment_key",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L114",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_rationale_114",
+      "target": "ml_gt_match_verify_weekly_merge_manifests",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L357",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_run_weekly_match_verify",
+      "target": "ml_gt_match_verify_weekly_merge_manifests",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L140",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_rationale_140",
+      "target": "ml_gt_match_verify_weekly_gold_accrual",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L342",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_run_weekly_match_verify",
+      "target": "ml_gt_match_verify_weekly_gold_accrual",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L172",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_rationale_172",
+      "target": "ml_gt_match_verify_weekly_matched_ids",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L345",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_run_weekly_match_verify",
+      "target": "ml_gt_match_verify_weekly_matched_ids",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "context": "parameter_type",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L176",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_load_match_state",
+      "target": "ml_gt_match_verify_weekly_py_path",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L177",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_rationale_177",
+      "target": "ml_gt_match_verify_weekly_load_match_state",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L327",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_run_weekly_match_verify",
+      "target": "ml_gt_match_verify_weekly_load_match_state",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "context": "parameter_type",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L287",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_load_captured_vod_ids",
+      "target": "ml_gt_match_verify_weekly_py_path",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L418",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_main",
+      "target": "ml_gt_match_verify_weekly_py_path",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "context": "parameter_type",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L202",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_read_jsonl",
+      "target": "ml_gt_match_verify_weekly_py_path",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "context": "parameter_type",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L296",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_run_weekly_match_verify",
+      "target": "ml_gt_match_verify_weekly_py_path",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "context": "parameter_type",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L193",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_save_match_state",
+      "target": "ml_gt_match_verify_weekly_py_path",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "context": "parameter_type",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L214",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_write_jsonl",
+      "target": "ml_gt_match_verify_weekly_py_path",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L194",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_rationale_194",
+      "target": "ml_gt_match_verify_weekly_save_match_state",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L371",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_run_weekly_match_verify",
+      "target": "ml_gt_match_verify_weekly_save_match_state",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L342",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_run_weekly_match_verify",
+      "target": "ml_gt_match_verify_weekly_read_jsonl",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L358",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_run_weekly_match_verify",
+      "target": "ml_gt_match_verify_weekly_write_jsonl",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L260",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_list_iboclipss_reposts",
+      "target": "ml_gt_match_verify_weekly_repostdiscoveryzeroed",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L224",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_rationale_224",
+      "target": "ml_gt_match_verify_weekly_repostdiscoveryzeroed",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L254",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_list_iboclipss_reposts",
+      "target": "services_downloader_apply_short_form_sleep_opts",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L253",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_list_iboclipss_reposts",
+      "target": "services_yt_dlp_auth_apply_yt_dlp_auth_options",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L425",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_main",
+      "target": "ml_gt_match_verify_weekly_list_iboclipss_reposts",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L233",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_rationale_233",
+      "target": "ml_gt_match_verify_weekly_list_iboclipss_reposts",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L426",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_main",
+      "target": "ml_gt_match_verify_weekly_load_captured_vod_ids",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L288",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_rationale_288",
+      "target": "ml_gt_match_verify_weekly_load_captured_vod_ids",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L424",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_main",
+      "target": "ml_gt_match_verify_weekly_run_weekly_match_verify",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "ml/gt_match_verify_weekly.py",
+      "source_location": "L310",
+      "weight": 1.0,
+      "source": "ml_gt_match_verify_weekly_rationale_310",
+      "target": "ml_gt_match_verify_weekly_run_weekly_match_verify",
       "confidence_score": 1.0
     },
     {
@@ -39549,9 +40770,9 @@
       "source_file": "tests/test_gt_match_verify.py",
       "source_location": "L6",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_match_verify",
-      "target": "ml_match_cross_platform_audio_fingerprints",
-      "confidence_score": 1.0
+      "target": "ml_match_cross_platform_audio_fingerprints"
     },
     {
       "relation": "imports_from",
@@ -44509,9 +45730,9 @@
       "source_file": "tests/test_gt_match_verify.py",
       "source_location": "L7",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_match_verify",
-      "target": "ml_verify_gt_matches",
-      "confidence_score": 1.0
+      "target": "ml_verify_gt_matches"
     },
     {
       "relation": "imports_from",
@@ -61554,9 +62775,9 @@
       "source_file": "tests/test_gt_match_verify.py",
       "source_location": "L26",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_match_verify",
-      "target": "tests_test_gt_match_verify_buildcapturedvodrowstests",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_match_verify_buildcapturedvodrowstests"
     },
     {
       "relation": "contains",
@@ -61564,9 +62785,9 @@
       "source_file": "tests/test_gt_match_verify.py",
       "source_location": "L43",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_match_verify",
-      "target": "tests_test_gt_match_verify_buildmanifestfrommatchestests",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_match_verify_buildmanifestfrommatchestests"
     },
     {
       "relation": "contains",
@@ -61574,9 +62795,9 @@
       "source_file": "tests/test_gt_match_verify.py",
       "source_location": "L69",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_match_verify",
-      "target": "tests_test_gt_match_verify_filtergoldmanifesttests",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_match_verify_filtergoldmanifesttests"
     },
     {
       "relation": "contains",
@@ -61584,9 +62805,9 @@
       "source_file": "tests/test_gt_match_verify.py",
       "source_location": "L10",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_match_verify",
-      "target": "tests_test_gt_match_verify_match_row",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_match_verify_match_row"
     },
     {
       "relation": "contains",
@@ -61594,9 +62815,9 @@
       "source_file": "tests/test_gt_match_verify.py",
       "source_location": "L119",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_match_verify",
-      "target": "tests_test_gt_match_verify_matchandverifytests",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_match_verify_matchandverifytests"
     },
     {
       "relation": "contains",
@@ -61604,9 +62825,9 @@
       "source_file": "tests/test_gt_match_verify.py",
       "source_location": "L103",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_match_verify",
-      "target": "tests_test_gt_match_verify_verdictcountstests",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_match_verify_verdictcountstests"
     },
     {
       "relation": "calls",
@@ -61615,9 +62836,9 @@
       "source_file": "tests/test_gt_match_verify.py",
       "source_location": "L46",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_match_verify_buildmanifestfrommatchestests_test_groups_by_vod_and_dedups_overlapping_windows",
-      "target": "tests_test_gt_match_verify_match_row",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_match_verify_match_row"
     },
     {
       "relation": "calls",
@@ -61626,9 +62847,9 @@
       "source_file": "tests/test_gt_match_verify.py",
       "source_location": "L62",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_match_verify_buildmanifestfrommatchestests_test_skips_rows_without_a_vod_id",
-      "target": "tests_test_gt_match_verify_match_row",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_match_verify_match_row"
     },
     {
       "relation": "calls",
@@ -61637,9 +62858,9 @@
       "source_file": "tests/test_gt_match_verify.py",
       "source_location": "L199",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_match_verify_matchandverifytests_test_confirms_from_stored_fingerprint_when_vod_media_is_gone",
-      "target": "tests_test_gt_match_verify_match_row",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_match_verify_match_row"
     },
     {
       "relation": "calls",
@@ -61648,9 +62869,9 @@
       "source_file": "tests/test_gt_match_verify.py",
       "source_location": "L151",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_match_verify_matchandverifytests_test_each_match_receives_a_verdict_and_gold_manifest_is_filtered",
-      "target": "tests_test_gt_match_verify_match_row",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_match_verify_match_row"
     },
     {
       "relation": "method",
@@ -61658,9 +62879,9 @@
       "source_file": "tests/test_gt_match_verify.py",
       "source_location": "L35",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_match_verify_buildcapturedvodrowstests",
-      "target": "tests_test_gt_match_verify_buildcapturedvodrowstests_test_dedups_and_skips_blank_ids",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_match_verify_buildcapturedvodrowstests_test_dedups_and_skips_blank_ids"
     },
     {
       "relation": "method",
@@ -61668,9 +62889,9 @@
       "source_file": "tests/test_gt_match_verify.py",
       "source_location": "L27",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_match_verify_buildcapturedvodrowstests",
-      "target": "tests_test_gt_match_verify_buildcapturedvodrowstests_test_points_each_row_at_its_stored_fingerprint_artifact",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_match_verify_buildcapturedvodrowstests_test_points_each_row_at_its_stored_fingerprint_artifact"
     },
     {
       "relation": "method",
@@ -61678,9 +62899,9 @@
       "source_file": "tests/test_gt_match_verify.py",
       "source_location": "L44",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_match_verify_buildmanifestfrommatchestests",
-      "target": "tests_test_gt_match_verify_buildmanifestfrommatchestests_test_groups_by_vod_and_dedups_overlapping_windows",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_match_verify_buildmanifestfrommatchestests_test_groups_by_vod_and_dedups_overlapping_windows"
     },
     {
       "relation": "method",
@@ -61688,9 +62909,9 @@
       "source_file": "tests/test_gt_match_verify.py",
       "source_location": "L61",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_match_verify_buildmanifestfrommatchestests",
-      "target": "tests_test_gt_match_verify_buildmanifestfrommatchestests_test_skips_rows_without_a_vod_id",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_match_verify_buildmanifestfrommatchestests_test_skips_rows_without_a_vod_id"
     },
     {
       "relation": "method",
@@ -61698,9 +62919,9 @@
       "source_file": "tests/test_gt_match_verify.py",
       "source_location": "L70",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_match_verify_filtergoldmanifesttests",
-      "target": "tests_test_gt_match_verify_filtergoldmanifesttests_manifest",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_match_verify_filtergoldmanifesttests_manifest"
     },
     {
       "relation": "method",
@@ -61708,9 +62929,9 @@
       "source_file": "tests/test_gt_match_verify.py",
       "source_location": "L97",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_match_verify_filtergoldmanifesttests",
-      "target": "tests_test_gt_match_verify_filtergoldmanifesttests_test_keep_silver_false_keeps_only_gold",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_match_verify_filtergoldmanifesttests_test_keep_silver_false_keeps_only_gold"
     },
     {
       "relation": "method",
@@ -61718,9 +62939,9 @@
       "source_file": "tests/test_gt_match_verify.py",
       "source_location": "L90",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_match_verify_filtergoldmanifesttests",
-      "target": "tests_test_gt_match_verify_filtergoldmanifesttests_test_keeps_only_gold_and_silver_and_drops_emptied_vods",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_match_verify_filtergoldmanifesttests_test_keeps_only_gold_and_silver_and_drops_emptied_vods"
     },
     {
       "relation": "calls",
@@ -61729,9 +62950,9 @@
       "source_file": "tests/test_gt_match_verify.py",
       "source_location": "L98",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_match_verify_filtergoldmanifesttests_test_keep_silver_false_keeps_only_gold",
-      "target": "tests_test_gt_match_verify_filtergoldmanifesttests_manifest",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_match_verify_filtergoldmanifesttests_manifest"
     },
     {
       "relation": "calls",
@@ -61740,9 +62961,9 @@
       "source_file": "tests/test_gt_match_verify.py",
       "source_location": "L91",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_match_verify_filtergoldmanifesttests_test_keeps_only_gold_and_silver_and_drops_emptied_vods",
-      "target": "tests_test_gt_match_verify_filtergoldmanifesttests_manifest",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_match_verify_filtergoldmanifesttests_manifest"
     },
     {
       "relation": "method",
@@ -61750,9 +62971,9 @@
       "source_file": "tests/test_gt_match_verify.py",
       "source_location": "L104",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_match_verify_verdictcountstests",
-      "target": "tests_test_gt_match_verify_verdictcountstests_test_counts_by_tier",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_match_verify_verdictcountstests_test_counts_by_tier"
     },
     {
       "relation": "method",
@@ -61760,9 +62981,9 @@
       "source_file": "tests/test_gt_match_verify.py",
       "source_location": "L133",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_match_verify_matchandverifytests",
-      "target": "tests_test_gt_match_verify_matchandverifytests_fake_verify",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_match_verify_matchandverifytests_fake_verify"
     },
     {
       "relation": "method",
@@ -61770,9 +62991,9 @@
       "source_file": "tests/test_gt_match_verify.py",
       "source_location": "L120",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_match_verify_matchandverifytests",
-      "target": "tests_test_gt_match_verify_matchandverifytests_setup",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_match_verify_matchandverifytests_setup"
     },
     {
       "relation": "method",
@@ -61780,9 +63001,9 @@
       "source_file": "tests/test_gt_match_verify.py",
       "source_location": "L178",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_match_verify_matchandverifytests",
-      "target": "tests_test_gt_match_verify_matchandverifytests_test_confirms_from_stored_fingerprint_when_vod_media_is_gone",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_match_verify_matchandverifytests_test_confirms_from_stored_fingerprint_when_vod_media_is_gone"
     },
     {
       "relation": "method",
@@ -61790,9 +63011,9 @@
       "source_file": "tests/test_gt_match_verify.py",
       "source_location": "L149",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_match_verify_matchandverifytests",
-      "target": "tests_test_gt_match_verify_matchandverifytests_test_each_match_receives_a_verdict_and_gold_manifest_is_filtered",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_match_verify_matchandverifytests_test_each_match_receives_a_verdict_and_gold_manifest_is_filtered"
     },
     {
       "relation": "method",
@@ -61800,9 +63021,9 @@
       "source_file": "tests/test_gt_match_verify.py",
       "source_location": "L125",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_match_verify_matchandverifytests",
-      "target": "tests_test_gt_match_verify_matchandverifytests_tier_for",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_match_verify_matchandverifytests_tier_for"
     },
     {
       "relation": "calls",
@@ -61811,8 +63032,530 @@
       "source_file": "tests/test_gt_match_verify.py",
       "source_location": "L134",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_match_verify_matchandverifytests_fake_verify",
-      "target": "tests_test_gt_match_verify_matchandverifytests_tier_for",
+      "target": "tests_test_gt_match_verify_matchandverifytests_tier_for"
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L98",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly",
+      "target": "tests_test_gt_match_verify_weekly_goldaccrualtests",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L19",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly",
+      "target": "tests_test_gt_match_verify_weekly_manifest_row",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L126",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly",
+      "target": "tests_test_gt_match_verify_weekly_matchstatetests",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L70",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly",
+      "target": "tests_test_gt_match_verify_weekly_mergemanifeststests",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L23",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly",
+      "target": "tests_test_gt_match_verify_weekly_moment",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L10",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly",
+      "target": "tests_test_gt_match_verify_weekly_repost",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L154",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly",
+      "target": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L36",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly",
+      "target": "tests_test_gt_match_verify_weekly_selectnewrepoststests",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L207",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests_test_matches_new_reposts_writes_gold_manifest_and_summarizes",
+      "target": "tests_test_gt_match_verify_weekly_repost",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L232",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests_test_only_new_reposts_are_matched_and_manifest_accumulates",
+      "target": "tests_test_gt_match_verify_weekly_repost",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L257",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests_test_zeroed_discovery_does_not_advance_state_or_clobber_manifest",
+      "target": "tests_test_gt_match_verify_weekly_repost",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L48",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_selectnewrepoststests_test_deduplicates_keeping_first_occurrence",
+      "target": "tests_test_gt_match_verify_weekly_repost",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L38",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_selectnewrepoststests_test_excludes_already_matched_and_returns_only_new",
+      "target": "tests_test_gt_match_verify_weekly_repost",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L54",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_selectnewrepoststests_test_skips_records_without_a_usable_id",
+      "target": "tests_test_gt_match_verify_weekly_repost",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L101",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_goldaccrualtests_test_counts_gold_moments_and_vods_against_target",
+      "target": "tests_test_gt_match_verify_weekly_manifest_row",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L116",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_goldaccrualtests_test_target_reached_when_both_thresholds_met",
+      "target": "tests_test_gt_match_verify_weekly_manifest_row",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L72",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_mergemanifeststests_test_appends_new_moments_per_vod_and_preserves_existing",
+      "target": "tests_test_gt_match_verify_weekly_manifest_row",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L86",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_mergemanifeststests_test_new_verdict_for_same_repost_overwrites_old",
+      "target": "tests_test_gt_match_verify_weekly_manifest_row",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L101",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_goldaccrualtests_test_counts_gold_moments_and_vods_against_target",
+      "target": "tests_test_gt_match_verify_weekly_moment",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L116",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_goldaccrualtests_test_target_reached_when_both_thresholds_met",
+      "target": "tests_test_gt_match_verify_weekly_moment",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L72",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_mergemanifeststests_test_appends_new_moments_per_vod_and_preserves_existing",
+      "target": "tests_test_gt_match_verify_weekly_moment",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L86",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_mergemanifeststests_test_new_verdict_for_same_repost_overwrites_old",
+      "target": "tests_test_gt_match_verify_weekly_moment",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L47",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_selectnewrepoststests",
+      "target": "tests_test_gt_match_verify_weekly_selectnewrepoststests_test_deduplicates_keeping_first_occurrence",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L43",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_selectnewrepoststests",
+      "target": "tests_test_gt_match_verify_weekly_selectnewrepoststests_test_empty_inputs_yield_nothing",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L37",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_selectnewrepoststests",
+      "target": "tests_test_gt_match_verify_weekly_selectnewrepoststests_test_excludes_already_matched_and_returns_only_new",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L59",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_selectnewrepoststests",
+      "target": "tests_test_gt_match_verify_weekly_selectnewrepoststests_test_falls_back_to_source_url_when_no_clip_id",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L53",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_selectnewrepoststests",
+      "target": "tests_test_gt_match_verify_weekly_selectnewrepoststests_test_skips_records_without_a_usable_id",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L71",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_mergemanifeststests",
+      "target": "tests_test_gt_match_verify_weekly_mergemanifeststests_test_appends_new_moments_per_vod_and_preserves_existing",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L85",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_mergemanifeststests",
+      "target": "tests_test_gt_match_verify_weekly_mergemanifeststests_test_new_verdict_for_same_repost_overwrites_old",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L99",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_goldaccrualtests",
+      "target": "tests_test_gt_match_verify_weekly_goldaccrualtests_test_counts_gold_moments_and_vods_against_target",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L114",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_goldaccrualtests",
+      "target": "tests_test_gt_match_verify_weekly_goldaccrualtests_test_target_reached_when_both_thresholds_met",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L127",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_matchstatetests",
+      "target": "tests_test_gt_match_verify_weekly_matchstatetests_setup",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L132",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_matchstatetests",
+      "target": "tests_test_gt_match_verify_weekly_matchstatetests_test_missing_state_loads_empty",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L136",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_matchstatetests",
+      "target": "tests_test_gt_match_verify_weekly_matchstatetests_test_save_then_load_roundtrips",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L145",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_matchstatetests",
+      "target": "tests_test_gt_match_verify_weekly_matchstatetests_test_unreadable_state_falls_back_to_empty",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L165",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests",
+      "target": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests_fake_match_and_verify_factory",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L189",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests",
+      "target": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests_run",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L155",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests",
+      "target": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests_setup",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L205",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests",
+      "target": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests_test_matches_new_reposts_writes_gold_manifest_and_summarizes",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L230",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests",
+      "target": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests_test_only_new_reposts_are_matched_and_manifest_accumulates",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L246",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests",
+      "target": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests_test_reports_new_vods_captured_since_last_run",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L254",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests",
+      "target": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests_test_zeroed_discovery_does_not_advance_state_or_clobber_manifest",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L211",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests_test_matches_new_reposts_writes_gold_manifest_and_summarizes",
+      "target": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests_fake_match_and_verify_factory",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L231",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests_test_only_new_reposts_are_matched_and_manifest_accumulates",
+      "target": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests_fake_match_and_verify_factory",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L247",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests_test_reports_new_vods_captured_since_last_run",
+      "target": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests_fake_match_and_verify_factory",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L256",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests_test_zeroed_discovery_does_not_advance_state_or_clobber_manifest",
+      "target": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests_fake_match_and_verify_factory",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L214",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests_test_matches_new_reposts_writes_gold_manifest_and_summarizes",
+      "target": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests_run",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L233",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests_test_only_new_reposts_are_matched_and_manifest_accumulates",
+      "target": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests_run",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L248",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests_test_reports_new_vods_captured_since_last_run",
+      "target": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests_run",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_gt_match_verify_weekly.py",
+      "source_location": "L257",
+      "weight": 1.0,
+      "source": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests_test_zeroed_discovery_does_not_advance_state_or_clobber_manifest",
+      "target": "tests_test_gt_match_verify_weekly_runweeklymatchverifytests_run",
       "confidence_score": 1.0
     },
     {
@@ -65168,5 +66911,5 @@
       "source_file": "data/README.md"
     }
   ],
-  "built_at_commit": "059e8fb6e4f151330e5b962d09c834a1f8ff304b"
+  "built_at_commit": "e9b16e7ae0c3aa3a77714a2979ea2916ce08d8e3"
 }
