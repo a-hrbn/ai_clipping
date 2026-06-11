@@ -6452,3 +6452,45 @@ against *verified gold* GT — before changing the finder.
 - Verification: 43 torch-free GT tests pass (incl. new file); py_compile OK on all
   three changed files. `npm run test/typecheck` N/A (Python project, no npm scripts);
   full pytest suite needs torch/whisper (pre-existing env limitation).
+
+## RALPH — GT Flywheel 3/5: Daily capture job (Helix new-VOD selection + scheduling) — issue #6
+
+Plan (smallest change wrapping the #5 capture core into a standing daily job):
+- [ ] New module `backend/ml/gt_capture_daily.py`:
+  - Pure seam `select_new_vods(vods, already_captured)` — order-preserving,
+    de-duplicated diff that drops already-captured ids and id-less records.
+  - State persistence `load_captured_state` / `save_captured_state` (atomic),
+    keyed vod_id -> provenance, so re-runs are idempotent/resumable.
+  - Thin orchestrator `run_daily_capture(...)` — list Helix archives (injected)
+    -> select_new_vods -> capture_vod per new VOD -> persist state AFTER EACH
+    capture (crash-resumable) -> return compact summary.
+  - `list_archive_vods(client, broadcaster)` — reuses the existing TwitchClient
+    Helix `/videos?type=archive` listing (lazy import; keeps pure seams torch/net-free).
+  - `main()` CLI (default broadcaster jynxzi).
+- [ ] Tests `backend/tests/test_gt_capture_daily.py` — pure seam boundaries +
+  orchestrator through fakes (only-new captured, idempotent across restart,
+  persist-after-each resumability, provenance recorded).
+- [ ] Schedule: `scripts/run_gt_capture_daily.sh` wrapper + documented daily
+  cron line (after stream-end), mirroring run_gt_pipeline.sh.
+- [ ] Verify pure-seam + orchestrator tests green (PYTHONPATH=backend pytest).
+
+### Review (done) — issue #6
+- Added `backend/ml/gt_capture_daily.py`: pure `select_new_vods` diff (order-
+  preserving, deduped, id-normalized), `load/save_captured_state` (atomic) +
+  `captured_ids`, thin `run_daily_capture` orchestrator (lists Helix archives via
+  injected callable → select_new → `gt_capture.capture_vod` per VOD → persists
+  state AFTER EACH capture so a crash is resumable → compact summary), Helix
+  `list_archive_vods` (lazy import of TwitchClient/_get_user → pure seams stay
+  net/ML-free), and a `main()` CLI (default broadcaster jynxzi).
+- Schedule: `scripts/run_gt_capture_daily.sh` wrapper (CUDA→CPU container
+  fallback) + documented daily crontab line (06:00, after stream-end).
+- Tests: `backend/tests/test_gt_capture_daily.py` (12) — select_new_vods
+  boundaries, state round-trip/atomicity/corrupt-fallback, and orchestration via
+  fakes (only-new captured + skip-rest demo, idempotent across restart,
+  persist-after-each resumability, per-VOD cache_dir/vod_date passthrough).
+- Verify: 74 torch-free GT tests pass (incl. the new 12); py_compile + `--help`
+  smoke OK. `npm run test/typecheck` N/A (Python project, no npm scripts).
+  `test_gt_pipeline_merge` still errors at collection on missing `ffmpeg` —
+  pre-existing env limitation, unrelated (gt_pipeline untouched).
+- Blocker for next iter: none. #7 (match+verify core, depends on #5 ✓) is the
+  next unblocked tracer; #8 remains blocked by #7.

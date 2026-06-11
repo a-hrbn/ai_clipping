@@ -1,16 +1,16 @@
 # Graph Report - backend  (2026-06-11)
 
 ## Corpus Check
-- 135 files · ~94,697 words
+- 137 files · ~96,292 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1906 nodes · 4086 edges · 64 communities (51 shown, 13 thin omitted)
-- Extraction: 97% EXTRACTED · 3% INFERRED · 0% AMBIGUOUS · INFERRED: 131 edges (avg confidence: 0.52)
+- 1948 nodes · 4152 edges · 76 communities (60 shown, 16 thin omitted)
+- Extraction: 97% EXTRACTED · 3% INFERRED · 0% AMBIGUOUS · INFERRED: 132 edges (avg confidence: 0.52)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `9e9821f2`
+- Built from commit: `3c82160d`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -29,8 +29,20 @@
 - [[_COMMUNITY_Community 11|Community 11]]
 - [[_COMMUNITY_Community 12|Community 12]]
 - [[_COMMUNITY_Community 13|Community 13]]
+- [[_COMMUNITY_Community 14|Community 14]]
 - [[_COMMUNITY_Community 15|Community 15]]
+- [[_COMMUNITY_Community 16|Community 16]]
+- [[_COMMUNITY_Community 17|Community 17]]
+- [[_COMMUNITY_Community 18|Community 18]]
+- [[_COMMUNITY_Community 19|Community 19]]
+- [[_COMMUNITY_Community 20|Community 20]]
+- [[_COMMUNITY_Community 21|Community 21]]
+- [[_COMMUNITY_Community 22|Community 22]]
+- [[_COMMUNITY_Community 23|Community 23]]
+- [[_COMMUNITY_Community 24|Community 24]]
 - [[_COMMUNITY_Community 25|Community 25]]
+- [[_COMMUNITY_Community 26|Community 26]]
+- [[_COMMUNITY_Community 27|Community 27]]
 - [[_COMMUNITY_Community 32|Community 32]]
 - [[_COMMUNITY_Community 35|Community 35]]
 - [[_COMMUNITY_Community 36|Community 36]]
@@ -112,7 +124,7 @@
 - **Trend Prior Update Inputs** — readme_update_process, readme_qualitative_review, readme_creator_domain_needs, readme_offline_eval_results [EXTRACTED 1.00]
 - **Shorts Pattern Seed Domains** — readme_seed_phrases, readme_short_categories, readme_hook_patterns_manifest [EXTRACTED 1.00]
 
-## Communities (64 total, 13 thin omitted)
+## Communities (76 total, 16 thin omitted)
 
 ### Community 0 - "Community 0"
 Cohesion: 0.06
@@ -166,13 +178,49 @@ Nodes (20): bind_job_session(), cancel_job(), create_job(), delete_job(), _evict
 Cohesion: 0.06
 Nodes (52): anthropic_text_content(), balanced_json_objects_from_list(), bounded_ratio(), _build_chat_marker(), build_moment_finder_prompt(), call_anthropic_moment_finder(), call_gemini_moment_finder(), call_moment_finder_provider() (+44 more)
 
+### Community 14 - "Community 14"
+Cohesion: 0.17
+Nodes (26): _collection_chunks(), _covered_date_ranges(), _date_range_payload(), _intersecting_date_ranges(), _label_date_ranges(), _label_vod_count(), main(), _merge_date_ranges() (+18 more)
+
 ### Community 15 - "Community 15"
 Cohesion: 0.09
 Nodes (35): main(), _parse_args(), run_local_pipeline(), main(), _parse_args(), run(), main(), _parse_args() (+27 more)
 
+### Community 16 - "Community 16"
+Cohesion: 0.11
+Nodes (4): CapturedStateTests, _FakeCaptureResult, RunDailyCaptureTests, SelectNewVodsTests
+
+### Community 17 - "Community 17"
+Cohesion: 0.16
+Nodes (20): _parse_twitch_duration(), captured_ids(), list_archive_vods(), load_captured_state(), main(), Path, GT-flywheel daily capture job — the standing, idempotent wrapper around the capt, Atomically persist the already-captured state (tmp file + replace). (+12 more)
+
+### Community 18 - "Community 18"
+Cohesion: 0.35
+Nodes (13): export_frontend_gold_eval(), _gold_row_key(), main(), _merge_with_existing_rows(), Path, _read_jsonl(), _should_replace_existing_gold_row(), _stable_time_value() (+5 more)
+
+### Community 19 - "Community 19"
+Cohesion: 0.39
+Nodes (8): collect_clip_labels(), collect_clip_labels_with_summary(), _collection_input_summary(), _get_clips(), _get_user(), _get_vods(), TwitchClient, main()
+
+### Community 20 - "Community 20"
+Cohesion: 0.40
+Nodes (10): _as_optional_float(), import_gold_eval_labels(), main(), _matching_sidecar(), _parse_gold_grade(), Path, _read_csv(), _read_jsonl() (+2 more)
+
+### Community 21 - "Community 21"
+Cohesion: 0.36
+Nodes (4): _auto_negative_row(), BuildOutcomeHoldoutDatasetTests, _cross_platform_row(), _top_viewed_row()
+
 ### Community 25 - "Community 25"
-Cohesion: 0.06
-Nodes (54): build_outcome_holdout_dataset(), _fallback_candidate_id(), _feature_replay_index(), _is_cross_platform_positive_split(), main(), _normalize_split(), _prepare_rows(), Counter (+46 more)
+Cohesion: 0.07
+Nodes (50): build_outcome_holdout_dataset(), _fallback_candidate_id(), _feature_replay_index(), _is_cross_platform_positive_split(), main(), _normalize_split(), _prepare_rows(), Counter (+42 more)
+
+### Community 26 - "Community 26"
+Cohesion: 0.60
+Nodes (4): main(), _parse_args(), run(), Namespace
+
+### Community 27 - "Community 27"
+Cohesion: 0.70
+Nodes (4): annotate_gold_row(), _gold_holdout_bucket(), _gold_holdout_key(), _gold_holdout_policy()
 
 ### Community 32 - "Community 32"
 Cohesion: 0.07
@@ -211,8 +259,8 @@ Cohesion: 0.10
 Nodes (46): _as_float(), _as_optional_float(), cancel_job_status(), _candidate_funnel_payload(), _check_gemini(), _check_groq(), _cleanup_serving_job_source_media(), _coerce_csv_list() (+38 more)
 
 ### Community 83 - "Community 83"
-Cohesion: 0.09
-Nodes (25): build_manifest(), _job_summary(), main(), Path, _read_job_map(), _read_jsonl(), _recover_vod_url(), _url_from_path() (+17 more)
+Cohesion: 0.13
+Nodes (24): build_manifest(), _job_summary(), main(), Path, _read_job_map(), _read_jsonl(), _recover_vod_url(), _url_from_path() (+16 more)
 
 ### Community 84 - "Community 84"
 Cohesion: 0.12
@@ -227,8 +275,8 @@ Cohesion: 0.17
 Nodes (32): _as_float(), _debug_dirs(), export_serving_hard_negatives(), _fair_cap_rows_by_vod(), _feature_similarity(), _hard_negative_rows_for_job(), _holdout_vod_ids(), main() (+24 more)
 
 ### Community 89 - "Community 89"
-Cohesion: 0.07
-Nodes (70): _blended_gap_duration(), build_label_rows(), _clamp_negative_duration(), _classify_clip_views(), _clip_merge_end(), _clip_window_bounds(), collect_clip_labels(), collect_clip_labels_with_summary() (+62 more)
+Cohesion: 0.12
+Nodes (35): _blended_gap_duration(), build_label_rows(), _clamp_negative_duration(), _classify_clip_views(), _clip_merge_end(), _clip_window_bounds(), _creator_density_bonus(), _cycled_duration() (+27 more)
 
 ### Community 113 - "Community 113"
 Cohesion: 0.19
@@ -271,8 +319,8 @@ Cohesion: 0.12
 Nodes (16): hook_patterns, topic_patterns, global, hook_patterns, topic_patterns, hook_patterns, topic_patterns, hook_patterns (+8 more)
 
 ### Community 145 - "Community 145"
-Cohesion: 0.06
-Nodes (49): main(), _parse_args(), run(), _annotated_eval_row(), build_eval_dataset(), _content_bucket(), _count_values(), _dataset_role() (+41 more)
+Cohesion: 0.24
+Nodes (16): _annotated_eval_row(), build_eval_dataset(), _content_bucket(), _count_values(), _dataset_role(), eval_dataset_summary(), _eval_group(), _has_outcome_feedback() (+8 more)
 
 ### Community 157 - "Community 157"
 Cohesion: 0.25
@@ -313,22 +361,22 @@ Nodes (4): reason, review_required, rows, status
 ## Knowledge Gaps
 - **56 isolated node(s):** `version`, `updated_at`, `source_note`, `hook_patterns`, `topic_patterns` (+51 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **13 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **16 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
 - **Why does `RichSegment` connect `Community 11` to `Community 2`, `Community 36`, `Community 136`, `Community 141`, `Community 115`?**
-  _High betweenness centrality (0.056) - this node is a cross-community bridge._
+  _High betweenness centrality (0.043) - this node is a cross-community bridge._
 - **Why does `load_manifest()` connect `Community 9` to `Community 1`?**
-  _High betweenness centrality (0.040) - this node is a cross-community bridge._
-- **Why does `JobsRouterTests` connect `Community 112` to `Community 86`?**
-  _High betweenness centrality (0.036) - this node is a cross-community bridge._
+  _High betweenness centrality (0.031) - this node is a cross-community bridge._
 - **Are the 28 inferred relationships involving `RichSegment` (e.g. with `CandidateFeatures` and `LlmMoment`) actually correct?**
   _`RichSegment` has 28 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 3 inferred relationships involving `JobsRouterTests` (e.g. with `ClipFeedbackPayload` and `ClipFeedbackResponse`) actually correct?**
   _`JobsRouterTests` has 3 INFERRED edges - model-reasoned connections that need verification._
 - **What connects `version`, `updated_at`, `source_note` to the rest of the system?**
-  _162 weakly-connected nodes found - possible documentation gaps or missing edges._
+  _171 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `Community 0` be split into smaller, more focused modules?**
   _Cohesion score 0.05854341736694678 - nodes in this community are weakly interconnected._
+- **Should `Community 1` be split into smaller, more focused modules?**
+  _Cohesion score 0.08779631255487269 - nodes in this community are weakly interconnected._
