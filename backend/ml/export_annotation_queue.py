@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import argparse
-import json
 import pathlib
 import sys
 
 BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
+
+from ml.row_identity import read_jsonl, write_jsonl
 
 
 def main() -> int:
@@ -16,7 +17,7 @@ def main() -> int:
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
 
-    rows = _read_jsonl(pathlib.Path(args.labels))
+    rows = read_jsonl(pathlib.Path(args.labels))
     queue = []
     for row in rows:
         if _should_queue_row(row):
@@ -38,16 +39,9 @@ def main() -> int:
                 }
             )
     output_path = pathlib.Path(args.output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text("\n".join(json.dumps(row, ensure_ascii=True) for row in queue), encoding="utf-8")
+    write_jsonl(output_path, queue)
     print(f"Wrote {len(queue)} annotation rows to {output_path}")
     return 0
-
-
-def _read_jsonl(path: pathlib.Path) -> list[dict]:
-    if not path.exists():
-        return []
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 def _should_queue_row(row: dict) -> bool:

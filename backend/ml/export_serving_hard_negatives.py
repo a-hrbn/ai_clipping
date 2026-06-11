@@ -11,7 +11,7 @@ BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from ml.row_identity import window_overlap_ratio
+from ml.row_identity import read_json, read_jsonl, window_overlap_ratio, write_json, write_jsonl
 from services.gold_eval_policy import GOLD_HOLDOUT_SPLIT_FIELD
 
 
@@ -99,8 +99,8 @@ def main(argv: list[str] | None = None) -> int:
         positive_exclusion_overlap=max(min(float(args.positive_exclusion_overlap), 1.0), 0.0),
         min_rank_score=float(args.min_rank_score),
     )
-    _write_jsonl(args.rows_out, payload["rows"])
-    _write_json(args.summary_out, payload["summary"])
+    write_jsonl(args.rows_out, payload["rows"])
+    write_json(args.summary_out, payload["summary"])
     print(json.dumps(payload["summary"], ensure_ascii=True, sort_keys=True))
     return 0
 
@@ -119,10 +119,10 @@ def export_serving_hard_negatives(
     positive_exclusion_overlap: float = 0.25,
     min_rank_score: float = -999.0,
 ) -> dict[str, Any]:
-    positives_by_vod = _positive_windows_by_vod(_read_jsonl(positive_rows_path))
+    positives_by_vod = _positive_windows_by_vod(read_jsonl(positive_rows_path, strict=False))
     holdout_vod_ids = set()
     if holdout_policy_rows_path is not None and pathlib.Path(holdout_policy_rows_path).exists():
-        holdout_vod_ids = _holdout_vod_ids(_read_jsonl(pathlib.Path(holdout_policy_rows_path)))
+        holdout_vod_ids = _holdout_vod_ids(read_jsonl(pathlib.Path(holdout_policy_rows_path), strict=False))
     selected: list[dict[str, Any]] = []
     skipped: Counter[str] = Counter()
     jobs_seen = 0
@@ -131,7 +131,7 @@ def export_serving_hard_negatives(
 
     for debug_dir in _debug_dirs(storage_dir):
         job_dir = debug_dir.parent
-        request = _read_json(job_dir / "request.json")
+        request = read_json(job_dir / "request.json", strict=False)
         vod_id = _vod_id_from_request(request)
         if not vod_id:
             skipped["missing_vod_id"] += 1
@@ -150,7 +150,7 @@ def export_serving_hard_negatives(
         if not positives:
             skipped["no_positive_windows_for_vod"] += 1
             continue
-        ranked_rows = _read_jsonl(debug_dir / "ranked_candidates_pre_judge.jsonl")
+        ranked_rows = read_jsonl(debug_dir / "ranked_candidates_pre_judge.jsonl", strict=False)
         if not ranked_rows:
             skipped["missing_pre_judge_rows"] += 1
             continue
@@ -431,7 +431,7 @@ def _serving_selected_or_judged_good(row: dict[str, Any]) -> bool:
 def _serving_outcomes_by_candidate_id(debug_dir: pathlib.Path) -> dict[str, dict[str, Any]]:
     outcomes: dict[str, dict[str, Any]] = {}
     for filename in ("ranked_candidates_v2.jsonl", "ranked_candidates.jsonl", "final_moments.jsonl"):
-        for row in _read_jsonl(debug_dir / filename):
+        for row in read_jsonl(debug_dir / filename, strict=False):
             candidate = row.get("candidate") if isinstance(row.get("candidate"), dict) else {}
             candidate_id = str(row.get("candidate_id") or candidate.get("id") or "").strip()
             if not candidate_id:
@@ -491,46 +491,6 @@ def _vod_id_from_request(request: dict[str, Any]) -> str:
     if marker not in url:
         return ""
     return url.split(marker, 1)[1].split("?", 1)[0].split("/", 1)[0]
-
-
-def _read_json(path: pathlib.Path) -> dict[str, Any]:
-    if not path.exists():
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
-def _read_jsonl(path: pathlib.Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    rows: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict):
-            rows.append(payload)
-    return rows
-
-
-def _write_jsonl(path: pathlib.Path, rows: list[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "".join(json.dumps(row, ensure_ascii=True, sort_keys=True) + "\n" for row in rows),
-        encoding="utf-8",
-    )
-
-
-def _write_json(path: pathlib.Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def _as_float(value: Any) -> float:

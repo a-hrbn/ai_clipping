@@ -12,6 +12,8 @@ BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
+from ml.row_identity import read_jsonl
+
 
 DEFAULT_INPUT = BACKEND_ROOT / "ml" / "artifacts" / "jynxzi_vod_training_rows.jsonl"
 DEFAULT_OUTPUT = BACKEND_ROOT.parent / "tasks" / "background_negative_spotcheck.csv"
@@ -29,7 +31,7 @@ def main_with_args_for_test(argv: list[str] | None) -> int:
     parser.add_argument("--seed", type=int, default=20260501)
     args = parser.parse_args(argv)
 
-    rows = _read_jsonl(pathlib.Path(args.input))
+    rows = read_jsonl(pathlib.Path(args.input))
     background_rows = [
         row
         for row in rows
@@ -42,17 +44,6 @@ def main_with_args_for_test(argv: list[str] | None) -> int:
     _write_csv(output, sampled)
     print(json.dumps({"input_rows": len(rows), "background_negative_rows": len(background_rows), "exported_rows": len(sampled), "output": str(output)}, ensure_ascii=True))
     return 0
-
-
-def _read_jsonl(path: pathlib.Path) -> list[dict]:
-    if not path.exists():
-        return []
-    rows: list[dict] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        rows.append(json.loads(line))
-    return rows
 
 
 def _sample_rows(rows: list[dict], *, sample_size: int, seed: int) -> list[dict]:

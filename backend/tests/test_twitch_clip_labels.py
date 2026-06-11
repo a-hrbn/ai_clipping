@@ -444,8 +444,8 @@ class TwitchClipLabelsTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "labels.jsonl"
-            collect_twitch_clip_labels._write_jsonl(path, rows)
-            loaded = collect_twitch_clip_labels._read_jsonl(path)
+            collect_twitch_clip_labels.write_jsonl(path, rows)
+            loaded = collect_twitch_clip_labels.read_jsonl(path)
 
         self.assertEqual(loaded, rows)
 

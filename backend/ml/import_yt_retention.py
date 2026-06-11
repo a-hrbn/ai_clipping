@@ -9,6 +9,8 @@ BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
+from ml.row_identity import read_jsonl, write_jsonl
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Convert locally exported retention metrics into outcome feedback rows.")
@@ -17,15 +19,14 @@ def main() -> int:
     args = parser.parse_args()
     rows = import_retention_rows(pathlib.Path(args.metrics))
     output = pathlib.Path(args.output)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text("\n".join(json.dumps(row, ensure_ascii=True) for row in rows), encoding="utf-8")
+    write_jsonl(output, rows)
     print(json.dumps({"metrics": args.metrics, "output": str(output), "rows": len(rows)}, ensure_ascii=True))
     return 0
 
 
 def import_retention_rows(path: pathlib.Path) -> list[dict]:
     rows: list[dict] = []
-    for row in _read_jsonl(path):
+    for row in read_jsonl(path, strict=False):
         retention_3s = _safe_float(row.get("retention_3s"))
         retention_50pct = _safe_float(row.get("retention_50pct"))
         completion = _safe_float(row.get("retention_complete") or row.get("completion_rate"))
@@ -57,22 +58,6 @@ def import_retention_rows(path: pathlib.Path) -> list[dict]:
             }
         )
         rows.append(copied)
-    return rows
-
-
-def _read_jsonl(path: pathlib.Path) -> list[dict]:
-    if not path.exists():
-        return []
-    rows = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict):
-            rows.append(payload)
     return rows
 
 

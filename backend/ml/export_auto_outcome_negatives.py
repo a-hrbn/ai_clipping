@@ -13,6 +13,7 @@ BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
+from ml.row_identity import read_jsonl, write_json, write_jsonl
 from services.gold_eval_policy import (
     GOLD_HOLDOUT_KEY_FIELD,
     GOLD_HOLDOUT_POLICY_FIELD,
@@ -110,10 +111,10 @@ def main() -> int:
     rows = payload["rows"]
     train_rows = [row for row in rows if str(row.get(GOLD_HOLDOUT_SPLIT_FIELD) or "") == "train"]
     holdout_rows = [row for row in rows if str(row.get(GOLD_HOLDOUT_SPLIT_FIELD) or "") == "holdout"]
-    _write_jsonl(pathlib.Path(args.rows_out), rows)
-    _write_jsonl(pathlib.Path(args.train_out), train_rows)
-    _write_jsonl(pathlib.Path(args.holdout_out), holdout_rows)
-    _write_json(pathlib.Path(args.summary_out), payload["summary"])
+    write_jsonl(pathlib.Path(args.rows_out), rows)
+    write_jsonl(pathlib.Path(args.train_out), train_rows)
+    write_jsonl(pathlib.Path(args.holdout_out), holdout_rows)
+    write_json(pathlib.Path(args.summary_out), payload["summary"])
     print(json.dumps(payload["summary"], ensure_ascii=True))
     return 0
 
@@ -526,36 +527,8 @@ def _optional_float(value: object) -> float | None:
 def _read_jsonl_many(paths: Iterable[pathlib.Path]) -> list[dict]:
     rows: list[dict] = []
     for path in paths:
-        rows.extend(_read_jsonl(path))
+        rows.extend(read_jsonl(path))
     return rows
-
-
-def _read_jsonl(path: pathlib.Path) -> list[dict]:
-    if not path.exists():
-        return []
-    rows: list[dict] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line:
-            rows.append(json.loads(line))
-    return rows
-
-
-def _write_jsonl(path: pathlib.Path, rows: list[dict]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = "\n".join(json.dumps(row, ensure_ascii=True) for row in rows)
-    _replace_text(path, payload + ("\n" if payload else ""))
-
-
-def _write_json(path: pathlib.Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    _replace_text(path, json.dumps(payload, ensure_ascii=True, indent=2))
-
-
-def _replace_text(path: pathlib.Path, payload: str) -> None:
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(payload, encoding="utf-8")
-    tmp_path.replace(path)
 
 
 if __name__ == "__main__":

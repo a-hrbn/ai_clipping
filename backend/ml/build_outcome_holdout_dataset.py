@@ -12,7 +12,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from ml import build_eval_dataset
-from ml.row_identity import row_identity_keys
+from ml.row_identity import read_jsonl, row_identity_keys, write_json, write_jsonl
 from services.gold_eval_policy import GOLD_HOLDOUT_SPLIT_FIELD
 
 OUTCOME_TIER_PREFIX = "outcome"
@@ -72,27 +72,19 @@ def main() -> int:
     args = parser.parse_args()
 
     payload = build_outcome_holdout_dataset(
-        positive_rows=_read_jsonl(pathlib.Path(args.positive_rows)),
-        auto_negative_rows=_read_jsonl(pathlib.Path(args.auto_negative_rows)),
+        positive_rows=read_jsonl(pathlib.Path(args.positive_rows)),
+        auto_negative_rows=read_jsonl(pathlib.Path(args.auto_negative_rows)),
         feature_source_rows=[
             row
             for feature_source_path in args.feature_source_rows
-            for row in _read_jsonl(pathlib.Path(feature_source_path))
+            for row in read_jsonl(pathlib.Path(feature_source_path))
         ],
         split=args.split,
         target_positive_rows=max(int(args.target_positive_rows), 0),
         cross_platform_holdout_ratio=float(args.cross_platform_holdout_ratio),
     )
-    output_path = pathlib.Path(args.output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(
-        "\n".join(json.dumps(row, ensure_ascii=True) for row in payload["rows"])
-        + ("\n" if payload["rows"] else ""),
-        encoding="utf-8",
-    )
-    summary_path = pathlib.Path(args.summary_out)
-    summary_path.parent.mkdir(parents=True, exist_ok=True)
-    summary_path.write_text(json.dumps(payload["summary"], ensure_ascii=True, indent=2), encoding="utf-8")
+    write_jsonl(pathlib.Path(args.output), payload["rows"])
+    write_json(pathlib.Path(args.summary_out), payload["summary"])
     print(json.dumps(payload["summary"], ensure_ascii=True))
     return 0
 
@@ -366,17 +358,6 @@ def _safe_float(value) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
-
-
-def _read_jsonl(path: pathlib.Path) -> list[dict]:
-    if not path.exists():
-        return []
-    rows: list[dict] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line:
-            rows.append(json.loads(line))
-    return rows
 
 
 if __name__ == "__main__":

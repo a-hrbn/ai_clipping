@@ -10,6 +10,8 @@ BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
+from ml.row_identity import read_jsonl
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Evaluate boundary-near-miss rows in a training dataset export.")
@@ -20,7 +22,7 @@ def main() -> int:
     parser.add_argument("--top-kinds", type=int, default=8)
     args = parser.parse_args()
 
-    rows = _read_jsonl(pathlib.Path(args.dataset))
+    rows = read_jsonl(pathlib.Path(args.dataset))
     if not rows:
         print("No dataset rows found.")
         return 1
@@ -35,17 +37,6 @@ def main() -> int:
     }
     print(json.dumps(summary, ensure_ascii=True))
     return 0
-
-
-def _read_jsonl(path: pathlib.Path) -> list[dict]:
-    if not path.exists():
-        return []
-    rows: list[dict] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line:
-            rows.append(json.loads(line))
-    return rows
 
 
 def _has_boundary_reference(row: dict) -> bool:

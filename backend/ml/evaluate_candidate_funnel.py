@@ -10,7 +10,7 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from ml.row_identity import window_overlap_ratio  # noqa: E402
+from ml.row_identity import read_json, read_jsonl, window_overlap_ratio  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -46,8 +46,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def summarize_debug_dir(debug_dir: Path) -> dict[str, Any]:
-    trace_rows = _read_jsonl(debug_dir / "candidate_trace.jsonl")
-    funnel = _read_json(debug_dir / "candidate_funnel_summary.json")
+    trace_rows = read_jsonl(debug_dir / "candidate_trace.jsonl", strict=False)
+    funnel = read_json(debug_dir / "candidate_funnel_summary.json", strict=False)
     final_rows = [row for row in trace_rows if row.get("final_selected")]
     high_judge_rows = [row for row in trace_rows if (_as_float(row.get("judge_score")) or 0.0) >= 7.0]
     judged_rows = [row for row in trace_rows if row.get("judge_score") not in (None, "")]
@@ -73,7 +73,7 @@ def summarize_debug_dir(debug_dir: Path) -> dict[str, Any]:
 
 def positive_window_recall(debug_dir: Path, positive_rows_path: Path, *, overlap_ratio: float = 0.45) -> dict[str, Any]:
     positives = _positive_windows(positive_rows_path, debug_dir)
-    trace_rows = _read_jsonl(debug_dir / "candidate_trace.jsonl")
+    trace_rows = read_jsonl(debug_dir / "candidate_trace.jsonl", strict=False)
     stages = [
         "dense_inventory",
         "ranked_pre_judge",
@@ -134,7 +134,7 @@ def _candidate_summary(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _positive_windows(path: Path, debug_dir: Path) -> list[dict[str, float]]:
-    rows = _read_jsonl(path)
+    rows = read_jsonl(path, strict=False)
     job_vod_id = _job_vod_id(debug_dir)
     windows: list[dict[str, float]] = []
     for row in rows:
@@ -237,39 +237,12 @@ def _window_overlap_ratio(pos_start: float, pos_end: float, row_start: Any, row_
 
 def _job_vod_id(debug_dir: Path) -> str:
     request_path = debug_dir.parent / "request.json"
-    request = _read_json(request_path)
+    request = read_json(request_path, strict=False)
     url = str(request.get("url") or "")
     marker = "twitch.tv/videos/"
     if marker not in url:
         return ""
     return url.split(marker, 1)[1].split("?", 1)[0].split("/", 1)[0]
-
-
-def _read_json(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    rows: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict):
-            rows.append(payload)
-    return rows
 
 
 def _mean(values) -> float | None:

@@ -19,6 +19,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from config import settings
+from ml.row_identity import read_jsonl, write_jsonl
 
 _TWITCH_AUTH_URL = "https://id.twitch.tv/oauth2/token"
 _TWITCH_API_URL = "https://api.twitch.tv/helix"
@@ -165,7 +166,7 @@ def main() -> int:
         print("date-to must be on or after date-from.")
         return 1
 
-    existing_rows = _read_jsonl(output_path) if output_path.exists() else []
+    existing_rows = read_jsonl(output_path) if output_path.exists() else []
     print(f"Trainiere VOD von {args.date_from} bis {args.date_to}")
     rows = list(existing_rows) if (output_path.exists() and (args.merge_output or args.skip_covered)) else []
     collected_any = False
@@ -237,7 +238,7 @@ def main() -> int:
             rows = _merge_label_rows(rows, range_rows)
             collected_any = collected_any or bool(range_rows)
             if output_path.exists() or rows:
-                _write_jsonl(output_path, rows)
+                write_jsonl(output_path, rows)
             progress = _read_progress_file(progress_path)
             progress = _record_collected_range(progress, broadcaster, range_start, range_end)
             _write_progress_file(progress_path, progress)
@@ -1136,24 +1137,6 @@ def _parse_iso_datetime(raw: str) -> datetime | None:
 
 def _overlaps_any(window: tuple[float, float], blocked: list[tuple[float, float]]) -> bool:
     return any(window[0] < end and window[1] > start for start, end in blocked)
-
-
-def _read_jsonl(path: pathlib.Path) -> list[dict]:
-    rows: list[dict] = []
-    if not path.exists():
-        return rows
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line:
-            rows.append(json.loads(line))
-    return rows
-
-
-def _write_jsonl(path: pathlib.Path, rows: list[dict]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text("\n".join(json.dumps(row, ensure_ascii=True) for row in rows), encoding="utf-8")
-    tmp_path.replace(path)
 
 
 def _label_row_key(row: dict) -> tuple:

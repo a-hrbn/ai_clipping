@@ -33,16 +33,25 @@ def read_jsonl(path: pathlib.Path, *, strict: bool = True) -> list[dict]:
     return rows
 
 
-def read_json(path: pathlib.Path) -> dict:
-    """Pendant to ``write_json``: missing file -> ``{}``, strict on corruption.
+def read_json(path: pathlib.Path, *, strict: bool = True) -> dict:
+    """Pendant to ``write_json``: missing file -> ``{}``.
 
-    A missing file yields an empty dict; a present file is parsed strictly
-    (``json.loads`` raises on malformed content, mirroring ``read_jsonl``). A
-    valid but non-dict top-level payload yields ``{}``.
+    A missing file yields an empty dict. ``strict=True`` (default) parses the
+    present file with ``json.loads`` and raises on malformed content — the
+    historical behaviour, mirroring ``read_jsonl``. ``strict=False`` makes the
+    lenient decision explicit at the call-site: a corrupt file yields ``{}``
+    instead of raising. A valid but non-dict top-level payload yields ``{}``.
     """
     if not path.exists():
         return {}
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    text = path.read_text(encoding="utf-8")
+    if strict:
+        payload = json.loads(text)
+    else:
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return {}
     return payload if isinstance(payload, dict) else {}
 
 

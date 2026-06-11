@@ -64,6 +64,17 @@ class JsonIoRoundTripTests(unittest.TestCase):
             with self.assertRaises(json.JSONDecodeError):
                 row_identity.read_json(path)
 
+    def test_read_json_strict_false_corrupt_file_returns_empty_dict(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "broken.json"
+            path.write_text("{not valid json", encoding="utf-8")
+            self.assertEqual(row_identity.read_json(path, strict=False), {})
+
+    def test_read_json_strict_false_missing_file_returns_empty_dict(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "absent.json"
+            self.assertEqual(row_identity.read_json(path, strict=False), {})
+
     def test_read_jsonl_round_trips_write_jsonl(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / "rows.jsonl"
