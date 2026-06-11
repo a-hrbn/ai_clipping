@@ -217,7 +217,10 @@ def _write_job_progress_file(job_id: str, status: str, progress_pct: int, error:
         pass
 
 
-def cancel_job(job_id: str) -> JobStatus | None:
+def cancel_job(job_id: str, reason: str = "Job cancelled by client") -> JobStatus | None:
+    """Cancel a non-terminal job. `reason` becomes the job's error message so that
+    manual cancellation and session-expiry cancellation share this one path yet stay
+    distinguishable by their message."""
     should_persist = False
     with _lock:
         _reload_jobs_from_disk_if_changed()
@@ -238,7 +241,7 @@ def cancel_job(job_id: str) -> JobStatus | None:
             _cancelled_jobs.add(job_id)
             session_lease.clear(job_id)
             job.status = "cancelled"
-            job.error = "Job cancelled by client"
+            job.error = reason
             _job_created_at[job_id] = time.monotonic()
             should_persist = True
     if should_persist:
@@ -247,31 +250,19 @@ def cancel_job(job_id: str) -> JobStatus | None:
 
 
 def is_job_cancelled(job_id: str) -> bool:
-    should_persist = False
+    """Pure query: True if the job is in the cancel-set or already carries the
+    terminal "cancelled" status. Mutates nothing and never persists — a cheap,
+    lock-friendly call for the Conductor hot path between producers.
+
+    Lease expiry is no longer driven here; the explicit drive lives in the request
+    path (`session_lease.drive_expiry` → `cancel_job`). The reload stays so a worker
+    subprocess observes a cancellation the main process wrote to jobs.json."""
     with _lock:
         _reload_jobs_from_disk_if_changed()
-        _evict_expired()
         if job_id in _cancelled_jobs:
             return True
-
-        # Slice B1 (Extraktion): die Lease-Logik liegt jetzt in session_lease,
-        # aber dieser Check MUTIERT bei abgelaufener Lease weiterhin (Status +
-        # Persist) — verhaltens-erhaltend. B2 macht is_job_cancelled zur reinen
-        # Query und verlagert den Expiry-Drive in den Request-Pfad.
-        cancelled_here = False
-        if session_lease.is_expired(job_id):
-            job = _jobs.get(job_id)
-            if job is not None and job.status not in _TERMINAL_JOB_STATUSES:
-                _cancelled_jobs.add(job_id)
-                session_lease.clear(job_id)
-                job.status = "cancelled"
-                job.error = "Job cancelled because the client session ended"
-                _job_created_at[job_id] = time.monotonic()
-                should_persist = True
-            cancelled_here = True
-    if should_persist:
-        _persist_jobs()
-    return cancelled_here
+        job = _jobs.get(job_id)
+        return job is not None and job.status == "cancelled"
 
 
 def bind_job_session(job_id: str, session_id: str | None) -> None:

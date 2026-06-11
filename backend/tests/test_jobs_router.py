@@ -313,6 +313,7 @@ class JobsRouterTests(unittest.TestCase):
         job = {"job_id": "job-1", "status": "downloading"}
 
         with patch.object(jobs, "touch_job_session", return_value=job) as touch_mock, \
+             patch.object(jobs.session_lease, "drive_expiry", return_value=False), \
              patch.object(jobs, "_job_pipeline_diagnostics", return_value={"available": False}) as diagnostics_mock:
             result = asyncio.run(jobs.get_job_status("job-1", session_id="sess-1"))
 

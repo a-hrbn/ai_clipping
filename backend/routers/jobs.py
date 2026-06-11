@@ -18,6 +18,7 @@ from models import (
     ClipFeedbackResponse,
     ReviewCandidateResponse,
 )
+import session_lease
 from job_manager import bind_job_session, cancel_job, create_job, delete_job, get_job, touch_job_session
 from job_manager import update_job
 from pipeline_runner import run_job_subprocess, writable_cache_dir
@@ -1062,6 +1063,10 @@ async def upload_job(
 @router.get("/{job_id}", response_model=JobStatus)
 async def get_job_status(job_id: str, session_id: str | None = None):
     job = touch_job_session(job_id, session_id)
+    # Explicit request-path drive: a matching session_id has just renewed the lease
+    # above, so an expired lease here means the owning tab is gone — cancel the orphan.
+    if session_lease.drive_expiry(job_id):
+        job = get_job(job_id)
     if job is None:
         job = get_job(job_id)
     if job is None:
