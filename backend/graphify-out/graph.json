@@ -2388,7 +2388,7 @@
       "source_location": "L54",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_twitchclient",
-      "community": 19,
+      "community": 89,
       "norm_label": "twitchclient"
     },
     {
@@ -2398,7 +2398,7 @@
       "source_location": "L55",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_twitchclient_init",
-      "community": 19,
+      "community": 89,
       "norm_label": ".__init__()"
     },
     {
@@ -2408,7 +2408,7 @@
       "source_location": "L65",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_twitchclient_get_token",
-      "community": 19,
+      "community": 89,
       "norm_label": "._get_token()"
     },
     {
@@ -2418,7 +2418,7 @@
       "source_location": "L102",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_twitchclient_get_json",
-      "community": 19,
+      "community": 89,
       "norm_label": ".get_json()"
     },
     {
@@ -2428,7 +2428,7 @@
       "source_location": "L118",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_main",
-      "community": 14,
+      "community": 89,
       "norm_label": "main()"
     },
     {
@@ -2438,7 +2438,7 @@
       "source_location": "L259",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_resolved_broadcasters",
-      "community": 14,
+      "community": 89,
       "norm_label": "_resolved_broadcasters()"
     },
     {
@@ -2448,7 +2448,7 @@
       "source_location": "L259",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_py_path",
-      "community": 14,
+      "community": 89,
       "norm_label": "path"
     },
     {
@@ -2458,7 +2458,7 @@
       "source_location": "L293",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_read_source_manifest",
-      "community": 14,
+      "community": 89,
       "norm_label": "_read_source_manifest()"
     },
     {
@@ -2468,7 +2468,7 @@
       "source_location": "L313",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_validate_source_manifest_header",
-      "community": 14,
+      "community": 89,
       "norm_label": "_validate_source_manifest_header()"
     },
     {
@@ -2478,7 +2478,7 @@
       "source_location": "L322",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_validate_source_manifest_row",
-      "community": 14,
+      "community": 89,
       "norm_label": "_validate_source_manifest_row()"
     },
     {
@@ -2488,7 +2488,7 @@
       "source_location": "L348",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_collect_clip_labels",
-      "community": 19,
+      "community": 89,
       "norm_label": "collect_clip_labels()"
     },
     {
@@ -2498,7 +2498,7 @@
       "source_location": "L365",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_collect_clip_labels_with_summary",
-      "community": 19,
+      "community": 89,
       "norm_label": "collect_clip_labels_with_summary()"
     },
     {
@@ -2508,7 +2508,7 @@
       "source_location": "L395",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_collection_input_summary",
-      "community": 19,
+      "community": 89,
       "norm_label": "_collection_input_summary()"
     },
     {
@@ -2528,7 +2528,7 @@
       "source_location": "L501",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_get_user",
-      "community": 19,
+      "community": 89,
       "norm_label": "_get_user()"
     },
     {
@@ -2538,7 +2538,7 @@
       "source_location": "L509",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_get_vods",
-      "community": 19,
+      "community": 89,
       "norm_label": "_get_vods()"
     },
     {
@@ -2548,7 +2548,7 @@
       "source_location": "L537",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_get_clips",
-      "community": 19,
+      "community": 89,
       "norm_label": "_get_clips()"
     },
     {
@@ -2858,7 +2858,7 @@
       "source_location": "L1116",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_parse_twitch_duration",
-      "community": 17,
+      "community": 89,
       "norm_label": "_parse_twitch_duration()"
     },
     {
@@ -2898,7 +2898,7 @@
       "source_location": "L1141",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_read_jsonl",
-      "community": 14,
+      "community": 89,
       "norm_label": "_read_jsonl()"
     },
     {
@@ -2908,7 +2908,7 @@
       "source_location": "L1152",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_write_jsonl",
-      "community": 14,
+      "community": 89,
       "norm_label": "_write_jsonl()"
     },
     {
@@ -2938,7 +2938,7 @@
       "source_location": "L1194",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_parse_cli_date",
-      "community": 14,
+      "community": 89,
       "norm_label": "_parse_cli_date()"
     },
     {
@@ -2948,7 +2948,7 @@
       "source_location": "L1194",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_py_date",
-      "community": 14,
+      "community": 89,
       "norm_label": "date"
     },
     {
@@ -2958,7 +2958,7 @@
       "source_location": "L1198",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_merge_date_ranges",
-      "community": 14,
+      "community": 89,
       "norm_label": "_merge_date_ranges()"
     },
     {
@@ -2968,7 +2968,7 @@
       "source_location": "L1212",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_missing_date_ranges",
-      "community": 14,
+      "community": 89,
       "norm_label": "_missing_date_ranges()"
     },
     {
@@ -2978,7 +2978,7 @@
       "source_location": "L1236",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_intersecting_date_ranges",
-      "community": 14,
+      "community": 89,
       "norm_label": "_intersecting_date_ranges()"
     },
     {
@@ -2988,7 +2988,7 @@
       "source_location": "L1250",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_validated_covered_date_ranges",
-      "community": 14,
+      "community": 89,
       "norm_label": "_validated_covered_date_ranges()"
     },
     {
@@ -2998,7 +2998,7 @@
       "source_location": "L1266",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_label_date_ranges",
-      "community": 14,
+      "community": 89,
       "norm_label": "_label_date_ranges()"
     },
     {
@@ -3008,7 +3008,7 @@
       "source_location": "L1277",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_row_matches_broadcaster",
-      "community": 14,
+      "community": 89,
       "norm_label": "_row_matches_broadcaster()"
     },
     {
@@ -3018,7 +3018,7 @@
       "source_location": "L1285",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_row_label_date",
-      "community": 14,
+      "community": 89,
       "norm_label": "_row_label_date()"
     },
     {
@@ -3028,7 +3028,7 @@
       "source_location": "L1313",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_collection_chunks",
-      "community": 14,
+      "community": 89,
       "norm_label": "_collection_chunks()"
     },
     {
@@ -3038,7 +3038,7 @@
       "source_location": "L1328",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_read_progress_file",
-      "community": 14,
+      "community": 89,
       "norm_label": "_read_progress_file()"
     },
     {
@@ -3048,7 +3048,7 @@
       "source_location": "L1346",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_write_progress_file",
-      "community": 14,
+      "community": 89,
       "norm_label": "_write_progress_file()"
     },
     {
@@ -3058,7 +3058,7 @@
       "source_location": "L1353",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_covered_date_ranges",
-      "community": 14,
+      "community": 89,
       "norm_label": "_covered_date_ranges()"
     },
     {
@@ -3068,7 +3068,7 @@
       "source_location": "L1364",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_record_collected_range",
-      "community": 14,
+      "community": 89,
       "norm_label": "_record_collected_range()"
     },
     {
@@ -3078,7 +3078,7 @@
       "source_location": "L1380",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_replace_collected_ranges",
-      "community": 14,
+      "community": 89,
       "norm_label": "_replace_collected_ranges()"
     },
     {
@@ -3088,7 +3088,7 @@
       "source_location": "L1397",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_date_range_payload",
-      "community": 14,
+      "community": 89,
       "norm_label": "_date_range_payload()"
     },
     {
@@ -3098,7 +3098,7 @@
       "source_location": "L1401",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_label_vod_count",
-      "community": 14,
+      "community": 89,
       "norm_label": "_label_vod_count()"
     },
     {
@@ -3108,7 +3108,7 @@
       "source_location": "L1410",
       "_origin": "ast",
       "id": "ml_collect_twitch_clip_labels_write_cache",
-      "community": 14,
+      "community": 89,
       "norm_label": "_write_cache()"
     },
     {
@@ -4928,7 +4928,7 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "ml_export_frontend_gold_eval",
-      "community": 18,
+      "community": 145,
       "norm_label": "export_frontend_gold_eval.py"
     },
     {
@@ -4938,7 +4938,7 @@
       "source_location": "L16",
       "_origin": "ast",
       "id": "ml_export_frontend_gold_eval_main",
-      "community": 18,
+      "community": 145,
       "norm_label": "main()"
     },
     {
@@ -4948,7 +4948,7 @@
       "source_location": "L93",
       "_origin": "ast",
       "id": "ml_export_frontend_gold_eval_export_frontend_gold_eval",
-      "community": 18,
+      "community": 145,
       "norm_label": "export_frontend_gold_eval()"
     },
     {
@@ -4958,7 +4958,7 @@
       "source_location": "L93",
       "_origin": "ast",
       "id": "ml_export_frontend_gold_eval_py_path",
-      "community": 18,
+      "community": 145,
       "norm_label": "path"
     },
     {
@@ -4968,7 +4968,7 @@
       "source_location": "L133",
       "_origin": "ast",
       "id": "ml_export_frontend_gold_eval_merge_with_existing_rows",
-      "community": 18,
+      "community": 145,
       "norm_label": "_merge_with_existing_rows()"
     },
     {
@@ -4978,7 +4978,7 @@
       "source_location": "L174",
       "_origin": "ast",
       "id": "ml_export_frontend_gold_eval_summary",
-      "community": 18,
+      "community": 145,
       "norm_label": "_summary()"
     },
     {
@@ -4988,7 +4988,7 @@
       "source_location": "L181",
       "_origin": "ast",
       "id": "ml_export_frontend_gold_eval_read_jsonl",
-      "community": 18,
+      "community": 145,
       "norm_label": "_read_jsonl()"
     },
     {
@@ -4998,7 +4998,7 @@
       "source_location": "L193",
       "_origin": "ast",
       "id": "ml_export_frontend_gold_eval_write_jsonl",
-      "community": 18,
+      "community": 145,
       "norm_label": "_write_jsonl()"
     },
     {
@@ -5008,7 +5008,7 @@
       "source_location": "L200",
       "_origin": "ast",
       "id": "ml_export_frontend_gold_eval_write_text_if_changed",
-      "community": 18,
+      "community": 145,
       "norm_label": "_write_text_if_changed()"
     },
     {
@@ -5018,7 +5018,7 @@
       "source_location": "L206",
       "_origin": "ast",
       "id": "ml_export_frontend_gold_eval_gold_row_key",
-      "community": 18,
+      "community": 145,
       "norm_label": "_gold_row_key()"
     },
     {
@@ -5028,7 +5028,7 @@
       "source_location": "L229",
       "_origin": "ast",
       "id": "ml_export_frontend_gold_eval_stable_time_value",
-      "community": 18,
+      "community": 145,
       "norm_label": "_stable_time_value()"
     },
     {
@@ -5038,7 +5038,7 @@
       "source_location": "L236",
       "_origin": "ast",
       "id": "ml_export_frontend_gold_eval_should_replace_existing_gold_row",
-      "community": 18,
+      "community": 145,
       "norm_label": "_should_replace_existing_gold_row()"
     },
     {
@@ -5048,7 +5048,7 @@
       "source_location": "L246",
       "_origin": "ast",
       "id": "ml_export_frontend_gold_eval_updated_at",
-      "community": 18,
+      "community": 145,
       "norm_label": "_updated_at()"
     },
     {
@@ -5578,7 +5578,7 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "ml_gt_capture_daily",
-      "community": 17,
+      "community": 89,
       "norm_label": "gt_capture_daily.py"
     },
     {
@@ -5588,7 +5588,7 @@
       "source_location": "L48",
       "_origin": "ast",
       "id": "ml_gt_capture_daily_vod_id",
-      "community": 17,
+      "community": 89,
       "norm_label": "_vod_id()"
     },
     {
@@ -5598,7 +5598,7 @@
       "source_location": "L54",
       "_origin": "ast",
       "id": "ml_gt_capture_daily_select_new_vods",
-      "community": 17,
+      "community": 89,
       "norm_label": "select_new_vods()"
     },
     {
@@ -5608,7 +5608,7 @@
       "source_location": "L78",
       "_origin": "ast",
       "id": "ml_gt_capture_daily_captured_ids",
-      "community": 17,
+      "community": 89,
       "norm_label": "captured_ids()"
     },
     {
@@ -5618,7 +5618,7 @@
       "source_location": "L83",
       "_origin": "ast",
       "id": "ml_gt_capture_daily_load_captured_state",
-      "community": 17,
+      "community": 89,
       "norm_label": "load_captured_state()"
     },
     {
@@ -5628,7 +5628,7 @@
       "source_location": "L83",
       "_origin": "ast",
       "id": "ml_gt_capture_daily_py_path",
-      "community": 17,
+      "community": 89,
       "norm_label": "path"
     },
     {
@@ -5638,7 +5638,7 @@
       "source_location": "L100",
       "_origin": "ast",
       "id": "ml_gt_capture_daily_save_captured_state",
-      "community": 17,
+      "community": 89,
       "norm_label": "save_captured_state()"
     },
     {
@@ -5648,7 +5648,7 @@
       "source_location": "L112",
       "_origin": "ast",
       "id": "ml_gt_capture_daily_list_archive_vods",
-      "community": 17,
+      "community": 89,
       "norm_label": "list_archive_vods()"
     },
     {
@@ -5658,7 +5658,7 @@
       "source_location": "L137",
       "_origin": "ast",
       "id": "ml_gt_capture_daily_vod_date",
-      "community": 17,
+      "community": 89,
       "norm_label": "_vod_date()"
     },
     {
@@ -5668,7 +5668,7 @@
       "source_location": "L147",
       "_origin": "ast",
       "id": "ml_gt_capture_daily_run_daily_capture",
-      "community": 17,
+      "community": 89,
       "norm_label": "run_daily_capture()"
     },
     {
@@ -5678,7 +5678,7 @@
       "source_location": "L221",
       "_origin": "ast",
       "id": "ml_gt_capture_daily_main",
-      "community": 17,
+      "community": 89,
       "norm_label": "main()"
     },
     {
@@ -5688,7 +5688,7 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "ml_gt_capture_daily_rationale_1",
-      "community": 17,
+      "community": 89,
       "norm_label": "gt-flywheel daily capture job \u2014 the standing, idempotent wrapper around the capt"
     },
     {
@@ -5698,7 +5698,7 @@
       "source_location": "L49",
       "_origin": "ast",
       "id": "ml_gt_capture_daily_rationale_49",
-      "community": 17,
+      "community": 89,
       "norm_label": "normalize a helix vod record (or bare id) to a string id."
     },
     {
@@ -5708,7 +5708,7 @@
       "source_location": "L55",
       "_origin": "ast",
       "id": "ml_gt_capture_daily_rationale_55",
-      "community": 17,
+      "community": 89,
       "norm_label": "pure new-vod-selection diff.      given helix archive-vod records (dicts with an"
     },
     {
@@ -5718,7 +5718,7 @@
       "source_location": "L79",
       "_origin": "ast",
       "id": "ml_gt_capture_daily_rationale_79",
-      "community": 17,
+      "community": 89,
       "norm_label": "the set of vod ids recorded as captured in ``state``."
     },
     {
@@ -5728,7 +5728,7 @@
       "source_location": "L84",
       "_origin": "ast",
       "id": "ml_gt_capture_daily_rationale_84",
-      "community": 17,
+      "community": 89,
       "norm_label": "load the already-captured state. missing or unreadable file \u2192 empty state     (s"
     },
     {
@@ -5738,7 +5738,7 @@
       "source_location": "L101",
       "_origin": "ast",
       "id": "ml_gt_capture_daily_rationale_101",
-      "community": 17,
+      "community": 89,
       "norm_label": "atomically persist the already-captured state (tmp file + replace)."
     },
     {
@@ -5748,7 +5748,7 @@
       "source_location": "L113",
       "_origin": "ast",
       "id": "ml_gt_capture_daily_rationale_113",
-      "community": 17,
+      "community": 89,
       "norm_label": "list the streamer's most-recent archive vods via the existing helix client."
     },
     {
@@ -5758,7 +5758,7 @@
       "source_location": "L138",
       "_origin": "ast",
       "id": "ml_gt_capture_daily_rationale_138",
-      "community": 17,
+      "community": 89,
       "norm_label": "best-available date string for provenance (helix ``created_at``)."
     },
     {
@@ -5768,7 +5768,7 @@
       "source_location": "L156",
       "_origin": "ast",
       "id": "ml_gt_capture_daily_rationale_156",
-      "community": 17,
+      "community": 89,
       "norm_label": "capture every not-yet-captured archive vod, persisting state per vod.      ``lis"
     },
     {
@@ -6148,7 +6148,7 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "ml_import_gold_eval_labels",
-      "community": 20,
+      "community": 145,
       "norm_label": "import_gold_eval_labels.py"
     },
     {
@@ -6158,7 +6158,7 @@
       "source_location": "L17",
       "_origin": "ast",
       "id": "ml_import_gold_eval_labels_main",
-      "community": 20,
+      "community": 145,
       "norm_label": "main()"
     },
     {
@@ -6168,7 +6168,7 @@
       "source_location": "L72",
       "_origin": "ast",
       "id": "ml_import_gold_eval_labels_import_gold_eval_labels",
-      "community": 20,
+      "community": 145,
       "norm_label": "import_gold_eval_labels()"
     },
     {
@@ -6178,7 +6178,7 @@
       "source_location": "L72",
       "_origin": "ast",
       "id": "ml_import_gold_eval_labels_py_path",
-      "community": 20,
+      "community": 145,
       "norm_label": "path"
     },
     {
@@ -6188,7 +6188,7 @@
       "source_location": "L170",
       "_origin": "ast",
       "id": "ml_import_gold_eval_labels_read_csv",
-      "community": 20,
+      "community": 145,
       "norm_label": "_read_csv()"
     },
     {
@@ -6198,7 +6198,7 @@
       "source_location": "L177",
       "_origin": "ast",
       "id": "ml_import_gold_eval_labels_read_jsonl",
-      "community": 20,
+      "community": 145,
       "norm_label": "_read_jsonl()"
     },
     {
@@ -6208,7 +6208,7 @@
       "source_location": "L189",
       "_origin": "ast",
       "id": "ml_import_gold_eval_labels_write_jsonl",
-      "community": 20,
+      "community": 145,
       "norm_label": "_write_jsonl()"
     },
     {
@@ -6218,7 +6218,7 @@
       "source_location": "L196",
       "_origin": "ast",
       "id": "ml_import_gold_eval_labels_parse_gold_grade",
-      "community": 20,
+      "community": 145,
       "norm_label": "_parse_gold_grade()"
     },
     {
@@ -6228,7 +6228,7 @@
       "source_location": "L209",
       "_origin": "ast",
       "id": "ml_import_gold_eval_labels_as_optional_float",
-      "community": 20,
+      "community": 145,
       "norm_label": "_as_optional_float()"
     },
     {
@@ -6238,7 +6238,7 @@
       "source_location": "L218",
       "_origin": "ast",
       "id": "ml_import_gold_eval_labels_matching_sidecar",
-      "community": 20,
+      "community": 145,
       "norm_label": "_matching_sidecar()"
     },
     {
@@ -8338,7 +8338,7 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "components_build_eval_dataset_op",
-      "community": 26,
+      "community": 145,
       "norm_label": "build_eval_dataset_op.py"
     },
     {
@@ -8348,7 +8348,7 @@
       "source_location": "L8",
       "_origin": "ast",
       "id": "components_build_eval_dataset_op_run",
-      "community": 26,
+      "community": 145,
       "norm_label": "run()"
     },
     {
@@ -8358,7 +8358,7 @@
       "source_location": "L36",
       "_origin": "ast",
       "id": "components_build_eval_dataset_op_parse_args",
-      "community": 26,
+      "community": 145,
       "norm_label": "_parse_args()"
     },
     {
@@ -8368,7 +8368,7 @@
       "source_location": "L36",
       "_origin": "ast",
       "id": "ml_pipelines_components_build_eval_dataset_op_py_namespace",
-      "community": 26,
+      "community": 145,
       "norm_label": "namespace"
     },
     {
@@ -8378,7 +8378,7 @@
       "source_location": "L49",
       "_origin": "ast",
       "id": "components_build_eval_dataset_op_main",
-      "community": 26,
+      "community": 145,
       "norm_label": "main()"
     },
     {
@@ -9258,7 +9258,7 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "ml_verify_twitch_api_live",
-      "community": 19,
+      "community": 89,
       "norm_label": "verify_twitch_api_live.py"
     },
     {
@@ -9268,7 +9268,7 @@
       "source_location": "L16",
       "_origin": "ast",
       "id": "ml_verify_twitch_api_live_main",
-      "community": 19,
+      "community": 89,
       "norm_label": "main()"
     },
     {
@@ -12032,20 +12032,20 @@
       "norm_label": "_is_transient_network_error()"
     },
     {
-      "label": "_is_ffmpeg_segfault_error()",
+      "label": "_ffmpeg_downloader_exit_code()",
       "file_type": "code",
       "source_file": "services/downloader.py",
       "source_location": "L356",
       "_origin": "ast",
-      "id": "services_downloader_is_ffmpeg_segfault_error",
+      "id": "services_downloader_ffmpeg_downloader_exit_code",
       "community": 134,
-      "norm_label": "_is_ffmpeg_segfault_error()"
+      "norm_label": "_ffmpeg_downloader_exit_code()"
     },
     {
       "label": "_extract_yt_dlp_info()",
       "file_type": "code",
       "source_file": "services/downloader.py",
-      "source_location": "L361",
+      "source_location": "L370",
       "_origin": "ast",
       "id": "services_downloader_extract_yt_dlp_info",
       "community": 134,
@@ -12055,7 +12055,7 @@
       "label": "_download_uncached()",
       "file_type": "code",
       "source_file": "services/downloader.py",
-      "source_location": "L377",
+      "source_location": "L386",
       "_origin": "ast",
       "id": "services_downloader_download_uncached",
       "community": 134,
@@ -12065,7 +12065,7 @@
       "label": "ensure_cached_download()",
       "file_type": "code",
       "source_file": "services/downloader.py",
-      "source_location": "L489",
+      "source_location": "L504",
       "_origin": "ast",
       "id": "services_downloader_ensure_cached_download",
       "community": 134,
@@ -12075,7 +12075,7 @@
       "label": "download()",
       "file_type": "code",
       "source_file": "services/downloader.py",
-      "source_location": "L527",
+      "source_location": "L542",
       "_origin": "ast",
       "id": "services_downloader_download",
       "community": 134,
@@ -12085,11 +12085,21 @@
       "label": "download_range()",
       "file_type": "code",
       "source_file": "services/downloader.py",
-      "source_location": "L567",
+      "source_location": "L582",
       "_origin": "ast",
       "id": "services_downloader_download_range",
       "community": 134,
       "norm_label": "download_range()"
+    },
+    {
+      "label": "Return ffmpeg's exit code if this is a yt-dlp ffmpeg-fragment-downloader     fai",
+      "file_type": "rationale",
+      "source_file": "services/downloader.py",
+      "source_location": "L357",
+      "_origin": "ast",
+      "id": "services_downloader_rationale_357",
+      "community": 134,
+      "norm_label": "return ffmpeg's exit code if this is a yt-dlp ffmpeg-fragment-downloader     fai"
     },
     {
       "label": "feedback_store.py",
@@ -12358,7 +12368,7 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "services_gold_eval_policy",
-      "community": 27,
+      "community": 145,
       "norm_label": "gold_eval_policy.py"
     },
     {
@@ -12368,7 +12378,7 @@
       "source_location": "L18",
       "_origin": "ast",
       "id": "services_gold_eval_policy_validate_gold_notes",
-      "community": 20,
+      "community": 145,
       "norm_label": "validate_gold_notes()"
     },
     {
@@ -12378,7 +12388,7 @@
       "source_location": "L38",
       "_origin": "ast",
       "id": "services_gold_eval_policy_annotate_gold_row",
-      "community": 27,
+      "community": 145,
       "norm_label": "annotate_gold_row()"
     },
     {
@@ -12388,7 +12398,7 @@
       "source_location": "L58",
       "_origin": "ast",
       "id": "services_gold_eval_policy_annotate_gold_rows",
-      "community": 18,
+      "community": 145,
       "norm_label": "annotate_gold_rows()"
     },
     {
@@ -12398,7 +12408,7 @@
       "source_location": "L62",
       "_origin": "ast",
       "id": "services_gold_eval_policy_gold_holdout_key",
-      "community": 27,
+      "community": 145,
       "norm_label": "_gold_holdout_key()"
     },
     {
@@ -12408,7 +12418,7 @@
       "source_location": "L73",
       "_origin": "ast",
       "id": "services_gold_eval_policy_gold_holdout_policy",
-      "community": 27,
+      "community": 145,
       "norm_label": "_gold_holdout_policy()"
     },
     {
@@ -12418,7 +12428,7 @@
       "source_location": "L77",
       "_origin": "ast",
       "id": "services_gold_eval_policy_gold_holdout_bucket",
-      "community": 27,
+      "community": 145,
       "norm_label": "_gold_holdout_bucket()"
     },
     {
@@ -13898,7 +13908,7 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "services_yt_dlp_auth",
-      "community": 134,
+      "community": 0,
       "norm_label": "yt_dlp_auth.py"
     },
     {
@@ -13908,7 +13918,7 @@
       "source_location": "L11",
       "_origin": "ast",
       "id": "services_yt_dlp_auth_apply_yt_dlp_auth_options",
-      "community": 134,
+      "community": 0,
       "norm_label": "apply_yt_dlp_auth_options()"
     },
     {
@@ -13918,7 +13928,7 @@
       "source_location": "L23",
       "_origin": "ast",
       "id": "services_yt_dlp_auth_prepare_cookiefile_path",
-      "community": 134,
+      "community": 0,
       "norm_label": "_prepare_cookiefile_path()"
     },
     {
@@ -13928,7 +13938,7 @@
       "source_location": "L40",
       "_origin": "ast",
       "id": "services_yt_dlp_auth_cookies_from_browser_tuple",
-      "community": 134,
+      "community": 0,
       "norm_label": "_cookies_from_browser_tuple()"
     },
     {
@@ -14086,7 +14096,7 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "tests_test_build_eval_dataset",
-      "community": 24,
+      "community": 145,
       "norm_label": "test_build_eval_dataset.py"
     },
     {
@@ -14096,7 +14106,7 @@
       "source_location": "L6",
       "_origin": "ast",
       "id": "tests_test_build_eval_dataset_buildevaldatasettests",
-      "community": 24,
+      "community": 145,
       "norm_label": "buildevaldatasettests"
     },
     {
@@ -14106,7 +14116,7 @@
       "source_location": "L7",
       "_origin": "ast",
       "id": "tests_test_build_eval_dataset_buildevaldatasettests_test_build_eval_dataset_adds_bucket_metadata",
-      "community": 24,
+      "community": 145,
       "norm_label": ".test_build_eval_dataset_adds_bucket_metadata()"
     },
     {
@@ -14116,7 +14126,7 @@
       "source_location": "L49",
       "_origin": "ast",
       "id": "tests_test_build_eval_dataset_buildevaldatasettests_test_eval_dataset_summary_counts_platforms_and_roles",
-      "community": 24,
+      "community": 145,
       "norm_label": ".test_eval_dataset_summary_counts_platforms_and_roles()"
     },
     {
@@ -14126,7 +14136,7 @@
       "source_location": "L90",
       "_origin": "ast",
       "id": "tests_test_build_eval_dataset_buildevaldatasettests_test_outcome_holdout_role_is_explicit",
-      "community": 24,
+      "community": 145,
       "norm_label": ".test_outcome_holdout_role_is_explicit()"
     },
     {
@@ -14136,7 +14146,7 @@
       "source_location": "L109",
       "_origin": "ast",
       "id": "tests_test_build_eval_dataset_buildevaldatasettests_test_outcome_train_role_is_explicit",
-      "community": 24,
+      "community": 145,
       "norm_label": ".test_outcome_train_role_is_explicit()"
     },
     {
@@ -14266,7 +14276,7 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "tests_test_build_outcome_holdout_dataset",
-      "community": 21,
+      "community": 25,
       "norm_label": "test_build_outcome_holdout_dataset.py"
     },
     {
@@ -14276,7 +14286,7 @@
       "source_location": "L6",
       "_origin": "ast",
       "id": "tests_test_build_outcome_holdout_dataset_buildoutcomeholdoutdatasettests",
-      "community": 21,
+      "community": 25,
       "norm_label": "buildoutcomeholdoutdatasettests"
     },
     {
@@ -14286,7 +14296,7 @@
       "source_location": "L7",
       "_origin": "ast",
       "id": "tests_test_build_outcome_holdout_dataset_buildoutcomeholdoutdatasettests_test_builds_positive_cross_platform_and_negative_auto_outcome_holdout",
-      "community": 21,
+      "community": 25,
       "norm_label": ".test_builds_positive_cross_platform_and_negative_auto_outcome_holdout()"
     },
     {
@@ -14296,7 +14306,7 @@
       "source_location": "L39",
       "_origin": "ast",
       "id": "tests_test_build_outcome_holdout_dataset_buildoutcomeholdoutdatasettests_test_skips_duplicate_identities_across_positive_and_negative_sources",
-      "community": 21,
+      "community": 25,
       "norm_label": ".test_skips_duplicate_identities_across_positive_and_negative_sources()"
     },
     {
@@ -14306,7 +14316,7 @@
       "source_location": "L55",
       "_origin": "ast",
       "id": "tests_test_build_outcome_holdout_dataset_buildoutcomeholdoutdatasettests_test_builds_outcome_train_split",
-      "community": 21,
+      "community": 25,
       "norm_label": ".test_builds_outcome_train_split()"
     },
     {
@@ -14316,7 +14326,7 @@
       "source_location": "L79",
       "_origin": "ast",
       "id": "tests_test_build_outcome_holdout_dataset_buildoutcomeholdoutdatasettests_test_replays_features_for_cross_platform_rows_before_filtering",
-      "community": 21,
+      "community": 25,
       "norm_label": ".test_replays_features_for_cross_platform_rows_before_filtering()"
     },
     {
@@ -14326,7 +14336,7 @@
       "source_location": "L105",
       "_origin": "ast",
       "id": "tests_test_build_outcome_holdout_dataset_buildoutcomeholdoutdatasettests_test_auto_split_keeps_same_vod_in_one_split",
-      "community": 21,
+      "community": 25,
       "norm_label": ".test_auto_split_keeps_same_vod_in_one_split()"
     },
     {
@@ -14336,7 +14346,7 @@
       "source_location": "L131",
       "_origin": "ast",
       "id": "tests_test_build_outcome_holdout_dataset_buildoutcomeholdoutdatasettests_test_ignores_top_viewed_rows",
-      "community": 21,
+      "community": 25,
       "norm_label": ".test_ignores_top_viewed_rows()"
     },
     {
@@ -14346,7 +14356,7 @@
       "source_location": "L141",
       "_origin": "ast",
       "id": "tests_test_build_outcome_holdout_dataset_cross_platform_row",
-      "community": 21,
+      "community": 25,
       "norm_label": "_cross_platform_row()"
     },
     {
@@ -14356,7 +14366,7 @@
       "source_location": "L162",
       "_origin": "ast",
       "id": "tests_test_build_outcome_holdout_dataset_top_viewed_row",
-      "community": 21,
+      "community": 25,
       "norm_label": "_top_viewed_row()"
     },
     {
@@ -14366,7 +14376,7 @@
       "source_location": "L175",
       "_origin": "ast",
       "id": "tests_test_build_outcome_holdout_dataset_auto_negative_row",
-      "community": 21,
+      "community": 25,
       "norm_label": "_auto_negative_row()"
     },
     {
@@ -15140,10 +15150,40 @@
       "norm_label": ".close()"
     },
     {
-      "label": "DownloaderTests",
+      "label": "_FailOnceFfmpegCode8YoutubeDL",
       "file_type": "code",
       "source_file": "tests/test_downloader.py",
       "source_location": "L72",
+      "_origin": "ast",
+      "id": "tests_test_downloader_failonceffmpegcode8youtubedl",
+      "community": 114,
+      "norm_label": "_failonceffmpegcode8youtubedl"
+    },
+    {
+      "label": ".__init__()",
+      "file_type": "code",
+      "source_file": "tests/test_downloader.py",
+      "source_location": "L77",
+      "_origin": "ast",
+      "id": "tests_test_downloader_failonceffmpegcode8youtubedl_init",
+      "community": 114,
+      "norm_label": ".__init__()"
+    },
+    {
+      "label": ".extract_info()",
+      "file_type": "code",
+      "source_file": "tests/test_downloader.py",
+      "source_location": "L81",
+      "_origin": "ast",
+      "id": "tests_test_downloader_failonceffmpegcode8youtubedl_extract_info",
+      "community": 114,
+      "norm_label": ".extract_info()"
+    },
+    {
+      "label": "DownloaderTests",
+      "file_type": "code",
+      "source_file": "tests/test_downloader.py",
+      "source_location": "L90",
       "_origin": "ast",
       "id": "tests_test_downloader_downloadertests",
       "community": 114,
@@ -15153,7 +15193,7 @@
       "label": ".test_coerces_float_eta_to_integer_seconds()",
       "file_type": "code",
       "source_file": "tests/test_downloader.py",
-      "source_location": "L73",
+      "source_location": "L91",
       "_origin": "ast",
       "id": "tests_test_downloader_downloadertests_test_coerces_float_eta_to_integer_seconds",
       "community": 114,
@@ -15163,7 +15203,7 @@
       "label": ".test_twitch_cache_path_uses_canonical_vod_id()",
       "file_type": "code",
       "source_file": "tests/test_downloader.py",
-      "source_location": "L78",
+      "source_location": "L96",
       "_origin": "ast",
       "id": "tests_test_downloader_downloadertests_test_twitch_cache_path_uses_canonical_vod_id",
       "community": 114,
@@ -15173,7 +15213,7 @@
       "label": ".test_negative_ttl_keeps_twitch_cache_enabled()",
       "file_type": "code",
       "source_file": "tests/test_downloader.py",
-      "source_location": "L82",
+      "source_location": "L100",
       "_origin": "ast",
       "id": "tests_test_downloader_downloadertests_test_negative_ttl_keeps_twitch_cache_enabled",
       "community": 114,
@@ -15183,7 +15223,7 @@
       "label": ".test_frontend_serving_jobs_use_twitch_download_cache_when_ttl_enabled()",
       "file_type": "code",
       "source_file": "tests/test_downloader.py",
-      "source_location": "L86",
+      "source_location": "L104",
       "_origin": "ast",
       "id": "tests_test_downloader_downloadertests_test_frontend_serving_jobs_use_twitch_download_cache_when_ttl_enabled",
       "community": 114,
@@ -15193,7 +15233,7 @@
       "label": ".test_twitch_download_opts_enable_parallel_fragments()",
       "file_type": "code",
       "source_file": "tests/test_downloader.py",
-      "source_location": "L102",
+      "source_location": "L120",
       "_origin": "ast",
       "id": "tests_test_downloader_downloadertests_test_twitch_download_opts_enable_parallel_fragments",
       "community": 114,
@@ -15203,7 +15243,7 @@
       "label": ".test_twitch_training_download_opts_cap_height()",
       "file_type": "code",
       "source_file": "tests/test_downloader.py",
-      "source_location": "L115",
+      "source_location": "L133",
       "_origin": "ast",
       "id": "tests_test_downloader_downloadertests_test_twitch_training_download_opts_cap_height",
       "community": 114,
@@ -15213,7 +15253,7 @@
       "label": ".test_frontend_twitch_download_opts_cap_height()",
       "file_type": "code",
       "source_file": "tests/test_downloader.py",
-      "source_location": "L131",
+      "source_location": "L149",
       "_origin": "ast",
       "id": "tests_test_downloader_downloadertests_test_frontend_twitch_download_opts_cap_height",
       "community": 114,
@@ -15223,7 +15263,7 @@
       "label": ".test_frontend_twitch_download_height_cap_can_be_disabled()",
       "file_type": "code",
       "source_file": "tests/test_downloader.py",
-      "source_location": "L147",
+      "source_location": "L165",
       "_origin": "ast",
       "id": "tests_test_downloader_downloadertests_test_frontend_twitch_download_height_cap_can_be_disabled",
       "community": 114,
@@ -15233,7 +15273,7 @@
       "label": ".test_download_opts_include_ytdlp_cookiefile()",
       "file_type": "code",
       "source_file": "tests/test_downloader.py",
-      "source_location": "L163",
+      "source_location": "L181",
       "_origin": "ast",
       "id": "tests_test_downloader_downloadertests_test_download_opts_include_ytdlp_cookiefile",
       "community": 114,
@@ -15243,7 +15283,7 @@
       "label": ".test_download_opts_remap_docker_ytdlp_cookiefile_to_local_backend_tmp()",
       "file_type": "code",
       "source_file": "tests/test_downloader.py",
-      "source_location": "L178",
+      "source_location": "L196",
       "_origin": "ast",
       "id": "tests_test_downloader_downloadertests_test_download_opts_remap_docker_ytdlp_cookiefile_to_local_backend_tmp",
       "community": 114,
@@ -15253,7 +15293,7 @@
       "label": ".test_twitch_download_opts_use_aria2c_when_available()",
       "file_type": "code",
       "source_file": "tests/test_downloader.py",
-      "source_location": "L197",
+      "source_location": "L215",
       "_origin": "ast",
       "id": "tests_test_downloader_downloadertests_test_twitch_download_opts_use_aria2c_when_available",
       "community": 114,
@@ -15263,7 +15303,7 @@
       "label": ".test_reuses_recent_twitch_cache()",
       "file_type": "code",
       "source_file": "tests/test_downloader.py",
-      "source_location": "L220",
+      "source_location": "L240",
       "_origin": "ast",
       "id": "tests_test_downloader_downloadertests_test_reuses_recent_twitch_cache",
       "community": 114,
@@ -15273,7 +15313,7 @@
       "label": ".test_ensure_cached_download_reuses_existing_generic_cache()",
       "file_type": "code",
       "source_file": "tests/test_downloader.py",
-      "source_location": "L249",
+      "source_location": "L269",
       "_origin": "ast",
       "id": "tests_test_downloader_downloadertests_test_ensure_cached_download_reuses_existing_generic_cache",
       "community": 114,
@@ -15283,7 +15323,7 @@
       "label": ".test_ensure_cached_download_populates_generic_cache()",
       "file_type": "code",
       "source_file": "tests/test_downloader.py",
-      "source_location": "L265",
+      "source_location": "L285",
       "_origin": "ast",
       "id": "tests_test_downloader_downloadertests_test_ensure_cached_download_populates_generic_cache",
       "community": 114,
@@ -15293,7 +15333,7 @@
       "label": ".test_short_form_cache_download_uses_ytdlp_sleep_options()",
       "file_type": "code",
       "source_file": "tests/test_downloader.py",
-      "source_location": "L283",
+      "source_location": "L303",
       "_origin": "ast",
       "id": "tests_test_downloader_downloadertests_test_short_form_cache_download_uses_ytdlp_sleep_options",
       "community": 114,
@@ -15303,7 +15343,7 @@
       "label": ".test_non_short_form_cache_download_does_not_use_sleep_options()",
       "file_type": "code",
       "source_file": "tests/test_downloader.py",
-      "source_location": "L301",
+      "source_location": "L321",
       "_origin": "ast",
       "id": "tests_test_downloader_downloadertests_test_non_short_form_cache_download_does_not_use_sleep_options",
       "community": 114,
@@ -15313,7 +15353,7 @@
       "label": ".test_stores_fresh_twitch_download_in_cache()",
       "file_type": "code",
       "source_file": "tests/test_downloader.py",
-      "source_location": "L319",
+      "source_location": "L339",
       "_origin": "ast",
       "id": "tests_test_downloader_downloadertests_test_stores_fresh_twitch_download_in_cache",
       "community": 114,
@@ -15323,17 +15363,27 @@
       "label": ".test_twitch_ffmpeg_segfault_retries_without_external_downloader()",
       "file_type": "code",
       "source_file": "tests/test_downloader.py",
-      "source_location": "L346",
+      "source_location": "L366",
       "_origin": "ast",
       "id": "tests_test_downloader_downloadertests_test_twitch_ffmpeg_segfault_retries_without_external_downloader",
       "community": 114,
       "norm_label": ".test_twitch_ffmpeg_segfault_retries_without_external_downloader()"
     },
     {
+      "label": ".test_twitch_ffmpeg_code8_retries_with_native_downloader_keeping_format()",
+      "file_type": "code",
+      "source_file": "tests/test_downloader.py",
+      "source_location": "L389",
+      "_origin": "ast",
+      "id": "tests_test_downloader_downloadertests_test_twitch_ffmpeg_code8_retries_with_native_downloader_keeping_format",
+      "community": 114,
+      "norm_label": ".test_twitch_ffmpeg_code8_retries_with_native_downloader_keeping_format()"
+    },
+    {
       "label": ".test_twitch_ffmpeg_retry_survives_cookie_save_error_during_cleanup()",
       "file_type": "code",
       "source_file": "tests/test_downloader.py",
-      "source_location": "L369",
+      "source_location": "L419",
       "_origin": "ast",
       "id": "tests_test_downloader_downloadertests_test_twitch_ffmpeg_retry_survives_cookie_save_error_during_cleanup",
       "community": 114,
@@ -15343,7 +15393,7 @@
       "label": ".test_invalid_cache_metadata_forces_refresh()",
       "file_type": "code",
       "source_file": "tests/test_downloader.py",
-      "source_location": "L389",
+      "source_location": "L439",
       "_origin": "ast",
       "id": "tests_test_downloader_downloadertests_test_invalid_cache_metadata_forces_refresh",
       "community": 114,
@@ -15353,7 +15403,7 @@
       "label": ".test_skips_twitch_cache_when_disabled()",
       "file_type": "code",
       "source_file": "tests/test_downloader.py",
-      "source_location": "L411",
+      "source_location": "L461",
       "_origin": "ast",
       "id": "tests_test_downloader_downloadertests_test_skips_twitch_cache_when_disabled",
       "community": 114,
@@ -15363,7 +15413,7 @@
       "label": ".test_frontend_twitch_job_populates_download_cache_when_ttl_enabled()",
       "file_type": "code",
       "source_file": "tests/test_downloader.py",
-      "source_location": "L426",
+      "source_location": "L476",
       "_origin": "ast",
       "id": "tests_test_downloader_downloadertests_test_frontend_twitch_job_populates_download_cache_when_ttl_enabled",
       "community": 114,
@@ -15373,7 +15423,7 @@
       "label": ".test_expired_twitch_cache_is_evicted_before_frontend_download()",
       "file_type": "code",
       "source_file": "tests/test_downloader.py",
-      "source_location": "L443",
+      "source_location": "L493",
       "_origin": "ast",
       "id": "tests_test_downloader_downloadertests_test_expired_twitch_cache_is_evicted_before_frontend_download",
       "community": 114,
@@ -15383,7 +15433,7 @@
       "label": ".test_download_range_passes_yt_dlp_range_options_without_cache()",
       "file_type": "code",
       "source_file": "tests/test_downloader.py",
-      "source_location": "L475",
+      "source_location": "L525",
       "_origin": "ast",
       "id": "tests_test_downloader_downloadertests_test_download_range_passes_yt_dlp_range_options_without_cache",
       "community": 114,
@@ -15393,7 +15443,7 @@
       "label": ".test_resolves_downloaded_file_with_nonstandard_extension()",
       "file_type": "code",
       "source_file": "tests/test_downloader.py",
-      "source_location": "L496",
+      "source_location": "L546",
       "_origin": "ast",
       "id": "tests_test_downloader_downloadertests_test_resolves_downloaded_file_with_nonstandard_extension",
       "community": 114,
@@ -15403,7 +15453,7 @@
       "label": ".test_uses_reported_yt_dlp_filepath_when_available()",
       "file_type": "code",
       "source_file": "tests/test_downloader.py",
-      "source_location": "L510",
+      "source_location": "L560",
       "_origin": "ast",
       "id": "tests_test_downloader_downloadertests_test_uses_reported_yt_dlp_filepath_when_available",
       "community": 114,
@@ -15413,11 +15463,21 @@
       "label": ".test_transient_network_errors_pause_download_instead_of_marking_unavailable()",
       "file_type": "code",
       "source_file": "tests/test_downloader.py",
-      "source_location": "L531",
+      "source_location": "L581",
       "_origin": "ast",
       "id": "tests_test_downloader_downloadertests_test_transient_network_errors_pause_download_instead_of_marking_unavailable",
       "community": 114,
       "norm_label": ".test_transient_network_errors_pause_download_instead_of_marking_unavailable()"
+    },
+    {
+      "label": "First attempt aborts like a Twitch HLS 403 (`ffmpeg exited with code 8`).",
+      "file_type": "rationale",
+      "source_file": "tests/test_downloader.py",
+      "source_location": "L73",
+      "_origin": "ast",
+      "id": "tests_test_downloader_rationale_73",
+      "community": 114,
+      "norm_label": "first attempt aborts like a twitch hls 403 (`ffmpeg exited with code 8`)."
     },
     {
       "label": "test_eval_clip_finder.py",
@@ -15716,7 +15776,7 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "tests_test_export_frontend_gold_eval",
-      "community": 22,
+      "community": 145,
       "norm_label": "test_export_frontend_gold_eval.py"
     },
     {
@@ -15726,7 +15786,7 @@
       "source_location": "L11",
       "_origin": "ast",
       "id": "tests_test_export_frontend_gold_eval_exportfrontendgoldevaltests",
-      "community": 22,
+      "community": 145,
       "norm_label": "exportfrontendgoldevaltests"
     },
     {
@@ -15736,7 +15796,7 @@
       "source_location": "L12",
       "_origin": "ast",
       "id": "tests_test_export_frontend_gold_eval_exportfrontendgoldevaltests_test_main_writes_empty_artifacts_when_no_gold_eval_rows_exist",
-      "community": 22,
+      "community": 145,
       "norm_label": ".test_main_writes_empty_artifacts_when_no_gold_eval_rows_exist()"
     },
     {
@@ -15746,7 +15806,7 @@
       "source_location": "L40",
       "_origin": "ast",
       "id": "tests_test_export_frontend_gold_eval_exportfrontendgoldevaltests_test_main_preserves_existing_outputs_when_requested_and_frontend_is_empty",
-      "community": 22,
+      "community": 145,
       "norm_label": ".test_main_preserves_existing_outputs_when_requested_and_frontend_is_empty()"
     },
     {
@@ -15756,7 +15816,7 @@
       "source_location": "L88",
       "_origin": "ast",
       "id": "tests_test_export_frontend_gold_eval_exportfrontendgoldevaltests_test_main_merges_existing_outputs_with_frontend_rows",
-      "community": 22,
+      "community": 145,
       "norm_label": ".test_main_merges_existing_outputs_with_frontend_rows()"
     },
     {
@@ -15766,7 +15826,7 @@
       "source_location": "L190",
       "_origin": "ast",
       "id": "tests_test_export_frontend_gold_eval_exportfrontendgoldevaltests_test_main_merge_keeps_manual_row_when_frontend_has_no_timestamp",
-      "community": 22,
+      "community": 145,
       "norm_label": ".test_main_merge_keeps_manual_row_when_frontend_has_no_timestamp()"
     },
     {
@@ -15776,7 +15836,7 @@
       "source_location": "L264",
       "_origin": "ast",
       "id": "tests_test_export_frontend_gold_eval_exportfrontendgoldevaltests_test_export_builds_gold_eval_dataset_from_debug_rows",
-      "community": 22,
+      "community": 145,
       "norm_label": ".test_export_builds_gold_eval_dataset_from_debug_rows()"
     },
     {
@@ -15786,7 +15846,7 @@
       "source_location": "L311",
       "_origin": "ast",
       "id": "tests_test_export_frontend_gold_eval_exportfrontendgoldevaltests_test_export_builds_dataset_from_snapshot_rows_after_job_cleanup",
-      "community": 22,
+      "community": 145,
       "norm_label": ".test_export_builds_dataset_from_snapshot_rows_after_job_cleanup()"
     },
     {
@@ -15796,7 +15856,7 @@
       "source_location": "L354",
       "_origin": "ast",
       "id": "tests_test_export_frontend_gold_eval_exportfrontendgoldevaltests_test_export_keeps_latest_row_per_job_and_candidate",
-      "community": 22,
+      "community": 145,
       "norm_label": ".test_export_keeps_latest_row_per_job_and_candidate()"
     },
     {
@@ -15806,7 +15866,7 @@
       "source_location": "L398",
       "_origin": "ast",
       "id": "tests_test_export_frontend_gold_eval_exportfrontendgoldevaltests_test_export_filters_by_creator_id",
-      "community": 22,
+      "community": 145,
       "norm_label": ".test_export_filters_by_creator_id()"
     },
     {
@@ -15816,7 +15876,7 @@
       "source_location": "L444",
       "_origin": "ast",
       "id": "tests_test_export_frontend_gold_eval_exportfrontendgoldevaltests_test_export_prefers_newest_row_across_snapshot_and_debug_sources",
-      "community": 22,
+      "community": 145,
       "norm_label": ".test_export_prefers_newest_row_across_snapshot_and_debug_sources()"
     },
     {
@@ -15996,7 +16056,7 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "tests_test_gold_eval_workflow",
-      "community": 23,
+      "community": 83,
       "norm_label": "test_gold_eval_workflow.py"
     },
     {
@@ -16006,7 +16066,7 @@
       "source_location": "L11",
       "_origin": "ast",
       "id": "tests_test_gold_eval_workflow_goldevalworkflowtests",
-      "community": 23,
+      "community": 83,
       "norm_label": "goldevalworkflowtests"
     },
     {
@@ -16016,7 +16076,7 @@
       "source_location": "L12",
       "_origin": "ast",
       "id": "tests_test_gold_eval_workflow_goldevalworkflowtests_test_build_gold_eval_queue_writes_joinable_csv_and_sidecar",
-      "community": 23,
+      "community": 83,
       "norm_label": ".test_build_gold_eval_queue_writes_joinable_csv_and_sidecar()"
     },
     {
@@ -16026,7 +16086,7 @@
       "source_location": "L81",
       "_origin": "ast",
       "id": "tests_test_gold_eval_workflow_goldevalworkflowtests_test_import_gold_eval_labels_rebuilds_gold_eval_dataset",
-      "community": 23,
+      "community": 83,
       "norm_label": ".test_import_gold_eval_labels_rebuilds_gold_eval_dataset()"
     },
     {
@@ -16036,7 +16096,7 @@
       "source_location": "L160",
       "_origin": "ast",
       "id": "tests_test_gold_eval_workflow_goldevalworkflowtests_test_import_gold_eval_labels_cli_writes_outputs",
-      "community": 23,
+      "community": 83,
       "norm_label": ".test_import_gold_eval_labels_cli_writes_outputs()"
     },
     {
@@ -16046,7 +16106,7 @@
       "source_location": "L216",
       "_origin": "ast",
       "id": "tests_test_gold_eval_workflow_goldevalworkflowtests_test_import_gold_eval_labels_requires_notes_for_grade_three",
-      "community": 23,
+      "community": 83,
       "norm_label": ".test_import_gold_eval_labels_requires_notes_for_grade_three()"
     },
     {
@@ -16056,7 +16116,7 @@
       "source_location": "L240",
       "_origin": "ast",
       "id": "tests_test_gold_eval_workflow_goldevalworkflowtests_test_import_gold_eval_labels_requires_notes_for_high_scoring_grade_zero",
-      "community": 23,
+      "community": 83,
       "norm_label": ".test_import_gold_eval_labels_requires_notes_for_high_scoring_grade_zero()"
     },
     {
@@ -16066,7 +16126,7 @@
       "source_location": "L265",
       "_origin": "ast",
       "id": "tests_test_gold_eval_workflow_goldevalworkflowtests_test_import_gold_eval_labels_requires_queue_id_when_candidate_ids_collide",
-      "community": 23,
+      "community": 83,
       "norm_label": ".test_import_gold_eval_labels_requires_queue_id_when_candidate_ids_collide()"
     },
     {
@@ -19116,7 +19176,7 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "tests_test_yt_dlp_auth",
-      "community": 134,
+      "community": 0,
       "norm_label": "test_yt_dlp_auth.py"
     },
     {
@@ -19126,7 +19186,7 @@
       "source_location": "L7",
       "_origin": "ast",
       "id": "tests_test_yt_dlp_auth_ytdlpauthtests",
-      "community": 134,
+      "community": 0,
       "norm_label": "ytdlpauthtests"
     },
     {
@@ -19136,7 +19196,7 @@
       "source_location": "L8",
       "_origin": "ast",
       "id": "tests_test_yt_dlp_auth_ytdlpauthtests_test_applies_cookiefile_when_configured",
-      "community": 134,
+      "community": 0,
       "norm_label": ".test_applies_cookiefile_when_configured()"
     },
     {
@@ -19146,7 +19206,7 @@
       "source_location": "L18",
       "_origin": "ast",
       "id": "tests_test_yt_dlp_auth_ytdlpauthtests_test_applies_browser_cookies_when_cookiefile_is_not_configured",
-      "community": 134,
+      "community": 0,
       "norm_label": ".test_applies_browser_cookies_when_cookiefile_is_not_configured()"
     },
     {
@@ -19156,7 +19216,7 @@
       "source_location": "L27",
       "_origin": "ast",
       "id": "tests_test_yt_dlp_auth_ytdlpauthtests_test_leaves_options_unchanged_without_auth_config",
-      "community": 134,
+      "community": 0,
       "norm_label": ".test_leaves_options_unchanged_without_auth_config()"
     },
     {
@@ -26393,9 +26453,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L244",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily",
-      "target": "ml_collect_twitch_clip_labels_twitchclient",
-      "confidence_score": 1.0
+      "target": "ml_collect_twitch_clip_labels_twitchclient"
     },
     {
       "relation": "calls",
@@ -26404,9 +26464,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L252",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily_main",
-      "target": "ml_collect_twitch_clip_labels_twitchclient",
-      "confidence_score": 1.0
+      "target": "ml_collect_twitch_clip_labels_twitchclient"
     },
     {
       "relation": "uses",
@@ -26414,9 +26474,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L244",
       "weight": 0.8,
+      "confidence_score": 0.5,
       "source": "ml_gt_capture_daily_py_path",
-      "target": "ml_collect_twitch_clip_labels_twitchclient",
-      "confidence_score": 0.5
+      "target": "ml_collect_twitch_clip_labels_twitchclient"
     },
     {
       "relation": "imports",
@@ -27018,9 +27078,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L120",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily",
-      "target": "ml_collect_twitch_clip_labels_get_user",
-      "confidence_score": 1.0
+      "target": "ml_collect_twitch_clip_labels_get_user"
     },
     {
       "relation": "calls",
@@ -27029,9 +27089,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L122",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily_list_archive_vods",
-      "target": "ml_collect_twitch_clip_labels_get_user",
-      "confidence_score": 1.0
+      "target": "ml_collect_twitch_clip_labels_get_user"
     },
     {
       "relation": "imports",
@@ -27524,9 +27584,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L120",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily",
-      "target": "ml_collect_twitch_clip_labels_parse_twitch_duration",
-      "confidence_score": 1.0
+      "target": "ml_collect_twitch_clip_labels_parse_twitch_duration"
     },
     {
       "relation": "calls",
@@ -27535,9 +27595,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L132",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily_list_archive_vods",
-      "target": "ml_collect_twitch_clip_labels_parse_twitch_duration",
-      "confidence_score": 1.0
+      "target": "ml_collect_twitch_clip_labels_parse_twitch_duration"
     },
     {
       "relation": "references",
@@ -34323,9 +34383,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L37",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily",
-      "target": "ml_gt_capture",
-      "confidence_score": 1.0
+      "target": "ml_gt_capture"
     },
     {
       "relation": "rationale_for",
@@ -34494,9 +34554,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L78",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily",
-      "target": "ml_gt_capture_daily_captured_ids",
-      "confidence_score": 1.0
+      "target": "ml_gt_capture_daily_captured_ids"
     },
     {
       "relation": "contains",
@@ -34504,9 +34564,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L112",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily",
-      "target": "ml_gt_capture_daily_list_archive_vods",
-      "confidence_score": 1.0
+      "target": "ml_gt_capture_daily_list_archive_vods"
     },
     {
       "relation": "contains",
@@ -34514,9 +34574,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L83",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily",
-      "target": "ml_gt_capture_daily_load_captured_state",
-      "confidence_score": 1.0
+      "target": "ml_gt_capture_daily_load_captured_state"
     },
     {
       "relation": "contains",
@@ -34524,9 +34584,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L221",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily",
-      "target": "ml_gt_capture_daily_main",
-      "confidence_score": 1.0
+      "target": "ml_gt_capture_daily_main"
     },
     {
       "relation": "contains",
@@ -34534,9 +34594,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L147",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily",
-      "target": "ml_gt_capture_daily_run_daily_capture",
-      "confidence_score": 1.0
+      "target": "ml_gt_capture_daily_run_daily_capture"
     },
     {
       "relation": "contains",
@@ -34544,9 +34604,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L100",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily",
-      "target": "ml_gt_capture_daily_save_captured_state",
-      "confidence_score": 1.0
+      "target": "ml_gt_capture_daily_save_captured_state"
     },
     {
       "relation": "contains",
@@ -34554,9 +34614,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L54",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily",
-      "target": "ml_gt_capture_daily_select_new_vods",
-      "confidence_score": 1.0
+      "target": "ml_gt_capture_daily_select_new_vods"
     },
     {
       "relation": "contains",
@@ -34564,9 +34624,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L137",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily",
-      "target": "ml_gt_capture_daily_vod_date",
-      "confidence_score": 1.0
+      "target": "ml_gt_capture_daily_vod_date"
     },
     {
       "relation": "contains",
@@ -34574,9 +34634,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L48",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily",
-      "target": "ml_gt_capture_daily_vod_id",
-      "confidence_score": 1.0
+      "target": "ml_gt_capture_daily_vod_id"
     },
     {
       "relation": "rationale_for",
@@ -34584,9 +34644,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L1",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily_rationale_1",
-      "target": "ml_gt_capture_daily",
-      "confidence_score": 1.0
+      "target": "ml_gt_capture_daily"
     },
     {
       "relation": "imports_from",
@@ -34595,9 +34655,9 @@
       "source_file": "tests/test_gt_capture_daily.py",
       "source_location": "L6",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_capture_daily",
-      "target": "ml_gt_capture_daily",
-      "confidence_score": 1.0
+      "target": "ml_gt_capture_daily"
     },
     {
       "relation": "rationale_for",
@@ -34605,9 +34665,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L49",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily_rationale_49",
-      "target": "ml_gt_capture_daily_vod_id",
-      "confidence_score": 1.0
+      "target": "ml_gt_capture_daily_vod_id"
     },
     {
       "relation": "calls",
@@ -34616,9 +34676,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L185",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily_run_daily_capture",
-      "target": "ml_gt_capture_daily_vod_id",
-      "confidence_score": 1.0
+      "target": "ml_gt_capture_daily_vod_id"
     },
     {
       "relation": "calls",
@@ -34627,9 +34687,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L67",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily_select_new_vods",
-      "target": "ml_gt_capture_daily_vod_id",
-      "confidence_score": 1.0
+      "target": "ml_gt_capture_daily_vod_id"
     },
     {
       "relation": "rationale_for",
@@ -34637,9 +34697,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L55",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily_rationale_55",
-      "target": "ml_gt_capture_daily_select_new_vods",
-      "confidence_score": 1.0
+      "target": "ml_gt_capture_daily_select_new_vods"
     },
     {
       "relation": "calls",
@@ -34648,9 +34708,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L171",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily_run_daily_capture",
-      "target": "ml_gt_capture_daily_select_new_vods",
-      "confidence_score": 1.0
+      "target": "ml_gt_capture_daily_select_new_vods"
     },
     {
       "relation": "rationale_for",
@@ -34658,9 +34718,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L79",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily_rationale_79",
-      "target": "ml_gt_capture_daily_captured_ids",
-      "confidence_score": 1.0
+      "target": "ml_gt_capture_daily_captured_ids"
     },
     {
       "relation": "calls",
@@ -34669,9 +34729,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L168",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily_run_daily_capture",
-      "target": "ml_gt_capture_daily_captured_ids",
-      "confidence_score": 1.0
+      "target": "ml_gt_capture_daily_captured_ids"
     },
     {
       "relation": "references",
@@ -34680,9 +34740,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L83",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily_load_captured_state",
-      "target": "ml_gt_capture_daily_py_path",
-      "confidence_score": 1.0
+      "target": "ml_gt_capture_daily_py_path"
     },
     {
       "relation": "rationale_for",
@@ -34690,9 +34750,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L84",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily_rationale_84",
-      "target": "ml_gt_capture_daily_load_captured_state",
-      "confidence_score": 1.0
+      "target": "ml_gt_capture_daily_load_captured_state"
     },
     {
       "relation": "calls",
@@ -34701,9 +34761,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L167",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily_run_daily_capture",
-      "target": "ml_gt_capture_daily_load_captured_state",
-      "confidence_score": 1.0
+      "target": "ml_gt_capture_daily_load_captured_state"
     },
     {
       "relation": "calls",
@@ -34712,9 +34772,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L250",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily_main",
-      "target": "ml_gt_capture_daily_py_path",
-      "confidence_score": 1.0
+      "target": "ml_gt_capture_daily_py_path"
     },
     {
       "relation": "references",
@@ -34723,9 +34783,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L147",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily_run_daily_capture",
-      "target": "ml_gt_capture_daily_py_path",
-      "confidence_score": 1.0
+      "target": "ml_gt_capture_daily_py_path"
     },
     {
       "relation": "references",
@@ -34734,9 +34794,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L100",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily_save_captured_state",
-      "target": "ml_gt_capture_daily_py_path",
-      "confidence_score": 1.0
+      "target": "ml_gt_capture_daily_py_path"
     },
     {
       "relation": "rationale_for",
@@ -34744,9 +34804,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L101",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily_rationale_101",
-      "target": "ml_gt_capture_daily_save_captured_state",
-      "confidence_score": 1.0
+      "target": "ml_gt_capture_daily_save_captured_state"
     },
     {
       "relation": "calls",
@@ -34755,9 +34815,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L200",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily_run_daily_capture",
-      "target": "ml_gt_capture_daily_save_captured_state",
-      "confidence_score": 1.0
+      "target": "ml_gt_capture_daily_save_captured_state"
     },
     {
       "relation": "calls",
@@ -34766,9 +34826,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L255",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily_main",
-      "target": "ml_gt_capture_daily_list_archive_vods",
-      "confidence_score": 1.0
+      "target": "ml_gt_capture_daily_list_archive_vods"
     },
     {
       "relation": "rationale_for",
@@ -34776,9 +34836,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L113",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily_rationale_113",
-      "target": "ml_gt_capture_daily_list_archive_vods",
-      "confidence_score": 1.0
+      "target": "ml_gt_capture_daily_list_archive_vods"
     },
     {
       "relation": "rationale_for",
@@ -34786,9 +34846,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L138",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily_rationale_138",
-      "target": "ml_gt_capture_daily_vod_date",
-      "confidence_score": 1.0
+      "target": "ml_gt_capture_daily_vod_date"
     },
     {
       "relation": "calls",
@@ -34797,9 +34857,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L190",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily_run_daily_capture",
-      "target": "ml_gt_capture_daily_vod_date",
-      "confidence_score": 1.0
+      "target": "ml_gt_capture_daily_vod_date"
     },
     {
       "relation": "calls",
@@ -34808,9 +34868,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L254",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily_main",
-      "target": "ml_gt_capture_daily_run_daily_capture",
-      "confidence_score": 1.0
+      "target": "ml_gt_capture_daily_run_daily_capture"
     },
     {
       "relation": "rationale_for",
@@ -34818,9 +34878,9 @@
       "source_file": "ml/gt_capture_daily.py",
       "source_location": "L156",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "ml_gt_capture_daily_rationale_156",
-      "target": "ml_gt_capture_daily_run_daily_capture",
-      "confidence_score": 1.0
+      "target": "ml_gt_capture_daily_run_daily_capture"
     },
     {
       "relation": "contains",
@@ -51122,21 +51182,21 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "services/downloader.py",
-      "source_location": "L45",
+      "source_location": "L356",
       "weight": 1.0,
-      "confidence_score": 1.0,
       "source": "services_downloader",
-      "target": "services_downloader_format_selector"
+      "target": "services_downloader_ffmpeg_downloader_exit_code",
+      "confidence_score": 1.0
     },
     {
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "services/downloader.py",
-      "source_location": "L345",
+      "source_location": "L45",
       "weight": 1.0,
       "confidence_score": 1.0,
       "source": "services_downloader",
-      "target": "services_downloader_is_ffmpeg_segfault_error"
+      "target": "services_downloader_format_selector"
     },
     {
       "relation": "contains",
@@ -51958,11 +52018,21 @@
       "context": "call",
       "confidence": "EXTRACTED",
       "source_file": "services/downloader.py",
-      "source_location": "L437",
+      "source_location": "L454",
       "weight": 1.0,
-      "confidence_score": 1.0,
       "source": "services_downloader_download_uncached",
-      "target": "services_downloader_is_ffmpeg_segfault_error"
+      "target": "services_downloader_ffmpeg_downloader_exit_code",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "services/downloader.py",
+      "source_location": "L357",
+      "weight": 1.0,
+      "source": "services_downloader_rationale_357",
+      "target": "services_downloader_ffmpeg_downloader_exit_code",
+      "confidence_score": 1.0
     },
     {
       "relation": "calls",
@@ -58281,6 +58351,16 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "tests/test_downloader.py",
+      "source_location": "L72",
+      "weight": 1.0,
+      "source": "tests_test_downloader",
+      "target": "tests_test_downloader_failonceffmpegcode8youtubedl",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_downloader.py",
       "source_location": "L65",
       "weight": 1.0,
       "confidence_score": 1.0,
@@ -58326,6 +58406,16 @@
       "confidence_score": 1.0,
       "source": "tests_test_downloader_captureoptsyoutubedl",
       "target": "tests_test_downloader_fakeyoutubedl"
+    },
+    {
+      "relation": "inherits",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_downloader.py",
+      "source_location": "L72",
+      "weight": 1.0,
+      "source": "tests_test_downloader_failonceffmpegcode8youtubedl",
+      "target": "tests_test_downloader_fakeyoutubedl",
+      "confidence_score": 1.0
     },
     {
       "relation": "inherits",
@@ -58414,6 +58504,17 @@
       "source_file": "tests/test_downloader.py",
       "source_location": "L33",
       "weight": 1.0,
+      "source": "tests_test_downloader_fakeyoutubedlwithtemp_extract_info",
+      "target": "tests_test_downloader_failonceffmpegcode8youtubedl_extract_info",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_downloader.py",
+      "source_location": "L33",
+      "weight": 1.0,
       "confidence_score": 1.0,
       "source": "tests_test_downloader_fakeyoutubedlwithtemp_extract_info",
       "target": "tests_test_downloader_failonceffmpegcrashyoutubedl_extract_info"
@@ -58427,6 +58528,17 @@
       "confidence_score": 1.0,
       "source": "tests_test_downloader_captureoptsyoutubedl",
       "target": "tests_test_downloader_captureoptsyoutubedl_init"
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_downloader.py",
+      "source_location": "L46",
+      "weight": 1.0,
+      "source": "tests_test_downloader_captureoptsyoutubedl_init",
+      "target": "tests_test_downloader_failonceffmpegcode8youtubedl_init",
+      "confidence_score": 1.0
     },
     {
       "relation": "calls",
@@ -58470,6 +58582,28 @@
       "target": "tests_test_downloader_failonceffmpegcrashyoutubedl_init"
     },
     {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_downloader.py",
+      "source_location": "L54",
+      "weight": 1.0,
+      "source": "tests_test_downloader_failonceffmpegcrashyoutubedl_init",
+      "target": "tests_test_downloader_failonceffmpegcode8youtubedl_init",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_downloader.py",
+      "source_location": "L62",
+      "weight": 1.0,
+      "source": "tests_test_downloader_failonceffmpegcrashyoutubedl_extract_info",
+      "target": "tests_test_downloader_failonceffmpegcode8youtubedl_extract_info",
+      "confidence_score": 1.0
+    },
+    {
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "tests/test_downloader.py",
@@ -58478,6 +58612,36 @@
       "confidence_score": 1.0,
       "source": "tests_test_downloader_failonceffmpegcrashthencookiecloseerroryoutubedl",
       "target": "tests_test_downloader_failonceffmpegcrashthencookiecloseerroryoutubedl_close"
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_downloader.py",
+      "source_location": "L81",
+      "weight": 1.0,
+      "source": "tests_test_downloader_failonceffmpegcode8youtubedl",
+      "target": "tests_test_downloader_failonceffmpegcode8youtubedl_extract_info",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_downloader.py",
+      "source_location": "L77",
+      "weight": 1.0,
+      "source": "tests_test_downloader_failonceffmpegcode8youtubedl",
+      "target": "tests_test_downloader_failonceffmpegcode8youtubedl_init",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_downloader.py",
+      "source_location": "L73",
+      "weight": 1.0,
+      "source": "tests_test_downloader_rationale_73",
+      "target": "tests_test_downloader_failonceffmpegcode8youtubedl",
+      "confidence_score": 1.0
     },
     {
       "relation": "method",
@@ -58708,6 +58872,16 @@
       "confidence_score": 1.0,
       "source": "tests_test_downloader_downloadertests",
       "target": "tests_test_downloader_downloadertests_test_twitch_download_opts_use_aria2c_when_available"
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_downloader.py",
+      "source_location": "L389",
+      "weight": 1.0,
+      "source": "tests_test_downloader_downloadertests",
+      "target": "tests_test_downloader_downloadertests_test_twitch_ffmpeg_code8_retries_with_native_downloader_keeping_format",
+      "confidence_score": 1.0
     },
     {
       "relation": "method",
@@ -59932,9 +60106,9 @@
       "source_file": "tests/test_gt_capture_daily.py",
       "source_location": "L46",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_capture_daily",
-      "target": "tests_test_gt_capture_daily_capturedstatetests",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_capture_daily_capturedstatetests"
     },
     {
       "relation": "contains",
@@ -59942,9 +60116,9 @@
       "source_file": "tests/test_gt_capture_daily.py",
       "source_location": "L76",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_capture_daily",
-      "target": "tests_test_gt_capture_daily_fakecaptureresult",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_capture_daily_fakecaptureresult"
     },
     {
       "relation": "contains",
@@ -59952,9 +60126,9 @@
       "source_file": "tests/test_gt_capture_daily.py",
       "source_location": "L82",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_capture_daily",
-      "target": "tests_test_gt_capture_daily_rundailycapturetests",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_capture_daily_rundailycapturetests"
     },
     {
       "relation": "contains",
@@ -59962,9 +60136,9 @@
       "source_file": "tests/test_gt_capture_daily.py",
       "source_location": "L12",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_capture_daily",
-      "target": "tests_test_gt_capture_daily_selectnewvodstests",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_capture_daily_selectnewvodstests"
     },
     {
       "relation": "method",
@@ -59972,9 +60146,9 @@
       "source_file": "tests/test_gt_capture_daily.py",
       "source_location": "L35",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_capture_daily_selectnewvodstests",
-      "target": "tests_test_gt_capture_daily_selectnewvodstests_test_already_captured_id_types_are_normalized",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_capture_daily_selectnewvodstests_test_already_captured_id_types_are_normalized"
     },
     {
       "relation": "method",
@@ -59982,9 +60156,9 @@
       "source_file": "tests/test_gt_capture_daily.py",
       "source_location": "L23",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_capture_daily_selectnewvodstests",
-      "target": "tests_test_gt_capture_daily_selectnewvodstests_test_deduplicates_keeping_first_occurrence",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_capture_daily_selectnewvodstests_test_deduplicates_keeping_first_occurrence"
     },
     {
       "relation": "method",
@@ -59992,9 +60166,9 @@
       "source_file": "tests/test_gt_capture_daily.py",
       "source_location": "L19",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_capture_daily_selectnewvodstests",
-      "target": "tests_test_gt_capture_daily_selectnewvodstests_test_empty_inputs_yield_nothing",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_capture_daily_selectnewvodstests_test_empty_inputs_yield_nothing"
     },
     {
       "relation": "method",
@@ -60002,9 +60176,9 @@
       "source_file": "tests/test_gt_capture_daily.py",
       "source_location": "L13",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_capture_daily_selectnewvodstests",
-      "target": "tests_test_gt_capture_daily_selectnewvodstests_test_excludes_already_captured_and_returns_only_new",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_capture_daily_selectnewvodstests_test_excludes_already_captured_and_returns_only_new"
     },
     {
       "relation": "method",
@@ -60012,9 +60186,9 @@
       "source_file": "tests/test_gt_capture_daily.py",
       "source_location": "L29",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_capture_daily_selectnewvodstests",
-      "target": "tests_test_gt_capture_daily_selectnewvodstests_test_skips_records_without_a_usable_id",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_capture_daily_selectnewvodstests_test_skips_records_without_a_usable_id"
     },
     {
       "relation": "method",
@@ -60022,9 +60196,9 @@
       "source_file": "tests/test_gt_capture_daily.py",
       "source_location": "L47",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_capture_daily_capturedstatetests",
-      "target": "tests_test_gt_capture_daily_capturedstatetests_setup",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_capture_daily_capturedstatetests_setup"
     },
     {
       "relation": "method",
@@ -60032,9 +60206,9 @@
       "source_file": "tests/test_gt_capture_daily.py",
       "source_location": "L52",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_capture_daily_capturedstatetests",
-      "target": "tests_test_gt_capture_daily_capturedstatetests_test_missing_state_loads_empty",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_capture_daily_capturedstatetests_test_missing_state_loads_empty"
     },
     {
       "relation": "method",
@@ -60042,9 +60216,9 @@
       "source_file": "tests/test_gt_capture_daily.py",
       "source_location": "L56",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_capture_daily_capturedstatetests",
-      "target": "tests_test_gt_capture_daily_capturedstatetests_test_save_then_load_roundtrips_and_is_atomic",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_capture_daily_capturedstatetests_test_save_then_load_roundtrips_and_is_atomic"
     },
     {
       "relation": "method",
@@ -60052,9 +60226,9 @@
       "source_file": "tests/test_gt_capture_daily.py",
       "source_location": "L67",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_capture_daily_capturedstatetests",
-      "target": "tests_test_gt_capture_daily_capturedstatetests_test_unreadable_state_falls_back_to_empty",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_capture_daily_capturedstatetests_test_unreadable_state_falls_back_to_empty"
     },
     {
       "relation": "method",
@@ -60062,9 +60236,9 @@
       "source_file": "tests/test_gt_capture_daily.py",
       "source_location": "L77",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_capture_daily_fakecaptureresult",
-      "target": "tests_test_gt_capture_daily_fakecaptureresult_init",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_capture_daily_fakecaptureresult_init"
     },
     {
       "relation": "calls",
@@ -60073,9 +60247,9 @@
       "source_file": "tests/test_gt_capture_daily.py",
       "source_location": "L93",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_capture_daily_rundailycapturetests_capture",
-      "target": "tests_test_gt_capture_daily_fakecaptureresult",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_capture_daily_fakecaptureresult"
     },
     {
       "relation": "method",
@@ -60083,9 +60257,9 @@
       "source_file": "tests/test_gt_capture_daily.py",
       "source_location": "L91",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_capture_daily_rundailycapturetests",
-      "target": "tests_test_gt_capture_daily_rundailycapturetests_capture",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_capture_daily_rundailycapturetests_capture"
     },
     {
       "relation": "method",
@@ -60093,9 +60267,9 @@
       "source_file": "tests/test_gt_capture_daily.py",
       "source_location": "L103",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_capture_daily_rundailycapturetests",
-      "target": "tests_test_gt_capture_daily_rundailycapturetests_run",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_capture_daily_rundailycapturetests_run"
     },
     {
       "relation": "method",
@@ -60103,9 +60277,9 @@
       "source_file": "tests/test_gt_capture_daily.py",
       "source_location": "L83",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_capture_daily_rundailycapturetests",
-      "target": "tests_test_gt_capture_daily_rundailycapturetests_setup",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_capture_daily_rundailycapturetests_setup"
     },
     {
       "relation": "method",
@@ -60113,9 +60287,9 @@
       "source_file": "tests/test_gt_capture_daily.py",
       "source_location": "L114",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_capture_daily_rundailycapturetests",
-      "target": "tests_test_gt_capture_daily_rundailycapturetests_test_captures_only_the_new_vod_and_skips_the_rest",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_capture_daily_rundailycapturetests_test_captures_only_the_new_vod_and_skips_the_rest"
     },
     {
       "relation": "method",
@@ -60123,9 +60297,9 @@
       "source_file": "tests/test_gt_capture_daily.py",
       "source_location": "L166",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_capture_daily_rundailycapturetests",
-      "target": "tests_test_gt_capture_daily_rundailycapturetests_test_passes_vod_date_and_cache_dir_per_vod_to_capture_core",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_capture_daily_rundailycapturetests_test_passes_vod_date_and_cache_dir_per_vod_to_capture_core"
     },
     {
       "relation": "method",
@@ -60133,9 +60307,9 @@
       "source_file": "tests/test_gt_capture_daily.py",
       "source_location": "L128",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_capture_daily_rundailycapturetests",
-      "target": "tests_test_gt_capture_daily_rundailycapturetests_test_records_provenance_and_is_idempotent_across_restart",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_capture_daily_rundailycapturetests_test_records_provenance_and_is_idempotent_across_restart"
     },
     {
       "relation": "method",
@@ -60143,9 +60317,9 @@
       "source_file": "tests/test_gt_capture_daily.py",
       "source_location": "L143",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_capture_daily_rundailycapturetests",
-      "target": "tests_test_gt_capture_daily_rundailycapturetests_test_state_persists_after_each_capture_so_a_crash_is_resumable",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_capture_daily_rundailycapturetests_test_state_persists_after_each_capture_so_a_crash_is_resumable"
     },
     {
       "relation": "calls",
@@ -60154,9 +60328,9 @@
       "source_file": "tests/test_gt_capture_daily.py",
       "source_location": "L121",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_capture_daily_rundailycapturetests_test_captures_only_the_new_vod_and_skips_the_rest",
-      "target": "tests_test_gt_capture_daily_rundailycapturetests_run",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_capture_daily_rundailycapturetests_run"
     },
     {
       "relation": "calls",
@@ -60165,9 +60339,9 @@
       "source_file": "tests/test_gt_capture_daily.py",
       "source_location": "L174",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_capture_daily_rundailycapturetests_test_passes_vod_date_and_cache_dir_per_vod_to_capture_core",
-      "target": "tests_test_gt_capture_daily_rundailycapturetests_run",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_capture_daily_rundailycapturetests_run"
     },
     {
       "relation": "calls",
@@ -60176,9 +60350,9 @@
       "source_file": "tests/test_gt_capture_daily.py",
       "source_location": "L129",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_capture_daily_rundailycapturetests_test_records_provenance_and_is_idempotent_across_restart",
-      "target": "tests_test_gt_capture_daily_rundailycapturetests_run",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_capture_daily_rundailycapturetests_run"
     },
     {
       "relation": "calls",
@@ -60187,9 +60361,9 @@
       "source_file": "tests/test_gt_capture_daily.py",
       "source_location": "L150",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "tests_test_gt_capture_daily_rundailycapturetests_test_state_persists_after_each_capture_so_a_crash_is_resumable",
-      "target": "tests_test_gt_capture_daily_rundailycapturetests_run",
-      "confidence_score": 1.0
+      "target": "tests_test_gt_capture_daily_rundailycapturetests_run"
     },
     {
       "relation": "contains",
@@ -63544,5 +63718,5 @@
       "source_file": "data/README.md"
     }
   ],
-  "built_at_commit": "3c82160d4eb4cff9a21ff4bebb3d728642d6485d"
+  "built_at_commit": "0a2c55e3f739b3679587b702932d7d4f9fb0fc4d"
 }

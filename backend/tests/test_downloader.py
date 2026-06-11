@@ -69,6 +69,24 @@ class _FailOnceFfmpegCrashThenCookieCloseErrorYoutubeDL(_FailOnceFfmpegCrashYout
         return None
 
 
+class _FailOnceFfmpegCode8YoutubeDL(_FakeYoutubeDL):
+    """First attempt aborts like a Twitch HLS 403 (`ffmpeg exited with code 8`)."""
+
+    captured_opts: list[dict] = []
+
+    def __init__(self, opts: dict):
+        type(self).captured_opts.append(opts)
+        super().__init__(opts)
+
+    def extract_info(self, url: str, download: bool = True):
+        if len(type(self).captured_opts) == 1:
+            target = Path(self.opts["outtmpl"])
+            target.parent.mkdir(parents=True, exist_ok=True)
+            (target.parent / "video.temp.mp4").write_bytes(b"failed-attempt")
+            raise RuntimeError("ERROR: ffmpeg exited with code 8")
+        return super().extract_info(url, download=download)
+
+
 class DownloaderTests(unittest.TestCase):
     def test_coerces_float_eta_to_integer_seconds(self) -> None:
         self.assertEqual(downloader._coerce_eta_seconds(715.6143084933422), 716)
@@ -214,6 +232,8 @@ class DownloaderTests(unittest.TestCase):
                 "1M",
                 "--file-allocation=none",
                 "--summary-interval=0",
+                "--console-log-level=error",
+                "--show-console-readout=false",
             ],
         )
 
@@ -365,6 +385,36 @@ class DownloaderTests(unittest.TestCase):
             self.assertNotIn("external_downloader", retry_opts)
             self.assertNotIn("external_downloader_args", retry_opts)
             self.assertFalse((storage_dir / "job-ffmpeg-retry" / "video.temp.mp4").exists())
+
+    def test_twitch_ffmpeg_code8_retries_with_native_downloader_keeping_format(self) -> None:
+        # Twitch VODs are HLS-only, so a hard segment error (e.g. HTTP 403) makes
+        # the ffmpeg fragment-downloader exit with code 8. Unlike a -11 segfault,
+        # the format is fine — only the external downloader must give way to the
+        # native HLS downloader (which honors fragment_retries/skip_unavailable),
+        # so the height-capped format selector is preserved (no jump to "best").
+        with tempfile.TemporaryDirectory() as tmp:
+            storage_dir = Path(tmp)
+            url = "https://www.twitch.tv/videos/7890"
+            _FailOnceFfmpegCode8YoutubeDL.captured_opts = []
+
+            with patch.object(downloader.settings, "storage_dir", str(storage_dir)), \
+                 patch.object(downloader.settings, "twitch_download_cache_ttl_sec", 0), \
+                 patch.object(downloader.settings, "twitch_download_use_aria2c", True), \
+                 patch.object(downloader, "_aria2c_available", return_value=True), \
+                 patch.object(downloader, "update_job", create=True), \
+                 patch.object(downloader.yt_dlp, "YoutubeDL", _FailOnceFfmpegCode8YoutubeDL):
+                output_path = downloader.download(url, "job-ffmpeg-code8")
+
+            self.assertEqual(output_path.read_bytes(), b"downloaded:https://www.twitch.tv/videos/7890")
+            self.assertEqual(len(_FailOnceFfmpegCode8YoutubeDL.captured_opts), 2)
+            first_opts, retry_opts = _FailOnceFfmpegCode8YoutubeDL.captured_opts
+            self.assertEqual(first_opts["external_downloader"], "aria2c")
+            self.assertNotIn("external_downloader", retry_opts)
+            self.assertNotIn("external_downloader_args", retry_opts)
+            # Format is NOT escalated to "best" — it stays the original selector.
+            self.assertNotEqual(retry_opts["format"], "best[ext=mp4]/best")
+            self.assertEqual(retry_opts["format"], first_opts["format"])
+            self.assertFalse((storage_dir / "job-ffmpeg-code8" / "video.temp.mp4").exists())
 
     def test_twitch_ffmpeg_retry_survives_cookie_save_error_during_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

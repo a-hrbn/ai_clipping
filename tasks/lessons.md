@@ -536,3 +536,21 @@
   Chromaprint-Suche hat fuer solche Reposts zu wenig SNR. Scoped
   Verifikation (±45s um behauptete Position) funktioniert dagegen gut,
   weil die Positions-Uebereinstimmung selbst starke Evidenz ist.
+
+## 2026-06-11: Twitch-VOD-Download — ffmpeg HLS-Downloader bricht mit Code 8 ab
+
+- Twitch-VODs sind HLS-only (alle Formate `m3u8`). aria2c kann kein HLS, also
+  lädt yt-dlp die Fragmente über **ffmpeg**. Der ffmpeg-Fragment-Downloader
+  bricht den GANZEN Download beim ersten harten Segment-Fehler ab (z. B. Twitch
+  HTTP 403 auf einem Ad-/Discontinuity-Segment) → `ffmpeg exited with code 8`.
+- Fix-Muster: bei ffmpeg-Downloader-Fehlern auf yt-dlp's **native HLS-Downloader**
+  zurückfallen (`disable_external_downloader=True`). Der lädt pro Fragment mit
+  `fragment_retries`/`skip_unavailable_fragments` (in `_twitch_download_ydl_opts`
+  bereits gesetzt) und überspringt einzelne 403-Segmente, statt abzubrechen.
+- Verifiziert: derselbe VOD, der per ffmpeg-FD mit Code 8 starb, lädt per
+  `--downloader native` sauber (Cloudfront-`.ts`-Segmente, exit 0).
+- Achtung Code -11 (Segfault) ist format-spezifisch → dort zusätzlich Format auf
+  `best[ext=mp4]/best` zwingen. Bei Code 8 das höhen-gekappte Format BEHALTEN,
+  sonst bläht der Retry einen 32h-VOD auf ~100 GiB ("best"=1080p60) auf.
+- Retry-Guard `and not disable_external_downloader` ⇒ genau ein Retry, keine
+  Endlosschleife.

@@ -353,9 +353,18 @@ def _is_transient_network_error(message: str) -> bool:
     )
 
 
-def _is_ffmpeg_segfault_error(message: str) -> bool:
-    text = (message or "").strip().lower()
-    return "ffmpeg exited with code -11" in text
+def _ffmpeg_downloader_exit_code(message: str) -> int | None:
+    """Return ffmpeg's exit code if this is a yt-dlp ffmpeg-fragment-downloader
+    failure, else None.
+
+    Twitch VODs are HLS-only, so yt-dlp downloads fragments through ffmpeg. The
+    ffmpeg downloader aborts the *whole* download on the first hard segment error
+    (a Twitch HTTP 403 surfaces as ``exited with code 8``; a crash as ``-11``)
+    instead of retrying per-fragment — so we fall back to yt-dlp's native HLS
+    downloader, which honors ``fragment_retries`` / ``skip_unavailable_fragments``.
+    """
+    match = re.search(r"ffmpeg exited with code (-?\d+)", (message or "").lower())
+    return int(match.group(1)) if match else None
 
 
 def _extract_yt_dlp_info(ydl_opts: dict[str, object], url: str) -> dict | object:
@@ -442,14 +451,20 @@ def _download_uncached(
         message = str(exc).lower()
         if _is_transient_network_error(message):
             raise DownloadPausedError(str(exc)) from exc
+        ffmpeg_exit_code = _ffmpeg_downloader_exit_code(message)
         if (
             _is_twitch_url(url)
             and not disable_external_downloader
-            and _is_ffmpeg_segfault_error(message)
+            and ffmpeg_exit_code is not None
         ):
             _cleanup_redundant_job_download_artifacts(job_dir, output_path)
             retry_overrides = dict(ydl_opt_overrides or {})
-            retry_overrides["format"] = "best[ext=mp4]/best"
+            # A -11 segfault is format-specific, so also collapse to a single
+            # muxed format. Other ffmpeg-downloader failures (e.g. code 8 on a
+            # Twitch HLS 403) just need the native HLS downloader — keep the
+            # height-capped format so the retry doesn't balloon to a "best" pull.
+            if ffmpeg_exit_code == -11:
+                retry_overrides["format"] = "best[ext=mp4]/best"
             return _download_uncached(
                 url,
                 job_id,
