@@ -19,6 +19,7 @@ from models import (
     ReviewCandidateResponse,
 )
 import session_lease
+from job_lifecycle import is_terminal
 from job_manager import bind_job_session, cancel_job, create_job, delete_job, get_job, touch_job_session
 from job_manager import update_job
 from pipeline_runner import run_job_subprocess, writable_cache_dir
@@ -40,7 +41,6 @@ _face_detection_cache: dict[str, str | bool | None] | None = None
 _SENTENCE_TRANSFORMERS_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
 _PYANNOTE_MODEL = "speaker-diarization-3.1"
 _BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
-_TERMINAL_STATES = {"done", "failed", "cancelled"}
 
 
 def _read_json_file(path: pathlib.Path) -> dict | list | None:
@@ -182,7 +182,7 @@ def _job_pipeline_diagnostics(job_id: str, job: JobStatus | dict | None = None) 
     transcript_details: list[str] = []
     if segments_count > 0:
         transcript_status = "ok"
-    elif job_status in _TERMINAL_STATES:
+    elif is_terminal(job_status):
         transcript_status = "warning"
         transcript_details.append("Keine Transcript-Segmente gefunden.")
 
@@ -210,7 +210,7 @@ def _job_pipeline_diagnostics(job_id: str, job: JobStatus | dict | None = None) 
             _metric("Model", str(llm_stage.get("model") or "default")),
             _metric("Max Momente", int(llm_stage.get("max_moments") or 0)),
         ]
-    elif job_status in _TERMINAL_STATES:
+    elif is_terminal(job_status):
         llm_status = "warning"
         llm_details.append("Kein LLM-Stage-Artefakt gefunden.")
 
@@ -223,7 +223,7 @@ def _job_pipeline_diagnostics(job_id: str, job: JobStatus | dict | None = None) 
     clip_details: list[str] = []
     if clip_count > 0 or final_count > 0:
         clip_status = "ok"
-    elif job_status in _TERMINAL_STATES:
+    elif is_terminal(job_status):
         clip_status = "warning"
         clip_details.append("Keine Clips geschnitten.")
 
@@ -1094,7 +1094,7 @@ async def delete_job_run(job_id: str):
     job = get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job.status not in {"done", "failed", "cancelled"}:
+    if not is_terminal(job.status):
         raise HTTPException(status_code=409, detail="Job is still running — cancel it first")
     deleted = delete_job(job_id)
     if not deleted:

@@ -8,6 +8,7 @@ from typing import Dict
 
 import session_lease
 from config import settings
+from job_lifecycle import is_terminal
 from models import JobStatus
 
 logger = logging.getLogger(__name__)
@@ -32,7 +33,6 @@ _jobs_file_mtime_ns = 0
 
 _JOB_TTL_SECONDS = 2 * 3600  # evict in-memory records after 2 hours
 _PERSIST_INTERVAL_SECONDS = 5.0
-_TERMINAL_JOB_STATUSES = {"done", "failed", "cancelled"}
 
 
 def _evict_expired(now: float | None = None) -> bool:
@@ -43,7 +43,7 @@ def _evict_expired(now: float | None = None) -> bool:
         for jid, ts in _job_created_at.items()
         if now - ts > _JOB_TTL_SECONDS
         and _jobs.get(jid) is not None
-        and _jobs[jid].status in _TERMINAL_JOB_STATUSES
+        and is_terminal(_jobs[jid].status)
     ]
     for jid in expired:
         _jobs.pop(jid, None)
@@ -133,7 +133,7 @@ def _persist_jobs() -> None:
 
 def _should_persist_update(kwargs: dict, now: float) -> bool:
     status = kwargs.get("status")
-    if status in {"done", "failed", "cancelled"}:
+    if is_terminal(status):
         return True
     if any(key in kwargs for key in {"clips", "error", "profile"}):
         return True
@@ -178,7 +178,7 @@ def update_job(job_id: str, **kwargs) -> None:
         previous_status = job.status
         for k, v in kwargs.items():
             setattr(job, k, v)
-        if job.status in _TERMINAL_JOB_STATUSES and previous_status not in _TERMINAL_JOB_STATUSES:
+        if is_terminal(job.status) and not is_terminal(previous_status):
             # Retain completed jobs for the full TTL after they reach a terminal state,
             # even if the job itself ran longer than _JOB_TTL_SECONDS.
             _job_created_at[job_id] = now
@@ -232,7 +232,7 @@ def cancel_job(job_id: str, reason: str = "Job cancelled by client") -> JobStatu
                 pass  # fall through to flush the eviction
             else:
                 return None
-        elif job.status in {"done", "failed", "cancelled"}:
+        elif is_terminal(job.status):
             if should_persist:
                 pass
             else:
@@ -287,7 +287,7 @@ def delete_job(job_id: str) -> bool:
         job = _jobs.get(job_id)
         if job is None:
             return False
-        if job.status not in _TERMINAL_JOB_STATUSES:
+        if not is_terminal(job.status):
             return False
         _jobs.pop(job_id, None)
         _job_created_at.pop(job_id, None)
@@ -309,7 +309,7 @@ def touch_job_session(job_id: str, session_id: str | None) -> JobStatus | None:
                 pass
             else:
                 return None
-        elif job.status in {"done", "failed", "cancelled"}:
+        elif is_terminal(job.status):
             pass
         else:
             session_lease.touch(job_id, session_id)

@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from config import settings
 import shutil
 
+from job_lifecycle import is_terminal
 from job_manager import create_job, delete_job, get_job
 from ml.llm_moment_finder import TranscriptSegment, transcript_excerpt
 from pipeline_runner import run_job_subprocess
@@ -350,7 +351,7 @@ async def delete_pipeline_debug_workflow(workflow_id: str) -> dict[str, Any]:
             continue
         job_id = job_dir.name
         job = get_job(job_id)
-        if job is not None and job.status not in {"done", "failed", "cancelled"}:
+        if job is not None and not is_terminal(job.status):
             continue  # skip still-running jobs
         delete_job(job_id)
         if job_dir.is_dir():

@@ -9,6 +9,7 @@ import sys
 import tempfile
 
 from config import settings
+from job_lifecycle import is_terminal
 from job_manager import get_job, update_job
 
 _BACKEND_ROOT = pathlib.Path(__file__).resolve().parent
@@ -95,7 +96,7 @@ async def run_job_subprocess(
     returncode = await process.wait()
     if returncode != 0:
         job = get_job(job_id)
-        if job is not None and job.status not in {"done", "failed", "cancelled"}:
+        if job is not None and not is_terminal(job.status):
             update_job(job_id, status="failed", error=_subprocess_error(returncode))
     return returncode
 
