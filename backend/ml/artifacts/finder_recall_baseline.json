@@ -10,59 +10,57 @@
   ],
   "anchor_restricted": true,
   "gold_vods": 23,
-  "scored_vods": 16,
+  "scored_vods": 18,
   "missing_prediction_vods": [
-    "2754503460",
     "2756055866",
     "2764976309",
     "2770356205",
     "2771207666",
-    "2772745645",
     "2773650615"
   ],
   "headline_min_views": 100000,
   "floor": {
     "min_views": 0.0,
-    "vods": 16,
-    "gt_count": 46,
+    "vods": 18,
+    "gt_count": 51,
     "hit_count": 6,
-    "miss_count": 40,
+    "miss_count": 45,
     "recall": {
-      "5": 0.065217,
-      "10": 0.086957,
-      "20": 0.130435,
-      "50": 0.130435
+      "5": 0.058824,
+      "10": 0.078431,
+      "20": 0.117647,
+      "50": 0.117647
     },
     "avg_rank": 7.8333,
-    "miss_rate": 0.869565
+    "miss_rate": 0.882353
   },
   "headline": {
     "min_views": 100000,
-    "vods": 11,
-    "gt_count": 21,
+    "vods": 13,
+    "gt_count": 24,
     "hit_count": 3,
-    "miss_count": 18,
+    "miss_count": 21,
     "recall": {
-      "5": 0.095238,
-      "10": 0.142857,
-      "20": 0.142857,
-      "50": 0.142857
+      "5": 0.083333,
+      "10": 0.125,
+      "20": 0.125,
+      "50": 0.125
     },
     "avg_rank": 4.6667,
-    "miss_rate": 0.857143
+    "miss_rate": 0.875
   },
   "generation": {
     "floor": {
       "min_views": 0.0,
-      "gt_count": 46,
-      "covered": 28,
-      "recall_any": 0.608696
+      "gt_count": 51,
+      "covered": 32,
+      "recall_any": 0.627451
     },
     "headline": {
       "min_views": 100000,
-      "gt_count": 21,
-      "covered": 13,
-      "recall_any": 0.619048
+      "gt_count": 24,
+      "covered": 15,
+      "recall_any": 0.625
     }
   },
   "coverage_threshold": 0.5,
@@ -336,6 +334,50 @@
           "desc": "Jynxzi Hits Two Rarest “Balright” In One Day! 😭🥀",
           "views": 356562.0,
           "source_url": "https://www.youtube.com/watch?v=o2tQc509OPI",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        }
+      ]
+    },
+    {
+      "vod_id": "2754503460",
+      "has_gt": true,
+      "gt_count": 2,
+      "pred_count": 20,
+      "recall": {
+        "5": 0.0,
+        "10": 0.0,
+        "20": 0.0,
+        "50": 0.0
+      },
+      "avg_rank": null,
+      "miss_rate": 1.0,
+      "hit_count": 0,
+      "miss_count": 2,
+      "gt_hits": [
+        {
+          "gt_index": 0,
+          "gt_start": 7633.02,
+          "gt_end": 7647.28,
+          "desc": "Jynxzi Quits Console After Playing R6 On Pc! 😭💀",
+          "views": 263917.0,
+          "source_url": "https://www.youtube.com/watch?v=I-Kqb5ru3XU",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        },
+        {
+          "gt_index": 1,
+          "gt_start": 20858.82,
+          "gt_end": 20872.02,
+          "desc": "Jynxzi Is Insanely Good In PC Ranked Lobbies! 😱👀",
+          "views": 74721.0,
+          "source_url": "https://www.youtube.com/watch?v=bgZ67Ookc2w",
           "hit": false,
           "hit_rank": null,
           "coverage": 0.0,
@@ -739,6 +781,63 @@
       ]
     },
     {
+      "vod_id": "2772745645",
+      "has_gt": true,
+      "gt_count": 3,
+      "pred_count": 20,
+      "recall": {
+        "5": 0.0,
+        "10": 0.0,
+        "20": 0.0,
+        "50": 0.0
+      },
+      "avg_rank": null,
+      "miss_rate": 1.0,
+      "hit_count": 0,
+      "miss_count": 3,
+      "gt_hits": [
+        {
+          "gt_index": 0,
+          "gt_start": 15284.78,
+          "gt_end": 15323.14,
+          "desc": "Jynxzi Explains the Difference Between Messi & Ronaldo! 👀🐐",
+          "views": 11669.0,
+          "source_url": "https://www.youtube.com/watch?v=gaWWdpV5_YQ",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        },
+        {
+          "gt_index": 1,
+          "gt_start": 22950.7,
+          "gt_end": 22994.56,
+          "desc": "Jynxzi Reacts to ChainsFR's Face Reveal! 😱👀",
+          "views": 1434649.0,
+          "source_url": "https://www.youtube.com/watch?v=PxpZBY5d2wU",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.2221,
+          "pred_start_time": null,
+          "pred_end_time": null
+        },
+        {
+          "gt_index": 2,
+          "gt_start": 25475.38,
+          "gt_end": 25485.32,
+          "desc": "Jynxzi Finds Out Faker Hit His Head Against a Wall After Losing in League of Legends! 💀😭",
+          "views": 139421.0,
+          "source_url": "https://www.youtube.com/watch?v=tQK0lxBapCg",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        }
+      ]
+    },
+    {
       "vod_id": "2774440901",
       "has_gt": true,
       "gt_count": 4,
@@ -954,5 +1053,5 @@
       ]
     }
   ],
-  "computed_at": "2026-06-11T14:40:16.539174Z"
+  "computed_at": "2026-06-11T22:27:26.975162Z"
 }
