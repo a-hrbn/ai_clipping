@@ -8,14 +8,28 @@ from typing import Iterable
 POSITIVE_LABEL_CLASSES = {"positive", "weak_positive", "viral_positive", "gold_positive", "cross_platform_outcome_positive"}
 
 
-def read_jsonl(path: pathlib.Path) -> list[dict]:
+def read_jsonl(path: pathlib.Path, *, strict: bool = True) -> list[dict]:
+    """Read a JSONL file into a list of dicts; missing file -> ``[]``.
+
+    ``strict=True`` (default) raises on a malformed line — the historical
+    behaviour. ``strict=False`` makes the lenient decision explicit at the
+    call-site: blank and malformed lines are skipped and the valid rows are
+    returned.
+    """
     if not path.exists():
         return []
     rows: list[dict] = []
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
-        if line:
+        if not line:
+            continue
+        if strict:
             rows.append(json.loads(line))
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
     return rows
 
 
