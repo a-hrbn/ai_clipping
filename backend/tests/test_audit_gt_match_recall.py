@@ -33,6 +33,20 @@ class AuditGtMatchRecallTests(unittest.TestCase):
         unmatched_urls = {row["url"] for row in audit["top_unmatched_by_views"]}
         self.assertIn("https://www.youtube.com/shorts/audioonly002", unmatched_urls)
 
+    def test_missing_matches_file_yields_zero_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = pathlib.Path(tmp)
+            _write_jsonl(run_dir / "iboclipss_discovered.jsonl", [
+                {"source_url": "https://www.youtube.com/shorts/discovered01", "title": "Jynxzi", "view_count": 10},
+            ])
+            # matches.jsonl deliberately absent — via the row_identity seam a
+            # missing file reads as [] instead of raising FileNotFoundError.
+            audit = build_audit(run_dir)
+
+        self.assertEqual(audit["discovered_clips"], 1)
+        self.assertEqual(audit["matched_clips"], 0)
+        self.assertEqual(audit["match_rows_by_kind"], {})
+
 
 if __name__ == "__main__":
     unittest.main()

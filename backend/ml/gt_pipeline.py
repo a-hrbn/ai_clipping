@@ -59,6 +59,7 @@ from ml.discover_iboclipss_clips import (  # noqa: E402
 )
 from ml.build_gt_vod_transcripts import _process_vod  # noqa: E402
 from ml.build_eval_manifest import dedup_moments  # noqa: E402
+from ml.row_identity import read_jsonl, write_jsonl  # noqa: E402
 
 _DEFAULT_VOD_CSV = BACKEND_ROOT / "ml" / "jynxzi_gt_vods.csv"
 _DEFAULT_CHANNEL = "https://www.youtube.com/@Iboclipss/shorts"
@@ -174,34 +175,6 @@ def _mark_done(state: dict, step: str) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# JSONL I/O
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _write_jsonl(path: pathlib.Path, rows: list[dict]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(
-        "\n".join(json.dumps(r, ensure_ascii=True, default=str) for r in rows),
-        encoding="utf-8",
-    )
-    tmp.replace(path)
-
-
-def _read_jsonl(path: pathlib.Path) -> list[dict]:
-    if not path.exists():
-        return []
-    rows: list[dict] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line:
-            try:
-                rows.append(json.loads(line))
-            except json.JSONDecodeError:
-                pass
-    return rows
-
-
-# ══════════════════════════════════════════════════════════════════════════════
 # Step 1 — List @Iboclipss clips within VOD date windows
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -214,7 +187,7 @@ def _load_channel_cache(runs_root: pathlib.Path) -> list[dict] | None:
     p = _channel_cache_path(runs_root)
     if not p.exists():
         return None
-    entries = _read_jsonl(p)
+    entries = read_jsonl(p, strict=False)
     if not entries:
         return None
     age_h = (time.time() - p.stat().st_mtime) / 3600
@@ -223,7 +196,7 @@ def _load_channel_cache(runs_root: pathlib.Path) -> list[dict] | None:
 
 
 def _save_channel_cache(runs_root: pathlib.Path, entries: list[dict]) -> None:
-    _write_jsonl(_channel_cache_path(runs_root), entries)
+    write_jsonl(_channel_cache_path(runs_root), entries)
 
 
 def step_list_iboclipss(
@@ -238,7 +211,7 @@ def step_list_iboclipss(
 ) -> list[dict]:
     discovered_path = run_dir / "iboclipss_discovered.jsonl"
     if _is_done(state, "iboclipss_listed") and discovered_path.exists():
-        rows = _read_jsonl(discovered_path)
+        rows = read_jsonl(discovered_path, strict=False)
         logger.info("[1/5] iboclipss_listed [CACHED]: %d clips", len(rows))
         for r in rows:
             logger.info("      %s  %5dk views  %s  → VODs %s",
@@ -288,7 +261,7 @@ def step_list_iboclipss(
                         row.get("upload_date", "?"), int(row.get("view_count", 0)) // 1000,
                         row.get("title", "")[:55], row.get("candidate_vod_ids", []))
 
-    _write_jsonl(discovered_path, matched)
+    write_jsonl(discovered_path, matched)
     _mark_done(state, "iboclipss_listed")
     logger.info("[1/5] iboclipss_listed DONE: %d clips → %s", len(matched), discovered_path.name)
     return matched
@@ -307,7 +280,7 @@ def step_download_iboclipss(
     from services.downloader import ensure_cached_download
 
     reposts_path = run_dir / "iboclipss_reposts.jsonl"
-    existing = _read_jsonl(reposts_path) if reposts_path.exists() else []
+    existing = read_jsonl(reposts_path, strict=False) if reposts_path.exists() else []
     done_ids = {str(r.get("clip_id") or "") for r in existing if r.get("clip_id")}
     pending = [d for d in discovered if str(d.get("clip_id") or "") not in done_ids]
 
@@ -369,10 +342,10 @@ def step_download_iboclipss(
             "upload_date": row.get("upload_date", ""),
             "candidate_vod_ids": row.get("candidate_vod_ids", []),
         })
-        _write_jsonl(reposts_path, existing + new_reposts)
+        write_jsonl(reposts_path, existing + new_reposts)
 
     all_reposts = existing + new_reposts
-    _write_jsonl(reposts_path, all_reposts)
+    write_jsonl(reposts_path, all_reposts)
 
     if len(all_reposts) >= len(discovered):
         _mark_done(state, "iboclipss_downloaded")
@@ -400,7 +373,7 @@ def step_build_vod_transcripts(
     vod_manifest_path = run_dir / "vod_manifest.jsonl"
     fpcalc = shutil.which("fpcalc")
 
-    existing_manifest = _read_jsonl(vod_manifest_path) if vod_manifest_path.exists() else []
+    existing_manifest = read_jsonl(vod_manifest_path, strict=False) if vod_manifest_path.exists() else []
     done_vod_ids = {str(r.get("vod_id") or "") for r in existing_manifest}
     per_vod_state: dict = state.setdefault("steps_done", {}).setdefault("vod_transcripts", {})
 
@@ -449,7 +422,7 @@ def step_build_vod_transcripts(
         all_manifest.append(manifest_row)
         done_vod_ids.add(vod_id)
 
-        _write_jsonl(vod_manifest_path, all_manifest)
+        write_jsonl(vod_manifest_path, all_manifest)
         _save_state(run_dir, state)
         logger.info("      [%d/%d] VOD %s: checkpoint saved", i, len(pending), vod_id)
 
@@ -483,7 +456,7 @@ def step_run_matcher(
 ) -> list[dict]:
     matches_path = run_dir / "matches.jsonl"
     if _is_done(state, "matching") and matches_path.exists():
-        rows = _read_jsonl(matches_path)
+        rows = read_jsonl(matches_path, strict=False)
         logger.info("[4/5] matching [CACHED]: %d accepted matches", len(rows))
         _log_match_summary(rows)
         return rows
@@ -530,7 +503,7 @@ def step_run_matcher(
                     rec.get("action", ""), rec.get("message", ""))
 
     _write_diagnostics(run_dir / "match_diagnostics.json", diag)
-    _write_jsonl(matches_path, output_rows)
+    write_jsonl(matches_path, output_rows)
     _mark_done(state, "matching")
     _log_match_summary(output_rows)
     return output_rows
@@ -549,7 +522,7 @@ def step_build_eval_manifest(
 ) -> None:
     manifest_path = run_dir / "eval_manifest.jsonl"
     if _is_done(state, "eval_manifest") and manifest_path.exists():
-        rows = _read_jsonl(manifest_path)
+        rows = read_jsonl(manifest_path, strict=False)
         logger.info("[5/5] eval_manifest [CACHED]: %s", manifest_path.name)
         _log_eval_summary(rows)
         return
@@ -581,7 +554,7 @@ def step_build_eval_manifest(
         output_rows.append({"vod_id": vod_id, "gt_moments": gt_moments})
         logger.info("      VOD %s: %d raw → %d moments after dedup", vod_id, len(vod_rows), len(gt_moments))
 
-    _write_jsonl(manifest_path, output_rows)
+    write_jsonl(manifest_path, output_rows)
     _mark_done(state, "eval_manifest")
     logger.info("[5/5] eval_manifest DONE: %d VODs  %d gt_moments → %s",
                 len(output_rows), total_moments, manifest_path.name)
@@ -592,7 +565,7 @@ def step_build_eval_manifest(
     # would silently destroy.
     canonical = BACKEND_ROOT / "ml" / "artifacts" / "jynxzi_eval_manifest.jsonl"
     canonical.parent.mkdir(parents=True, exist_ok=True)
-    existing_rows = _read_jsonl(canonical) if canonical.exists() else []
+    existing_rows = read_jsonl(canonical, strict=False) if canonical.exists() else []
     if existing_rows:
         backup = canonical.with_name(
             f"jynxzi_eval_manifest.pre_{datetime.now().strftime('%Y%m%dT%H%M%S')}.bak.jsonl"
@@ -616,7 +589,7 @@ def step_build_eval_manifest(
         merged[vod_id] = row
         replaced += 1
     merged_rows = [merged[k] for k in sorted(merged)]
-    _write_jsonl(canonical, merged_rows)
+    write_jsonl(canonical, merged_rows)
     logger.info(
         "      Merged → %s (%d VODs total, %d written by this run, %d untouched)",
         canonical.name, len(merged_rows), replaced, len(merged_rows) - replaced,
@@ -857,7 +830,7 @@ def main() -> int:
         return 1
 
     total_elapsed = time.monotonic() - t_pipeline
-    eval_rows = _read_jsonl(run_dir / "eval_manifest.jsonl")
+    eval_rows = read_jsonl(run_dir / "eval_manifest.jsonl", strict=False)
     total_moments = sum(len(r.get("gt_moments") or []) for r in eval_rows)
     logger.info("=" * 64)
     logger.info("Pipeline complete in %.0fs (%.1f min)", total_elapsed, total_elapsed / 60)

@@ -23,6 +23,11 @@ import sys
 BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 _DEFAULT_RUNS_ROOT = BACKEND_ROOT / "tmp" / "gt_runs"
 
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
+
+from ml.row_identity import read_jsonl  # noqa: E402
+
 # Title markers for clips whose payoff is mostly non-verbal (screams, rage,
 # physical/visual comedy). Transcript matching is expected to struggle here.
 # Deliberately word-based: Iboclipss decorates nearly every title with the
@@ -44,10 +49,6 @@ def _video_id(url: str) -> str:
     """Normalize YouTube URL forms (shorts/<id>, watch?v=<id>, youtu.be/<id>)."""
     m = re.search(r"(?:shorts/|watch\?v=|youtu\.be/)([A-Za-z0-9_-]{6,})", url or "")
     return m.group(1) if m else (url or "")
-
-
-def _read_jsonl(path: pathlib.Path) -> list[dict]:
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 def _classify_title(title: str) -> str:
@@ -86,8 +87,8 @@ def _tier_stats(clips: list[dict], matched_ids: set[str]) -> list[dict]:
 
 
 def build_audit(run_dir: pathlib.Path, top_n: int = 20, matches_name: str = "matches.jsonl") -> dict:
-    discovered = _read_jsonl(run_dir / "iboclipss_discovered.jsonl")
-    matches = _read_jsonl(run_dir / matches_name)
+    discovered = read_jsonl(run_dir / "iboclipss_discovered.jsonl")
+    matches = read_jsonl(run_dir / matches_name)
 
     # Audio-fallback rows place the repost via chromaprint alignment only and
     # historically carried meaningless positions (pre -length fix they always

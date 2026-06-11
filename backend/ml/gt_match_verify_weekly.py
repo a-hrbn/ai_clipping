@@ -42,6 +42,7 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from ml import gt_capture_daily
 from ml import gt_match_verify
+from ml.row_identity import read_jsonl, write_jsonl  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -199,24 +200,6 @@ def save_match_state(path: pathlib.Path, state: dict) -> None:
     tmp.replace(path)
 
 
-def _read_jsonl(path: pathlib.Path) -> list[dict]:
-    path = pathlib.Path(path)
-    if not path.exists():
-        return []
-    rows: list[dict] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line:
-            rows.append(json.loads(line))
-    return rows
-
-
-def _write_jsonl(path: pathlib.Path, rows: list[dict]) -> None:
-    path = pathlib.Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(json.dumps(row, ensure_ascii=True) for row in rows), encoding="utf-8")
-
-
 # ---------------------------------------------------------------------------
 # @Iboclipss re-scan (cookie-auth + pacing; lazy import keeps seams net-free)
 # ---------------------------------------------------------------------------
@@ -339,7 +322,7 @@ def run_weekly_match_verify(
             "new_vods": new_vods,
             "total_captured_vods": len(captured),
             "run_counts": {},
-            "accrual": gold_accrual(_read_jsonl(gold_manifest_path), target_gold=target_gold, target_vods=target_vods),
+            "accrual": gold_accrual(read_jsonl(gold_manifest_path), target_gold=target_gold, target_vods=target_vods),
         }
 
     already = matched_ids(state)
@@ -354,10 +337,10 @@ def run_weekly_match_verify(
 
     result = match_and_verify(new_reposts, captured, cache_root=cache_root)
 
-    merged = merge_manifests(_read_jsonl(manifest_path), result.manifest)
-    _write_jsonl(manifest_path, merged)
+    merged = merge_manifests(read_jsonl(manifest_path), result.manifest)
+    write_jsonl(manifest_path, merged)
     gold_manifest = gt_match_verify.filter_gold_manifest(merged)
-    _write_jsonl(gold_manifest_path, gold_manifest)
+    write_jsonl(gold_manifest_path, gold_manifest)
 
     for repost in new_reposts:
         rid = _repost_id(repost)
