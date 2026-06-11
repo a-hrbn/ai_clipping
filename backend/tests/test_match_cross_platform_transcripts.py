@@ -389,6 +389,37 @@ class CrossPlatformTranscriptMatchTests(unittest.TestCase):
         self.assertEqual(parallel_diagnostics["best_match_rows"], serial_diagnostics["best_match_rows"])
         self.assertEqual(parallel_diagnostics["transcript_match_workers"], 2)
 
+    def test_main_reads_inputs_leniently_via_row_identity(self) -> None:
+        self.assertTrue(
+            hasattr(matcher, "row_identity"),
+            "transcript matcher should own its I/O via row_identity, not audio_matcher._read_jsonl",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            vods = tmp_path / "vods.jsonl"
+            reposts = tmp_path / "reposts.jsonl"
+            vods.write_text('{"vod_id": "1"}\n\nnot-json\n', encoding="utf-8")
+            reposts.write_text('{"video_path": "/tmp/r.mp4"}\nbroken{\n', encoding="utf-8")
+            captured: dict[str, list[dict]] = {}
+
+            def fake_match(vod_rows, repost_rows, **_kwargs):
+                captured["vods"] = vod_rows
+                captured["reposts"] = repost_rows
+                return [], {}
+
+            argv = [
+                "prog",
+                "--vods", str(vods),
+                "--reposts", str(reposts),
+                "--output", str(tmp_path / "out.jsonl"),
+            ]
+            with patch.object(matcher.sys, "argv", argv), \
+                 patch.object(matcher, "match_reposts_to_vods_with_diagnostics", side_effect=fake_match):
+                matcher.main()
+
+        self.assertEqual(captured["vods"], [{"vod_id": "1"}])
+        self.assertEqual(captured["reposts"], [{"video_path": "/tmp/r.mp4"}])
+
     def test_repost_transcription_skips_diarization(self) -> None:
         repost = {"source_url": "https://youtube.com/shorts/abc"}
         with self.subTest("cache miss"):

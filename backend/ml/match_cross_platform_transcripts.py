@@ -21,7 +21,7 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from config import settings
 from ml import match_cross_platform_audio_fingerprints as audio_matcher
-from ml import outcome_view_weighting
+from ml import outcome_view_weighting, row_identity
 from services import audio_extractor, transcriber
 from services.transcriber import RichSegment
 
@@ -188,8 +188,8 @@ def main() -> int:
     args = parser.parse_args()
 
     rows, _diagnostics = match_reposts_to_vods_with_diagnostics(
-        audio_matcher._read_jsonl(pathlib.Path(args.vods)),
-        audio_matcher._read_jsonl(pathlib.Path(args.reposts)),
+        row_identity.read_jsonl(pathlib.Path(args.vods), strict=False),
+        row_identity.read_jsonl(pathlib.Path(args.reposts), strict=False),
         min_similarity=args.min_similarity,
         vod_cache_root=pathlib.Path(args.vod_cache_root),
         log_progress=True,

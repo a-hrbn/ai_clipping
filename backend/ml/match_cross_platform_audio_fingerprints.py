@@ -13,7 +13,7 @@ BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from ml import outcome_view_weighting
+from ml import outcome_view_weighting, row_identity
 
 
 def main() -> int:
@@ -27,8 +27,8 @@ def main() -> int:
     args = parser.parse_args()
 
     rows, _diagnostics = match_reposts_to_vods_with_diagnostics(
-        _read_jsonl(pathlib.Path(args.vods)),
-        _read_jsonl(pathlib.Path(args.reposts)),
+        row_identity.read_jsonl(pathlib.Path(args.vods), strict=False),
+        row_identity.read_jsonl(pathlib.Path(args.reposts), strict=False),
         min_confidence=args.min_confidence,
         log_progress=True,
     )
@@ -660,22 +660,6 @@ def _matching_recommendation(
             "multimodal matcher for these reposts."
         ),
     }
-
-
-def _read_jsonl(path: pathlib.Path) -> list[dict]:
-    if not path.exists():
-        return []
-    rows = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict):
-            rows.append(payload)
-    return rows
 
 
 def _safe_float(value) -> float:

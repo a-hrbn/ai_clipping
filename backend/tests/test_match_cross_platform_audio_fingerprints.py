@@ -204,6 +204,37 @@ class CrossPlatformFingerprintTests(unittest.TestCase):
         self.assertIn("cross_platform_fingerprint_repost_progress", events)
         self.assertIn("cross_platform_fingerprint_match_done", events)
 
+    def test_main_reads_inputs_leniently_via_row_identity(self) -> None:
+        self.assertFalse(
+            hasattr(matcher, "_read_jsonl"),
+            "local _read_jsonl should be dropped in favour of row_identity.read_jsonl(strict=False)",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            vods = tmp_path / "vods.jsonl"
+            reposts = tmp_path / "reposts.jsonl"
+            vods.write_text('{"vod_id": "1"}\n\nnot-json\n', encoding="utf-8")
+            reposts.write_text('{"video_path": "/tmp/r.mp4"}\nbroken{\n', encoding="utf-8")
+            captured: dict[str, list[dict]] = {}
+
+            def fake_match(vod_rows, repost_rows, **_kwargs):
+                captured["vods"] = vod_rows
+                captured["reposts"] = repost_rows
+                return [], {}
+
+            argv = [
+                "prog",
+                "--vods", str(vods),
+                "--reposts", str(reposts),
+                "--output", str(tmp_path / "out.jsonl"),
+            ]
+            with patch.object(matcher.sys, "argv", argv), \
+                 patch.object(matcher, "match_reposts_to_vods_with_diagnostics", side_effect=fake_match):
+                matcher.main()
+
+        self.assertEqual(captured["vods"], [{"vod_id": "1"}])
+        self.assertEqual(captured["reposts"], [{"video_path": "/tmp/r.mp4"}])
+
 
 if __name__ == "__main__":
     unittest.main()
