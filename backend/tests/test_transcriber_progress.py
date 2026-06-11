@@ -11,6 +11,15 @@ from time import sleep
 from unittest.mock import patch
 
 sys.modules.setdefault("whisper", types.SimpleNamespace(load_model=lambda *_args, **_kwargs: None))
+sys.modules.setdefault(
+    "torch",
+    types.SimpleNamespace(
+        cuda=types.SimpleNamespace(
+            is_available=lambda: False,
+            get_device_properties=lambda *_a, **_k: types.SimpleNamespace(total_memory=0),
+        )
+    ),
+)
 
 from services import transcriber
 

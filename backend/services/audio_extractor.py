@@ -1,5 +1,4 @@
 import pathlib
-import ffmpeg
 
 
 def extract(
@@ -10,6 +9,8 @@ def extract(
     start_sec: float | None = None,
     end_sec: float | None = None,
 ) -> pathlib.Path:
+    import ffmpeg  # deferred: native dependency, only needed when extracting
+
     audio_path = output_path or (video_path.parent / "audio.wav")
     audio_path.parent.mkdir(parents=True, exist_ok=True)
 

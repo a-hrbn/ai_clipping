@@ -6,6 +6,12 @@ import unittest
 from unittest.mock import patch
 from pathlib import Path
 
+import pytest
+
+# fastapi is a base dependency; skip cleanly (rather than error the whole
+# collection) when running without it installed.
+pytest.importorskip("fastapi")
+
 from fastapi import HTTPException, UploadFile
 
 from routers import jobs

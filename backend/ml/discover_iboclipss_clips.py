@@ -20,7 +20,6 @@ import urllib.request
 from datetime import date, datetime, timedelta, timezone
 
 import certifi
-import yt_dlp
 
 BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
@@ -141,6 +140,8 @@ def _build_date_windows(vod_rows: list[dict], window_days: int) -> dict[date, li
 # ── Channel listing ───────────────────────────────────────────────────────────
 
 def _list_channel_entries(channel_url: str, max_candidates: int) -> list[dict]:
+    import yt_dlp  # deferred: heavy import, only needed for live discovery
+
     opts: dict = {
         "quiet": True,
         "no_warnings": True,
@@ -401,6 +402,8 @@ def _fetch_text(url: str, proxy: str | None = None) -> str:
 
 
 def _fetch_single_video_metadata(url: str) -> dict | None:
+    import yt_dlp  # deferred: heavy import, only needed for live discovery
+
     opts: dict = {"quiet": True, "no_warnings": True, "skip_download": True}
     apply_yt_dlp_auth_options(opts)
     try:

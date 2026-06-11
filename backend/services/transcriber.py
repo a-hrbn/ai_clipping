@@ -17,14 +17,24 @@ from dataclasses import dataclass, field
 from hashlib import sha256
 from typing import Iterator
 
-import torch
-import whisper
 from config import settings
 
 try:
     from faster_whisper import WhisperModel as FasterWhisperModel
 except ImportError:  # pragma: no cover - optional runtime acceleration
     FasterWhisperModel = None
+
+
+def __getattr__(name: str):
+    # Lazily expose the heavy ML deps as module attributes. Importing this
+    # module (e.g. for RichSegment) must not pull in torch/whisper, but callers
+    # and tests still reference `services.transcriber.torch` / `.whisper`.
+    if name in ("torch", "whisper"):
+        import importlib
+
+        return importlib.import_module(name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +83,8 @@ def _resolved_whisper_backend() -> str:
 
 
 def _resolved_whisper_device() -> str:
+    import torch  # deferred: heavy import, only needed when a model is actually used
+
     requested = str(settings.whisper_device or "auto").strip().lower() or "auto"
     if requested == "auto":
         return "cuda" if torch.cuda.is_available() else "cpu"
@@ -157,6 +169,8 @@ def _get_model() -> object:
                         download_root=str(whisper_cache_dir),
                     )
                 else:
+                    import whisper  # deferred: heavy import, only the openai backend needs it
+
                     _whisper_model = whisper.load_model(
                         settings.whisper_model,
                         download_root=str(whisper_cache_dir),
@@ -209,6 +223,8 @@ def transcription_slots() -> int:
     if override > 0:
         return override
     try:
+        import torch  # deferred: heavy import, optional at runtime
+
         if torch.cuda.is_available():
             vram_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
             return max(1, int(vram_gb // 5))

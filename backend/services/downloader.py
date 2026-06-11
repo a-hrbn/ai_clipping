@@ -8,11 +8,19 @@ import re
 import threading
 import uuid
 
-import yt_dlp
-from yt_dlp.utils import download_range_func
 from config import settings
 from job_manager import is_job_cancelled, update_job
 from services.yt_dlp_auth import apply_yt_dlp_auth_options
+
+
+def __getattr__(name: str):
+    # Lazily expose yt_dlp as a module attribute so importing this module stays
+    # cheap, while callers and tests can still reference `downloader.yt_dlp`.
+    if name == "yt_dlp":
+        import yt_dlp
+
+        return yt_dlp
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 class DownloadUnavailableError(RuntimeError):
@@ -368,6 +376,8 @@ def _ffmpeg_downloader_exit_code(message: str) -> int | None:
 
 
 def _extract_yt_dlp_info(ydl_opts: dict[str, object], url: str) -> dict | object:
+    import yt_dlp  # deferred: heavy import, only needed when actually downloading
+
     ydl = yt_dlp.YoutubeDL(ydl_opts)
     primary_exc: BaseException | None = None
     try:
@@ -606,6 +616,8 @@ def download_range(
     end_sec: float,
     proxy: str | None = None,
 ) -> pathlib.Path:
+    from yt_dlp.utils import download_range_func  # deferred: heavy import
+
     start = max(float(start_sec), 0.0)
     end = max(float(end_sec), start + 1.0)
     return _download_uncached(

@@ -1,7 +1,19 @@
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+# Stub yt_dlp so the suite runs without the (heavy, optional) package installed.
+# Tests replace YoutubeDL per-case via patch.object(downloader.yt_dlp, ...).
+_yt_dlp_stub = types.ModuleType("yt_dlp")
+_yt_dlp_stub.YoutubeDL = object
+_yt_dlp_utils_stub = types.ModuleType("yt_dlp.utils")
+_yt_dlp_utils_stub.download_range_func = lambda *_args, **_kwargs: ("download_ranges", _args, _kwargs)
+_yt_dlp_stub.utils = _yt_dlp_utils_stub
+sys.modules.setdefault("yt_dlp", _yt_dlp_stub)
+sys.modules.setdefault("yt_dlp.utils", _yt_dlp_utils_stub)
 
 from services import downloader, yt_dlp_auth
 

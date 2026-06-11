@@ -1,16 +1,19 @@
-import asyncio
-import json
 import importlib
 import sys
 import tempfile
+import types
 import unittest
 from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
-import types
-
+# Torch-free harness. The Conductor's Producers are substituted with fakes here
+# (each Producer's real behavior is covered by tests/test_producers_*.py), so
+# this integration suite exercises pure orchestration and needs none of the ML
+# wheels. The defensive stubs below keep any transitive import light; the real
+# chat_signal / audio_energy (requests / numpy only) import fine.
 sys.modules.setdefault("whisper", types.SimpleNamespace(load_model=lambda *_args, **_kwargs: None))
+sys.modules.setdefault("ollama", types.SimpleNamespace(Client=lambda *_args, **_kwargs: None))
 
 
 class _FFmpegStub:
@@ -28,123 +31,280 @@ class _FFmpegStub:
 
 
 sys.modules.setdefault("ffmpeg", _FFmpegStub())
-sys.modules.setdefault("ollama", types.SimpleNamespace(Client=lambda *_args, **_kwargs: None))
-
-from models import ClipResult
-from services.transcriber import RichSegment
 
 
 async def _noop_cleanup_later(_job_id: str) -> None:
     return None
 
 
-class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_run_pipeline_lean_path(self) -> None:
+# An opaque, torch-free transcript handed between the faked Producers — its
+# element type is irrelevant because every Producer that reads it is a fake.
+_SEGMENTS = [types.SimpleNamespace(start=0.0, end=5.0, text="segment")]
+
+
+class _FakeAudioResource:
+    def __init__(self, **_kwargs) -> None:
+        self.teardowns = 0
+
+    def path(self):
+        return None
+
+    def materialized(self):
+        return None
+
+    def teardown(self) -> None:
+        self.teardowns += 1
+
+
+class _FakeTranscriptResource:
+    def __init__(self, **_kwargs) -> None:
+        pass
+
+    def segments(self, *, progress=lambda _f: None):
+        progress(1.0)
+        return _SEGMENTS
+
+    def from_cache(self) -> bool:
+        return False
+
+
+class _Passthrough:
+    """VoiceEnergy / ChatEnrichment stand-in: returns the transcript unchanged."""
+
+    def __init__(self, **_kwargs) -> None:
+        pass
+
+    def apply(self, transcript):
+        return transcript
+
+
+class _FakeMomentFinding:
+    def __init__(self, *, result, raises=None) -> None:
+        self._result = result
+        self._raises = raises
+
+    def find(self, _transcript, *, progress=lambda _f: None):
+        progress(1.0)
+        if self._raises is not None:
+            raise self._raises
+        return self._result
+
+
+class _FakeClipping:
+    def __init__(self, *, clips) -> None:
+        self._clips = clips
+
+    def run(self, _video_path, _result, *, progress=lambda _f: None):
+        progress(1.0)
+        return self._clips
+
+
+def _patch_conductor_producers(stack, pipeline, *, result, clips, moments_raises=None) -> None:
+    """Swap every Producer the Conductor builds for a fake, so the test exercises
+    orchestration only (Producer behavior lives in tests/test_producers_*.py)."""
+    stack.enter_context(patch.object(pipeline, "AudioResource", _FakeAudioResource))
+    stack.enter_context(patch.object(pipeline, "TranscriptResource", _FakeTranscriptResource))
+    stack.enter_context(patch.object(pipeline, "VoiceEnergy", _Passthrough))
+    stack.enter_context(patch.object(pipeline, "ChatEnrichment", _Passthrough))
+    stack.enter_context(
+        patch.object(
+            pipeline, "MomentFinding",
+            lambda **_kw: _FakeMomentFinding(result=result, raises=moments_raises),
+        )
+    )
+    stack.enter_context(patch.object(pipeline, "Clipping", lambda **_kw: _FakeClipping(clips=clips)))
+
+
+def _conductor_stack(stack, pipeline, tmp_path, job_updates) -> None:
+    stack.enter_context(patch.object(pipeline.settings, "storage_dir", str(tmp_path)))
+    stack.enter_context(patch.object(pipeline.settings, "frontend_transcript_cache_enabled", False))
+    stack.enter_context(patch.object(pipeline.settings, "frontend_job_cache_enabled", False))
+    stack.enter_context(
+        patch.object(
+            pipeline, "update_job",
+            side_effect=lambda job_id, **kwargs: job_updates.append({"job_id": job_id, **kwargs}),
+        )
+    )
+
+
+_MISSING = object()
+
+_STUBBED_MODULE_NAMES = (
+    "services.downloader",
+    "services.audio_extractor",
+    "services.transcriber",
+    "services.clipper",
+    "services.clip_strategy",
+    "services.moment_finder",
+    "pipeline",
+)
+
+
+class _PipelineStubTestCase(unittest.IsolatedAsyncioTestCase):
+    """Restore the sys.modules entries and parent-package attributes that
+    _import_pipeline_with_stubs() clobbers, so the stubs don't leak into later
+    test modules (e.g. test_transcriber) and corrupt them."""
+
+    def setUp(self) -> None:
+        self._saved = []
+        for name in _STUBBED_MODULE_NAMES:
+            module = sys.modules.get(name, _MISSING)
+            parent_name, _, child = name.rpartition(".")
+            parent = sys.modules.get(parent_name) if parent_name else None
+            attr = getattr(parent, child, _MISSING) if parent is not None else _MISSING
+            self._saved.append((name, module, parent, child, attr))
+
+    def tearDown(self) -> None:
+        for name, module, parent, child, attr in self._saved:
+            if module is _MISSING:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
+            if parent is not None:
+                if attr is _MISSING:
+                    if hasattr(parent, child):
+                        delattr(parent, child)
+                else:
+                    setattr(parent, child, attr)
+
+
+class ConductorOrchestrationTests(_PipelineStubTestCase):
+    async def test_runs_producers_in_band_order_to_done(self) -> None:
         pipeline = _import_pipeline_with_stubs()
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             video_path = tmp_path / "video.mp4"
             video_path.write_bytes(b"video")
-            transcript = [
-                RichSegment(start=10.0, end=20.0, text="actual hook."),
-                RichSegment(start=20.0, end=35.0, text="clear payoff!"),
-            ]
-            llm_result = types.SimpleNamespace(
-                raw_moments=[],
-                ranked_candidates=[object()],
-                post_processed_moments=[
-                    {"rank": 1, "start_time": 10.0, "end_time": 35.0, "viral_score": 9.5, "reason": "hook"},
-                ],
-                prompt="prompt text",
-                response_text='{"moments":[]}',
-                usage={"provider": "gemini", "input_tokens": 100, "output_tokens": 20},
-                summary={"ranked_candidate_count": 1, "post_processed_moment_count": 1},
+            result = types.SimpleNamespace(
+                post_processed_moments=[{"start_time": 0.0, "end_time": 5.0}]
             )
-
-            def fake_cut_clips(_video_path, moments, job_id, **_kwargs):
-                return [
-                    ClipResult(
-                        candidate_id=m["candidate_id"],
-                        filename="clip_01.mp4",
-                        download_url=f"/static/{job_id}/clips/clip_01.mp4",
-                        start_time=m["start_time"],
-                        end_time=m["end_time"],
-                        viral_score=m["viral_score"],
-                        reason=m["reason"],
-                        ranking_mode="llm_moment_finder",
-                    )
-                    for m in moments
-                ]
-
+            clips = [types.SimpleNamespace(filename="clip_01.mp4")]
             job_updates: list[dict] = []
 
             with ExitStack() as stack:
-                stack.enter_context(patch.object(pipeline.settings, "storage_dir", str(tmp_path)))
-                stack.enter_context(patch.object(pipeline.settings, "frontend_transcript_cache_enabled", False))
-                stack.enter_context(patch.object(pipeline.settings, "frontend_job_cache_enabled", False))
-                stack.enter_context(
-                    patch.object(
-                        pipeline,
-                        "update_job",
-                        side_effect=lambda job_id, **kwargs: job_updates.append({"job_id": job_id, **kwargs}),
-                    )
-                )
-                stack.enter_context(patch.object(pipeline.audio_extractor, "extract", return_value=tmp_path / "audio.wav"))
-                stack.enter_context(patch.object(pipeline.transcriber, "transcribe_with_progress", return_value=transcript))
-                stack.enter_context(patch.object(pipeline.moment_finder, "find_moments", return_value=llm_result))
-                stack.enter_context(patch.object(pipeline.clipper, "cut_clips", side_effect=fake_cut_clips))
+                _conductor_stack(stack, pipeline, tmp_path, job_updates)
+                stack.enter_context(patch.object(pipeline, "_cleanup_later", side_effect=_noop_cleanup_later))
+                _patch_conductor_producers(stack, pipeline, result=result, clips=clips)
+
+                await pipeline.run_pipeline("lean-job", video_path=video_path, profile="jynxzi")
+
+            statuses = [u.get("status") for u in job_updates if u.get("status")]
+            band_order = [s for s in statuses if s in {
+                "transcribing", "extracting_audio", "analyzing", "clipping", "done"
+            }]
+            seen: list[str] = []
+            for s in band_order:
+                if s not in seen:
+                    seen.append(s)
+            self.assertEqual(
+                seen, ["transcribing", "extracting_audio", "analyzing", "clipping", "done"]
+            )
+            done = [u for u in job_updates if u.get("status") == "done"][-1]
+            self.assertEqual(done["progress_pct"], 100)
+            self.assertEqual(done["clips"], clips)
+
+    async def test_normal_job_schedules_cleanup_later(self) -> None:
+        pipeline = _import_pipeline_with_stubs()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            video_path = tmp_path / "video.mp4"
+            video_path.write_bytes(b"video")
+            job_updates: list[dict] = []
+
+            with ExitStack() as stack:
+                _conductor_stack(stack, pipeline, tmp_path, job_updates)
                 cleanup_mock = stack.enter_context(
                     patch.object(pipeline, "_cleanup_later", side_effect=_noop_cleanup_later)
+                )
+                _patch_conductor_producers(
+                    stack, pipeline,
+                    result=types.SimpleNamespace(post_processed_moments=[]), clips=[],
                 )
 
                 await pipeline.run_pipeline("lean-job", video_path=video_path, profile="jynxzi")
 
-            debug_dir = tmp_path / "lean-job" / "debug"
-            stage = json.loads((debug_dir / "llm_moment_finder_stage.json").read_text(encoding="utf-8"))
-            moments_rows = _read_jsonl(debug_dir / "llm_moment_finder_moments.jsonl")
-            final = json.loads((debug_dir / "final_moments.json").read_text(encoding="utf-8"))
-
-            self.assertEqual(stage["status"], "ok")
-            self.assertEqual(len(moments_rows), 1)
-            self.assertEqual(moments_rows[0]["start_time"], 10.0)
-            self.assertEqual(len(final["moments"]), 1)
-            self.assertEqual(final["moments"][0]["candidate_id"], "llm_moment_01")
-            self.assertTrue(any(u.get("status") == "done" for u in job_updates))
             cleanup_mock.assert_called_once_with("lean-job")
 
-    async def test_pipeline_debug_job_skips_cleanup_later(self) -> None:
+    async def test_debug_job_skips_cleanup_later(self) -> None:
         pipeline = _import_pipeline_with_stubs()
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             video_path = tmp_path / "video.mp4"
             video_path.write_bytes(b"video")
-            transcript = [RichSegment(start=0.0, end=10.0, text="moment")]
-            llm_result = types.SimpleNamespace(
-                raw_moments=[],
-                ranked_candidates=[object()],
-                post_processed_moments=[{"rank": 1, "start_time": 0.0, "end_time": 10.0, "viral_score": 1.0}],
-                prompt="p",
-                response_text="{}",
-                usage={},
-                summary={"ranked_candidate_count": 1, "post_processed_moment_count": 1},
-            )
+            job_updates: list[dict] = []
+
             with ExitStack() as stack:
-                stack.enter_context(patch.object(pipeline.settings, "storage_dir", str(tmp_path)))
-                stack.enter_context(patch.object(pipeline.settings, "frontend_transcript_cache_enabled", False))
-                stack.enter_context(patch.object(pipeline.settings, "frontend_job_cache_enabled", False))
-                stack.enter_context(patch.object(pipeline, "update_job", side_effect=lambda *_a, **_kw: None))
-                stack.enter_context(patch.object(pipeline.audio_extractor, "extract", return_value=tmp_path / "audio.wav"))
-                stack.enter_context(patch.object(pipeline.transcriber, "transcribe_with_progress", return_value=transcript))
-                stack.enter_context(patch.object(pipeline.moment_finder, "find_moments", return_value=llm_result))
-                stack.enter_context(patch.object(pipeline.clipper, "cut_clips", return_value=[]))
+                _conductor_stack(stack, pipeline, tmp_path, job_updates)
                 cleanup_mock = stack.enter_context(
                     patch.object(pipeline, "_cleanup_later", side_effect=_noop_cleanup_later)
                 )
+                _patch_conductor_producers(
+                    stack, pipeline,
+                    result=types.SimpleNamespace(post_processed_moments=[]), clips=[],
+                )
 
-                debug_job_id = "pipeline_debug_wf1_vod123"
-                await pipeline.run_pipeline(debug_job_id, video_path=video_path, profile="jynxzi")
+                await pipeline.run_pipeline(
+                    "pipeline_debug_wf1_vod123", video_path=video_path, profile="jynxzi"
+                )
 
             cleanup_mock.assert_not_called()
+
+    async def test_producer_failure_sets_failed_status(self) -> None:
+        pipeline = _import_pipeline_with_stubs()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            video_path = tmp_path / "video.mp4"
+            video_path.write_bytes(b"video")
+            job_updates: list[dict] = []
+
+            with ExitStack() as stack:
+                _conductor_stack(stack, pipeline, tmp_path, job_updates)
+                stack.enter_context(patch.object(pipeline, "_cleanup_later", side_effect=_noop_cleanup_later))
+                _patch_conductor_producers(
+                    stack, pipeline, result=None, clips=[],
+                    moments_raises=pipeline.moment_finder.MomentFinderError("boom"),
+                )
+
+                await pipeline.run_pipeline("fail-job", video_path=video_path, profile="jynxzi")
+
+            statuses = [u.get("status") for u in job_updates]
+            self.assertIn("failed", statuses)  # any exception → failed
+            self.assertNotIn("done", statuses)
+            failed = [u for u in job_updates if u.get("status") == "failed"][-1]
+            self.assertEqual(failed["error"], "boom")
+
+    async def test_cancellation_does_not_set_failed_status(self) -> None:
+        pipeline = _import_pipeline_with_stubs()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            video_path = tmp_path / "video.mp4"
+            video_path.write_bytes(b"video")
+            job_updates: list[dict] = []
+            calls = {"n": 0}
+
+            def _cancelled(_job_id: str) -> bool:
+                calls["n"] += 1
+                return calls["n"] >= 2  # pass entry check, cancel at the first run() between producers
+
+            with ExitStack() as stack:
+                _conductor_stack(stack, pipeline, tmp_path, job_updates)
+                stack.enter_context(patch.object(pipeline, "_cleanup_later", side_effect=_noop_cleanup_later))
+                stack.enter_context(patch.object(pipeline, "is_job_cancelled", side_effect=_cancelled))
+                _patch_conductor_producers(
+                    stack, pipeline,
+                    result=types.SimpleNamespace(post_processed_moments=[]), clips=[],
+                )
+
+                await pipeline.run_pipeline("cancel-job", video_path=video_path, profile="jynxzi")
+
+            statuses = [u.get("status") for u in job_updates]
+            self.assertNotIn("failed", statuses)  # cancel → no failed status
+            self.assertNotIn("done", statuses)
+
+
+class ConductorCleanupAndCacheSourceTests(_PipelineStubTestCase):
+    """Verify the Conductor-owned cleanup + cache-source helpers directly; these
+    survive the Producer extraction unchanged."""
 
     async def test_serving_source_media_cleanup_preserves_training_vod(self) -> None:
         pipeline = _import_pipeline_with_stubs()
@@ -223,70 +383,6 @@ class PipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
 
-    async def test_run_pipeline_uses_complete_transcript_cache_without_retranscribing(self) -> None:
-        pipeline = _import_pipeline_with_stubs()
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            video_path = tmp_path / "video.mp4"
-            video_path.write_bytes(b"video")
-
-            transcript = [
-                RichSegment(start=0.0, end=2.0, text="cached setup", words_per_second=1.0),
-                RichSegment(start=2.0, end=4.0, text="cached payoff", words_per_second=2.0),
-            ]
-            llm_result = types.SimpleNamespace(
-                raw_moments=[],
-                ranked_candidates=[object()],
-                post_processed_moments=[{"rank": 1, "start_time": 0.0, "end_time": 8.0, "viral_score": 8.0}],
-                prompt="p",
-                response_text="{}",
-                usage={},
-                summary={"ranked_candidate_count": 1, "post_processed_moment_count": 1},
-            )
-            job_updates: list[dict] = []
-
-            with ExitStack() as stack:
-                stack.enter_context(patch.object(pipeline.settings, "storage_dir", str(tmp_path)))
-                stack.enter_context(patch.object(pipeline.settings, "frontend_job_cache_enabled", False))
-                stack.enter_context(patch.object(pipeline.settings, "frontend_transcript_cache_enabled", True))
-                stack.enter_context(
-                    patch.object(pipeline, "update_job", side_effect=lambda job_id, **kwargs: job_updates.append({"job_id": job_id, **kwargs}))
-                )
-                stack.enter_context(patch.object(pipeline, "_probe_media_duration_sec", return_value=16720.0))
-                # TranscriptResource resolves the cache via the injected leaf op;
-                # a hit must skip transcription AND never pull the audio.
-                cache_mock = stack.enter_context(
-                    patch.object(pipeline.transcriber, "load_cached_transcript", return_value=transcript)
-                )
-                transcribe_mock = stack.enter_context(
-                    patch.object(pipeline.transcriber, "transcribe_with_progress", side_effect=AssertionError("transcription should be skipped"))
-                )
-                stack.enter_context(patch.object(pipeline.moment_finder, "find_moments", return_value=llm_result))
-                stack.enter_context(patch.object(pipeline.clipper, "cut_clips", return_value=[]))
-                stack.enter_context(patch.object(pipeline, "_cleanup_later", side_effect=_noop_cleanup_later))
-
-                await pipeline.run_pipeline(
-                    "job-cache",
-                    url="https://www.twitch.tv/videos/123",
-                    video_path=video_path,
-                    profile="jynxzi",
-                )
-
-            cache_mock.assert_called_once()
-            transcribe_mock.assert_not_called()
-            self.assertTrue(any(u.get("status") == "done" for u in job_updates))
-
-
-def _read_jsonl(path: Path) -> list[dict]:
-    if not path.exists():
-        return []
-    rows = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line:
-            rows.append(json.loads(line))
-    return rows
-
 
 def _import_pipeline_with_stubs():
     def _stub_module(name: str, **attrs):
@@ -294,6 +390,13 @@ def _import_pipeline_with_stubs():
         for key, value in attrs.items():
             setattr(module, key, value)
         sys.modules[name] = module
+        # Override the parent-package attribute too: when another test module has
+        # already imported the real submodule, `from services import X` resolves
+        # to that cached attribute and would bypass this sys.modules stub. Setting
+        # the attribute makes the stub win regardless of suite ordering.
+        parent_name, _, child = name.rpartition(".")
+        if parent_name:
+            setattr(importlib.import_module(parent_name), child, module)
 
     _stub_module(
         "services.downloader",
@@ -301,12 +404,18 @@ def _import_pipeline_with_stubs():
         download=lambda *_args, **_kwargs: None,
     )
     _stub_module("services.audio_extractor", extract=lambda *_args, **_kwargs: None)
+    # The Conductor binds these as injected leaf ops when it constructs the (now
+    # faked) Producers, so every name the constructors reference must exist.
     _stub_module(
         "services.transcriber",
-        RichSegment=RichSegment,
         transcribe_with_progress=lambda *_args, **_kwargs: [],
         load_cached_transcript=lambda *_args, **_kwargs: None,
         stable_cache_key_for_source=lambda source: source,
+        has_chat_enrichment=lambda *_args, **_kwargs: False,
+        load_voice_energy=lambda *_args, **_kwargs: None,
+        save_voice_energy=lambda *_args, **_kwargs: None,
+        apply_chat_enrichment=lambda *_args, **_kwargs: None,
+        save_chat_enrichment=lambda *_args, **_kwargs: None,
         format_transcript=lambda segments: "",
         format_jsonl=lambda segments: "",
     )

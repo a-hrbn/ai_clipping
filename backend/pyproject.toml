@@ -50,3 +50,7 @@ py-modules = ["config", "job_manager", "main", "models", "pipeline", "pipeline_w
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# rootdir is this file's dir (backend/), so "." puts backend/ on sys.path.
+# Lets `import config`, `import producers`, ... resolve without an editable
+# install or a PYTHONPATH prefix.
+pythonpath = ["."]
