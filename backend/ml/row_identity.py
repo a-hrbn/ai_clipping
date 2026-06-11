@@ -19,6 +19,19 @@ def read_jsonl(path: pathlib.Path) -> list[dict]:
     return rows
 
 
+def read_json(path: pathlib.Path) -> dict:
+    """Pendant to ``write_json``: missing file -> ``{}``, strict on corruption.
+
+    A missing file yields an empty dict; a present file is parsed strictly
+    (``json.loads`` raises on malformed content, mirroring ``read_jsonl``). A
+    valid but non-dict top-level payload yields ``{}``.
+    """
+    if not path.exists():
+        return {}
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return payload if isinstance(payload, dict) else {}
+
+
 def write_jsonl(path: pathlib.Path, rows: Iterable[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = "\n".join(json.dumps(row, ensure_ascii=True) for row in rows)
@@ -28,6 +41,25 @@ def write_jsonl(path: pathlib.Path, rows: Iterable[dict]) -> None:
 def write_json(path: pathlib.Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     _replace_text(path, json.dumps(payload, ensure_ascii=True, indent=2))
+
+
+def window_overlap_ratio(start_a: float, end_a: float, start_b: float, end_b: float) -> float:
+    """Overlap of two time windows as a fraction of the *shorter* one.
+
+    Returns ``overlap / min(duration_a, duration_b)`` and ``0.0`` for
+    non-overlapping, zero-length, or inverted windows. Commutative in (a, b).
+
+    This unifies the two mathematically equivalent expressions of the same
+    measure previously scattered across the eval/manifest scripts
+    (``overlap / min(dur)`` and ``max(overlap / dur_a, overlap / dur_b)``).
+    """
+    overlap = min(end_a, end_b) - max(start_a, start_b)
+    if overlap <= 0:
+        return 0.0
+    min_dur = min(end_a - start_a, end_b - start_b)
+    if min_dur <= 0:
+        return 0.0
+    return overlap / min_dur
 
 
 def row_identity_keys(row: dict) -> set[str]:
