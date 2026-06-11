@@ -6,6 +6,7 @@ import threading
 import time
 from typing import Dict
 
+import session_lease
 from config import settings
 from models import JobStatus
 
@@ -14,8 +15,12 @@ logger = logging.getLogger(__name__)
 _jobs: Dict[str, JobStatus] = {}
 _job_created_at: Dict[str, float] = {}   # job_id → creation timestamp (epoch seconds)
 _cancelled_jobs: set[str] = set()
-_job_session_id: Dict[str, str] = {}
-_job_session_expires_at: Dict[str, float] = {}
+# Session-Lease-State wohnt jetzt in session_lease (single owner). Hier nur per
+# Referenz re-exportiert, damit Aufrufer/Tests `job_manager._job_session_id` /
+# `_job_session_expires_at` unverändert sehen. Alias — niemals neu binden, nur
+# mutieren; alle Lease-Mutationen laufen über die session_lease-Funktionen.
+_job_session_id = session_lease._job_session_id
+_job_session_expires_at = session_lease._job_session_expires_at
 _lock = threading.RLock()
 # Dedicated write lock so disk I/O is serialized but does NOT hold the job-state
 # `_lock`. Pipeline progress ticks call update_job() frequently; blocking
@@ -27,10 +32,6 @@ _jobs_file_mtime_ns = 0
 
 _JOB_TTL_SECONDS = 2 * 3600  # evict in-memory records after 2 hours
 _PERSIST_INTERVAL_SECONDS = 5.0
-# Browser tabs may heavily throttle timers/polling while unfocused. Keep the
-# server-side session lease long enough that background tabs do not get treated
-# as disconnected sessions, while still allowing stale abandoned jobs to stop.
-_SESSION_TTL_SECONDS = 300.0
 _TERMINAL_JOB_STATUSES = {"done", "failed", "cancelled"}
 
 
@@ -48,8 +49,7 @@ def _evict_expired(now: float | None = None) -> bool:
         _jobs.pop(jid, None)
         _job_created_at.pop(jid, None)
         _cancelled_jobs.discard(jid)
-        _job_session_id.pop(jid, None)
-        _job_session_expires_at.pop(jid, None)
+        session_lease.clear(jid)
     return bool(expired)
 
 
@@ -85,8 +85,7 @@ def _load_jobs() -> None:
             _jobs.pop(job_id, None)
             _job_created_at.pop(job_id, None)
             _cancelled_jobs.discard(job_id)
-            _job_session_id.pop(job_id, None)
-            _job_session_expires_at.pop(job_id, None)
+            session_lease.clear(job_id)
 
     try:
         _jobs_file_mtime_ns = _jobs_file.stat().st_mtime_ns
@@ -237,8 +236,7 @@ def cancel_job(job_id: str) -> JobStatus | None:
                 return job
         else:
             _cancelled_jobs.add(job_id)
-            _job_session_id.pop(job_id, None)
-            _job_session_expires_at.pop(job_id, None)
+            session_lease.clear(job_id)
             job.status = "cancelled"
             job.error = "Job cancelled by client"
             _job_created_at[job_id] = time.monotonic()
@@ -256,15 +254,16 @@ def is_job_cancelled(job_id: str) -> bool:
         if job_id in _cancelled_jobs:
             return True
 
+        # Slice B1 (Extraktion): die Lease-Logik liegt jetzt in session_lease,
+        # aber dieser Check MUTIERT bei abgelaufener Lease weiterhin (Status +
+        # Persist) — verhaltens-erhaltend. B2 macht is_job_cancelled zur reinen
+        # Query und verlagert den Expiry-Drive in den Request-Pfad.
         cancelled_here = False
-        session_id = _job_session_id.get(job_id)
-        expires_at = _job_session_expires_at.get(job_id)
-        if session_id and expires_at is not None and time.monotonic() > expires_at:
+        if session_lease.is_expired(job_id):
             job = _jobs.get(job_id)
-            if job is not None and job.status not in {"done", "failed", "cancelled"}:
+            if job is not None and job.status not in _TERMINAL_JOB_STATUSES:
                 _cancelled_jobs.add(job_id)
-                _job_session_id.pop(job_id, None)
-                _job_session_expires_at.pop(job_id, None)
+                session_lease.clear(job_id)
                 job.status = "cancelled"
                 job.error = "Job cancelled because the client session ended"
                 _job_created_at[job_id] = time.monotonic()
@@ -283,8 +282,7 @@ def bind_job_session(job_id: str, session_id: str | None) -> None:
         _evict_expired()
         if job_id not in _jobs:
             return
-        _job_session_id[job_id] = session_id
-        _job_session_expires_at[job_id] = time.monotonic() + _SESSION_TTL_SECONDS
+        session_lease.bind(job_id, session_id)
 
 
 def delete_job(job_id: str) -> bool:
@@ -303,8 +301,7 @@ def delete_job(job_id: str) -> bool:
         _jobs.pop(job_id, None)
         _job_created_at.pop(job_id, None)
         _cancelled_jobs.discard(job_id)
-        _job_session_id.pop(job_id, None)
-        _job_session_expires_at.pop(job_id, None)
+        session_lease.clear(job_id)
     _persist_jobs()
     return True
 
@@ -323,8 +320,8 @@ def touch_job_session(job_id: str, session_id: str | None) -> JobStatus | None:
                 return None
         elif job.status in {"done", "failed", "cancelled"}:
             pass
-        elif session_id and _job_session_id.get(job_id) == session_id:
-            _job_session_expires_at[job_id] = time.monotonic() + _SESSION_TTL_SECONDS
+        else:
+            session_lease.touch(job_id, session_id)
     if should_persist:
         _persist_jobs()
     return job
