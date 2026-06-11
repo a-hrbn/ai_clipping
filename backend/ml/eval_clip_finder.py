@@ -1,8 +1,12 @@
 """
 Evaluate LLM clip finder against the Ground-Truth eval manifest.
 
-Overlap rule: a prediction is a "hit" for a GT moment when it covers
->= 50% of the GT window (coverage = overlap_seconds / gt_duration >= 0.5).
+Overlap rule (bidirectional): a prediction is a "hit" for a GT moment when it
+covers >= 50% of the GT window OR the GT window covers >= 50% of the prediction.
+The second direction lets a short, precise clip fully inside a long, loose
+Iboclipss-repost window count; the finder's 8s minimum clip length keeps a
+degenerate mini-prediction from gaming it. The reported per-GT `coverage` column
+stays GT-centric (overlap_seconds / gt_duration).
 
 Usage (standalone CLI inside the Docker container):
   python ml/eval_clip_finder.py --json
@@ -49,8 +53,31 @@ def coverage_ratio(gt: dict, pred: dict) -> float:
     return overlap / (gt_end - gt_start)
 
 
+def pred_coverage_ratio(gt: dict, pred: dict) -> float:
+    """Fraction of the prediction window that lies within the GT window.
+
+    The bidirectional counterpart to coverage_ratio: a short, precise clip
+    fully inside a long, loose GT window covers a tiny fraction of the GT but
+    (almost) all of itself. Returns 0.0 if the prediction window is zero-length.
+    """
+    pred_start = float(pred.get("start_time") or 0)
+    pred_end = float(pred.get("end_time") or 0)
+    if pred_end <= pred_start:
+        return 0.0
+    gt_start = float(gt.get("start") or 0)
+    gt_end = float(gt.get("end") or 0)
+    overlap = max(0.0, min(gt_end, pred_end) - max(gt_start, pred_start))
+    return overlap / (pred_end - pred_start)
+
+
 def is_hit(gt: dict, pred: dict, threshold: float = COVERAGE_THRESHOLD) -> bool:
-    return coverage_ratio(gt, pred) >= threshold
+    """Bidirectional hit: the prediction covers >= threshold of the GT window,
+    OR the GT window covers >= threshold of the prediction.
+    """
+    return (
+        coverage_ratio(gt, pred) >= threshold
+        or pred_coverage_ratio(gt, pred) >= threshold
+    )
 
 
 def _pred_rank(pred: dict, fallback: int) -> int:
@@ -99,12 +126,11 @@ def evaluate_vod(
                 break  # sorted ascending — no further hits possible
             cov = coverage_ratio(gt, pred)
             if cov > best_cov:
-                best_cov = cov
-            if cov >= COVERAGE_THRESHOLD and hit_rank is None:
+                best_cov = cov  # reported coverage stays GT-centric
+            if hit_rank is None and is_hit(gt, pred):
                 hit_rank = rank
                 hit_pred = pred
-                # Keep scanning to track best_cov even past first hit
-                break  # GT-centric: first hit wins, no double-count
+                break  # first hit (by rank) wins, no double-count
 
         gt_hits.append({
             "gt_index": gi,
