@@ -11,6 +11,7 @@ BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
+from ml.row_identity import read_jsonl
 from services.gold_eval_policy import GOLD_HOLDOUT_SPLIT_FIELD
 
 
@@ -44,8 +45,9 @@ def main() -> int:
 def build_manifest(*, gold_rows_path: pathlib.Path, diagnosis_csv: pathlib.Path | None, limit: int = 10) -> list[dict[str, object]]:
     gold_rows = [
         row
-        for row in _read_jsonl(gold_rows_path)
-        if str(row.get(GOLD_HOLDOUT_SPLIT_FIELD) or "").strip().lower() == "holdout"
+        for row in read_jsonl(gold_rows_path, strict=False)
+        if isinstance(row, dict)
+        and str(row.get(GOLD_HOLDOUT_SPLIT_FIELD) or "").strip().lower() == "holdout"
     ]
     diagnosis_errors = _diagnosis_error_counts(_read_csv(diagnosis_csv) if diagnosis_csv and diagnosis_csv.exists() else [])
     grouped: dict[str, list[dict]] = {}
@@ -96,23 +98,6 @@ def _diagnosis_error_counts(rows: list[dict]) -> Counter[str]:
         if vod_id:
             counts[vod_id] += 1
     return counts
-
-
-def _read_jsonl(path: pathlib.Path) -> list[dict]:
-    if not path.exists():
-        return []
-    rows: list[dict] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(row, dict):
-            rows.append(row)
-    return rows
 
 
 def _read_csv(path: pathlib.Path) -> list[dict]:

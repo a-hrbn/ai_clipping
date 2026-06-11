@@ -11,6 +11,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from ml import build_eval_dataset
+from ml.row_identity import read_jsonl, write_jsonl, write_json
 from services.gold_eval_policy import annotate_gold_row, validate_gold_notes
 
 
@@ -53,18 +54,15 @@ def main() -> int:
 
     rows_out = pathlib.Path(args.rows_out)
     rows_out.parent.mkdir(parents=True, exist_ok=True)
-    _write_jsonl(rows_out, payload["rows"])
+    write_jsonl(rows_out, payload["rows"])
 
     output = pathlib.Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    _write_jsonl(output, payload["eval_rows"])
+    write_jsonl(output, payload["eval_rows"])
 
     summary_out = pathlib.Path(args.summary_out)
     summary_out.parent.mkdir(parents=True, exist_ok=True)
-    summary_out.write_text(
-        json.dumps(payload["summary"], ensure_ascii=True, indent=2),
-        encoding="utf-8",
-    )
+    write_json(summary_out, payload["summary"])
     print(json.dumps(payload["summary"], ensure_ascii=True))
     return 0
 
@@ -78,7 +76,7 @@ def import_gold_eval_labels(
     queue_rows = _read_csv(labeled_csv)
     if not queue_rows:
         raise ValueError("Labeled gold-eval CSV is empty.")
-    feature_rows = _read_jsonl(features_jsonl)
+    feature_rows = read_jsonl(features_jsonl)
     if not feature_rows:
         raise ValueError("Gold-eval features sidecar is empty.")
 
@@ -172,25 +170,6 @@ def _read_csv(path: pathlib.Path) -> list[dict]:
         raise FileNotFoundError(path)
     with path.open("r", encoding="utf-8", newline="") as handle:
         return list(csv.DictReader(handle))
-
-
-def _read_jsonl(path: pathlib.Path) -> list[dict]:
-    if not path.exists():
-        raise FileNotFoundError(path)
-    rows: list[dict] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        rows.append(json.loads(line))
-    return rows
-
-
-def _write_jsonl(path: pathlib.Path, rows: list[dict]) -> None:
-    path.write_text(
-        "\n".join(json.dumps(row, ensure_ascii=True) for row in rows),
-        encoding="utf-8",
-    )
 
 
 def _parse_gold_grade(value) -> int | None:

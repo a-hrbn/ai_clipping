@@ -10,6 +10,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from ml import build_eval_dataset
+from ml.row_identity import read_jsonl, write_jsonl, write_json
 from services.gold_eval_policy import annotate_gold_rows
 
 
@@ -53,11 +54,11 @@ def main() -> int:
 
     rows_out = pathlib.Path(args.rows_out)
     if args.merge_existing and rows_out.exists():
-        existing_rows = _read_jsonl(rows_out)
+        existing_rows = read_jsonl(rows_out)
         if existing_rows:
             payload = _merge_with_existing_rows(existing_rows, payload)
     elif args.preserve_existing_if_empty and not payload["rows"] and rows_out.exists():
-        existing_rows = _read_jsonl(rows_out)
+        existing_rows = read_jsonl(rows_out)
         if existing_rows:
             existing_eval_rows = build_eval_dataset.build_eval_dataset(existing_rows)
             payload = {
@@ -71,15 +72,15 @@ def main() -> int:
             }
 
     rows_out.parent.mkdir(parents=True, exist_ok=True)
-    _write_jsonl(rows_out, payload["rows"])
+    write_jsonl(rows_out, payload["rows"])
 
     output = pathlib.Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    _write_jsonl(output, payload["eval_rows"])
+    write_jsonl(output, payload["eval_rows"])
 
     summary_out = pathlib.Path(args.summary_out)
     summary_out.parent.mkdir(parents=True, exist_ok=True)
-    _write_text_if_changed(summary_out, json.dumps(payload["summary"], ensure_ascii=True, indent=2))
+    write_json(summary_out, payload["summary"])
     if payload["summary"].get("preserved_existing"):
         print("No frontend gold-eval rows found; preserved existing gold-eval artifacts.", file=sys.stderr)
     elif payload["summary"].get("merged_existing"):
@@ -99,13 +100,13 @@ def export_frontend_gold_eval(
     if not storage_dir.exists():
         return {"rows": rows, "eval_rows": [], "summary": _summary(rows, [])}
 
-    rows.extend(_read_jsonl(storage_dir / "feedback" / "gold_eval_updates.jsonl"))
+    rows.extend(read_jsonl(storage_dir / "feedback" / "gold_eval_updates.jsonl"))
 
     for job_dir in sorted(path for path in storage_dir.iterdir() if path.is_dir() and path.name != "feedback"):
         gold_eval_path = job_dir / "debug" / "gold_eval.jsonl"
         if not gold_eval_path.exists():
             continue
-        rows.extend(_read_jsonl(gold_eval_path))
+        rows.extend(read_jsonl(gold_eval_path))
 
     deduped: dict[tuple[str, str], dict] = {}
     for row in rows:
@@ -176,31 +177,6 @@ def _summary(rows: list[dict], eval_rows: list[dict]) -> dict[str, object]:
         "rows": len(rows),
         "eval_dataset": build_eval_dataset.eval_dataset_summary(eval_rows) if eval_rows else {},
     }
-
-
-def _read_jsonl(path: pathlib.Path) -> list[dict]:
-    rows: list[dict] = []
-    if not path.exists():
-        return rows
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        rows.append(json.loads(line))
-    return rows
-
-
-def _write_jsonl(path: pathlib.Path, rows: list[dict]) -> None:
-    _write_text_if_changed(
-        path,
-        "\n".join(json.dumps(row, ensure_ascii=True) for row in rows),
-    )
-
-
-def _write_text_if_changed(path: pathlib.Path, content: str) -> None:
-    if path.exists() and path.read_text(encoding="utf-8") == content:
-        return
-    path.write_text(content, encoding="utf-8")
 
 
 def _gold_row_key(row: dict) -> tuple[str, ...]:

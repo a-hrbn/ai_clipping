@@ -17,11 +17,16 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
 import pathlib
 import random
 import sys
 from urllib.parse import urlparse
+
+BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
+
+from ml.row_identity import read_jsonl, write_jsonl  # noqa: E402
 
 
 def main() -> int:
@@ -67,10 +72,10 @@ def main() -> int:
             print(f"[skip] {job_id}: no debug dir at {job_debug}", file=sys.stderr)
             continue
 
-        candidates = _read_jsonl(job_debug / "candidates_normalized.jsonl")
-        features = _read_jsonl(job_debug / "candidate_features.jsonl")
-        segments = _read_jsonl(job_debug / "segments.jsonl")
-        ranked_rows = _read_jsonl(job_debug / "ranked_candidates_pre_judge.jsonl")
+        candidates = read_jsonl(job_debug / "candidates_normalized.jsonl", strict=False)
+        features = read_jsonl(job_debug / "candidate_features.jsonl", strict=False)
+        segments = read_jsonl(job_debug / "segments.jsonl", strict=False)
+        ranked_rows = read_jsonl(job_debug / "ranked_candidates_pre_judge.jsonl", strict=False)
         if not candidates:
             print(f"[skip] {job_id}: no normalized candidates", file=sys.stderr)
             continue
@@ -137,7 +142,7 @@ def main() -> int:
         return 1
 
     _write_csv(queue_path, queue_rows)
-    _write_jsonl(features_path, features_rows)
+    write_jsonl(features_path, features_rows)
     print(
         f"Wrote {len(queue_rows)} labeling rows to {queue_path} "
         f"(features sidecar: {features_path})"
@@ -168,21 +173,6 @@ def _read_manifest(path: pathlib.Path) -> list[dict]:
         return rows
 
 
-def _read_jsonl(path: pathlib.Path) -> list[dict]:
-    if not path.exists():
-        return []
-    out: list[dict] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            out.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return out
-
-
 def _write_csv(path: pathlib.Path, rows: list[dict]) -> None:
     if not rows:
         return
@@ -191,13 +181,6 @@ def _write_csv(path: pathlib.Path, rows: list[dict]) -> None:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
-
-
-def _write_jsonl(path: pathlib.Path, rows: list[dict]) -> None:
-    with path.open("w", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False))
-            f.write("\n")
 
 
 def _snippet_for_window(segments: list[dict], start: float, end: float, max_chars: int) -> str:

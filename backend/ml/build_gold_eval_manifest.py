@@ -11,6 +11,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from ml import build_gold_eval_queue
+from ml.row_identity import read_jsonl
 
 
 def main() -> int:
@@ -137,8 +138,8 @@ def build_manifest(
 
 
 def _job_summary(job_dir: pathlib.Path) -> dict[str, int]:
-    feedback_rows = _read_jsonl(job_dir / "debug" / "feedback.jsonl")
-    candidate_rows = _read_jsonl(job_dir / "debug" / "candidates_normalized.jsonl")
+    feedback_rows = read_jsonl(job_dir / "debug" / "feedback.jsonl", strict=False)
+    candidate_rows = read_jsonl(job_dir / "debug" / "candidates_normalized.jsonl", strict=False)
     return {
         "selected_count": sum(1 for row in feedback_rows if bool(row.get("selected"))),
         "feedback_rows": len(feedback_rows),
@@ -207,21 +208,6 @@ def _read_job_map(path: pathlib.Path | None) -> dict[str, dict[str, str]]:
                 "platform": str(row.get("platform") or "").strip(),
                 "vod_id": str(row.get("vod_id") or "").strip(),
             }
-    return rows
-
-
-def _read_jsonl(path: pathlib.Path) -> list[dict]:
-    if not path.exists():
-        return []
-    rows: list[dict] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rows.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
     return rows
 
 

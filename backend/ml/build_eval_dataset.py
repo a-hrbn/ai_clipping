@@ -9,6 +9,7 @@ BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
+from ml.row_identity import read_jsonl, write_jsonl, write_json
 from services.gold_eval_policy import (
     GOLD_HOLDOUT_SPLIT_FIELD,
     annotate_gold_row,
@@ -31,23 +32,18 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    rows = _read_jsonl(pathlib.Path(args.dataset))
+    rows = read_jsonl(pathlib.Path(args.dataset))
     if not rows:
         print("No dataset rows found.")
         return 1
 
     eval_rows = build_eval_dataset(rows)
     output_path = pathlib.Path(args.output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(
-        "\n".join(json.dumps(row, ensure_ascii=True) for row in eval_rows),
-        encoding="utf-8",
-    )
+    write_jsonl(output_path, eval_rows)
 
     summary = eval_dataset_summary(eval_rows)
     summary_path = pathlib.Path(args.summary_out)
-    summary_path.parent.mkdir(parents=True, exist_ok=True)
-    summary_path.write_text(json.dumps(summary, ensure_ascii=True, indent=2), encoding="utf-8")
+    write_json(summary_path, summary)
     print(json.dumps(summary, ensure_ascii=True))
     return 0
 
@@ -205,17 +201,6 @@ def _count_values(rows: list[dict], key: str) -> dict[str, int]:
             continue
         counts[value] = counts.get(value, 0) + 1
     return dict(sorted(counts.items()))
-
-
-def _read_jsonl(path: pathlib.Path) -> list[dict]:
-    if not path.exists():
-        return []
-    rows: list[dict] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line:
-            rows.append(json.loads(line))
-    return rows
 
 
 if __name__ == "__main__":
