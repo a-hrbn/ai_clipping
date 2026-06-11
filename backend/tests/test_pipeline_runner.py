@@ -1,5 +1,7 @@
+import asyncio
 import os
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -206,6 +208,86 @@ class SubprocessErrorTests(unittest.TestCase):
             pipeline_runner._subprocess_error(2),
             "Pipeline subprocess exited with code 2",
         )
+
+
+class RunJobSubprocessTests(unittest.TestCase):
+    @staticmethod
+    def _fake_exec_returning(returncode: int):
+        class _Process:
+            async def wait(self):
+                return returncode
+
+        captured: dict = {}
+
+        async def fake_create_subprocess_exec(*args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return _Process()
+
+        return fake_create_subprocess_exec, captured
+
+    def test_signal_failure_marks_running_job_failed(self) -> None:
+        fake_exec, captured = self._fake_exec_returning(-11)
+        running_job = types.SimpleNamespace(status="downloading")
+
+        with patch.object(pipeline_runner.asyncio, "create_subprocess_exec", side_effect=fake_exec), \
+             patch.object(pipeline_runner, "get_job", return_value=running_job), \
+             patch.object(pipeline_runner, "update_job") as update_mock:
+            returncode = asyncio.run(
+                pipeline_runner.run_job_subprocess(
+                    job_id="job-1",
+                    url="https://www.twitch.tv/videos/123",
+                    profile="general",
+                    strategy={},
+                )
+            )
+
+        self.assertEqual(returncode, -11)
+        self.assertTrue(captured["args"][1].endswith("pipeline_worker.py"))
+        self.assertEqual(captured["kwargs"]["cwd"], str(pipeline_runner._BACKEND_ROOT))
+        update_mock.assert_called_once_with(
+            "job-1",
+            status="failed",
+            error="Pipeline subprocess exited from signal 11",
+        )
+
+    def test_success_does_not_touch_job_state(self) -> None:
+        fake_exec, _captured = self._fake_exec_returning(0)
+
+        with patch.object(pipeline_runner.asyncio, "create_subprocess_exec", side_effect=fake_exec), \
+             patch.object(pipeline_runner, "get_job") as get_job_mock, \
+             patch.object(pipeline_runner, "update_job") as update_mock:
+            returncode = asyncio.run(
+                pipeline_runner.run_job_subprocess(
+                    job_id="job-1",
+                    url="https://www.twitch.tv/videos/123",
+                    profile="general",
+                    strategy={},
+                )
+            )
+
+        self.assertEqual(returncode, 0)
+        get_job_mock.assert_not_called()
+        update_mock.assert_not_called()
+
+    def test_already_terminal_job_is_not_re_marked(self) -> None:
+        fake_exec, _captured = self._fake_exec_returning(-9)
+        terminal_job = types.SimpleNamespace(status="cancelled")
+
+        with patch.object(pipeline_runner.asyncio, "create_subprocess_exec", side_effect=fake_exec), \
+             patch.object(pipeline_runner, "get_job", return_value=terminal_job), \
+             patch.object(pipeline_runner, "update_job") as update_mock:
+            returncode = asyncio.run(
+                pipeline_runner.run_job_subprocess(
+                    job_id="job-1",
+                    url="https://www.twitch.tv/videos/123",
+                    profile="general",
+                    strategy={},
+                )
+            )
+
+        self.assertEqual(returncode, -9)
+        update_mock.assert_not_called()
 
 
 if __name__ == "__main__":

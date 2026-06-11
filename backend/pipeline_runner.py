@@ -53,7 +53,7 @@ def build_subprocess_env() -> dict[str, str]:
     env.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "hwaccel;none")
     env.setdefault("TORCHDYNAMO_DISABLE", "1")
     env.setdefault("TORCH_COMPILE_DISABLE", "1")
-    env["MPLCONFIGDIR"] = str(_writable_cache_dir("matplotlib"))
+    env["MPLCONFIGDIR"] = str(writable_cache_dir("matplotlib"))
     env.setdefault("WHISPER_LANGUAGE", "en")
     env.setdefault("TOKENIZERS_PARALLELISM", "false")
     env.setdefault("OMP_NUM_THREADS", "1")
@@ -109,7 +109,12 @@ def _subprocess_error(returncode: int) -> str:
     return f"Pipeline subprocess exited with code {returncode}"
 
 
-def _writable_cache_dir(name: str) -> pathlib.Path:
+def writable_cache_dir(name: str) -> pathlib.Path:
+    """Resolve a writable cache directory, preferring a sibling of the storage dir.
+
+    Shared by the subprocess env builder and the status router's face-detection
+    probe, so both adapters resolve ``MPLCONFIGDIR`` through one seam.
+    """
     preferred = pathlib.Path(settings.storage_dir).parent / name
     fallback = pathlib.Path(tempfile.gettempdir()) / f"ai_clipping_{name}"
     for candidate in (preferred, fallback):

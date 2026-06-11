@@ -217,77 +217,33 @@ class JobsRouterTests(unittest.TestCase):
         create_job_mock.assert_called_once_with(fake_job_id, profile="general")
         bind_session_mock.assert_called_once_with(fake_job_id, "sess-1")
 
-    def test_pipeline_command_runs_worker_in_subprocess(self) -> None:
-        cmd = jobs._pipeline_subprocess_command(
-            job_id="job-1",
-            url="https://www.twitch.tv/videos/123",
-            video_path=None,
-            profile="jynxzi",
-            strategy={"clip_style": "balanced"},
-        )
+    def test_run_pipeline_subprocess_delegates_to_pipeline_runner_and_cleans_up(self) -> None:
+        captured: dict = {}
 
-        self.assertEqual(cmd[0], jobs.sys.executable)
-        self.assertTrue(cmd[1].endswith("pipeline_worker.py"))
-        self.assertIn("--url", cmd)
-        self.assertIn("https://www.twitch.tv/videos/123", cmd)
-        self.assertIn("--strategy-json", cmd)
+        async def fake_run_job_subprocess(**kwargs):
+            captured.update(kwargs)
+            return 0
 
-    def test_pipeline_command_serializes_set_valued_strategy_fields(self) -> None:
-        cmd = jobs._pipeline_subprocess_command(
-            job_id="job-1",
-            url="https://www.twitch.tv/videos/123",
-            video_path=None,
-            profile="jynxzi",
-            strategy={
-                "keywords": {"rage", "funny"},
-                "nested": {"exclude_keywords": {"spoiler"}},
-            },
-        )
-
-        raw_strategy = cmd[cmd.index("--strategy-json") + 1]
-        payload = jobs.json.loads(raw_strategy)
-        self.assertEqual(payload["keywords"], ["funny", "rage"])
-        self.assertEqual(payload["nested"]["exclude_keywords"], ["spoiler"])
-
-    def test_pipeline_subprocess_signal_failure_marks_job_failed(self) -> None:
-        captured = {}
-
-        class _Process:
-            async def wait(self):
-                return -11
-
-        async def fake_create_subprocess_exec(*args, **kwargs):
-            captured["args"] = args
-            captured["kwargs"] = kwargs
-            return _Process()
-
-        with patch.object(jobs.asyncio, "create_subprocess_exec", side_effect=fake_create_subprocess_exec), \
-             patch.object(jobs, "get_job", return_value=JobStatus(job_id="job-1", status="downloading")), \
-             patch.object(jobs, "update_job") as update_mock:
+        with patch.object(jobs, "run_job_subprocess", side_effect=fake_run_job_subprocess), \
+             patch.object(jobs, "_cleanup_serving_job_source_media") as cleanup_mock:
             asyncio.run(
                 jobs._run_pipeline_subprocess(
                     job_id="job-1",
                     url="https://www.twitch.tv/videos/123",
                     profile="general",
-                    strategy={},
+                    strategy={"clip_style": "balanced"},
                 )
             )
 
-        self.assertTrue(captured["args"][1].endswith("pipeline_worker.py"))
-        self.assertEqual(captured["kwargs"]["cwd"], str(jobs._BACKEND_ROOT))
-        update_mock.assert_called_once_with(
-            "job-1",
-            status="failed",
-            error="Pipeline subprocess exited from signal 11",
-        )
+        self.assertEqual(captured["job_id"], "job-1")
+        self.assertEqual(captured["url"], "https://www.twitch.tv/videos/123")
+        self.assertEqual(captured["profile"], "general")
+        self.assertEqual(captured["strategy"], {"clip_style": "balanced"})
+        cleanup_mock.assert_called_once_with("job-1")
 
-    def test_pipeline_subprocess_failure_deletes_serving_source_media(self) -> None:
-        class _Process:
-            async def wait(self):
-                return -9
-
-        async def fake_create_subprocess_exec(*_args, **_kwargs):
-            return _Process()
+    def test_run_pipeline_subprocess_cleans_up_serving_source_media(self) -> None:
+        async def fake_run_job_subprocess(**_kwargs):
+            return -9
 
         with tempfile.TemporaryDirectory() as tmp:
             storage_dir = Path(tmp)
@@ -310,9 +266,7 @@ class JobsRouterTests(unittest.TestCase):
             chunk_path.write_bytes(b"chunk")
 
             with patch.object(jobs.settings, "storage_dir", str(storage_dir)), \
-                 patch.object(jobs.asyncio, "create_subprocess_exec", side_effect=fake_create_subprocess_exec), \
-                 patch.object(jobs, "get_job", return_value=JobStatus(job_id="job-1", status="downloading")), \
-                 patch.object(jobs, "update_job"):
+                 patch.object(jobs, "run_job_subprocess", side_effect=fake_run_job_subprocess):
                 asyncio.run(
                     jobs._run_pipeline_subprocess(
                         job_id="job-1",
@@ -343,63 +297,6 @@ class JobsRouterTests(unittest.TestCase):
 
             self.assertTrue(video_path.exists())
             self.assertTrue(audio_path.exists())
-
-    def test_pipeline_subprocess_sigkill_error_mentions_oom(self) -> None:
-        self.assertEqual(
-            jobs._pipeline_subprocess_error(-9),
-            "Pipeline subprocess exited from signal 9 (SIGKILL; likely OOM or external kill)",
-        )
-
-    def test_pipeline_subprocess_env_enables_face_detection_by_default(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, \
-             patch.object(jobs.settings, "storage_dir", str(Path(tmp) / "storage")), \
-             patch.dict(jobs.os.environ, {}, clear=True):
-            env = jobs._pipeline_subprocess_env()
-            self.assertTrue(Path(env["MPLCONFIGDIR"]).exists())
-
-        self.assertEqual(env["AI_CLIPPING_DISABLE_FACE_DETECTION"], "0")
-        self.assertIn(str(jobs._BACKEND_ROOT), env["PYTHONPATH"].split(jobs.os.pathsep))
-        self.assertEqual(env["LIBGL_ALWAYS_SOFTWARE"], "1")
-        self.assertEqual(env["MESA_LOADER_DRIVER_OVERRIDE"], "swrast")
-        self.assertEqual(env["OPENCV_FFMPEG_CAPTURE_OPTIONS"], "hwaccel;none")
-        self.assertEqual(env["PYTHONFAULTHANDLER"], "1")
-        self.assertEqual(env["TORCHDYNAMO_DISABLE"], "1")
-        self.assertEqual(env["TORCH_COMPILE_DISABLE"], "1")
-        self.assertEqual(env["PIPELINE_ENABLE_DIARIZATION"], "false")
-        self.assertEqual(env["WHISPER_LANGUAGE"], "en")
-        self.assertEqual(env["TOKENIZERS_PARALLELISM"], "false")
-        self.assertEqual(env["OMP_NUM_THREADS"], "1")
-        self.assertEqual(env["OPENBLAS_NUM_THREADS"], "1")
-        self.assertEqual(env["MKL_NUM_THREADS"], "1")
-        self.assertEqual(env["NUMEXPR_NUM_THREADS"], "1")
-        self.assertEqual(env["VECLIB_MAXIMUM_THREADS"], "1")
-
-    def test_pipeline_subprocess_env_matches_cuda_training_defaults(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, \
-             patch.object(jobs.settings, "storage_dir", str(Path(tmp) / "storage")), \
-             patch.dict(jobs.os.environ, {"WHISPER_DEVICE": "cuda"}, clear=True):
-            env = jobs._pipeline_subprocess_env()
-
-        self.assertEqual(env["WHISPER_LANGUAGE"], "en")
-        self.assertEqual(env["CUDA_VISIBLE_DEVICES"], "0")
-        self.assertEqual(env["PYTORCH_CUDA_ALLOC_CONF"], "expandable_segments:True")
-
-    def test_pipeline_subprocess_env_can_enable_diarization_explicitly(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, \
-             patch.object(jobs.settings, "storage_dir", str(Path(tmp) / "storage")), \
-             patch.object(jobs.settings, "pipeline_enable_diarization", True), \
-             patch.dict(jobs.os.environ, {}, clear=True):
-            env = jobs._pipeline_subprocess_env()
-
-        self.assertEqual(env["PIPELINE_ENABLE_DIARIZATION"], "true")
-
-    def test_pipeline_subprocess_env_respects_explicit_face_detection_disable(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, \
-             patch.object(jobs.settings, "storage_dir", str(Path(tmp) / "storage")), \
-             patch.dict(jobs.os.environ, {"AI_CLIPPING_DISABLE_FACE_DETECTION": "1"}, clear=True):
-            env = jobs._pipeline_subprocess_env()
-
-        self.assertEqual(env["AI_CLIPPING_DISABLE_FACE_DETECTION"], "1")
 
     def test_face_detection_probe_env_uses_writable_matplotlib_and_headless_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, \
