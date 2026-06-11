@@ -6382,3 +6382,132 @@ Kernprobleme: kleines Goldlabeled-Dataset, Train-Holdout-Gap, twitch_proxy schad
 - [x] Ergebnis-Dateien: matches_open_gate.jsonl + match_diagnostics_open_gate.json im Run-Dir, Audit in ml/artifacts/gt_match_recall_audit_open_gate.json
 - [ ] Offen: GT-Manifeste neu bauen (alle gt_runs re-matchen + build_eval_manifest), damit die Eval die neuen Matches nutzt
 - Audit-Output: backend/ml/artifacts/gt_match_recall_audit.json
+
+---
+
+# Issue #4 — GT Flywheel 1/5: Directional finder eval (raw recall@50 vs recall@10)
+
+Parent PRD #3. Localize whether the LLM finder's gap is **generation** (never
+surfaces the viral moment) or **ranking** (surfaces it, not top-K), scoring it
+against *verified gold* GT — before changing the finder.
+
+## Findings (current data)
+- gt_match_verification.jsonl: 230 rows -> gold=62, silver=111, review=24,
+  unverifiable=33. Gold spans 26 VODs; 25 gold >=100k views, 6 >=500k.
+- "gold-filtered" == tier `gold` (confirmed). silver/review == not_confirmed;
+  unverifiable == vod/repost_unavailable. Filtering to `gold` exactly drops
+  not_confirmed + vod_unavailable (AC1).
+- 16/26 gold VODs already have finder predictions in tmp/storage; 10 missing.
+- eval_clip_finder already has: 50%-coverage hit rule, recall@K, --ks 5,10,20,50,
+  --tiers gold. Missing: two-tier (view) recall + a missing-prediction guard.
+
+## Plan (reuse-first; new module ml/directional_eval.py)
+- [ ] Extract load_predictions(...) from eval_clip_finder.main (no behaviour change).
+- [ ] Pure seams in ml/directional_eval.py: aggregate_tier, two_tier_recall,
+      missing_prediction_vods, gold_manifest, run(), format_report().
+- [ ] CLI python -m ml.directional_eval --headline-min-views 100000 --ks 5,10,20,50:
+      log paid-LLM gap (missing preds) before scoring; print floor + headline
+      recall@5/10/20/50.
+
+## AC mapping
+- AC1 -> gold_manifest. AC2 -> missing_prediction_vods + CLI warn.
+- AC3 -> reuse evaluate_vod/is_hit + default ks. AC4 -> two_tier_recall + report.
+- AC5 -> --headline-min-views + --manifest (no code change to re-run).
+
+## Review (done)
+- Added `ml/directional_eval.py`: gold-filtered two-tier recall (floor + headline)
+  with a missing-prediction guard. Reuses eval_clip_finder (evaluate_vod/is_hit,
+  load_manifest, filter_manifest_tiers, load_predictions).
+- Refactored eval_clip_finder: extracted `load_predictions()` + `_finder_moments_path()`
+  out of `main` (no behaviour change; main now calls the helper).
+- Tests: `tests/test_directional_eval.py` (10 cases) — all green.
+- Real run on current gold (26 gold VODs, 62 gold moments): FLOOR r@10=0.065
+  r@50=0.145; HEADLINE(>=100k, n=25) r@10=0.120 r@50=0.160. 10/26 gold VODs lack
+  finder predictions and are surfaced (counted as misses) — paid-finder gap, not
+  silently buried. recall@50 only modestly above recall@10 + low absolute recall
+  => looks generation-leaning, but confounded by the 10 missing-pred VODs; close
+  that gap (run finder over them) before concluding.
+- Verification: directly-related suites pass (test_directional_eval,
+  test_eval_clip_finder, test_verify_gt_matches, test_build_eval_manifest). The 8
+  failing + 10 erroring tests are pre-existing (missing torch; root-only unwritable
+  test) and reproduce with my edit reverted.
+
+## RALPH — GT Flywheel 2/5: Capture core (one VOD) — issue #5
+
+- Built the decoupled, fingerprint-first capture core for a single VOD (no
+  scheduling yet — that is #6). New torch-free modules so the core is unit-testable
+  without the ML stack:
+  - `backend/ml/gt_transcript_artifact.py`: extracted the transcript-cache
+    serializer/version/fields into one source of truth (matcher-compatible format).
+  - `backend/ml/gt_capture.py`: pure seams `validate_full_duration_fingerprint`
+    (rejects prefix-only ≈<4 items/s) and `build_provenance`; thin `capture_vod`
+    orchestrator with injectable collaborators — download → fingerprint-first
+    (validated) → extract audio → transcript (CUDA/base/chunk-isolated/diarization
+    off) → persist fingerprint+transcript+provenance → delete media.
+  - Refactored `build_gt_vod_transcripts._write_transcript_cache` to delegate to the
+    shared serializer (no format drift).
+- Tests: `backend/tests/test_gt_capture.py` (9) — pure guards, provenance, serializer
+  round-trip, and capture_vod behavior (artifacts persisted, fingerprint-before-
+  transcript ordering, media deleted, prefix-only rejected before transcription).
+- Verification: 43 torch-free GT tests pass (incl. new file); py_compile OK on all
+  three changed files. `npm run test/typecheck` N/A (Python project, no npm scripts);
+  full pytest suite needs torch/whisper (pre-existing env limitation).
+
+## RALPH — GT Flywheel 3/5: Daily capture job (Helix new-VOD selection + scheduling) — issue #6
+
+Plan (smallest change wrapping the #5 capture core into a standing daily job):
+- [ ] New module `backend/ml/gt_capture_daily.py`:
+  - Pure seam `select_new_vods(vods, already_captured)` — order-preserving,
+    de-duplicated diff that drops already-captured ids and id-less records.
+  - State persistence `load_captured_state` / `save_captured_state` (atomic),
+    keyed vod_id -> provenance, so re-runs are idempotent/resumable.
+  - Thin orchestrator `run_daily_capture(...)` — list Helix archives (injected)
+    -> select_new_vods -> capture_vod per new VOD -> persist state AFTER EACH
+    capture (crash-resumable) -> return compact summary.
+  - `list_archive_vods(client, broadcaster)` — reuses the existing TwitchClient
+    Helix `/videos?type=archive` listing (lazy import; keeps pure seams torch/net-free).
+  - `main()` CLI (default broadcaster jynxzi).
+- [ ] Tests `backend/tests/test_gt_capture_daily.py` — pure seam boundaries +
+  orchestrator through fakes (only-new captured, idempotent across restart,
+  persist-after-each resumability, provenance recorded).
+- [ ] Schedule: `scripts/run_gt_capture_daily.sh` wrapper + documented daily
+  cron line (after stream-end), mirroring run_gt_pipeline.sh.
+- [ ] Verify pure-seam + orchestrator tests green (PYTHONPATH=backend pytest).
+
+### Review (done) — issue #6
+- Added `backend/ml/gt_capture_daily.py`: pure `select_new_vods` diff (order-
+  preserving, deduped, id-normalized), `load/save_captured_state` (atomic) +
+  `captured_ids`, thin `run_daily_capture` orchestrator (lists Helix archives via
+  injected callable → select_new → `gt_capture.capture_vod` per VOD → persists
+  state AFTER EACH capture so a crash is resumable → compact summary), Helix
+  `list_archive_vods` (lazy import of TwitchClient/_get_user → pure seams stay
+  net/ML-free), and a `main()` CLI (default broadcaster jynxzi).
+- Schedule: `scripts/run_gt_capture_daily.sh` wrapper (CUDA→CPU container
+  fallback) + documented daily crontab line (06:00, after stream-end).
+- Tests: `backend/tests/test_gt_capture_daily.py` (12) — select_new_vods
+  boundaries, state round-trip/atomicity/corrupt-fallback, and orchestration via
+  fakes (only-new captured + skip-rest demo, idempotent across restart,
+  persist-after-each resumability, per-VOD cache_dir/vod_date passthrough).
+- Verify: 74 torch-free GT tests pass (incl. the new 12); py_compile + `--help`
+  smoke OK. `npm run test/typecheck` N/A (Python project, no npm scripts).
+  `test_gt_pipeline_merge` still errors at collection on missing `ffmpeg` —
+  pre-existing env limitation, unrelated (gt_pipeline untouched).
+- Blocker for next iter: none. #7 (match+verify core, depends on #5 ✓) is the
+  next unblocked tracer; #8 remains blocked by #7.
+
+### Hardening — gt_capture_daily single-run lock + audio-only capture (interactive)
+- Concurrency: `capture_lock` PID-file guard (not flock — robust on WSL/drvfs +
+  bind-mounted container volumes) wraps the whole `run_daily_capture`. Live-PID
+  lock → `CaptureAlreadyRunning` (CLI exits 0, expected for an overlapping cron);
+  stale lock (dead PID) is taken over. Root-causes the parallel-runs incident
+  where manual re-runs double-downloaded VODs.
+- Speedup: `downloader.download_audio_only` (format `bestaudio/best`, straight
+  through `_download_uncached` so it bypasses the shared 720p serving cache);
+  capture core (`gt_capture._default_download`) now uses it. Validated on the
+  real 32h VOD: `bestaudio` resolves to Twitch `Audio_Only` ≈2.3 GiB vs ≈41 GiB
+  at 720p (~18× less download/disk). Fingerprint+transcript only need audio.
+- Tests: +3 lock tests (reject live / take over stale / release on exit) and a
+  download_audio_only test (audio format + no serving-cache write). 29 downloader
+  (container) + 24 capture (host) green.
+- Other speedup (ops, not code): run capture on the CUDA container — Whisper base
+  on the CPU container is the remaining wall-clock cost for long VODs.

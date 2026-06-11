@@ -45,7 +45,7 @@ vision = [
   "tf-keras>=2.21.0,<3.0.0",
 ]
 [tool.setuptools]
-packages = ["ml", "routers", "services"]
+packages = ["ml", "producers", "routers", "services"]
 py-modules = ["config", "job_manager", "main", "models", "pipeline", "pipeline_worker"]
 
 [tool.pytest.ini_options]

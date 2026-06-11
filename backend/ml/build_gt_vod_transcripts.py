@@ -25,6 +25,7 @@ BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
+from ml import gt_transcript_artifact
 from ml import match_cross_platform_audio_fingerprints as audio_matcher
 from services import audio_extractor, downloader, transcriber
 
@@ -34,8 +35,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_VOD_CSV = BACKEND_ROOT / "ml" / "jynxzi_gt_vods.csv"
 DEFAULT_VOD_CACHE_ROOT = BACKEND_ROOT / "tmp" / "vod_feature_cache"
 DEFAULT_MANIFEST_OUT = BACKEND_ROOT / "ml" / "artifacts" / "jynxzi_gt_vod_manifest.jsonl"
-_TRANSCRIPT_CACHE_VERSION = 1
-_SERIALIZE_FIELDS = ("start", "end", "text", "words_per_second", "hype_score", "speaker_id", "word_count")
+_TRANSCRIPT_CACHE_VERSION = gt_transcript_artifact.TRANSCRIPT_CACHE_VERSION
+_SERIALIZE_FIELDS = gt_transcript_artifact.SERIALIZE_FIELDS
 
 
 def main() -> int:
@@ -136,19 +137,7 @@ def _process_vod(
 
 
 def _write_transcript_cache(path: pathlib.Path, segments: list) -> None:
-    serialized = []
-    for seg in segments:
-        row = {}
-        for field in _SERIALIZE_FIELDS:
-            value = getattr(seg, field, None)
-            if value is not None:
-                row[field] = value
-        if row:
-            serialized.append(row)
-    payload = {"metadata": {"version": _TRANSCRIPT_CACHE_VERSION}, "transcript": serialized}
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=True), encoding="utf-8")
-    tmp.replace(path)
+    gt_transcript_artifact.write_transcript_cache(path, segments)
 
 
 def _read_vod_csv(path: pathlib.Path) -> list[dict]:

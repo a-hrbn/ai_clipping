@@ -286,6 +286,39 @@ def _read_moments_jsonl(path: pathlib.Path) -> list[dict]:
     return rows
 
 
+def _finder_moments_path(job_dir: pathlib.Path) -> pathlib.Path:
+    """Prefer the raw (pre-filter) finder moments, fall back to the filtered set."""
+    raw_path = job_dir / "debug" / "llm_moment_finder_moments_raw.jsonl"
+    filtered_path = job_dir / "debug" / "llm_moment_finder_moments.jsonl"
+    return raw_path if raw_path.exists() else filtered_path
+
+
+def load_predictions(
+    anchor_ids: list[str],
+    storage: pathlib.Path,
+    workflow_id: str = "",
+) -> dict[str, list[dict]]:
+    """Load finder predictions per VOD from pipeline_debug job dirs.
+
+    With a workflow_id, reads that exact run; otherwise picks the most-recently
+    modified pipeline_debug job for each VOD. VODs with no job map to [].
+    """
+    predictions_by_vod: dict[str, list[dict]] = {}
+    for vod_id in anchor_ids:
+        if workflow_id:
+            job_dir = storage / f"pipeline_debug_{workflow_id}_{vod_id}"
+            moments_path = _finder_moments_path(job_dir)
+        else:
+            candidates = sorted(
+                storage.glob(f"pipeline_debug_*_{vod_id}"),
+                key=lambda p: p.stat().st_mtime if p.exists() else 0,
+                reverse=True,
+            )
+            moments_path = _finder_moments_path(candidates[0]) if candidates else pathlib.Path("/dev/null")
+        predictions_by_vod[vod_id] = _read_moments_jsonl(moments_path)
+    return predictions_by_vod
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Top-level orchestrator
 # ─────────────────────────────────────────────────────────────────────────────
@@ -346,27 +379,7 @@ def main(argv: list[str] | None = None) -> int:
     anchor_ids = read_anchor_vod_ids(pathlib.Path(args.vods))
     storage = pathlib.Path(args.predictions_dir)
 
-    predictions_by_vod: dict[str, list[dict]] = {}
-    for vod_id in anchor_ids:
-        if args.workflow_id:
-            job_id = f"pipeline_debug_{args.workflow_id}_{vod_id}"
-            raw_path = storage / job_id / "debug" / "llm_moment_finder_moments_raw.jsonl"
-            filtered_path = storage / job_id / "debug" / "llm_moment_finder_moments.jsonl"
-            moments_path = raw_path if raw_path.exists() else filtered_path
-        else:
-            # Find most-recently modified pipeline_debug job for this VOD
-            candidates = sorted(
-                storage.glob(f"pipeline_debug_*_{vod_id}"),
-                key=lambda p: p.stat().st_mtime if p.exists() else 0,
-                reverse=True,
-            )
-            if candidates:
-                raw_path = candidates[0] / "debug" / "llm_moment_finder_moments_raw.jsonl"
-                filtered_path = candidates[0] / "debug" / "llm_moment_finder_moments.jsonl"
-                moments_path = raw_path if raw_path.exists() else filtered_path
-            else:
-                moments_path = pathlib.Path("/dev/null")
-        predictions_by_vod[vod_id] = _read_moments_jsonl(moments_path)
+    predictions_by_vod = load_predictions(anchor_ids, storage, args.workflow_id)
 
     result = evaluate_all(predictions_by_vod, manifest=manifest, anchor_vod_ids=anchor_ids, ks=ks)
 
