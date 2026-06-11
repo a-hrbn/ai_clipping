@@ -2,16 +2,15 @@ import asyncio
 import concurrent.futures
 import json
 import logging
-import os
 import pathlib
 import re
 import shutil
 import subprocess
 import threading
-import uuid
-from dataclasses import asdict, is_dataclass
 from config import settings
 from job_manager import is_job_cancelled, update_job
+from producers.adapters import FsAudioCache
+from producers.audio import AudioResource
 from services import (
     downloader,
     audio_extractor,
@@ -26,7 +25,6 @@ from services import (
 logger = logging.getLogger(__name__)
 
 _TWITCH_VOD_RE = re.compile(r"twitch\.tv/videos/(\d+)")
-_AUDIO_CACHE_VERSION = 1
 
 
 class PipelineCancelledError(RuntimeError):
@@ -175,173 +173,6 @@ def _load_complete_cached_transcript(
 
 
 
-def _audio_cache_path(cache_source: str | None) -> pathlib.Path | None:
-    digest = transcriber.stable_cache_key_for_source(cache_source)
-    if not digest:
-        return None
-    return pathlib.Path(settings.storage_dir) / "_audio_cache" / digest / "audio.wav"
-
-
-def _audio_cache_metadata_path(audio_cache_path: pathlib.Path) -> pathlib.Path:
-    return audio_cache_path.with_name("audio_metadata.json")
-
-
-
-def _audio_cache_metadata(cache_source: str, video_path: pathlib.Path | None) -> dict:
-    metadata: dict[str, object] = {
-        "version": _AUDIO_CACHE_VERSION,
-        "source": cache_source,
-        "sample_rate_hz": 16000,
-        "channels": 1,
-        "codec": "pcm_s16le",
-    }
-    if video_path is not None:
-        duration_sec = _probe_media_duration_sec(video_path)
-        metadata["duration_sec"] = round(duration_sec, 3) if duration_sec is not None else None
-    return metadata
-
-
-def _metadata_matches(cached: object, expected: dict) -> bool:
-    if not isinstance(cached, dict):
-        return False
-    for key, value in expected.items():
-        if cached.get(key) != value:
-            return False
-    return True
-
-
-
-def _json_safe_cache_value(value: object) -> object:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, pathlib.Path):
-        return str(value)
-    if is_dataclass(value):
-        return _json_safe_cache_value(asdict(value))
-    if isinstance(value, dict):
-        return {str(key): _json_safe_cache_value(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set)):
-        return [_json_safe_cache_value(item) for item in value]
-
-    tolist = getattr(value, "tolist", None)
-    if callable(tolist):
-        try:
-            return _json_safe_cache_value(tolist())
-        except (TypeError, ValueError):
-            pass
-
-    item = getattr(value, "item", None)
-    if callable(item):
-        try:
-            return _json_safe_cache_value(item())
-        except (TypeError, ValueError):
-            pass
-
-    return str(value)
-
-
-def _link_or_copy_cache_file(source: pathlib.Path, target: pathlib.Path) -> pathlib.Path:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        if source.resolve(strict=False) == target.resolve(strict=False):
-            return target
-    except OSError:
-        pass
-    target.unlink(missing_ok=True)
-    try:
-        os.link(source, target)
-    except OSError:
-        shutil.copy2(source, target)
-    return target
-
-
-def _job_audio_cache_target(job_id: str) -> pathlib.Path:
-    return pathlib.Path(settings.storage_dir) / job_id / "audio.wav"
-
-
-def _load_audio_cache(
-    cache_source: str | None,
-    *,
-    video_path: pathlib.Path,
-    job_id: str,
-) -> pathlib.Path | None:
-    path = _audio_cache_path(cache_source)
-    if path is None or not path.exists():
-        return None
-    metadata_path = _audio_cache_metadata_path(path)
-    try:
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        if path.stat().st_size <= 44:
-            return None
-    except (OSError, json.JSONDecodeError):
-        logger.warning("pipeline_audio_cache_read_failed path=%s", path, exc_info=True)
-        return None
-    expected = _audio_cache_metadata(str(cache_source), video_path)
-    if not _metadata_matches(metadata, expected):
-        logger.info("pipeline_audio_cache_stale source=%s path=%s", cache_source, path)
-        return None
-    target = _job_audio_cache_target(job_id)
-    try:
-        _link_or_copy_cache_file(path, target)
-    except OSError:
-        logger.warning("pipeline_audio_cache_link_failed source=%s path=%s", cache_source, path, exc_info=True)
-        return None
-    logger.info("pipeline_audio_cache_hit job_id=%s source=%s path=%s", job_id, cache_source, path)
-    return target
-
-
-def _write_audio_cache(
-    cache_source: str | None,
-    *,
-    video_path: pathlib.Path,
-    audio_path: pathlib.Path,
-) -> None:
-    path = _audio_cache_path(cache_source)
-    if path is None:
-        return
-    try:
-        if not audio_path.exists() or audio_path.stat().st_size <= 44:
-            return
-        path.parent.mkdir(parents=True, exist_ok=True)
-        write_token = f"{os.getpid()}.{uuid.uuid4().hex}"
-        tmp_path = path.with_suffix(path.suffix + f".tmp.{write_token}")
-        _link_or_copy_cache_file(audio_path, tmp_path)
-        tmp_path.replace(path)
-        metadata = _audio_cache_metadata(str(cache_source), video_path)
-        metadata_path = _audio_cache_metadata_path(path)
-        tmp_metadata_path = metadata_path.with_suffix(metadata_path.suffix + f".tmp.{write_token}")
-        tmp_metadata_path.write_text(
-            json.dumps(_json_safe_cache_value(metadata), ensure_ascii=True),
-            encoding="utf-8",
-        )
-        tmp_metadata_path.replace(metadata_path)
-        logger.info(
-            "pipeline_audio_cache_written source=%s path=%s size_bytes=%s",
-            cache_source,
-            path,
-            path.stat().st_size,
-        )
-    except (OSError, TypeError, ValueError):
-        logger.warning("pipeline_audio_cache_write_failed source=%s path=%s", cache_source, path, exc_info=True)
-
-
-def _extract_audio_cached(
-    video_path: pathlib.Path,
-    job_id: str,
-    *,
-    cache_source: str | None,
-) -> pathlib.Path:
-    cached = _load_audio_cache(cache_source, video_path=video_path, job_id=job_id) if cache_source else None
-    if cached is not None:
-        return cached
-    logger.info("pipeline_audio_cache_miss job_id=%s source=%s", job_id, cache_source)
-    audio_path = audio_extractor.extract(video_path, job_id)
-    if cache_source and audio_path is not None:
-        _write_audio_cache(cache_source, video_path=video_path, audio_path=audio_path)
-    return audio_path
-
-
-
 def _write_json(path: pathlib.Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -383,7 +214,7 @@ async def run_pipeline(
     effective_profile = profile or settings.clip_profile
     normalized_strategy = clip_strategy.normalize_strategy(strategy)
     loop = asyncio.get_running_loop()
-    audio_path: pathlib.Path | None = None
+    audio: AudioResource | None = None
     try:
         _raise_if_cancelled(job_id)
         transcript_cache_source = (
@@ -420,6 +251,20 @@ async def run_pipeline(
         else:
             update_job(job_id, status="downloading", progress_pct=19)
 
+        # The keystone Resource: transcription and voice-energy both pull it, but
+        # audio is extracted at most once per job. The Conductor tears it down.
+        audio = AudioResource(
+            video_path=video_path,
+            job_id=job_id,
+            cache_source=transcript_cache_source,
+            extract=audio_extractor.extract,
+            cache=FsAudioCache(
+                settings.storage_dir,
+                cache_key=transcriber.stable_cache_key_for_source,
+                probe=_probe_media_duration_sec,
+            ),
+        )
+
         def _transcription_progress(done_chunks: int, total_chunks: int, _chunk_path) -> None:
             pct = 30 + int((done_chunks / max(total_chunks, 1)) * 25)
             update_job(job_id, status="transcribing", progress_pct=min(max(pct, 30), 55))
@@ -448,14 +293,7 @@ async def run_pipeline(
             )
         else:
             update_job(job_id, status="extracting_audio", progress_pct=20)
-            audio_path = await loop.run_in_executor(
-                None,
-                lambda: _extract_audio_cached(
-                    video_path,
-                    job_id,
-                    cache_source=transcript_cache_source,
-                ),
-            )
+            audio_path = await loop.run_in_executor(None, audio.path)
             update_job(job_id, status="transcribing", progress_pct=30)
             transcript = await loop.run_in_executor(
                 None,
@@ -477,16 +315,10 @@ async def run_pipeline(
         # and persist it so cache-hit runs keep the signal too.
         energy_scores = transcriber.load_voice_energy(transcript_cache_source, transcript)
         if energy_scores is None:
+            audio_path = audio.materialized()
             if audio_path is None:
                 update_job(job_id, status="extracting_audio", progress_pct=56)
-                audio_path = await loop.run_in_executor(
-                    None,
-                    lambda: _extract_audio_cached(
-                        video_path,
-                        job_id,
-                        cache_source=transcript_cache_source,
-                    ),
-                )
+                audio_path = await loop.run_in_executor(None, audio.path)
             if audio_path is not None:
                 energy_scores = await loop.run_in_executor(
                     None,
@@ -626,8 +458,8 @@ async def run_pipeline(
             None, lambda: clipper.cut_clips(video_path, moments, job_id, progress_cb=_clip_progress)
         )
 
-        _cleanup_audio_artifacts(audio_path)
-        audio_path = None
+        audio.teardown()
+        audio = None
 
         update_job(job_id, status="done", progress_pct=100, clips=clips)
 
@@ -642,10 +474,12 @@ async def run_pipeline(
         logger.exception("Pipeline failed for job %s", job_id)
         update_job(job_id, status="failed", error=str(e))
     finally:
+        if audio is not None:
+            audio.teardown()
         _cleanup_serving_source_media(
             job_id=job_id,
             video_path=video_path,
-            audio_path=audio_path,
+            audio_path=None,
         )
 
 
