@@ -8,7 +8,6 @@ import shutil
 import subprocess
 import sys
 import uuid
-from datetime import datetime, timezone
 from fastapi import APIRouter, Form, HTTPException, UploadFile, File
 from config import settings
 from models import (
@@ -24,6 +23,7 @@ from job_manager import bind_job_session, cancel_job, create_job, delete_job, ge
 from job_manager import update_job
 from pipeline_runner import run_job_subprocess, writable_cache_dir
 from services import clip_strategy, feedback_store
+from services.job_artifact_store import JobArtifactStore, RealFsJobArtifactStore
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
@@ -41,25 +41,6 @@ _face_detection_cache: dict[str, str | bool | None] | None = None
 _SENTENCE_TRANSFORMERS_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
 _PYANNOTE_MODEL = "speaker-diarization-3.1"
 _BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
-
-
-def _read_json_file(path: pathlib.Path) -> dict | list | None:
-    if not path.exists():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-
-
-def _jsonl_count(path: pathlib.Path) -> int:
-    if not path.exists():
-        return 0
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            return sum(1 for line in handle if line.strip())
-    except OSError:
-        return 0
 
 
 def _read_jsonl_rows(path: pathlib.Path) -> list[dict]:
@@ -141,22 +122,13 @@ def _vod_id_from_url(url: str | None) -> str | None:
     return m.group(1) if m else None
 
 
-def _debug_last_modified(debug_dir: pathlib.Path) -> str | None:
-    mtimes: list[float] = []
-    try:
-        for path in debug_dir.iterdir():
-            if path.is_file():
-                mtimes.append(path.stat().st_mtime)
-    except OSError:
-        return None
-    if not mtimes:
-        return None
-    return datetime.fromtimestamp(max(mtimes), tz=timezone.utc).isoformat()
-
-
-def _job_pipeline_diagnostics(job_id: str, job: JobStatus | dict | None = None) -> dict:
-    job_dir = pathlib.Path(settings.storage_dir) / job_id
-    debug_dir = job_dir / "debug"
+def _job_pipeline_diagnostics(
+    job_id: str,
+    job: JobStatus | dict | None = None,
+    *,
+    store: JobArtifactStore | None = None,
+) -> dict:
+    store = store or RealFsJobArtifactStore(settings.storage_dir)
     job_status = None
     job_error = None
     clip_count = 0
@@ -169,7 +141,7 @@ def _job_pipeline_diagnostics(job_id: str, job: JobStatus | dict | None = None) 
         job_error = job.error
         clip_count = len(job.clips)
 
-    if not debug_dir.exists():
+    if not store.debug_artifacts_present(job_id):
         return {
             "available": False,
             "job_status": job_status,
@@ -177,7 +149,7 @@ def _job_pipeline_diagnostics(job_id: str, job: JobStatus | dict | None = None) 
             "stages": [],
         }
 
-    segments_count = _jsonl_count(debug_dir / "segments.jsonl")
+    segments_count = len(store.read_segments(job_id))
     transcript_status = "pending"
     transcript_details: list[str] = []
     if segments_count > 0:
@@ -186,8 +158,8 @@ def _job_pipeline_diagnostics(job_id: str, job: JobStatus | dict | None = None) 
         transcript_status = "warning"
         transcript_details.append("Keine Transcript-Segmente gefunden.")
 
-    llm_stage = _read_json_file(debug_dir / "llm_moment_finder_stage.json")
-    llm_moments_count = _jsonl_count(debug_dir / "llm_moment_finder_moments.jsonl")
+    llm_stage = store.read_stage(job_id)
+    llm_moments_count = len(store.read_moments(job_id))
     llm_status = "pending"
     llm_summary = "LLM Moment Finder noch nicht ausgeführt."
     llm_details: list[str] = []
@@ -214,7 +186,7 @@ def _job_pipeline_diagnostics(job_id: str, job: JobStatus | dict | None = None) 
         llm_status = "warning"
         llm_details.append("Kein LLM-Stage-Artefakt gefunden.")
 
-    final_moments_data = _read_json_file(debug_dir / "final_moments.json")
+    final_moments_data = store.read_final_moments(job_id)
     final_count = 0
     if isinstance(final_moments_data, dict):
         moments_list = final_moments_data.get("moments")
@@ -254,7 +226,7 @@ def _job_pipeline_diagnostics(job_id: str, job: JobStatus | dict | None = None) 
         ),
     ]
     # GT matches stage — only shown for Twitch VOD jobs that have a match in the eval manifest
-    request_meta = _read_json_file(job_dir / "request.json")
+    request_meta = store.read_request_metadata(job_id)
     source_url = request_meta.get("url") if isinstance(request_meta, dict) else None
     vod_id = _vod_id_from_url(source_url)
     if vod_id:
@@ -288,7 +260,7 @@ def _job_pipeline_diagnostics(job_id: str, job: JobStatus | dict | None = None) 
     return {
         "available": True,
         "job_status": job_status,
-        "last_modified": _debug_last_modified(debug_dir),
+        "last_modified": store.debug_last_modified(job_id),
         "summary": f"{ok}/{len(stages)} Stages ok, {warnings} mit Warnung.",
         "stages": stages,
         "candidate_funnel": {"available": False, "rows": 0, "samples": []},

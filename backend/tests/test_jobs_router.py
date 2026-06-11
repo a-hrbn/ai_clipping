@@ -405,6 +405,40 @@ class JobsRouterTests(unittest.TestCase):
         self.assertIn("fehlgeschlagen", llm["summary"])
         self.assertIn("API quota exceeded", llm["details"][0])
 
+    def test_job_pipeline_diagnostics_reads_through_injected_store(self) -> None:
+        # Seed the in-memory fake (the "DebugSink as a port") and inject it: the
+        # diagnostics reader must obtain every artifact through the store seam —
+        # no tmp directory, no path built by the router.
+        from services.job_artifact_store import InMemoryJobArtifactStore
+
+        store = InMemoryJobArtifactStore()
+        store.write_segments(
+            "job-1",
+            [{"start": 0.0, "end": 5.0, "text": "hi"}, {"start": 5.0, "end": 9.0, "text": "yo"}],
+        )
+        store.write_stage(
+            "job-1",
+            {"status": "ok", "provider": "gemini", "model": "m", "max_moments": 180},
+        )
+        store.write_moments("job-1", [{"rank": 1}, {"rank": 2}, {"rank": 3}])
+        store.write_final_moments("job-1", {"moments": [{}, {}, {}], "count": 3})
+
+        result = jobs._job_pipeline_diagnostics(
+            "job-1",
+            JobStatus(job_id="job-1", status="done", clips=[]),
+            store=store,
+        )
+
+        self.assertTrue(result["available"])
+        stages = {stage["id"]: stage for stage in result["stages"]}
+        self.assertEqual(stages["transcript"]["status"], "ok")
+        self.assertIn("2", stages["transcript"]["summary"])
+        self.assertEqual(stages["llm_moment_finder"]["status"], "ok")
+        self.assertIn("3 Momente", stages["llm_moment_finder"]["summary"])
+        self.assertEqual(stages["clipping"]["status"], "ok")
+        # The fake reports no wall-clock mtime; the reader tolerates None.
+        self.assertIsNone(result["last_modified"])
+
     def test_submit_clip_feedback_accepts_gold_eval_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             response = ClipFeedbackResponse(

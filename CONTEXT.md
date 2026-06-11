@@ -63,6 +63,15 @@ erzeugt; die Top-K Moments werden zu Clips. _Avoid_: highlight, segment.
 Scores wie voice-energy burst und chat spike). Die geteilte Timeline-Währung, die die
 Clip-Finding-Producers annotieren. _Avoid_: segment (unqualifiziert), chunk.
 
+**Job-Artifact-Store**: Der einzige Owner des On-Disk-Job-Layouts — der Artefakt-
+**Namen** (`segments.jsonl`, `final_moments.json`, die `llm_moment_finder_*`-Dumps,
+`request.json`, `progress.json` …) UND der json/jsonl/text-I/O. Aufrufer übergeben nur
+die `job_id` und eine Artefakt-Rolle, nie selbst einen Pfad; umbenennen passiert an
+genau einer Stelle, sodass Schreiber und Leser nicht auseinanderlaufen. Zwei Adapter:
+`RealFsJobArtifactStore` (prod) und `InMemoryJobArtifactStore` (Test-Fake). Kennt nur
+Pfade + I/O — die `jobs.json`-Registry-Mechanik bleibt im `job_manager`. _Avoid_:
+artifact manager, file store.
+
 ### Offline-ML / Eval
 
 **GT-Flywheel** (Ground-Truth-Flywheel): Der Offline-Kreislauf, der echte Eval-/
