@@ -43,6 +43,8 @@ BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
+from ml.row_identity import read_jsonl, window_overlap_ratio  # noqa: E402
+
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -54,35 +56,20 @@ _MIN_DURATION_SEC = 4.0
 _MAX_DURATION_SEC = 120.0
 
 
-def _read_jsonl(path: pathlib.Path) -> list[dict]:
-    rows: list[dict] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rows.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return rows
-
-
 def _clip_group(source_url: str, vod_id: str) -> str:
     basis = (source_url or "").strip() or f"vod:{vod_id}"
     return hashlib.sha1(basis.encode("utf-8")).hexdigest()[:10]
-
-
-def _overlap_ratio(a: dict, b: dict) -> float:
-    overlap = max(0.0, min(a["end"], b["end"]) - max(a["start"], b["start"]))
-    shorter = max(min(a["end"] - a["start"], b["end"] - b["start"]), 1e-9)
-    return overlap / shorter
 
 
 def _dedupe_windows(moments: list[dict]) -> list[dict]:
     """Drop near-duplicate windows; the higher-similarity row wins."""
     kept: list[dict] = []
     for moment in sorted(moments, key=lambda m: m.get("match_similarity") or 0, reverse=True):
-        if any(_overlap_ratio(moment, existing) >= _OVERLAP_DEDUP_RATIO for existing in kept):
+        if any(
+            window_overlap_ratio(moment["start"], moment["end"], existing["start"], existing["end"])
+            >= _OVERLAP_DEDUP_RATIO
+            for existing in kept
+        ):
             continue
         kept.append(moment)
     kept.sort(key=lambda m: m["start"])
@@ -98,12 +85,12 @@ def main() -> int:
     args = parser.parse_args()
 
     manifest_path = pathlib.Path(args.manifest)
-    existing = _read_jsonl(manifest_path) if manifest_path.exists() else []
+    existing = read_jsonl(manifest_path) if manifest_path.exists() else []
     existing_vods = {str(row.get("vod_id")) for row in existing}
     logger.info("Existing manifest: %d VODs, %d GT moments",
                 len(existing), sum(len(r.get("gt_moments") or []) for r in existing))
 
-    rows = _read_jsonl(pathlib.Path(args.training_rows))
+    rows = read_jsonl(pathlib.Path(args.training_rows))
     positives = [
         r for r in rows
         if r.get("label_class") == "cross_platform_outcome_positive"

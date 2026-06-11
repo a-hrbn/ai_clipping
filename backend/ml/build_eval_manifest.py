@@ -13,7 +13,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import pathlib
 import sys
@@ -21,6 +20,8 @@ import sys
 BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
+
+from ml.row_identity import read_jsonl, window_overlap_ratio, write_jsonl  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
 logger = logging.getLogger(__name__)
@@ -47,7 +48,7 @@ def main() -> int:
         logger.error("Matches file not found: %s", matches_path)
         return 1
 
-    rows = _read_jsonl(matches_path)
+    rows = read_jsonl(matches_path)
     logger.info("Loaded %d match rows from %s", len(rows), matches_path)
 
     rows = [r for r in rows if float(r.get("transcript_similarity") or 0) >= args.min_similarity]
@@ -62,17 +63,13 @@ def main() -> int:
     output_rows = []
     total_moments = 0
     for vod_id, vod_rows in sorted(by_vod.items()):
-        gt_moments = _dedup_moments(vod_rows)
+        gt_moments = dedup_moments(vod_rows)
         total_moments += len(gt_moments)
         output_rows.append({"vod_id": vod_id, "gt_moments": gt_moments})
         logger.info("VOD %s: %d match rows → %d gt_moments", vod_id, len(vod_rows), len(gt_moments))
 
     output_path = pathlib.Path(args.output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(
-        "\n".join(json.dumps(row, ensure_ascii=True) for row in output_rows),
-        encoding="utf-8",
-    )
+    write_jsonl(output_path, output_rows)
     logger.info(
         "Eval manifest: %d VODs, %d gt_moments total → %s",
         len(output_rows), total_moments, output_path,
@@ -80,8 +77,17 @@ def main() -> int:
     return 0
 
 
-def _dedup_moments(rows: list[dict]) -> list[dict]:
-    """Deduplicate near-overlapping windows per VOD. Highest views wins a slot."""
+def dedup_moments(rows: list[dict]) -> list[dict]:
+    """Deduplicate near-overlapping windows per VOD into eval-manifest moments.
+
+    Projects each match row into the eval-manifest **moment** schema
+    (``repost_title``/``views``/``source_url``/``match_kind``), then collapses
+    near-overlapping windows: highest views wins a slot, a candidate is dropped
+    when it covers >= ``_OVERLAP_DEDUP_RATIO`` of an already-kept window. Output
+    is sorted by ``start``. The pure geometry is delegated to
+    :func:`ml.row_identity.window_overlap_ratio`; this function owns the
+    eval-manifest schema knowledge, so it stays in the manifest builder.
+    """
     moments = []
     for row in rows:
         start = float(row.get("window_start") or 0)
@@ -105,33 +111,14 @@ def _dedup_moments(rows: list[dict]) -> list[dict]:
 
     kept: list[dict] = []
     for candidate in moments:
-        if not any(_overlap_ratio(candidate, k) >= _OVERLAP_DEDUP_RATIO for k in kept):
+        if not any(
+            window_overlap_ratio(candidate["start"], candidate["end"], k["start"], k["end"])
+            >= _OVERLAP_DEDUP_RATIO
+            for k in kept
+        ):
             kept.append(candidate)
 
     return sorted(kept, key=lambda m: m["start"])
-
-
-def _overlap_ratio(a: dict, b: dict) -> float:
-    overlap = min(a["end"], b["end"]) - max(a["start"], b["start"])
-    if overlap <= 0:
-        return 0.0
-    min_dur = min(a["end"] - a["start"], b["end"] - b["start"])
-    if min_dur <= 0:
-        return 0.0
-    return overlap / min_dur
-
-
-def _read_jsonl(path: pathlib.Path) -> list[dict]:
-    rows = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rows.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return rows
 
 
 if __name__ == "__main__":

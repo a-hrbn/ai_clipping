@@ -58,7 +58,7 @@ from ml.discover_iboclipss_clips import (  # noqa: E402
     _filter_to_windows,
 )
 from ml.build_gt_vod_transcripts import _process_vod  # noqa: E402
-from ml.build_eval_manifest import _dedup_moments  # noqa: E402
+from ml.build_eval_manifest import dedup_moments  # noqa: E402
 
 _DEFAULT_VOD_CSV = BACKEND_ROOT / "ml" / "jynxzi_gt_vods.csv"
 _DEFAULT_CHANNEL = "https://www.youtube.com/@Iboclipss/shorts"
@@ -576,7 +576,7 @@ def step_build_eval_manifest(
     output_rows: list[dict] = []
     total_moments = 0
     for vod_id, vod_rows in sorted(by_vod.items()):
-        gt_moments = _dedup_moments(vod_rows)
+        gt_moments = dedup_moments(vod_rows)
         total_moments += len(gt_moments)
         output_rows.append({"vod_id": vod_id, "gt_moments": gt_moments})
         logger.info("      VOD %s: %d raw → %d moments after dedup", vod_id, len(vod_rows), len(gt_moments))

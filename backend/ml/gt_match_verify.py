@@ -7,7 +7,7 @@ of @Iboclipss reposts and the set of VOD ids captured by the daily capture job
   1. Matches each repost against the captured VODs (transcript primary, audio
      fallback) — reusing :mod:`ml.match_cross_platform_transcripts` unchanged.
   2. Builds a per-VOD, dedup'd manifest of matched moments — reusing
-     :func:`ml.build_eval_manifest._dedup_moments`.
+     :func:`ml.build_eval_manifest.dedup_moments`.
   3. Auto-verifies every moment with the confirm-margin rule — reusing
      :func:`ml.verify_gt_matches.verify_moment` (``is_confirmed`` /
      ``assign_tier``): gold when the margin clears the floor, silver for
@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from ml import gt_capture
 from ml import match_cross_platform_audio_fingerprints as audio_matcher
 from ml import verify_gt_matches as verifier
-from ml.build_eval_manifest import _dedup_moments
+from ml.build_eval_manifest import dedup_moments
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +101,7 @@ def build_captured_vod_rows(captured_vod_ids, cache_root: pathlib.Path) -> list[
 def build_manifest_from_matches(match_rows: list[dict]) -> list[dict]:
     """Group accepted match rows by VOD and dedup near-overlapping windows.
 
-    Reuses :func:`ml.build_eval_manifest._dedup_moments` (highest-views wins a
+    Reuses :func:`ml.build_eval_manifest.dedup_moments` (highest-views wins a
     slot) so the manifest shape is identical to the canonical eval manifest;
     moments carry the fields :func:`ml.verify_gt_matches.verify_moment` reads
     (``start``/``end``/``source_url``/``match_similarity``/...).
@@ -112,7 +112,7 @@ def build_manifest_from_matches(match_rows: list[dict]) -> list[dict]:
         if vod_id:
             by_vod.setdefault(vod_id, []).append(row)
     return [
-        {"vod_id": vod_id, "gt_moments": _dedup_moments(rows)}
+        {"vod_id": vod_id, "gt_moments": dedup_moments(rows)}
         for vod_id, rows in sorted(by_vod.items())
     ]
 
