@@ -12,6 +12,7 @@ import pathlib
 from typing import TYPE_CHECKING, Callable, Protocol
 
 if TYPE_CHECKING:  # keep runtime import-light — RichSegment pulls torch/whisper
+    from models import ClipResult
     from services.moment_finder import MomentFinderResult
     from services.transcriber import RichSegment
 
@@ -59,6 +60,12 @@ SaveChatEnrichmentFn = Callable[["str | None", "list[RichSegment]"], None]  # tr
 # tests pass a canned ``MomentFinderResult``. Importing the real service pulls
 # torch via RichSegment, so MomentFinding keeps it behind this Callable alias.
 FindMomentsFn = Callable[..., "MomentFinderResult"]  # moment_finder.find_moments
+
+# Leaf-op port for the clipping step. The Conductor wires ``clipper.cut_clips``
+# (wrapped to stream partial clips via update_job); tests pass a canned
+# ``list[ClipResult]``. Shape: cut(video_path, moments, job_id, *, progress_cb)
+# where progress_cb receives ``(so_far, done, total)``.
+CutClipsFn = Callable[..., "list[ClipResult]"]  # clipper.cut_clips
 
 
 class AudioCache(Protocol):

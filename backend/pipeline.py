@@ -12,6 +12,7 @@ from job_manager import is_job_cancelled, update_job
 from producers.adapters import FsAudioCache
 from producers.audio import AudioResource
 from producers.chat import ChatEnrichment
+from producers.clipping import Clipping
 from producers.energy import VoiceEnergy
 from producers.moments import MomentFinding, MomentParams
 from producers.transcript import TranscriptResource
@@ -160,14 +161,6 @@ def _probe_media_duration_sec(video_path: pathlib.Path) -> float | None:
     return duration if duration > 0 else None
 
 
-def _write_json(path: pathlib.Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(payload, ensure_ascii=True, indent=2),
-        encoding="utf-8",
-    )
-
-
 def _moment_params() -> MomentParams:
     """Snapshot the ~17 ``moment_finder_*`` settings once, so the MomentFinding
     Producer is handed plain values and never reads ``config.settings``."""
@@ -186,28 +179,6 @@ def _moment_params() -> MomentParams:
         filter_transcript_noise=bool(getattr(settings, "moment_finder_filter_transcript_noise", True)),
         temperature=0.0,
     )
-
-
-def _moments_from_post_processed(rows: list[dict], platform: str) -> list[dict]:
-    moments = []
-    for i, row in enumerate(rows, start=1):
-        start = float(row["start_time"])
-        end = float(row["end_time"])
-        moments.append({
-            "start_time": start,
-            "end_time": end,
-            "viral_score": float(row.get("viral_score") or 1.0),
-            "composite_score": float(row.get("composite_score") or row.get("viral_score") or 1.0),
-            "reason": str(row.get("reason") or ""),
-            "candidate_id": f"llm_moment_{i:02d}",
-            "ranking_mode": "llm_moment_finder",
-            "platform": platform,
-            "projected_hook_score": row.get("hook"),
-            "projected_retention_score": row.get("flow"),
-            "value_score": row.get("value"),
-            "trend_score": row.get("trend"),
-        })
-    return moments
 
 
 
@@ -393,39 +364,33 @@ async def run_pipeline(
         (transcripts_dir / f"{job_id}.jsonl").write_text(transcriber.format_jsonl(transcript), encoding="utf-8")
         _write_jsonl(debug_dir / "segments.jsonl", _segment_records(transcript))
 
-        platform = str(normalized_strategy.get("platform") or "general")
-        moment_candidates = _moments_from_post_processed(llm_result.post_processed_moments, platform)
-        # Cut only the top-K ranked moments into clips; the full candidate set
-        # remains in the debug JSONL files for review/eval.
-        clip_top_k = int(getattr(settings, "clip_top_k", 0) or 0)
-        moments = moment_candidates[:clip_top_k] if clip_top_k > 0 else moment_candidates
-        _write_json(debug_dir / "final_moments.json", {"moments": moments, "count": len(moments)})
+        # Clipping post-processes the moment rows, selects top-K, writes
+        # final_moments.json, then cuts the clips. Pure: top_k/platform/debug_dir/
+        # job_id + cut are injected; the run() helper maps cut progress onto the
+        # `clipping` 88–99 band. Partial-clips streaming stays a Conductor concern
+        # via a cut wrapper that update_job(clips=so_far) before delegating to the
+        # producer's band-progress callback.
+        def cut_with_clip_streaming(video_path_, moments, job_id_, *, progress_cb):
+            def on_cut(so_far: list, done: int, total: int) -> None:
+                try:
+                    update_job(job_id_, status="clipping", clips=so_far)
+                except Exception:
+                    pass
+                progress_cb(so_far, done, total)
 
-        logger.info(
-            json.dumps(
-                {
-                    "event": "pipeline_moments_ready",
-                    "job_id": job_id,
-                    "candidate_count": len(moment_candidates),
-                    "clipped_count": len(moments),
-                    "clip_top_k": clip_top_k,
-                },
-                ensure_ascii=True, sort_keys=True,
-            )
+            return clipper.cut_clips(video_path_, moments, job_id_, progress_cb=on_cut)
+
+        clipping = Clipping(
+            job_id=job_id,
+            debug_dir=debug_dir,
+            top_k=int(getattr(settings, "clip_top_k", 0) or 0),
+            platform=str(normalized_strategy.get("platform") or "general"),
+            cut=cut_with_clip_streaming,
         )
-
-        update_job(job_id, status="clipping", progress_pct=88)
-        _raise_if_cancelled(job_id)
-
-        def _clip_progress(so_far: list, done: int, total: int) -> None:
-            pct = 88 + int(done / total * 11)
-            try:
-                update_job(job_id, status="clipping", progress_pct=pct, clips=so_far)
-            except Exception:
-                pass
-
-        clips = await loop.run_in_executor(
-            None, lambda: clipper.cut_clips(video_path, moments, job_id, progress_cb=_clip_progress)
+        clips = await run(
+            lambda *, progress: clipping.run(video_path, llm_result, progress=progress),
+            status="clipping",
+            band=(88, 99),
         )
 
         audio.teardown()
