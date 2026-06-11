@@ -36,6 +36,13 @@ TranscribeFn = Callable[..., "list[RichSegment]"]  # transcriber.transcribe_with
 LoadCachedFn = Callable[..., "list[RichSegment] | None"]  # transcriber.load_cached_transcript
 ProbeFn = Callable[[pathlib.Path], "float | None"]  # ffprobe media duration
 
+# Leaf-op ports for the voice-energy step. ``compute`` runs on the WAV resolved
+# from the shared AudioResource; ``load``/``save`` persist the per-segment score
+# under the transcript cache so later cache-hit runs keep the signal.
+ComputeEnergyFn = Callable[[pathlib.Path, "list[RichSegment]"], "list[float]"]  # audio_energy.compute_segment_energy
+LoadVoiceEnergyFn = Callable[["str | None", "list[RichSegment]"], "list[float] | None"]  # transcriber.load_voice_energy
+SaveVoiceEnergyFn = Callable[["str | None", "list[RichSegment]", "list[float]"], None]  # transcriber.save_voice_energy
+
 
 class AudioCache(Protocol):
     """The per-source audio cache. Two adapters justify the port: ``FsAudioCache``

@@ -11,6 +11,7 @@ from config import settings
 from job_manager import is_job_cancelled, update_job
 from producers.adapters import FsAudioCache
 from producers.audio import AudioResource
+from producers.energy import VoiceEnergy
 from producers.transcript import TranscriptResource
 from services import (
     downloader,
@@ -296,33 +297,22 @@ async def run_pipeline(
         debug_dir.mkdir(parents=True, exist_ok=True)
 
         # Voice energy burst: load from the transcript cache when possible; else
-        # compute it — extracting audio if the transcript cache hit skipped that —
-        # and persist it so cache-hit runs keep the signal too.
-        energy_scores = transcriber.load_voice_energy(transcript_cache_source, transcript)
-        if energy_scores is None:
-            audio_path = audio.materialized()
-            if audio_path is None:
-                update_job(job_id, status="extracting_audio", progress_pct=56)
-                audio_path = await loop.run_in_executor(None, audio.path)
-            if audio_path is not None:
-                energy_scores = await loop.run_in_executor(
-                    None,
-                    lambda: audio_energy.compute_segment_energy(audio_path, transcript),
-                )
-            else:
-                logger.warning("pipeline_voice_energy_skipped job_id=%s reason=no_audio", job_id)
-            if energy_scores:
-                transcriber.save_voice_energy(transcript_cache_source, transcript, energy_scores)
-        if energy_scores:
-            transcript = [
-                seg.__class__(
-                    **{
-                        **{f.name: getattr(seg, f.name) for f in seg.__dataclass_fields__.values()},
-                        "voice_energy_burst_score": energy_scores[i],
-                    }
-                )
-                for i, seg in enumerate(transcript)
-            ]
+        # compute it — pulling the SAME AudioResource transcription used, so audio
+        # is extracted at most once — and persist it so cache-hit runs keep the
+        # signal. The Producer is pure; load/save/compute are injected, and the
+        # run() helper maps its work onto the `extracting_audio` band.
+        voice_energy = VoiceEnergy(
+            audio=audio,
+            cache_source=transcript_cache_source,
+            load=transcriber.load_voice_energy,
+            save=transcriber.save_voice_energy,
+            compute=audio_energy.compute_segment_energy,
+        )
+        transcript = await run(
+            lambda *, progress: voice_energy.apply(transcript),
+            status="extracting_audio",
+            band=(56, 60),
+        )
 
         if settings.enable_chat_analysis and url:
             update_job(job_id, status="downloading_chat", progress_pct=60)
