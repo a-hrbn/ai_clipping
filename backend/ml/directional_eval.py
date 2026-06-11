@@ -367,6 +367,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="CSV of anchor VOD IDs the canonical eval is restricted to")
     parser.add_argument("--all-gold", action="store_true",
                         help="Score every gold VOD, not just the anchor set (off the canonical metric)")
+    parser.add_argument("--output", type=pathlib.Path, default=None,
+                        help="Write the full result JSON here (the committed baseline artifact)")
     parser.add_argument("--json", dest="output_json", action="store_true")
     args = parser.parse_args(argv)
 
@@ -398,8 +400,12 @@ def main(argv: list[str] | None = None) -> int:
 
     result["computed_at"] = datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00", "Z")
 
+    payload = json.dumps(result, indent=2, ensure_ascii=False)
+    if args.output:
+        args.output.write_text(payload + "\n", encoding="utf-8")
+
     if args.output_json:
-        print(json.dumps(result, indent=2, ensure_ascii=False))
+        print(payload)
     else:
         print(format_report(result))
         print(f"\ncomputed_at: {result['computed_at']}")

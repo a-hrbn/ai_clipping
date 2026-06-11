@@ -1,3 +1,6 @@
+import json
+import pathlib
+import tempfile
 import unittest
 
 from ml import directional_eval
@@ -275,6 +278,49 @@ class RunTests(unittest.TestCase):
         self.assertIn("FLOOR", report.upper())
         self.assertIn("HEADLINE", report.upper())
         self.assertIn("r@50", report)
+
+
+class OutputArtifactTests(unittest.TestCase):
+    def test_output_writes_valid_baseline_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            manifest_path = tmp_path / "manifest.jsonl"
+            manifest_path.write_text(
+                json.dumps({
+                    "vod_id": "A",
+                    "gt_moments": [{"start": 10.0, "end": 30.0, "views": 300_000, "gt_tier": "gold"}],
+                }) + "\n",
+                encoding="utf-8",
+            )
+            anchor_csv = tmp_path / "anchors.csv"
+            anchor_csv.write_text("vod_id\nA\n", encoding="utf-8")
+            preds_dir = tmp_path / "storage"
+            preds_dir.mkdir()
+            out_path = tmp_path / "baseline.json"
+
+            rc = directional_eval.main([
+                "--manifest", str(manifest_path),
+                "--anchor-csv", str(anchor_csv),
+                "--predictions-dir", str(preds_dir),
+                "--output", str(out_path),
+                "--json",
+            ])
+
+            self.assertEqual(rc, 0)
+            self.assertTrue(out_path.exists())
+            artifact = json.loads(out_path.read_text(encoding="utf-8"))
+            for key in (
+                "ks", "gold_tiers", "anchor_restricted", "gold_vods", "scored_vods",
+                "missing_prediction_vods", "headline_min_views", "floor", "headline",
+                "generation", "coverage_threshold", "computed_at",
+            ):
+                self.assertIn(key, artifact)
+            # product recall@20 (headline column) present on both tiers
+            self.assertIn(str(directional_eval.PRODUCT_HEADLINE_K), artifact["floor"]["recall"])
+            self.assertIn(str(directional_eval.PRODUCT_HEADLINE_K), artifact["headline"]["recall"])
+            # generation ceiling (raw@any) present
+            self.assertIn("recall_any", artifact["generation"]["floor"])
+            self.assertTrue(artifact["anchor_restricted"])
 
 
 if __name__ == "__main__":

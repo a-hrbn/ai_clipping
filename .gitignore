@@ -23,6 +23,7 @@ backend/ml/artifacts/*
 !backend/ml/artifacts/*gold_holdout_annotation_manifest*
 !backend/ml/artifacts/*ranker_feature_confounds*
 !backend/ml/artifacts/*rollout_review_queue*
+!backend/ml/artifacts/*finder_recall_baseline*
 
 backend/tmp/*
 !backend/tmp/storage/
