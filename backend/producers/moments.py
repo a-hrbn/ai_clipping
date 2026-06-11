@@ -4,10 +4,11 @@ Owns the ``llm_moment_finder_stage.json`` running/ok/failed contract the job
 router reads, plus the prompt / response / usage / moments(.raw).jsonl debug dumps.
 Pure: the ~17 ``moment_finder_*`` settings are bound into an injected
 :class:`MomentParams` snapshot and ``find`` is injected, so it never reads
-``config.settings`` or touches job state. Empty ``ranked_candidates`` is a
-failure — it writes the failed marker, then raises the injected
-``MomentFinderError`` (which is also injected rather than imported, since the real
-``moment_finder`` service pulls torch via ``RichSegment``).
+``config.settings`` or touches job state. Empty ``post_processed_moments`` (the
+serving currency) is a failure — it writes the failed marker, then raises the
+injected ``MomentFinderError`` (which is also injected rather than imported, since
+the real ``moment_finder`` service pulls torch via ``RichSegment``). The eval-only
+``moments_raw.jsonl`` is written only when the snapshot's ``eval_recall`` is on.
 """
 from __future__ import annotations
 
@@ -62,6 +63,9 @@ class MomentParams:
     retry_backoff_sec: float
     filter_transcript_noise: bool
     temperature: float = 0.0
+    # Off for serving: gates the raw-recall branch and the typed RankedCandidate in
+    # find_moments (and the moments_raw.jsonl dump here). Eval/capture runs opt in.
+    eval_recall: bool = False
 
 
 class MomentFinding:
@@ -121,9 +125,10 @@ class MomentFinding:
                 api_retries=p.api_retries,
                 retry_backoff_sec=p.retry_backoff_sec,
                 filter_transcript_noise=p.filter_transcript_noise,
+                eval_recall=p.eval_recall,
             )
-            if not result.ranked_candidates:
-                raise self._error("LLM moment finder returned no ranked candidates.")
+            if not result.post_processed_moments:
+                raise self._error("LLM moment finder returned no moments.")
             stage.update({"status": "ok", **result.summary})
             (self._debug_dir / "llm_moment_finder_prompt.txt").write_text(
                 result.prompt, encoding="utf-8"
@@ -136,9 +141,12 @@ class MomentFinding:
             _write_jsonl(
                 self._debug_dir / "llm_moment_finder_moments.jsonl", result.post_processed_moments
             )
-            _write_jsonl(
-                self._debug_dir / "llm_moment_finder_moments_raw.jsonl", result.raw_moments
-            )
+            # Eval-only artifact: skipped on serving runs (no raw branch computed),
+            # so the debug dir holds only what was actually produced.
+            if p.eval_recall:
+                _write_jsonl(
+                    self._debug_dir / "llm_moment_finder_moments_raw.jsonl", result.raw_moments
+                )
             return result
         except self._error as exc:
             stage.update({"status": "failed", "error_type": type(exc).__name__, "error": str(exc)})

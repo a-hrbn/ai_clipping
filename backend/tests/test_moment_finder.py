@@ -58,6 +58,7 @@ def test_find_moments_reuses_d0_prompt_filters_noise_and_builds_ranked_candidate
         model="gemini-test",
         max_moments=10,
         max_tokens=1000,
+        eval_recall=True,
     )
 
     assert "actual hook starts" in str(captured["prompt"])
@@ -78,6 +79,58 @@ def test_find_moments_reuses_d0_prompt_filters_noise_and_builds_ranked_candidate
     assert ranked.features.has_llm_semantics is True
     assert ranked.features.projected_hook_score == 1.0
     assert "llm_moment_finder" in ranked.rationale
+
+
+def test_find_moments_eval_recall_off_skips_raw_and_typed(monkeypatch) -> None:
+    """Serving default (eval_recall=False): no raw/pre-diversity branch and no
+    typed RankedCandidate are materialized; the post-processed dict-rows (the one
+    serving currency) stay bit-identical to the eval_recall=True run."""
+
+    def fake_call(prompt: str, **kwargs):
+        return (
+            json.dumps(
+                {
+                    "moments": [
+                        {
+                            "start": 10,
+                            "end": 35,
+                            "hook": 0.8,
+                            "flow": 0.7,
+                            "value": 0.9,
+                            "trend": 0.6,
+                            "virality": 0.95,
+                            "rationale": "strong payoff",
+                        }
+                    ]
+                }
+            ),
+            {"provider": "fake"},
+        )
+
+    monkeypatch.setattr(moment_finder.d0, "call_moment_finder_provider", fake_call)
+    segments = [
+        RichSegment(start=10.0, end=20.0, text="actual hook starts."),
+        RichSegment(start=20.0, end=35.0, text="clear payoff!"),
+    ]
+
+    serving = moment_finder.find_moments(
+        segments, profile="jynxzi", vod_id="vod-1", max_tokens=1000
+    )
+    eval_run = moment_finder.find_moments(
+        segments, profile="jynxzi", vod_id="vod-1", max_tokens=1000, eval_recall=True
+    )
+
+    # The serving currency is present and bit-identical to the eval run.
+    assert serving.post_processed_moments
+    assert serving.post_processed_moments == eval_run.post_processed_moments
+    # Eval-only encodings stay empty on the serving default.
+    assert serving.ranked_candidates == []
+    assert serving.raw_moments == []
+    assert serving.summary["ranked_candidate_count"] == 0
+    assert serving.summary["raw_moment_count"] == 0
+    # eval_recall=True reproduces both encodings as today.
+    assert eval_run.ranked_candidates
+    assert eval_run.raw_moments
 
 
 def test_post_processed_rows_to_ranked_candidates_sorts_by_pipeline_score() -> None:

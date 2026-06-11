@@ -31,15 +31,28 @@ def _params(**over) -> MomentParams:
     return MomentParams(**base)
 
 
-def _result(ranked: list) -> types.SimpleNamespace:
+def _result(ranked: list, *, post_processed=None, raw=None) -> types.SimpleNamespace:
+    # post_processed (the dict-rows) is the serving currency the empty check now
+    # guards; default it to mirror the ranked count so a non-empty `ranked`
+    # produces a non-empty serving set. raw_moments is eval-only and empty unless
+    # the run opted into eval_recall.
+    if post_processed is None:
+        post_processed = [
+            {"rank": i + 1, "start_time": 0.0, "end_time": 5.0} for i in range(len(ranked))
+        ]
+    if raw is None:
+        raw = [{"raw": 1}] if ranked else []
     return types.SimpleNamespace(
         ranked_candidates=ranked,
-        post_processed_moments=[{"rank": 1, "start_time": 0.0, "end_time": 5.0}],
-        raw_moments=[{"raw": 1}],
+        post_processed_moments=post_processed,
+        raw_moments=raw,
         prompt="PROMPT",
         response_text="RESPONSE",
         usage={"provider": "gemini", "input_tokens": 10},
-        summary={"ranked_candidate_count": len(ranked), "post_processed_moment_count": 1},
+        summary={
+            "ranked_candidate_count": len(ranked),
+            "post_processed_moment_count": len(post_processed),
+        },
     )
 
 
@@ -70,9 +83,29 @@ class MomentFindingTests(unittest.TestCase):
             self.assertEqual(
                 len((debug / "llm_moment_finder_moments.jsonl").read_text(encoding="utf-8").splitlines()), 1
             )
-            self.assertTrue((debug / "llm_moment_finder_moments_raw.jsonl").exists())
+            # eval_recall is off by default, so the eval-only raw artifact is not written.
+            self.assertEqual(find_calls[0]["eval_recall"], False)
+            self.assertFalse((debug / "llm_moment_finder_moments_raw.jsonl").exists())
             self.assertTrue((debug / "llm_moment_finder_usage.json").exists())
             self.assertIs(out.ranked_candidates[0], find_calls[0] and out.ranked_candidates[0])
+
+    def test_eval_recall_passes_flag_and_writes_raw_artifact(self) -> None:
+        with TemporaryDirectory() as tmp:
+            debug = Path(tmp)
+            captured: dict = {}
+            mf = MomentFinding(
+                profile="jynxzi",
+                vod_id="123",
+                debug_dir=debug,
+                params=_params(eval_recall=True),
+                find=lambda _segs, **kw: captured.update(kw) or _result([object()]),
+                error=_FakeMomentFinderError,
+            )
+
+            mf.find([object()])
+
+            self.assertEqual(captured["eval_recall"], True)
+            self.assertTrue((debug / "llm_moment_finder_moments_raw.jsonl").exists())
 
     def test_params_and_identity_are_passed_through_to_find(self) -> None:
         # purity: every find_moments arg is resolved from the injected params /
@@ -97,8 +130,9 @@ class MomentFindingTests(unittest.TestCase):
             self.assertEqual(captured["min_duration_sec"], 8.0)
             self.assertEqual(captured["filter_transcript_noise"], True)
             self.assertEqual(captured["temperature"], 0.0)
+            self.assertEqual(captured["eval_recall"], False)
 
-    def test_empty_ranked_candidates_raises_and_marks_stage_failed(self) -> None:
+    def test_empty_post_processed_moments_raises_and_marks_stage_failed(self) -> None:
         with TemporaryDirectory() as tmp:
             debug = Path(tmp)
             mf = MomentFinding(
@@ -106,7 +140,7 @@ class MomentFindingTests(unittest.TestCase):
                 vod_id="123",
                 debug_dir=debug,
                 params=_params(),
-                find=lambda _segs, **kw: _result([]),  # no ranked candidates
+                find=lambda _segs, **kw: _result([]),  # no serving moments
                 error=_FakeMomentFinderError,
             )
 
@@ -116,7 +150,7 @@ class MomentFindingTests(unittest.TestCase):
             stage = json.loads((debug / "llm_moment_finder_stage.json").read_text(encoding="utf-8"))
             self.assertEqual(stage["status"], "failed")
             self.assertEqual(stage["error_type"], "_FakeMomentFinderError")
-            self.assertIn("no ranked candidates", stage["error"])
+            self.assertIn("no moments", stage["error"])
             # ok-path artifacts are not written on the failure path
             self.assertFalse((debug / "llm_moment_finder_moments.jsonl").exists())
             self.assertFalse((debug / "llm_moment_finder_prompt.txt").exists())

@@ -49,6 +49,7 @@ def find_moments(
     filter_transcript_noise: bool = True,
     chunk_duration_sec: float = d0.DEFAULT_CHUNK_DURATION_SEC,
     chunk_overlap_sec: float = d0.DEFAULT_CHUNK_OVERLAP_SEC,
+    eval_recall: bool = False,
 ) -> MomentFinderResult:
     transcript_segments = rich_segments_to_transcript_segments(segments)
     prompt_transcript = d0.format_transcript_for_prompt(
@@ -129,19 +130,27 @@ def find_moments(
     rank_score_fn = None
     rank_key = _llm_moment_composite
 
-    # Raw branch: pre-dedupe, pre-diversity — measures true LLM recall for eval.
-    raw_ranked = sorted(length_discipline.moments, key=rank_key, reverse=True)
-    raw_rows = llm_moments_to_post_processor_rows(raw_ranked, rank_score_fn=rank_score_fn)
-    raw_snapped = _post_processor.snap_boundaries(raw_rows, list(segments))
-    raw_post_processed_rows = _rank_post_processed_rows(raw_snapped)
-
+    # Serving currency: the post-processed dict-rows the Clipping producer consumes.
     deduped_moments, duplicate_moments = d0.dedupe_moments_by_overlap(length_discipline.moments)
     ranked_moments = sorted(deduped_moments, key=rank_key, reverse=True)
     moment_rows = llm_moments_to_post_processor_rows(ranked_moments, rank_score_fn=rank_score_fn)
     snapped_rows = _post_processor.snap_boundaries(moment_rows, list(segments))
     diverse_rows = _post_processor.enforce_diversity(snapped_rows)
     post_processed_rows = _rank_post_processed_rows(diverse_rows)
-    ranked_candidates = post_processed_rows_to_ranked_candidates(post_processed_rows)
+
+    # Eval-only encodings, gated behind eval_recall (off for serving): the raw
+    # pre-dedupe/pre-diversity branch (a second snap_boundaries pass measuring true
+    # LLM recall) and the typed RankedCandidate (the 65-field CandidateFeatures
+    # build). Serving consumes neither, so the default pays for neither.
+    if eval_recall:
+        raw_ranked = sorted(length_discipline.moments, key=rank_key, reverse=True)
+        raw_rows = llm_moments_to_post_processor_rows(raw_ranked, rank_score_fn=rank_score_fn)
+        raw_snapped = _post_processor.snap_boundaries(raw_rows, list(segments))
+        raw_post_processed_rows = _rank_post_processed_rows(raw_snapped)
+        ranked_candidates = post_processed_rows_to_ranked_candidates(post_processed_rows)
+    else:
+        raw_post_processed_rows = []
+        ranked_candidates = []
     summary = {
         "provider": resolved_provider,
         "model": resolved_model,

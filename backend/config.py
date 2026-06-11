@@ -260,6 +260,12 @@ class Settings(BaseSettings):
     moment_finder_retry_backoff_sec: float = 20.0
     moment_finder_filter_transcript_noise: bool = True
     moment_finder_multimodal_confirm_top_n: int = 12
+    # Off for serving: opt eval/capture runs into the raw-recall branch + typed
+    # RankedCandidate (and the moments_raw.jsonl dump). Serving pays neither.
+    # Assumption: this global knob is the trigger because eval-capture runs in a
+    # separate process/batch. If eval-capture ever shares the serving process,
+    # switch the trigger to a per-job signal (e.g. bound to the job id) instead.
+    moment_finder_eval_recall: bool = False
 
     @field_validator("allowed_origins", mode="before")
     @classmethod

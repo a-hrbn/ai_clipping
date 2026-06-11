@@ -178,6 +178,7 @@ def _moment_params() -> MomentParams:
         retry_backoff_sec=float(getattr(settings, "moment_finder_retry_backoff_sec", 20.0) or 20.0),
         filter_transcript_noise=bool(getattr(settings, "moment_finder_filter_transcript_noise", True)),
         temperature=0.0,
+        eval_recall=bool(getattr(settings, "moment_finder_eval_recall", False)),
     )
 
 
