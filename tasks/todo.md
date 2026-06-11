@@ -6494,3 +6494,20 @@ Plan (smallest change wrapping the #5 capture core into a standing daily job):
   pre-existing env limitation, unrelated (gt_pipeline untouched).
 - Blocker for next iter: none. #7 (match+verify core, depends on #5 ✓) is the
   next unblocked tracer; #8 remains blocked by #7.
+
+### Hardening — gt_capture_daily single-run lock + audio-only capture (interactive)
+- Concurrency: `capture_lock` PID-file guard (not flock — robust on WSL/drvfs +
+  bind-mounted container volumes) wraps the whole `run_daily_capture`. Live-PID
+  lock → `CaptureAlreadyRunning` (CLI exits 0, expected for an overlapping cron);
+  stale lock (dead PID) is taken over. Root-causes the parallel-runs incident
+  where manual re-runs double-downloaded VODs.
+- Speedup: `downloader.download_audio_only` (format `bestaudio/best`, straight
+  through `_download_uncached` so it bypasses the shared 720p serving cache);
+  capture core (`gt_capture._default_download`) now uses it. Validated on the
+  real 32h VOD: `bestaudio` resolves to Twitch `Audio_Only` ≈2.3 GiB vs ≈41 GiB
+  at 720p (~18× less download/disk). Fingerprint+transcript only need audio.
+- Tests: +3 lock tests (reject live / take over stale / release on exit) and a
+  download_audio_only test (audio format + no serving-cache write). 29 downloader
+  (container) + 24 capture (host) green.
+- Other speedup (ops, not code): run capture on the CUDA container — Whisper base
+  on the CPU container is the remaining wall-clock cost for long VODs.

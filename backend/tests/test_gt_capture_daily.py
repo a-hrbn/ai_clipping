@@ -163,6 +163,36 @@ class RunDailyCaptureTests(unittest.TestCase):
         self.assertEqual(self.captured_calls, ["D"])
         self.assertEqual(summary["captured"], ["D"])
 
+    def test_concurrent_run_is_rejected_while_lock_is_held_by_live_pid(self) -> None:
+        # A lock file naming a *live* PID (is_alive=True) means another run is in
+        # progress → the second run must refuse and capture nothing.
+        lock_path = self.state_path.parent / (self.state_path.name + gt_capture_daily.LOCK_SUFFIX)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text("4242", encoding="utf-8")
+
+        with self.assertRaises(gt_capture_daily.CaptureAlreadyRunning):
+            self._run([{"id": "C"}], is_alive=lambda pid: True)
+
+        self.assertEqual(self.captured_calls, [])
+
+    def test_stale_lock_from_dead_pid_is_taken_over(self) -> None:
+        # A lock left behind by a crashed/killed run (dead PID) must not wedge the
+        # job forever — it is taken over and the run proceeds.
+        lock_path = self.state_path.parent / (self.state_path.name + gt_capture_daily.LOCK_SUFFIX)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text("4242", encoding="utf-8")
+
+        summary = self._run([{"id": "C"}], is_alive=lambda pid: False)
+
+        self.assertEqual(summary["captured"], ["C"])
+        # The lock is released after a clean run.
+        self.assertFalse(lock_path.exists())
+
+    def test_lock_is_released_after_a_normal_run(self) -> None:
+        self._run([{"id": "C"}])
+        lock_path = self.state_path.parent / (self.state_path.name + gt_capture_daily.LOCK_SUFFIX)
+        self.assertFalse(lock_path.exists())
+
     def test_passes_vod_date_and_cache_dir_per_vod_to_capture_core(self) -> None:
         seen = {}
 

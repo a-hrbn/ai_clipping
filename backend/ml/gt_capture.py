@@ -97,7 +97,10 @@ def build_provenance(
 def _default_download(vod_url: str, job_id: str) -> pathlib.Path:
     from services import downloader
 
-    return downloader.download(vod_url, job_id)
+    # Capture only needs audio (fingerprint + transcript), so pull the audio-only
+    # track: a multi-hour VOD shrinks from tens of GiB of 720p video to a few
+    # hundred MB, avoiding the disk-exhaustion risk and slashing download time.
+    return downloader.download_audio_only(vod_url, job_id)
 
 
 def _default_extract_audio(

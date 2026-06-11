@@ -1,16 +1,16 @@
 # Graph Report - backend  (2026-06-11)
 
 ## Corpus Check
-- 137 files · ~96,623 words
+- 137 files · ~97,277 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1954 nodes · 4163 edges · 65 communities (52 shown, 13 thin omitted)
-- Extraction: 97% EXTRACTED · 3% INFERRED · 0% AMBIGUOUS · INFERRED: 132 edges (avg confidence: 0.52)
+- 1967 nodes · 4188 edges · 74 communities (58 shown, 16 thin omitted)
+- Extraction: 97% EXTRACTED · 3% INFERRED · 0% AMBIGUOUS · INFERRED: 133 edges (avg confidence: 0.52)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `0a2c55e3`
+- Built from commit: `eddccd83`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -29,8 +29,17 @@
 - [[_COMMUNITY_Community 11|Community 11]]
 - [[_COMMUNITY_Community 12|Community 12]]
 - [[_COMMUNITY_Community 13|Community 13]]
+- [[_COMMUNITY_Community 14|Community 14]]
 - [[_COMMUNITY_Community 15|Community 15]]
 - [[_COMMUNITY_Community 16|Community 16]]
+- [[_COMMUNITY_Community 17|Community 17]]
+- [[_COMMUNITY_Community 18|Community 18]]
+- [[_COMMUNITY_Community 19|Community 19]]
+- [[_COMMUNITY_Community 20|Community 20]]
+- [[_COMMUNITY_Community 21|Community 21]]
+- [[_COMMUNITY_Community 22|Community 22]]
+- [[_COMMUNITY_Community 23|Community 23]]
+- [[_COMMUNITY_Community 24|Community 24]]
 - [[_COMMUNITY_Community 25|Community 25]]
 - [[_COMMUNITY_Community 32|Community 32]]
 - [[_COMMUNITY_Community 35|Community 35]]
@@ -83,7 +92,7 @@
 1. `RichSegment` - 56 edges
 2. `JobsRouterTests` - 32 edges
 3. `TwitchClipLabelsTests` - 31 edges
-4. `DownloaderTests` - 29 edges
+4. `DownloaderTests` - 30 edges
 5. `match_reposts_to_vods_with_diagnostics()` - 28 edges
 6. `Path` - 26 edges
 7. `TranscriptMatch` - 24 edges
@@ -113,11 +122,11 @@
 - **Trend Prior Update Inputs** — readme_update_process, readme_qualitative_review, readme_creator_domain_needs, readme_offline_eval_results [EXTRACTED 1.00]
 - **Shorts Pattern Seed Domains** — readme_seed_phrases, readme_short_categories, readme_hook_patterns_manifest [EXTRACTED 1.00]
 
-## Communities (65 total, 13 thin omitted)
+## Communities (74 total, 16 thin omitted)
 
 ### Community 0 - "Community 0"
-Cohesion: 0.05
-Nodes (80): _dedup_moments(), main(), _overlap_ratio(), Path, Convert cross-platform match rows into a fixed eval manifest.  Reads iboclipss_m, Deduplicate near-overlapping windows per VOD. Highest views wins a slot., _read_jsonl(), main() (+72 more)
+Cohesion: 0.10
+Nodes (43): _dedup_moments(), main(), _overlap_ratio(), Path, Convert cross-platform match rows into a fixed eval manifest.  Reads iboclipss_m, Deduplicate near-overlapping windows per VOD. Highest views wins a slot., _read_jsonl(), main() (+35 more)
 
 ### Community 1 - "Community 1"
 Cohesion: 0.09
@@ -167,6 +176,10 @@ Nodes (20): bind_job_session(), cancel_job(), create_job(), delete_job(), _evict
 Cohesion: 0.06
 Nodes (52): anthropic_text_content(), balanced_json_objects_from_list(), bounded_ratio(), _build_chat_marker(), build_moment_finder_prompt(), call_anthropic_moment_finder(), call_gemini_moment_finder(), call_moment_finder_provider() (+44 more)
 
+### Community 14 - "Community 14"
+Cohesion: 0.12
+Nodes (27): _parse_twitch_duration(), capture_lock(), CaptureAlreadyRunning, captured_ids(), list_archive_vods(), load_captured_state(), main(), _pid_alive() (+19 more)
+
 ### Community 15 - "Community 15"
 Cohesion: 0.09
 Nodes (35): main(), _parse_args(), run_local_pipeline(), main(), _parse_args(), run(), main(), _parse_args() (+27 more)
@@ -175,9 +188,33 @@ Nodes (35): main(), _parse_args(), run_local_pipeline(), main(), _parse_args(), 
 Cohesion: 0.11
 Nodes (4): CapturedStateTests, _FakeCaptureResult, RunDailyCaptureTests, SelectNewVodsTests
 
+### Community 17 - "Community 17"
+Cohesion: 0.30
+Nodes (16): _collection_chunks(), _covered_date_ranges(), _date_range_payload(), _intersecting_date_ranges(), _label_date_ranges(), _label_vod_count(), main(), _merge_date_ranges() (+8 more)
+
+### Community 18 - "Community 18"
+Cohesion: 0.22
+Nodes (12): Downloader, ensure_vod_sources(), Any, Path, resolve_downloader(), source_video_path(), twitch_vod_url(), VodDownloadPreflightError (+4 more)
+
+### Community 19 - "Community 19"
+Cohesion: 0.35
+Nodes (9): collect_clip_labels(), collect_clip_labels_with_summary(), _collection_input_summary(), _get_clips(), _get_user(), _get_vods(), TwitchClient, _write_cache() (+1 more)
+
+### Community 20 - "Community 20"
+Cohesion: 0.24
+Nodes (12): _blended_gap_duration(), _clamp_negative_duration(), _cycled_duration(), _dedupe_negative_rows(), _duration_for_positive_window(), _interstitial_window_starts(), _mine_background_negatives(), _mine_boundary_negatives() (+4 more)
+
+### Community 21 - "Community 21"
+Cohesion: 0.29
+Nodes (5): _FailOnceFfmpegCode8YoutubeDL, _FailOnceFfmpegCrashThenCookieCloseErrorYoutubeDL, _FailOnceFfmpegCrashYoutubeDL, _FakeYoutubeDLWithTemp, First attempt aborts like a Twitch HLS 403 (`ffmpeg exited with code 8`).
+
+### Community 22 - "Community 22"
+Cohesion: 0.31
+Nodes (9): Path, _read_jsonl(), _read_progress_file(), _read_source_manifest(), _resolved_broadcasters(), _validate_source_manifest_header(), _validate_source_manifest_row(), _write_jsonl() (+1 more)
+
 ### Community 25 - "Community 25"
 Cohesion: 0.06
-Nodes (54): build_outcome_holdout_dataset(), _fallback_candidate_id(), _feature_replay_index(), _is_cross_platform_positive_split(), main(), _normalize_split(), _prepare_rows(), Counter (+46 more)
+Nodes (53): build_outcome_holdout_dataset(), _fallback_candidate_id(), _feature_replay_index(), _is_cross_platform_positive_split(), main(), _normalize_split(), _prepare_rows(), Counter (+45 more)
 
 ### Community 32 - "Community 32"
 Cohesion: 0.07
@@ -232,16 +269,12 @@ Cohesion: 0.17
 Nodes (32): _as_float(), _debug_dirs(), export_serving_hard_negatives(), _fair_cap_rows_by_vod(), _feature_similarity(), _hard_negative_rows_for_job(), _holdout_vod_ids(), main() (+24 more)
 
 ### Community 89 - "Community 89"
-Cohesion: 0.05
-Nodes (89): _blended_gap_duration(), build_label_rows(), _clamp_negative_duration(), _classify_clip_views(), _clip_merge_end(), _clip_window_bounds(), collect_clip_labels(), collect_clip_labels_with_summary() (+81 more)
+Cohesion: 0.17
+Nodes (24): build_label_rows(), _classify_clip_views(), _clip_merge_end(), _clip_window_bounds(), _creator_density_bonus(), _default_view_thresholds(), _finalize_clip_region(), _label_row_key() (+16 more)
 
 ### Community 113 - "Community 113"
 Cohesion: 0.19
 Nodes (22): _as_float(), _candidate_summary(), _delta_summary(), _job_vod_id(), main(), _matched_positive_count(), _mean(), _numeric_delta() (+14 more)
-
-### Community 114 - "Community 114"
-Cohesion: 0.05
-Nodes (8): _CaptureOptsYoutubeDL, DownloaderTests, _FailOnceFfmpegCode8YoutubeDL, _FailOnceFfmpegCrashThenCookieCloseErrorYoutubeDL, _FailOnceFfmpegCrashYoutubeDL, _FakeYoutubeDL, _FakeYoutubeDLWithTemp, First attempt aborts like a Twitch HLS 403 (`ffmpeg exited with code 8`).
 
 ### Community 115 - "Community 115"
 Cohesion: 0.07
@@ -256,8 +289,8 @@ Cohesion: 0.13
 Nodes (17): append_annotations(), _apply_manual_label(), _manual_label_class(), _manual_ordinal_label(), merge_annotations(), Path, read_annotations(), _sample_id() (+9 more)
 
 ### Community 134 - "Community 134"
-Cohesion: 0.08
-Nodes (49): Downloader, Lock, ensure_vod_sources(), Any, Path, resolve_downloader(), source_video_path(), twitch_vod_url() (+41 more)
+Cohesion: 0.05
+Nodes (76): Lock, _build_date_windows(), _coerce_publish_timestamp(), _coerce_upload_date(), _download_clips(), _enrich_with_upload_dates(), _entry_date(), _fetch_single_video_metadata() (+68 more)
 
 ### Community 136 - "Community 136"
 Cohesion: 0.22
@@ -318,22 +351,22 @@ Nodes (4): reason, review_required, rows, status
 ## Knowledge Gaps
 - **56 isolated node(s):** `version`, `updated_at`, `source_note`, `hook_patterns`, `topic_patterns` (+51 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **13 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **16 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
 - **Why does `RichSegment` connect `Community 11` to `Community 2`, `Community 36`, `Community 136`, `Community 141`, `Community 115`?**
-  _High betweenness centrality (0.052) - this node is a cross-community bridge._
+  _High betweenness centrality (0.046) - this node is a cross-community bridge._
 - **Why does `load_manifest()` connect `Community 9` to `Community 1`?**
-  _High betweenness centrality (0.031) - this node is a cross-community bridge._
+  _High betweenness centrality (0.039) - this node is a cross-community bridge._
 - **Are the 28 inferred relationships involving `RichSegment` (e.g. with `CandidateFeatures` and `LlmMoment`) actually correct?**
   _`RichSegment` has 28 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 3 inferred relationships involving `JobsRouterTests` (e.g. with `ClipFeedbackPayload` and `ClipFeedbackResponse`) actually correct?**
   _`JobsRouterTests` has 3 INFERRED edges - model-reasoned connections that need verification._
 - **What connects `version`, `updated_at`, `source_note` to the rest of the system?**
-  _173 weakly-connected nodes found - possible documentation gaps or missing edges._
+  _177 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `Community 0` be split into smaller, more focused modules?**
-  _Cohesion score 0.05101807366735301 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.10285714285714286 - nodes in this community are weakly interconnected._
 - **Should `Community 1` be split into smaller, more focused modules?**
   _Cohesion score 0.08779631255487269 - nodes in this community are weakly interconnected._

@@ -579,6 +579,25 @@ def download(url: str, job_id: str, proxy: str | None = None) -> pathlib.Path:
     return _download_uncached(url, job_id, proxy=proxy)
 
 
+def download_audio_only(url: str, job_id: str, proxy: str | None = None) -> pathlib.Path:
+    """Download only the audio track of ``url`` (no video).
+
+    GT capture needs only audio (fingerprint + full-VOD transcript), so a
+    multi-hour Twitch VOD drops from tens of GiB of 720p video to a few hundred
+    MB of audio — far less disk, bandwidth and wall-clock, and it sidesteps the
+    934G download-cache disk-exhaustion risk. Goes straight through
+    ``_download_uncached`` (no shared serving cache) so the audio-only artifact
+    never collides with the 720p video that the frontend serving path caches
+    under the same VOD URL.
+    """
+    return _download_uncached(
+        url,
+        job_id,
+        proxy=proxy,
+        ydl_opt_overrides={"format": "bestaudio/best"},
+    )
+
+
 def download_range(
     url: str,
     job_id: str,

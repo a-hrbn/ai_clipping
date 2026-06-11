@@ -24,8 +24,10 @@ seam stays testable without network access or the ML stack installed.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import logging
+import os
 import pathlib
 import sys
 from datetime import datetime, timezone
@@ -39,6 +41,7 @@ from ml import gt_capture
 logger = logging.getLogger(__name__)
 
 STATE_FILENAME = "capture_state.json"
+LOCK_SUFFIX = ".lock"
 DEFAULT_BROADCASTER = "jynxzi"
 
 
@@ -107,6 +110,58 @@ def save_captured_state(path: pathlib.Path, state: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Single-run lock — stops overlapping runs from double-downloading the same VODs
+# ---------------------------------------------------------------------------
+class CaptureAlreadyRunning(RuntimeError):
+    """Raised when another gt_capture_daily run already holds the lock."""
+
+
+def _read_lock_pid(lock_path: pathlib.Path) -> int | None:
+    try:
+        return int(pathlib.Path(lock_path).read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _pid_alive(pid: int) -> bool:
+    """True if a process with ``pid`` exists (signal 0 probes without killing it)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, just owned by another user
+    return True
+
+
+@contextlib.contextmanager
+def capture_lock(lock_path, *, pid: int | None = None, is_alive=_pid_alive):
+    """Hold an exclusive single-run lock for the whole capture run.
+
+    A PID file (not ``flock``), so it works on WSL/drvfs and bind-mounted
+    container volumes where advisory locks are unreliable. A lock held by a
+    *live* PID rejects the run; a stale lock (dead PID — a crashed or ``kill -9``'d
+    run) is taken over. The lock is removed on exit only if we still own it.
+    """
+    lock_path = pathlib.Path(lock_path)
+    pid = pid if pid is not None else os.getpid()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    holder = _read_lock_pid(lock_path)
+    if holder is not None and holder != pid and is_alive(holder):
+        raise CaptureAlreadyRunning(
+            f"another gt_capture_daily run is active (pid {holder}); lock: {lock_path}"
+        )
+
+    lock_path.write_text(str(pid), encoding="utf-8")
+    try:
+        yield
+    finally:
+        if _read_lock_pid(lock_path) == pid:
+            lock_path.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
 # Helix archive-VOD listing (lazy import keeps the pure seams net/ML-free)
 # ---------------------------------------------------------------------------
 def list_archive_vods(client, broadcaster: str, *, max_vods: int = 100) -> list[dict]:
@@ -152,67 +207,75 @@ def run_daily_capture(
     capture=gt_capture.capture_vod,
     captured_at: str | None = None,
     limit: int | None = None,
+    lock_path=None,
+    is_alive=_pid_alive,
 ) -> dict:
     """Capture every not-yet-captured archive VOD, persisting state per VOD.
 
     ``list_vods`` is a zero-arg callable returning Helix archive-VOD records;
     ``capture`` defaults to the real capture core but is injectable for tests.
+    The whole run is guarded by a single-run lock so overlapping invocations
+    (e.g. a manual re-run while the cron is mid-download) can't double-download
+    the same VODs — a second run raises ``CaptureAlreadyRunning``.
     Returns a compact summary: captured ids, skipped count, and failed ids.
     """
     state_path = pathlib.Path(state_path)
     cache_root = pathlib.Path(cache_root)
+    if lock_path is None:
+        lock_path = state_path.parent / (state_path.name + LOCK_SUFFIX)
     if captured_at is None:
         captured_at = datetime.now(timezone.utc).isoformat()
 
-    state = load_captured_state(state_path)
-    already = captured_ids(state)
+    with capture_lock(lock_path, is_alive=is_alive):
+        state = load_captured_state(state_path)
+        already = captured_ids(state)
 
-    vods = list(list_vods())
-    new_vods = select_new_vods(vods, already)
-    if limit is not None:
-        new_vods = new_vods[:limit]
+        vods = list(list_vods())
+        new_vods = select_new_vods(vods, already)
+        if limit is not None:
+            new_vods = new_vods[:limit]
 
-    skipped = len(vods) - len(new_vods)
-    captured: list[str] = []
-    failed: list[str] = []
+        skipped = len(vods) - len(new_vods)
+        captured: list[str] = []
+        failed: list[str] = []
 
-    logger.info(
-        "gt_capture_daily: %d archive VODs listed, %d new, %d already captured",
-        len(vods), len(new_vods), len(already),
-    )
+        logger.info(
+            "gt_capture_daily: %d archive VODs listed, %d new, %d already captured",
+            len(vods), len(new_vods), len(already),
+        )
 
-    for vod in new_vods:
-        vid = _vod_id(vod)
-        try:
-            result = capture(
-                vid,
-                cache_dir=cache_root / vid,
-                vod_date=_vod_date(vod),
-                captured_at=captured_at,
-            )
-        except Exception:  # noqa: BLE001 — one bad VOD must not abort the batch
-            logger.warning("gt_capture_daily: capture failed for VOD %s", vid, exc_info=True)
-            failed.append(vid)
-            continue
+        for vod in new_vods:
+            vid = _vod_id(vod)
+            try:
+                result = capture(
+                    vid,
+                    cache_dir=cache_root / vid,
+                    vod_date=_vod_date(vod),
+                    captured_at=captured_at,
+                )
+            except Exception:  # noqa: BLE001 — one bad VOD must not abort the batch
+                logger.warning("gt_capture_daily: capture failed for VOD %s", vid, exc_info=True)
+                failed.append(vid)
+                continue
 
-        # Commit each success immediately so a later crash is resumable.
-        state.setdefault("captured", {})[vid] = getattr(result, "provenance", {"vod_id": vid})
-        save_captured_state(state_path, state)
-        captured.append(vid)
-        logger.info("gt_capture_daily: captured VOD %s", vid)
+            # Commit each success immediately so a later crash is resumable.
+            state.setdefault("captured", {})[vid] = getattr(result, "provenance", {"vod_id": vid})
+            save_captured_state(state_path, state)
+            captured.append(vid)
+            logger.info("gt_capture_daily: captured VOD %s", vid)
 
-    summary = {
-        "broadcaster_vods": len(vods),
-        "captured": captured,
-        "skipped": skipped,
-        "failed": failed,
-        "total_captured": len(captured_ids(state)),
-    }
-    logger.info(
-        "gt_capture_daily: done — captured %d, skipped %d, failed %d (total gold VODs: %d)",
-        len(captured), skipped, len(failed), summary["total_captured"],
-    )
-    return summary
+        summary = {
+            "broadcaster_vods": len(vods),
+            "captured": captured,
+            "skipped": skipped,
+            "failed": failed,
+            "total_captured": len(captured_ids(state)),
+        }
+        logger.info(
+            "gt_capture_daily: done — captured %d, skipped %d, failed %d (total gold VODs: %d)",
+            len(captured), skipped, len(failed), summary["total_captured"],
+        )
+        return summary
 
 
 # ---------------------------------------------------------------------------
@@ -251,12 +314,17 @@ def main(argv=None) -> int:
     state_path = pathlib.Path(args.state) if args.state else cache_root / STATE_FILENAME
     client = TwitchClient(settings.twitch_client_id, settings.twitch_client_secret)
 
-    summary = run_daily_capture(
-        list_vods=lambda: list_archive_vods(client, args.broadcaster, max_vods=args.max_vods),
-        state_path=state_path,
-        cache_root=cache_root,
-        limit=args.limit,
-    )
+    try:
+        summary = run_daily_capture(
+            list_vods=lambda: list_archive_vods(client, args.broadcaster, max_vods=args.max_vods),
+            state_path=state_path,
+            cache_root=cache_root,
+            limit=args.limit,
+        )
+    except CaptureAlreadyRunning as exc:
+        # A cron firing while a long run is still going is expected, not an error.
+        print(f"gt_capture_daily: skipped — {exc}")
+        return 0
 
     if args.json:
         print(json.dumps(summary, ensure_ascii=True))

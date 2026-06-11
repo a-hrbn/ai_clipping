@@ -416,6 +416,26 @@ class DownloaderTests(unittest.TestCase):
             self.assertEqual(retry_opts["format"], first_opts["format"])
             self.assertFalse((storage_dir / "job-ffmpeg-code8" / "video.temp.mp4").exists())
 
+    def test_download_audio_only_requests_audio_format_and_bypasses_video_cache(self) -> None:
+        # Capture pulls audio-only (a fraction of the 720p video size) and must
+        # NOT touch the shared twitch serving cache, or it would poison later
+        # video serving of the same VOD URL with an audio-only file.
+        with tempfile.TemporaryDirectory() as tmp:
+            storage_dir = Path(tmp)
+            url = "https://www.twitch.tv/videos/7890"
+            _CaptureOptsYoutubeDL.captured_opts = None
+
+            with patch.object(downloader.settings, "storage_dir", str(storage_dir)), \
+                 patch.object(downloader.settings, "twitch_download_cache_ttl_sec", 86400), \
+                 patch.object(downloader, "update_job", create=True), \
+                 patch.object(downloader.yt_dlp, "YoutubeDL", _CaptureOptsYoutubeDL):
+                output_path = downloader.download_audio_only(url, "job-audio")
+
+            self.assertEqual(_CaptureOptsYoutubeDL.captured_opts["format"], "bestaudio/best")
+            self.assertTrue(output_path.exists())
+            # No shared twitch cache entry was created despite the TTL being on.
+            self.assertFalse((storage_dir / "_download_cache" / "twitch").exists())
+
     def test_twitch_ffmpeg_retry_survives_cookie_save_error_during_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             storage_dir = Path(tmp)
