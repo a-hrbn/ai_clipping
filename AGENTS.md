@@ -1,12 +1,6 @@
-## graphify
+## Orientierung
 
-This project has a graphify knowledge graph at backend/graphify-out/.
-
-Rules:
-- Before answering architecture or codebase questions, read backend/graphify-out/GRAPH_REPORT.md for god nodes and community structure
-- If backend/graphify-out/wiki/index.md exists, navigate it instead of reading raw files
-- After modifying backend code files in this session, run `python3 -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('backend'))"` to keep the graph current
-
+Lies zu Session-Beginn `CONTEXT.md` (Repo-Root) für App-Überblick und Domänen-Vokabular.
 
 ## Agent skills
 
