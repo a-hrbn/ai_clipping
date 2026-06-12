@@ -173,6 +173,38 @@ class ReplayRankedPoolTests(unittest.TestCase):
         self.assertEqual(pool[0]["reason"], "B")  # later start wins under the override
 
 
+class LoadSegmentsChatParityTests(unittest.TestCase):
+    """Skew guard (#65): the segment loader must preserve the chat emote-class
+    scores so a re-gen sees the SAME enriched prompt marker as production."""
+
+    def test_load_segments_round_trips_chat_marker_identically(self) -> None:
+        from ml.llm_moment_finder import _build_chat_marker
+
+        # A segment whose chat spike carries a dominant emote class + a voice burst:
+        # _build_chat_marker emits ' | chat=0.82 hype | vol=0.60'. That class label
+        # only survives if chat_hype_score round-trips through segments.jsonl — the
+        # loader currently drops it, degrading the re-gen prompt vs production.
+        original = RichSegment(
+            start=10.0, end=14.0, text="that is actually insane",
+            chat_spike_score=0.82, chat_hype_score=0.9, chat_funny_score=0.1,
+            chat_shock_score=0.0, voice_energy_burst_score=0.6)
+        expected_marker = _build_chat_marker(original)
+        self.assertIn("hype", expected_marker)   # the fixture exercises the class label
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "segments.jsonl"
+            path.write_text(json.dumps({
+                "start": 10.0, "end": 14.0, "text": "that is actually insane",
+                "chat_spike_score": 0.82, "chat_hype_score": 0.9,
+                "chat_funny_score": 0.1, "chat_shock_score": 0.0,
+                "voice_energy_burst_score": 0.6,
+            }) + "\n", encoding="utf-8")
+            loaded = replay_harness._load_segments(path)
+
+        self.assertEqual(len(loaded), 1)
+        self.assertEqual(_build_chat_marker(loaded[0]), expected_marker)
+
+
 def _write_job_dir(storage: pathlib.Path, vod_id: str, ts: str, *, raw, segments, mtime: float) -> pathlib.Path:
     """Write a pipeline_debug_<ts>_<vod> job dir; omit an artifact by passing None."""
     job_dir = storage / f"pipeline_debug_{ts}_{vod_id}"

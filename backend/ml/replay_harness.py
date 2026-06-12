@@ -142,6 +142,12 @@ def _load_segments(path: pathlib.Path) -> list[RichSegment]:
                 end=float(obj.get("end") or 0.0),
                 text=str(obj.get("text") or ""),
                 chat_spike_score=float(obj.get("chat_spike_score") or 0.0),
+                # The emote-class scores feed _build_chat_marker's dominant-class
+                # label; dropping them degrades the re-gen prompt vs production
+                # (the #65 skew guard), so they must round-trip too.
+                chat_hype_score=float(obj.get("chat_hype_score") or 0.0),
+                chat_funny_score=float(obj.get("chat_funny_score") or 0.0),
+                chat_shock_score=float(obj.get("chat_shock_score") or 0.0),
                 voice_energy_burst_score=float(obj.get("voice_energy_burst_score") or 0.0),
             )
         )

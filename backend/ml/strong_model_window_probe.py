@@ -379,6 +379,22 @@ def _persist_scores(path: pathlib.Path, scored: list[dict]) -> None:
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def load_persisted_rating(artifacts_dir: pathlib.Path) -> dict:
+    """Read the persisted per-VOD ``*.scores.json`` back into a ``rating`` dict.
+
+    The inverse of ``_persist_scores``: each ``<vod_id>.scores.json`` becomes one
+    ``rating["vods"][vod_id]["scored"]`` list — exactly the shape
+    ``analyze_separation`` consumes — so a later read-only consumer (e.g. the
+    B-narrow recoverable-subset selection, #65) re-derives the #60 separation
+    from disk, net-free, with no re-rating.
+    """
+    vods: dict[str, dict] = {}
+    for path in sorted(artifacts_dir.glob("*.scores.json")):
+        vod_id = path.name[: -len(".scores.json")]
+        vods[vod_id] = {"scored": json.loads(path.read_text(encoding="utf-8"))}
+    return {"vods": vods}
+
+
 def persisted_response_provider(raw: str) -> repost_virality_judge.CallProviderFn:
     """A network-free provider that replays one persisted raw response.
 

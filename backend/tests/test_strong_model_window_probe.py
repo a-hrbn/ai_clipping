@@ -484,6 +484,27 @@ def test_format_verdict_comment_carries_route_threshold_and_caveats() -> None:
     assert "ship" in comment.lower()
 
 
+# ── load_persisted_rating: read the persisted scores.json back into a rating ──
+
+def test_load_persisted_rating_reads_scores_json_into_a_rating(tmp_path) -> None:
+    # The inverse of _persist_scores: one scores.json per VOD -> the rating dict
+    # analyze_separation consumes, grouped by VOD.
+    v1 = [_scored("V1", 3000, 3030, "gold", 0.9, headline=True, desc="g1"),
+          _scored("V1", 500, 520, "control", 0.2, rank=2)]
+    v2 = [_scored("V2", 8000, 8030, "gold", 0.4, headline=False, desc="g2")]
+    (tmp_path / "V1.scores.json").write_text(json.dumps(v1), encoding="utf-8")
+    (tmp_path / "V2.scores.json").write_text(json.dumps(v2), encoding="utf-8")
+
+    rating = swp.load_persisted_rating(tmp_path)
+
+    assert set(rating["vods"]) == {"V1", "V2"}
+    assert rating["vods"]["V1"]["scored"] == v1
+    assert rating["vods"]["V2"]["scored"] == v2
+    # Round-trips straight into the #60 separation seam.
+    sep = swp.analyze_separation(rating)
+    assert {w["desc"] for w in sep["windows"]} == {"g1", "g2"}
+
+
 # ── Job-dir writer for the CLI test (the pipeline_debug_* replay layout) ──────
 def _row(start, end, composite=8.0):
     virality = composite / 10.0
