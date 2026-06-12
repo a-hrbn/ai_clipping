@@ -385,6 +385,110 @@ def test_format_report_surfaces_buckets_chainsfr_model_fact_and_caveat() -> None
     assert "product recall@20" in report
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# Issue #59 — the pre-fixed, cheap-before-expensive routing rule applied to the
+# Slice-2 bucket counts. route() is a pure function: a bucket-count dict in, the
+# ordered routed levers out, hand-computed, fixed BEFORE the run (cost-asymmetry
+# as the tie-break, no after-the-fact rationalisation). No network, no paid call.
+# ═════════════════════════════════════════════════════════════════════════════
+
+def test_route_floor_takes_cheap_truncation_fix_first_then_paid_probe() -> None:
+    # The real FLOOR shape (#58): truncation=2 (non-trivial), llm_skipped=17
+    # (dominant, 17/19 > 50%), visual=0. Cheap-before-expensive: the mechanical
+    # truncation fix routes FIRST (free, discrimination-independent product win),
+    # then the dominant llm_skipped bucket routes the gated paid strong-model probe.
+    verdict = hmd.route({hmd.VISUAL: 0, hmd.TRUNCATION: 2, hmd.LLM_SKIPPED: 17})
+
+    assert verdict["n"] == 19
+    assert [lever["lever"] for lever in verdict["levers"]] == [
+        hmd.TRUNCATION_FIX, hmd.PAID_REGEN_PROBE]
+    # The build-first lever is the cheapest one that fired.
+    assert verdict["primary"] == hmd.TRUNCATION_FIX
+
+
+def test_route_headline_routes_paid_probe_only_when_no_truncation() -> None:
+    # The real HEADLINE shape (#58): truncation=0, llm_skipped=9 (dominant, 9/9),
+    # visual=0. No cheap truncation win at the North-Star tier — the routing weight
+    # is the gated paid strong-model re-gen probe alone. This is the honest verdict
+    # for headline: the shipped-metric mover (truncation) is floor-only.
+    verdict = hmd.route({hmd.VISUAL: 0, hmd.TRUNCATION: 0, hmd.LLM_SKIPPED: 9})
+
+    assert [lever["lever"] for lever in verdict["levers"]] == [hmd.PAID_REGEN_PROBE]
+    assert verdict["primary"] == hmd.PAID_REGEN_PROBE
+
+
+def test_route_visual_plurality_escalates_track_and_empty_tier_routes_nothing() -> None:
+    # Visual is the largest buried bucket and llm_skipped is NOT dominant (3/9 <
+    # 50%): the cheap truncation fix still fires (1 is non-trivial), then the visual
+    # plurality escalates the track — NOT the paid probe (cost-asymmetry: a mere
+    # plurality never buys a paid experiment).
+    verdict = hmd.route({hmd.VISUAL: 5, hmd.TRUNCATION: 1, hmd.LLM_SKIPPED: 3})
+    assert [lever["lever"] for lever in verdict["levers"]] == [
+        hmd.TRUNCATION_FIX, hmd.VIDEO_OR_PIVOT]
+    assert verdict["primary"] == hmd.TRUNCATION_FIX
+
+    # An empty tier meets no gate — no lever, never a default paid call.
+    empty = hmd.route({hmd.VISUAL: 0, hmd.TRUNCATION: 0, hmd.LLM_SKIPPED: 0})
+    assert empty["levers"] == []
+    assert empty["primary"] == hmd.NO_LEVER
+
+
+def test_run_attaches_routing_verdict_per_tier_floor_and_headline() -> None:
+    # run() carries the routed verdict for floor AND headline separately, derived
+    # mechanically from each tier's bucket counts — so the routing weight reads off
+    # the North-Star (headline) on its own. Same fixture as the per-bucket test: a
+    # visual, a truncated, and a (sub-headline) llm-skipped gold on one VOD.
+    manifest = {"V": [
+        _gold(100, 130, views=300_000, desc="visual"),
+        _gold(200, 230, views=300_000, desc="trunc"),
+        _gold(3000, 3030, views=50_000, desc="skip"),
+    ]}
+    raw = {"V": [_cand(0, 5)]}
+    pool = {"V": [_cand(0, 5)]}
+
+    result = hmd.run(
+        manifest, raw, pool, anchor_vod_ids=["V"], headline_min_views=100_000,
+        segments_by_vod={"V": _PRIORITY_SEGMENTS}, response_by_vod={"V": _PRIORITY_RESPONSE})
+
+    routing = result["routing"]
+    # Floor (visual=1, truncation=1, llm_skipped=1; n=3): truncation non-trivial →
+    # the cheap fix; no bucket is a strict majority, but visual ties the plurality
+    # → the track switch. Cheap-first ordering.
+    assert [lever["lever"] for lever in routing["floor"]["levers"]] == [
+        hmd.TRUNCATION_FIX, hmd.VIDEO_OR_PIVOT]
+    # Headline drops the 50k skip gold (visual=1, truncation=1, llm_skipped=0; n=2):
+    # visual ties the plurality → track switch, plus the cheap truncation fix.
+    assert routing["headline"]["levers"][0]["lever"] == hmd.TRUNCATION_FIX
+    assert routing["headline"]["n"] == 2
+
+
+def test_format_report_surfaces_applied_routing_verdict() -> None:
+    # The report must surface the *applied* verdict (the routed lever per tier),
+    # not merely restate the rule — so a reader sees which lever this run routed to.
+    # One truncated + two clean-spoken golds (truncation=1, llm_skipped=2 dominant)
+    # so both the cheap fix AND the paid probe fire — the real-floor shape in mini.
+    manifest = {"V": [
+        _gold(200, 230, views=300_000, desc="spoken truncated window"),
+        _gold(3000, 3010, views=300_000, desc="spoken clean window one"),
+        _gold(3015, 3030, views=300_000, desc="spoken clean window two"),
+    ]}
+    raw = {"V": [_cand(0, 5)]}
+    pool = {"V": [_cand(0, 5)]}
+
+    result = hmd.run(
+        manifest, raw, pool, anchor_vod_ids=["V"], headline_min_views=100_000,
+        segments_by_vod={"V": _PRIORITY_SEGMENTS}, response_by_vod={"V": _PRIORITY_RESPONSE})
+    report = hmd.format_report(result)
+
+    # The verdict section names the routed lever for floor and headline separately.
+    assert "ROUTING VERDICT" in report
+    assert "FLOOR" in report and "HEADLINE" in report
+    # The mechanically-routed levers appear by their human labels, with both the
+    # truncation fix (here truncation=1) and the paid probe (llm_skipped dominant).
+    assert hmd.LEVER_LABELS[hmd.TRUNCATION_FIX] in report
+    assert hmd.LEVER_LABELS[hmd.PAID_REGEN_PROBE] in report
+
+
 # ── Job-dir writer for the CLI test (the pipeline_debug_* replay layout) ──────
 def _row(start, end, composite=8.0):
     virality = composite / 10.0
@@ -605,6 +709,52 @@ def test_decomposition_buckets_reconcile_and_surface_chainsfr_on_real_artifacts(
                 if "ChainsFR" in g["desc"] or round(g["views"]) == 1_434_649]
     assert len(chainsfr) == 1
     assert chainsfr[0]["bucket"] == hmd.LLM_SKIPPED
+
+
+@pytest.mark.skipif(
+    not _real_artifacts_present(),
+    reason="real pipeline_debug artifacts / baseline not present (tmp/storage is gitignored)",
+)
+def test_routing_verdict_on_real_artifacts_is_pre_fixed_rule_applied(tmp_path) -> None:
+    # Issue #59: the pre-fixed cheap-before-expensive rule, applied to the live
+    # Slice-2 counts (floor truncation=2/llm_skipped=17; headline llm_skipped=9).
+    # The verdict is what gets posted to #56 — pin it on the REAL artifacts.
+    manifest = eval_clip_finder.load_manifest()
+    anchors = eval_clip_finder.read_anchor_vod_ids()
+    (raw, pool, segments_by_vod, response_by_vod,
+     chunk_duration_by_vod, _gaps) = hmd.build_inputs(anchors, _STORAGE_DIR)
+
+    result = hmd.run(
+        manifest, raw, pool,
+        segments_by_vod=segments_by_vod, response_by_vod=response_by_vod,
+        chunk_duration_by_vod=chunk_duration_by_vod, anchor_vod_ids=anchors)
+
+    floor = result["routing"]["floor"]
+    headline = result["routing"]["headline"]
+
+    # FLOOR (n=19): truncation=2 non-trivial → the cheap mechanical fix routes
+    # FIRST; llm_skipped=17 is a strict majority (89%) → the gated paid probe. Both
+    # fire, cheapest-first.
+    assert floor["n"] == 19
+    assert [lever["lever"] for lever in floor["levers"]] == [
+        hmd.TRUNCATION_FIX, hmd.PAID_REGEN_PROBE]
+    assert floor["primary"] == hmd.TRUNCATION_FIX
+
+    # HEADLINE (n=9, the North-Star routing weight): truncation=0 → NO cheap fix at
+    # the shipped tier; llm_skipped=9 (100%) dominant → the gated paid strong-model
+    # re-gen probe ALONE. This is the honest verdict: the product-recall mover
+    # (truncation) is floor-only; the headline lever is paid and discrimination-gated.
+    assert headline["n"] == 9
+    assert [lever["lever"] for lever in headline["levers"]] == [hmd.PAID_REGEN_PROBE]
+    assert headline["primary"] == hmd.PAID_REGEN_PROBE
+
+    # The rendered report carries the applied verdict, the caveat and the model fact
+    # — exactly what the #56 comment must say, reproducibly off the CLI.
+    report = hmd.format_report(result)
+    assert "ROUTING VERDICT" in report
+    assert hmd.LEVER_LABELS[hmd.TRUNCATION_FIX] in report
+    assert hmd.LEVER_LABELS[hmd.PAID_REGEN_PROBE] in report
+    assert hmd.GENERATOR_MODEL in report and "product recall@20" in report
 
 
 def directional_gold(manifest, anchors):

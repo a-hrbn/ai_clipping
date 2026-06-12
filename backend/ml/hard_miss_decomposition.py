@@ -68,6 +68,36 @@ BUCKETS: tuple[str, ...] = (VISUAL, TRUNCATION, LLM_SKIPPED)
 GENERATOR_MODEL = "gemini-2.5-flash-lite"
 RANKING_MODEL = "Sonnet"
 
+# The three Phase-2 levers each bucket routes to (PRD #56), hung on this Phase-1
+# routing gate. The decomposition diagnoses and routes; it does not build them.
+TRUNCATION_FIX = "truncation_fix"        # mechanical chunk/max_tokens fix
+PAID_REGEN_PROBE = "paid_regen_probe"    # gated paid strong-model re-gen probe
+VIDEO_OR_PIVOT = "video_or_pivot"        # video-signal track / product pivot
+NO_LEVER = "none"                        # no bucket meets its gate
+
+# Human-readable lever labels (used by the report + the #56 verdict comment).
+LEVER_LABELS: dict[str, str] = {
+    TRUNCATION_FIX: ("mechanical chunk/max_tokens fix — cheap, deterministic, "
+                     "discrimination-independent product recall@20 win"),
+    PAID_REGEN_PROBE: ("gated paid strong-model re-gen probe — measured on the "
+                       "raw@any lift (only this bucket can profit from a stronger model)"),
+    VIDEO_OR_PIVOT: ("escalate to the video-signal track (vl_*/face_reaction_peak) "
+                     "or a product pivot — NO further transcript experiment"),
+    NO_LEVER: "no bucket meets its gate",
+}
+
+# Pre-fixed routing gates — set BEFORE the run, cost-asymmetry as the tie-break
+# (no arbitrary %-threshold, no after-the-fact rationalisation):
+#   * truncation is the cheapest, deterministic, discrimination-independent win,
+#     so it is taken whenever it is NON-TRIVIAL (present at all under the strict
+#     mid-JSON detector), regardless of what the other buckets do, and
+#   * the gated paid strong-model probe is expensive, so the llm_skipped bucket
+#     must be DOMINANT (a strict majority of the tier) before it routes there;
+#     a mere visual PLURALITY (largest buried bucket, not dominant) escalates the
+#     track instead — both cheaper bars than the paid one.
+TRUNCATION_NONTRIVIAL_MIN = 1
+DOMINANT_SHARE = 0.5
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Detector 1 — no-transcript / visual (checked first, model-agnostic)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -242,6 +272,71 @@ def classify_root_cause(
     return LLM_SKIPPED
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Routing — the pre-fixed, cheap-before-expensive rule applied to bucket counts
+# ─────────────────────────────────────────────────────────────────────────────
+
+def route(buckets: dict[str, int]) -> dict:
+    """Apply the pre-fixed cheap-before-expensive routing rule to one tier's counts.
+
+    The rule is fixed *before* the run; this only reads it off the bucket counts,
+    so the lever choice can't be rationalised after the fact. Cost-asymmetry is
+    the tie-break, evaluated cheapest-first:
+
+      1. ``truncation`` non-trivial (``>= TRUNCATION_NONTRIVIAL_MIN``) → the
+         mechanical chunk/``max_tokens`` fix, taken *regardless of the other
+         buckets* — it is the only cheap, deterministic, discrimination-
+         independent product-recall win.
+      2. ``llm_skipped`` DOMINANT (a strict majority, ``> DOMINANT_SHARE`` of the
+         tier) → the gated paid strong-model re-gen probe. Expensive, so it needs
+         the dominant share, not merely the largest bucket.
+      3. else ``visual`` PLURALITY (the largest buried bucket, ``> 0``) → escalate
+         to the video-signal track / product pivot — no further transcript
+         experiment.
+
+    Returns ``{n, shares, levers, primary}`` where ``levers`` is the ordered list
+    of fired levers (each ``{lever, bucket, count, share, gate, cost}``) and
+    ``primary`` is the cheapest fired lever — the one to build first — or
+    ``NO_LEVER`` when no gate fires.
+    """
+    visual = int(buckets.get(VISUAL, 0))
+    truncation = int(buckets.get(TRUNCATION, 0))
+    llm_skipped = int(buckets.get(LLM_SKIPPED, 0))
+    n = visual + truncation + llm_skipped
+
+    def _share(count: int) -> float:
+        return count / n if n else 0.0
+
+    levers: list[dict] = []
+    # 1. Cheapest: truncation, taken whenever non-trivial regardless of others.
+    if truncation >= TRUNCATION_NONTRIVIAL_MIN:
+        levers.append({
+            "lever": TRUNCATION_FIX, "bucket": TRUNCATION, "count": truncation,
+            "share": _share(truncation), "gate": f"non-trivial (>={TRUNCATION_NONTRIVIAL_MIN})",
+            "cost": "cheap"})
+    # 2/3. The buried remainder (visual + llm_skipped) routes the cost-asymmetric
+    # bar: a dominant llm_skipped → the expensive paid probe; else a visual
+    # plurality → the track switch.
+    if n and llm_skipped > n * DOMINANT_SHARE:
+        levers.append({
+            "lever": PAID_REGEN_PROBE, "bucket": LLM_SKIPPED, "count": llm_skipped,
+            "share": _share(llm_skipped), "gate": f"dominant (>{DOMINANT_SHARE:.0%})",
+            "cost": "paid"})
+    elif visual and visual >= truncation and visual >= llm_skipped:
+        levers.append({
+            "lever": VIDEO_OR_PIVOT, "bucket": VISUAL, "count": visual,
+            "share": _share(visual), "gate": "plurality (largest buried bucket)",
+            "cost": "track-switch"})
+
+    return {
+        "n": n,
+        "shares": {VISUAL: _share(visual), TRUNCATION: _share(truncation),
+                   LLM_SKIPPED: _share(llm_skipped)},
+        "levers": levers,
+        "primary": levers[0]["lever"] if levers else NO_LEVER,
+    }
+
+
 def hard_miss_golds(
     gold_by_vod: dict[str, list[dict]],
     raw_by_vod: dict[str, list[dict]],
@@ -353,6 +448,7 @@ def run(
             min_views=min_views, thresholds=thresholds,
             min_transcript_chars=min_transcript_chars))
 
+    hard_miss = {"floor": tier(0.0), "headline": tier(headline_min_views)}
     return {
         "gold_tiers": sorted(gold_tiers),
         "anchor_restricted": anchor_vod_ids is not None,
@@ -365,7 +461,12 @@ def run(
         "generator_model": GENERATOR_MODEL,
         "ranking_model": RANKING_MODEL,
         "buckets": list(BUCKETS),
-        "hard_miss": {"floor": tier(0.0), "headline": tier(headline_min_views)},
+        "hard_miss": hard_miss,
+        # The pre-fixed routing rule applied to each tier's bucket counts. Floor and
+        # headline route independently, so the North-Star (headline) routing weight
+        # reads on its own — the truncation product-win is often floor-only.
+        "routing": {tier_name: route(hard_miss[tier_name]["buckets"])
+                    for tier_name in ("floor", "headline")},
     }
 
 
@@ -440,6 +541,33 @@ def _golds_by_bucket(tier: dict) -> list[str]:
     return lines
 
 
+def _routing_lines(label: str, verdict: dict) -> list[str]:
+    """The applied routed levers for one tier, cheapest-first, by human label."""
+    if not verdict["levers"]:
+        return [f"  {label:<9} (n={verdict['n']}) → {LEVER_LABELS[NO_LEVER]}"]
+    lines = [f"  {label:<9} (n={verdict['n']})"]
+    for lever in verdict["levers"]:
+        lines.append(
+            f"    [{lever['cost']:>12}] {lever['bucket']}={lever['count']} "
+            f"({lever['share']:.0%}, {lever['gate']}) → {LEVER_LABELS[lever['lever']]}")
+    return lines
+
+
+def format_routing(result: dict) -> str:
+    """Render the applied routing verdict (floor + headline), the routing weight on
+    the North-Star (headline). The rule is pre-fixed; this only reads it off the
+    Slice-2 bucket counts, so the lever choice is mechanical, not rationalised."""
+    routing = result["routing"]
+    lines = [
+        "  ROUTING VERDICT (pre-fixed cheap-before-expensive rule, applied to the "
+        "bucket counts):"]
+    lines.extend(_routing_lines("FLOOR", routing["floor"]))
+    lines.extend(_routing_lines("HEADLINE", routing["headline"]))
+    lines.append(
+        "  Routing weight sits on HEADLINE (the North-Star / shipped recall@20 tier).")
+    return "\n".join(lines)
+
+
 def format_report(result: dict) -> str:
     hm = result["hard_miss"]
     lines = [
@@ -472,14 +600,12 @@ def format_report(result: dict) -> str:
     lines.extend(_golds_by_bucket(hm["floor"]))
 
     lines.append("")
+    lines.append(format_routing(result))
+    lines.append("")
     lines.append(
         "Caveat: only the truncation subset is a discrimination-independent product "
         "recall@20 win (those candidates would have competed on merit). An llm_skipped "
         "or visual raw@any lift lands buried until discrimination is solved.")
-    lines.append(
-        "Routing (cheap-before-expensive): truncation non-trivial → mechanical "
-        "chunk/max_tokens fix; llm_skipped dominant → gated paid strong-model re-gen; "
-        "visual plurality → video-signal track / product pivot.")
     return "\n".join(lines)
 
 
