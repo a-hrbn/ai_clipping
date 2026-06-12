@@ -341,6 +341,149 @@ def test_run_rating_scores_each_vod_set_and_surfaces_caps() -> None:
         ("gold", 0.8), ("control", 0.5)]
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# Issue #63 — within-set separation + the pre-fixed 0.66 gate (read-only over the
+# #62 persisted scores; no paid call). Hand-computed percentiles in, exact gate out.
+# ═════════════════════════════════════════════════════════════════════════════
+
+# ── Slice 1: window_separation — fraction of controls the gold strictly beats ──
+
+def test_window_separation_counts_controls_strictly_beaten() -> None:
+    # The gold scores 0.5; of three controls it strictly outscores only the 0.3 one
+    # (the 0.5 tie does NOT count, the 0.7 beats it). probability-of-superiority =
+    # 1/3, the #54 formula on rated windows.
+    sep = swp.window_separation(0.5, [0.3, 0.5, 0.7])
+
+    assert sep is not None
+    assert sep["gold_score"] == 0.5
+    assert sep["sibling_n"] == 3
+    assert sep["beaten"] == 1
+    assert sep["percentile"] == 1 / 3
+
+
+def test_window_separation_is_none_without_controls() -> None:
+    # No controls in the VOD -> the gold is unmeasurable, surfaced as None (never a
+    # 0.0 that would understate separation), fail-closed like #54.
+    assert swp.window_separation(0.9, []) is None
+
+
+# ── Slice 2: the pre-fixed 0.66 gate, read asymmetrically ─────────────────────
+
+def test_gate_separated_routes_to_escalate_b() -> None:
+    # Median percentile at/above the 0.66 bar (#54's cut) -> getrennt -> escalate
+    # (B), the full paid_regen_probe. 0.66 itself separates (>=).
+    assert swp.gate(0.70)["separated"] is True
+    assert swp.gate(0.70)["route"] == swp.ESCALATE_B
+    assert swp.gate(0.66)["separated"] is True
+
+
+def test_gate_not_separated_routes_to_pivot_c() -> None:
+    # Below 0.66 -> nicht getrennt -> decided exogenous-to-transcript -> Pivot (C).
+    verdict = swp.gate(0.50)
+    assert verdict["separated"] is False
+    assert verdict["route"] == swp.PIVOT_C
+
+
+def test_gate_fails_closed_on_unmeasurable_median() -> None:
+    # No measurable gold (None median) is never read as separation -> Pivot (C).
+    verdict = swp.gate(None)
+    assert verdict["separated"] is False
+    assert verdict["route"] == swp.PIVOT_C
+
+
+# ── Slice 3: analyze_separation — per-tier median + gate, per-window rows ──────
+
+def _scored(vod_id, start, end, kind, score, **extra):
+    return {"vod_id": vod_id, "start": float(start), "end": float(end),
+            "kind": kind, "score": score, **extra}
+
+
+def test_analyze_separation_splits_floor_and_headline_and_routes_on_headline() -> None:
+    # V1's headline gold beats all 3 of its controls (percentile 1.0); V2's floor
+    # gold beats none of its 2 controls (0.0). Floor median([0.0,1.0])=0.5 < 0.66 ->
+    # Pivot (C); headline median([1.0])=1.0 >= 0.66 -> escalate (B). Routing weight
+    # sits on headline (North-Star).
+    rating = {"vods": {
+        "V1": {"scored": [
+            _scored("V1", 3000, 3030, "gold", 0.9, headline=True, desc="V1 headline gold"),
+            _scored("V1", 500, 520, "control", 0.2, rank=2),
+            _scored("V1", 600, 620, "control", 0.4, rank=3),
+            _scored("V1", 700, 720, "control", 0.6, rank=4),
+        ], "dropped": []},
+        "V2": {"scored": [
+            _scored("V2", 8000, 8030, "gold", 0.3, headline=False, desc="V2 floor gold"),
+            _scored("V2", 100, 120, "control", 0.5, rank=1),
+            _scored("V2", 200, 220, "control", 0.7, rank=2),
+        ], "dropped": []},
+    }}
+
+    result = swp.analyze_separation(rating)
+
+    assert result["tiers"]["floor"]["median_percentile"] == 0.5
+    assert result["tiers"]["floor"]["gate"]["route"] == swp.PIVOT_C
+    assert result["tiers"]["headline"]["median_percentile"] == 1.0
+    assert result["tiers"]["headline"]["gate"]["route"] == swp.ESCALATE_B
+    # The North-Star headline tier drives the routing verdict.
+    assert result["routing_tier"] == "headline"
+    assert result["verdict"] == result["tiers"]["headline"]["gate"]["verdict"]
+    # Per-window rows (not just the aggregate), identifiable by desc.
+    by_desc = {w["desc"]: w for w in result["windows"]}
+    assert by_desc["V1 headline gold"]["percentile"] == 1.0
+    assert by_desc["V2 floor gold"]["percentile"] == 0.0
+    assert by_desc["V1 headline gold"]["separated"] is True
+    assert by_desc["V2 floor gold"]["separated"] is False
+
+
+# ── Slice 4: format_separation — per-window report + the two caveats ──────────
+
+def test_format_separation_surfaces_per_window_tiers_and_both_caveats() -> None:
+    rating = {"vods": {
+        "C": {"scored": [
+            _scored("C", 22950, 22994, "gold", 0.4, headline=True,
+                    desc="Jynxzi Reacts to ChainsFR's Face Reveal!"),
+            _scored("C", 100, 120, "control", 0.6, rank=1),
+            _scored("C", 200, 220, "control", 0.8, rank=2),
+        ], "dropped": []},
+    }}
+    separation = swp.analyze_separation(rating)
+
+    report = swp.format_separation(separation)
+
+    # The 1.43M ChainsFR window is identifiable by name (per-window, not just aggregate).
+    assert "ChainsFR" in report
+    # Both tiers' gate verdicts are shown, and the headline routing decision.
+    assert "FLOOR" in report and "HEADLINE" in report
+    assert swp.PIVOT_C in report          # ChainsFR beats neither control -> not separated
+    # The thin-n caveat names the tier counts.
+    assert "thin" in report.lower()
+    # The ship caveat: separated is suggestive, not a ship proof (in-context is B).
+    assert "ship" in report.lower()
+
+
+# ── Slice 6: format_verdict_comment — the markdown verdict for #60 ────────────
+
+def test_format_verdict_comment_carries_route_threshold_and_caveats() -> None:
+    rating = {"vods": {
+        "C": {"scored": [
+            _scored("C", 22950, 22994, "gold", 0.4, headline=True, desc="ChainsFR Face Reveal"),
+            _scored("C", 100, 120, "control", 0.6, rank=1),
+            _scored("C", 200, 220, "control", 0.8, rank=2),
+        ], "dropped": []},
+    }}
+    separation = swp.analyze_separation(rating)
+
+    comment = swp.format_verdict_comment(separation)
+
+    # The headline routing decision (Pivot C here: ChainsFR beats no control).
+    assert swp.PIVOT_C in comment
+    # The pre-fixed bar is named, and the routing tier is the North-Star headline.
+    assert "0.66" in comment
+    assert "headline" in comment.lower()
+    # Both caveats travel with the verdict.
+    assert "thin" in comment.lower()
+    assert "ship" in comment.lower()
+
+
 # ── Job-dir writer for the CLI test (the pipeline_debug_* replay layout) ──────
 def _row(start, end, composite=8.0):
     virality = composite / 10.0
@@ -466,6 +609,51 @@ def test_main_replay_rescoreswindows_from_persisted_raw_no_network(tmp_path) -> 
     assert artifact["rating"]["counts"] == {"scored": 2, "dropped": 0}
 
 
+def test_main_replay_computes_separation_and_gate(tmp_path) -> None:
+    # --replay also applies the #63 separation + 0.66 gate over the re-scored
+    # windows, net-free. The gold (0.85) beats its single control (0.30) -> pct 1.0
+    # -> headline separated -> escalate (B). The gate is reproducible from disk.
+    manifest_path = tmp_path / "manifest.jsonl"
+    manifest_path.write_text(
+        json.dumps({
+            "vod_id": "V",
+            "gt_moments": [{"start": 3000.0, "end": 3030.0, "views": 300_000,
+                            "gt_tier": "gold", "desc": "V llm_skipped"}],
+        }) + "\n", encoding="utf-8")
+    anchor_csv = tmp_path / "anchors.csv"
+    anchor_csv.write_text("vod_id\nV\n", encoding="utf-8")
+    storage = tmp_path / "storage"
+    storage.mkdir()
+    clean_response = json.dumps({"moments": [{"start": 10, "end": 30, "rationale": "ok"}]})
+    _write_job_dir(
+        storage, "V", "20260101T000000000000Z",
+        raw=[_row(1.0, 19.0)],
+        segments=[_seg(2990, 3035, "the llm skipped gold window with real spoken words"),
+                  _seg(495, 525, "the delivered control window speech here")],
+        response=clean_response,
+        final=[_moment(3005, 3025, composite=9.0), _moment(500, 520, composite=8.0)],
+        mtime=1000.0)
+    artifacts_dir = tmp_path / "artifacts"
+    artifacts_dir.mkdir()
+    (artifacts_dir / "V.raw.txt").write_text(
+        '{"scores": [{"id": 1, "repost_virality": 0.85}, {"id": 2, "repost_virality": 0.30}]}',
+        encoding="utf-8")
+    out_path = tmp_path / "report.json"
+
+    rc = swp.main([
+        "--manifest", str(manifest_path), "--anchor-csv", str(anchor_csv),
+        "--predictions-dir", str(storage), "--artifacts-dir", str(artifacts_dir),
+        "--replay", "--output", str(out_path), "--json",
+    ])
+
+    assert rc == 0
+    separation = json.loads(out_path.read_text(encoding="utf-8"))["separation"]
+    assert separation["tiers"]["headline"]["median_percentile"] == 1.0
+    assert separation["tiers"]["headline"]["gate"]["route"] == swp.ESCALATE_B
+    assert separation["verdict"] == separation["tiers"]["headline"]["gate"]["verdict"]
+    assert separation["windows"][0]["percentile"] == 1.0
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Guard — reconcile the assembly against #56 + the real artifacts (no network)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -565,3 +753,47 @@ def test_replay_rescores_real_window_assembly_net_free() -> None:
         out = swp.replay_make_rater(_ARTIFACTS_DIR)(vod_id, windows)
         assert len(out["scored"]) + len(out["dropped"]) == len(windows)
         assert all(0.0 <= w["score"] <= 1.0 for w in out["scored"])
+
+
+@pytest.mark.skipif(
+    not _probe_artifacts_present(),
+    reason="no persisted window-probe artifacts (no paid Sonnet run yet — #62 is net-free)",
+)
+def test_separation_gate_reconciles_on_real_persisted_scores() -> None:
+    # The #63 gate over the REAL persisted scores, net-free: re-score the real
+    # assembly from disk, run the within-set separation + 0.66 gate, and pin (a)
+    # the gold set against #56 (frozen 17/9, no re-classification), (b) every tier
+    # produces a legitimate gate route, (c) the headline verdict drives routing,
+    # (d) every measured percentile is a real probability.
+    manifest = eval_clip_finder.load_manifest()
+    anchors = eval_clip_finder.read_anchor_vod_ids()
+    (raw, pool, final_by_vod, segments_by_vod, response_by_vod,
+     chunk_duration_by_vod, _gaps) = swp.build_inputs(anchors, _STORAGE_DIR)
+    result = swp.run(
+        manifest, raw, pool, final_by_vod,
+        segments_by_vod=segments_by_vod, response_by_vod=response_by_vod,
+        chunk_duration_by_vod=chunk_duration_by_vod, anchor_vod_ids=anchors)
+
+    # (a) Reuse guard: the gold windows are still exactly #56's llm_skipped (17/9).
+    assert result["counts"]["gold_windows"] == {"floor": 17, "headline": 9}
+
+    # Re-score only the VODs with a persisted raw (a partial paid run stays honest),
+    # then run the separation + gate over that rating.
+    rated_vods: dict[str, dict] = {}
+    for vod_id, entry in result["vods"].items():
+        if not swp._raw_path(_ARTIFACTS_DIR, vod_id).exists():
+            continue
+        out = swp.replay_make_rater(_ARTIFACTS_DIR)(vod_id, swp.vod_windows(entry))
+        rated_vods[vod_id] = {"scored": out["scored"], "dropped": out["dropped"]}
+    assert rated_vods, "guard says a raw exists, but none mapped to an assembled VOD"
+
+    separation = swp.analyze_separation({"vods": rated_vods})
+
+    # (b)/(c) Each tier resolves to a real route; the headline drives the verdict.
+    for tier in ("floor", "headline"):
+        assert separation["tiers"][tier]["gate"]["route"] in (swp.ESCALATE_B, swp.PIVOT_C)
+    assert separation["routing_tier"] == "headline"
+    assert separation["verdict"] == separation["tiers"]["headline"]["gate"]["verdict"]
+    # (d) Every gold window is a real probability or a surfaced unmeasurable.
+    for w in separation["windows"]:
+        assert w["percentile"] is None or 0.0 <= w["percentile"] <= 1.0

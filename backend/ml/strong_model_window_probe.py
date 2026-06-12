@@ -1,15 +1,17 @@
-"""Strong-model Window-Probe — assembly (#61) + paid Sonnet rating (#62), PRD #60.
+"""Strong-model Window-Probe — assembly (#61) + Sonnet rating (#62) + gate (#63), PRD #60.
 
-The probe that de-risks, then runs, the single paid step of Generation Phase 2. It
-does NOT add a new measurement layer; it **composes** the existing seams:
+The probe that de-risks, runs, then gates the single paid step of Generation Phase 2.
+It does NOT add a new measurement layer; it **composes** the existing seams:
 
   * `hard_miss_decomposition` (#56) — the `llm_skipped` bucket *is* the gold window
     set (consumed directly, never re-classified),
   * `eval_clip_finder.is_hit` (#49) — the gold/non-gold test + tier filtering,
   * the `replay_harness` (#47) loaders — `segments.jsonl` and the delivered
-    `final_moments.json` (the flash-lite top-20) from the `pipeline_debug_*` dirs, and
+    `final_moments.json` (the flash-lite top-20) from the `pipeline_debug_*` dirs,
   * the `repost_virality_judge` (#48) judge — its compact score-only prompt, parser
-    (with truncation salvage) and Sonnet provider seam, reused not rebuilt.
+    (with truncation salvage) and Sonnet provider seam, reused not rebuilt, and
+  * the `separability_probe` (#54) — the probability-of-superiority percentile + the
+    pre-fixed 0.66 separation cut (`classify_separation`), reused not rebuilt.
 
 Assembly (#61): for every window — gold AND control, treated identically — it builds
 a modest symmetric transcript excerpt (~60-120 s each side) from `segments.jsonl`;
@@ -20,12 +22,18 @@ Rating (#62): the strong model rates each window's excerpt on repost-virality, g
 AND control in ONE scored set (identical form). The raw response is persisted BEFORE
 parsing, so `--replay` re-scores net-free without paying again; a window the model
 did not score is dropped fail-closed (a truncated response never reads as "scored
-everything"). The within-set separation + 0.66 gate is #63.
+everything").
+
+Gate (#63): the within-set separation of each gold window vs its VOD's controls (the
+#54 percentile), per tier, read against the pre-fixed **0.66** gate asymmetrically —
+`>= 0.66` → getrennt → escalate (B, full paid_regen_probe); `< 0.66` → nicht getrennt
+→ Pivot (C, video-discriminator / product change). Routing weight on headline
+(North-Star). Read-only over the #62 scores — no paid call, reproducible via `--replay`.
 
 Usage (inside the Docker container):
   python -m ml.strong_model_window_probe                    # free assembly only (#61)
   python -m ml.strong_model_window_probe --rate             # PAID: one Sonnet call/VOD
-  python -m ml.strong_model_window_probe --replay [--json]  # free re-score from disk
+  python -m ml.strong_model_window_probe --replay [--json]  # free re-score + gate (#62/#63)
 """
 from __future__ import annotations
 
@@ -34,6 +42,7 @@ import datetime
 import json
 import logging
 import pathlib
+import statistics
 import sys
 from typing import Callable
 
@@ -42,7 +51,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from ml import (directional_eval, eval_clip_finder, hard_miss_decomposition as hmd,
-                repost_virality_judge, replay_harness)
+                repost_virality_judge, replay_harness, separability_probe as sp)
 from ml.eval_clip_finder import COVERAGE_THRESHOLD, is_hit
 
 logger = logging.getLogger(__name__)
@@ -454,6 +463,131 @@ def run_rating(assembled: dict, *, make_rater: MakeRaterFn) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Separation analysis + the pre-fixed 0.66 gate (#63) — read-only over the scores
+# ─────────────────────────────────────────────────────────────────────────────
+# The within-set separation each llm_skipped gold window achieves against its
+# VOD's control scores (the delivered top-20 non-gold), as a probability-of-
+# superiority percentile — exactly the #54 `separability_probe` method, on rated
+# windows instead of a judged pool. The pre-fixed 0.66 gate (#54's bar, for
+# cross-probe comparability) is read asymmetrically: separated → escalate (B),
+# not-separated → Pivot (C). No paid call — this reads the #62-persisted scores.
+
+
+# The two pre-fixed Phase-2 routes the gate selects between (PRD #60), hung on the
+# 0.66 separation cut. Read asymmetrically: not-separated decides Pivot (exogeneity
+# is hard-proven — Sonnet won't even lift the gold over the delivered competition);
+# separated only *suggests* recoverability (rate-mode ≠ in-context generation → B).
+ESCALATE_B = "escalate (B) — full paid_regen_probe"
+PIVOT_C = "Pivot (C) — video-discriminator / product change"
+
+
+def gate(median_percentile: float | None, *, threshold: float = sp.SEPARATION_THRESHOLD) -> dict:
+    """The pre-fixed 0.66 separation gate, mapped to the #63 escalate/Pivot routes.
+
+    Reuses the #54 cut and fail-closed semantics (``separability_probe`` —
+    ``SEPARATION_THRESHOLD`` = 0.66, ``classify_separation`` treats a ``None``
+    median as not-separated) so the bar is identical and lives in one place, then
+    translates the boolean into the #60 Phase-2 route: ``>= 0.66`` → getrennt →
+    ``ESCALATE_B``; ``< 0.66`` or unmeasurable → nicht getrennt → ``PIVOT_C``.
+    """
+    base = sp.classify_separation(median_percentile, threshold=threshold)
+    route = ESCALATE_B if base["separated"] else PIVOT_C
+    label = "getrennt" if base["separated"] else "nicht getrennt"
+    return {
+        "separated": base["separated"],
+        "median_percentile": median_percentile,
+        "threshold": threshold,
+        "route": route,
+        "verdict": f"{label} → {route}",
+    }
+
+
+def window_separation(gold_score: float, control_scores: list[float]) -> dict | None:
+    """The gold window's probability-of-superiority percentile vs its VOD's controls.
+
+    The fraction of control scores the gold *strictly* outscores (0.5 = random,
+    1.0 = beats every control), the #54 formula applied to the rated windows. Ties
+    do not count as beaten. Returns ``None`` when the VOD has no controls — the
+    gold is unmeasurable, surfaced rather than folded in as a 0.0 (fail-closed).
+    """
+    siblings = [float(s) for s in control_scores if s is not None]
+    if not siblings:
+        return None
+    gold = float(gold_score)
+    beaten = sum(1 for s in siblings if s < gold)
+    return {
+        "gold_score": gold,
+        "sibling_n": len(siblings),
+        "beaten": beaten,
+        "percentile": beaten / len(siblings),
+    }
+
+
+def _separation_tier(window_rows: list[dict], *, headline_only: bool, threshold: float) -> dict:
+    """Aggregate the within-set separation over one tier's gold windows.
+
+    Floor reads every gold window; headline keeps only the high-view ones. The tier
+    verdict reads the **median** of the *measurable* percentiles (a gold in a VOD
+    with no controls is unmeasurable — surfaced, never counted as a 0.0 that would
+    understate separation), then the pre-fixed 0.66 gate.
+    """
+    rows = [r for r in window_rows if (not headline_only or r["headline"])]
+    measurable = [r["percentile"] for r in rows if r["percentile"] is not None]
+    median = statistics.median(measurable) if measurable else None
+    return {
+        "gold_count": len(rows),
+        "measurable": len(measurable),
+        "unmeasurable": len(rows) - len(measurable),
+        "median_percentile": median,
+        "percentiles": sorted(measurable),
+        "gate": gate(median, threshold=threshold),
+    }
+
+
+def analyze_separation(rating: dict, *, threshold: float = sp.SEPARATION_THRESHOLD) -> dict:
+    """Within-set separation of every llm_skipped gold vs its VOD's controls, gated.
+
+    Reads the #62 ``rating`` (per VOD, the gold + control windows each scored by
+    Sonnet, read-only) and, per VOD, measures each gold window's
+    ``window_separation`` against that VOD's control scores. Aggregates per tier
+    (floor = all golds, headline = the high-view ones) into a median percentile and
+    the pre-fixed gate; the routing weight is the **headline** verdict (the
+    North-Star). Returns the per-window rows (so the expected split — ChainsFR
+    exogenous vs quotable narrative beats — is legible) plus the per-tier verdicts.
+    """
+    window_rows: list[dict] = []
+    for vod_id, entry in rating["vods"].items():
+        scored = entry.get("scored", [])
+        control_scores = [w["score"] for w in scored
+                          if w.get("kind") == CONTROL and w.get("score") is not None]
+        for gold in (w for w in scored if w.get("kind") == GOLD):
+            sep = window_separation(gold["score"], control_scores)
+            percentile = sep["percentile"] if sep else None
+            window_rows.append({
+                "vod_id": vod_id,
+                "start": gold["start"],
+                "end": gold["end"],
+                "desc": gold.get("desc"),
+                "headline": bool(gold.get("headline")),
+                "score": gold["score"],
+                "sibling_n": sep["sibling_n"] if sep else 0,
+                "percentile": percentile,
+                "separated": percentile is not None and percentile >= threshold,
+            })
+    tiers = {
+        "floor": _separation_tier(window_rows, headline_only=False, threshold=threshold),
+        "headline": _separation_tier(window_rows, headline_only=True, threshold=threshold),
+    }
+    return {
+        "threshold": threshold,
+        "windows": window_rows,
+        "tiers": tiers,
+        "routing_tier": "headline",
+        "verdict": tiers["headline"]["gate"]["verdict"],
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Artifact bridge — compose the #56 inputs + the delivered final_moments loader
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -539,11 +673,113 @@ def format_report(result: dict) -> str:
         lines.append("")
         lines.append(_format_rating(result))
 
+    if result.get("separation"):
+        lines.append("")
+        lines.append(format_separation(result["separation"]))
+
     lines.append("")
     lines.append(
         f"Caveat (thin n): gold windows floor={counts['gold_windows']['floor']} / "
         f"headline={counts['gold_windows']['headline']} — the separation gate (#63) reads off "
-        f"the North-Star (headline). This slice rates the windows; the 0.66 gate is #63.")
+        f"the North-Star (headline).")
+    return "\n".join(lines)
+
+
+def _separation_tier_line(label: str, tier: dict) -> str:
+    median = tier["median_percentile"]
+    median_str = f"{median:.3f}" if median is not None else "  —  "
+    return (
+        f"  {label:<9} n={tier['gold_count']:>2} (measurable {tier['measurable']}, "
+        f"unmeasurable {tier['unmeasurable']})  median pct {median_str}  → {tier['gate']['verdict']}")
+
+
+def format_separation(separation: dict) -> str:
+    """The within-set separation report (#63): per-tier gate + per-window split.
+
+    Shows the floor/headline median percentile and the pre-fixed 0.66 gate verdict,
+    the headline routing decision (North-Star), and every gold window's percentile
+    so the expected split is legible by name (ChainsFR exogenous / low; quotable
+    narrative beats recoverable / high). Carries the thin-n caveat and the explicit
+    'getrennt is not a ship proof' caveat.
+    """
+    tiers = separation["tiers"]
+    floor, headline = tiers["floor"], tiers["headline"]
+    lines = [
+        "=" * 78,
+        "WINDOW SEPARATION + 0.66 GATE (#63): within-set percentile, gold vs delivered control",
+        "=" * 78,
+        _separation_tier_line("FLOOR", floor),
+        _separation_tier_line("HEADLINE", headline),
+        f"  ROUTING (weight on {separation['routing_tier']} = North-Star): {separation['verdict']}",
+        "",
+        "  PER-WINDOW (gold's within-set percentile vs its VOD's delivered controls):",
+    ]
+    for w in sorted(separation["windows"],
+                    key=lambda x: (x["percentile"] is None, -(x["percentile"] or 0.0))):
+        tier = "headline" if w["headline"] else "floor"
+        pct = f"{w['percentile']:.3f}" if w["percentile"] is not None else "—(no controls)"
+        flag = "getrennt" if w["separated"] else "nicht getrennt"
+        lines.append(
+            f"    [{tier:^8}] score {w['score']:.3f}  pct {pct:<14} {flag:<14} "
+            f"{str(w.get('desc') or '')[:50]}")
+    lines.append("")
+    lines.append(
+        f"Caveat (thin n): headline n={headline['gold_count']} "
+        f"(measurable {headline['measurable']}), floor n={floor['gold_count']} "
+        f"(measurable {floor['measurable']}) — read with care, do not overstate.")
+    lines.append(
+        "Caveat (not a ship proof): 'getrennt' is suggestive only — rate-mode on an "
+        "excerpt is not in-context generation surfacing the gold into the shipped "
+        "top-20; only the full paid_regen_probe (B) tests that.")
+    return "\n".join(lines)
+
+
+def format_verdict_comment(separation: dict) -> str:
+    """The markdown verdict comment for PRD #60 (analogous to #50/#54/#55/#59).
+
+    States the pre-fixed 0.66 gate result per tier, the headline (North-Star)
+    routing decision, the per-window split (so ChainsFR vs the narrative beats is
+    legible), and the two caveats. The verdict is mechanical — read off the median,
+    never rationalised after the fact.
+    """
+    tiers = separation["tiers"]
+    floor, headline = tiers["floor"], tiers["headline"]
+
+    def _med(tier: dict) -> str:
+        m = tier["median_percentile"]
+        return f"{m:.3f}" if m is not None else "— (unmeasurable)"
+
+    lines = [
+        "## Window-Probe Separation Verdict (#63 — Phase 1 gate)",
+        "",
+        f"Within-set separation of each `llm_skipped` gold window vs its VOD's "
+        f"delivered top-20 controls (probability-of-superiority percentile, the #54 "
+        f"method), against the pre-fixed **{separation['threshold']}** bar.",
+        "",
+        f"- **HEADLINE** (North-Star, routing weight): median percentile {_med(headline)} "
+        f"over n={headline['gold_count']} (measurable {headline['measurable']}) → "
+        f"**{headline['gate']['verdict']}**",
+        f"- **FLOOR**: median percentile {_med(floor)} over n={floor['gold_count']} "
+        f"(measurable {floor['measurable']}) → {floor['gate']['verdict']}",
+        "",
+        f"**Routing decision (headline): {separation['verdict']}**",
+        "",
+        "Per-window separation (highest first):",
+    ]
+    for w in sorted(separation["windows"],
+                    key=lambda x: (x["percentile"] is None, -(x["percentile"] or 0.0))):
+        tier = "headline" if w["headline"] else "floor"
+        pct = f"{w['percentile']:.3f}" if w["percentile"] is not None else "—(no controls)"
+        flag = "getrennt" if w["separated"] else "nicht getrennt"
+        lines.append(f"- [{tier}] pct {pct} ({flag}) — {str(w.get('desc') or '')[:70]}")
+    lines.extend([
+        "",
+        f"_Caveat (thin n): headline n={headline['gold_count']}, floor "
+        f"n={floor['gold_count']} — do not overstate._",
+        "_Caveat (not a ship proof): 'getrennt' is suggestive only — rate-mode on an "
+        "excerpt is not in-context generation surfacing the gold into the shipped "
+        "top-20; only the full `paid_regen_probe` (B) tests that._",
+    ])
     return "\n".join(lines)
 
 
@@ -637,6 +873,9 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         result["rating"] = run_rating(result, make_rater=make_rater)
         result["rating_mode"] = "replay" if args.replay else "paid"
+        # #63: the within-set separation + the pre-fixed 0.66 gate, read off the
+        # re-scored windows. Reproducible from disk under --replay (no paid call).
+        result["separation"] = analyze_separation(result["rating"])
 
     result["computed_at"] = datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00", "Z")
 
