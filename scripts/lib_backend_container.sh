@@ -149,3 +149,30 @@ ensure_backend_image_current() {
   fi
 }
 
+# --- container runtime helpers ---
+
+# True wenn der genannte Container existiert UND läuft.
+container_running() {
+  [ "$(docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = "true" ]
+}
+
+# CUDA-Backend bevorzugen, sonst CPU-Backend; sonst mit Fehler abbrechen.
+# Ersetzt den laufenden Prozess durch `docker exec` (exec → kein Rücksprung).
+# Container-Namen und Workdir via Env überschreibbar.
+exec_in_backend() {
+  local module="$1"; shift
+  local cuda="${BACKEND_CONTAINER_CUDA:-ai-clipping-backend-cuda}"
+  local cpu="${BACKEND_CONTAINER:-ai-clipping-backend}"
+  local workdir="${BACKEND_WORKDIR:-/app/backend}"
+
+  local container="$cuda"
+  container_running "$container" || container="$cpu"   # Fallback CUDA → CPU
+  if ! container_running "$container"; then
+    echo "ERROR: No backend container running (tried $cuda, $cpu)." >&2
+    echo "Start it first: docker compose -f docker-compose.cuda.yml up -d" >&2
+    exit 1
+  fi
+
+  exec docker exec -w "$workdir" "$container" python -m "$module" "$@"
+}
+

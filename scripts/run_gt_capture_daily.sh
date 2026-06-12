@@ -18,18 +18,8 @@
 # All Python logic lives in backend/ml/gt_capture_daily.py (mounted at /app/backend).
 set -euo pipefail
 
-CONTAINER="ai-clipping-backend-cuda"
-WORKDIR="/app/backend"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib_backend_container.sh
+source "$SCRIPT_DIR/lib_backend_container.sh"
 
-if ! docker inspect --format='{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q "^true$"; then
-    # Fall back to the CPU image if the CUDA box is not up.
-    CONTAINER="ai-clipping-backend"
-fi
-
-if ! docker inspect --format='{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q "^true$"; then
-    echo "ERROR: No backend container running (tried ai-clipping-backend-cuda, ai-clipping-backend)."
-    echo "Start it first: docker compose -f docker-compose.cuda.yml up -d"
-    exit 1
-fi
-
-exec docker exec -w "$WORKDIR" "$CONTAINER" python -m ml.gt_capture_daily "$@"
+exec_in_backend ml.gt_capture_daily "$@"
