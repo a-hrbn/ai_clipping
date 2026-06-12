@@ -58,6 +58,10 @@ RESPONSE_ARTIFACT = "llm_moment_finder_response.txt"
 USAGE_ARTIFACT = "llm_moment_finder_usage.json"
 STAGE_ARTIFACT = "llm_moment_finder_stage.json"
 
+# The product's delivered top-20 (post dedupe + enforce_diversity + top_k), in
+# product-rank order — the control set the window-probe rates the gold against.
+FINAL_MOMENTS_ARTIFACT = "final_moments.json"
+
 # rows -> rows. The single variation point; default identity keeps the current
 # composite order. A fn may overwrite each row's composite_score and/or reorder.
 RankScoreFn = Callable[[list[dict]], list[dict]]
@@ -194,6 +198,20 @@ def load_generation_artifacts(
     usage = _read_json_artifact(debug / USAGE_ARTIFACT)
     stage = _read_json_artifact(debug / STAGE_ARTIFACT)
     return segments, response_text, usage, stage
+
+
+def load_final_moments(vod_id: str, storage: pathlib.Path) -> list[dict] | None:
+    """The VOD's delivered top-20 (``final_moments.json``) in product-rank order.
+
+    Resolves the same newest replayable job dir as ``load_replay_inputs`` and reads
+    the delivered final set via ``eval_clip_finder._read_final_moments_json`` (no
+    reimplemented I/O). ``None`` means the VOD has no replayable job dir (a coverage
+    gap); an empty list means the job dir holds no/empty ``final_moments.json``.
+    """
+    job_dir = _resolve_replay_job_dir(storage, vod_id)
+    if job_dir is None:
+        return None
+    return eval_clip_finder._read_final_moments_json(job_dir / "debug" / FINAL_MOMENTS_ARTIFACT)
 
 
 def _snap_dedupe_rescore(

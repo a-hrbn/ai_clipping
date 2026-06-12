@@ -1,0 +1,366 @@
+"""Tests for the strong-model Window-Probe data assembly (ml/strong_model_window_probe.py).
+
+The free, offline Phase-1 tracer of PRD #60: it de-risks the data assembly *before*
+any paid Sonnet call (#62) or separation analysis (#63). It composes existing seams —
+the #56 `hard_miss_decomposition` `llm_skipped` bucket (the gold windows), the delivered
+flash-lite top-20 (`final_moments.json`) filtered to non-gold via #49 `is_hit` (the
+control), and the #47 `replay_harness` loaders — and builds, for every window (gold AND
+control, treated identically), a modest symmetric transcript excerpt from `segments.jsonl`.
+
+These tests pin the excerpt builder, the control filter and the llm_skipped reuse guard
+through the public interface on hand-built fixtures — never a network or paid call.
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+import types
+
+import pytest
+
+# Defensive: the assembly reaches hard_miss_decomposition -> the serving
+# post-processor, which can pull the heavy transcription stack. Prior art
+# (test_gap_decomposition) stubs whisper the same way so the import stays cheap.
+sys.modules.setdefault("whisper", types.SimpleNamespace(load_model=lambda *_a, **_k: None))
+
+from ml import eval_clip_finder, hard_miss_decomposition as hmd, strong_model_window_probe as swp
+
+
+def _seg(start, end, text):
+    return {"start": float(start), "end": float(end), "text": str(text)}
+
+
+def _gold(start, end, views=0.0, desc=""):
+    return {"start": float(start), "end": float(end), "views": float(views),
+            "gt_tier": "gold", "desc": desc}
+
+
+def _moment(start, end, composite=8.0):
+    """One delivered top-20 moment (final_moments.json shape: start_time/end_time)."""
+    return {"start_time": float(start), "end_time": float(end),
+            "composite_score": float(composite), "reason": "delivered"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Slice 1 — build_excerpt grabs the segments symmetrically around a window
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_build_excerpt_grabs_segments_within_the_symmetric_pad() -> None:
+    # Window [200,230], pad 90s -> excerpt window [110, 320]. Only the segments
+    # overlapping that span contribute; the ones just outside are excluded.
+    segments = [
+        _seg(100, 110, "before_excluded"),     # ends at 110 -> no overlap with [110,320]
+        _seg(110, 120, "lead_in"),             # inside the left pad
+        _seg(200, 210, "the_gold_itself"),     # the window
+        _seg(310, 320, "tail_out"),            # inside the right pad
+        _seg(320, 330, "after_excluded"),      # starts at 320 -> no overlap
+        _seg(500, 510, "far_away"),            # well outside
+    ]
+
+    excerpt = swp.build_excerpt(200, 230, segments, pad_sec=90)
+
+    assert excerpt["excerpt_start"] == 110.0
+    assert excerpt["excerpt_end"] == 320.0
+    assert "lead_in" in excerpt["text"]
+    assert "the_gold_itself" in excerpt["text"]
+    assert "tail_out" in excerpt["text"]
+    for excluded in ("before_excluded", "after_excluded", "far_away"):
+        assert excluded not in excerpt["text"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Slice 2 — the excerpt is clamped to the VOD's first/last segment bounds
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_build_excerpt_clamps_to_vod_start_and_end_bounds() -> None:
+    # Timeline runs [0, 200]. A window near the start would pad to -40 (before the
+    # VOD) and one near the end would pad past 200 — both clamp to the real bounds,
+    # so the excerpt never references time outside the transcript.
+    segments = [
+        _seg(0, 10, "vod_start"),
+        _seg(60, 70, "near_start_window"),
+        _seg(160, 170, "near_end_window"),
+        _seg(190, 200, "vod_end"),
+    ]
+
+    head = swp.build_excerpt(50, 80, segments, pad_sec=90)     # raw [-40,170] -> [0,170]
+    assert head["excerpt_start"] == 0.0                        # clamped up from -40
+    assert head["excerpt_end"] == 170.0                        # 170 < 200, untouched
+    assert "vod_start" in head["text"] and "vod_end" not in head["text"]
+
+    tail = swp.build_excerpt(150, 180, segments, pad_sec=90)   # raw [60,270] -> [60,200]
+    assert tail["excerpt_start"] == 60.0                       # 60 > 0, untouched
+    assert tail["excerpt_end"] == 200.0                        # clamped down from 270
+    assert "vod_end" in tail["text"] and "vod_start" not in tail["text"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Slice 3 — the control set is the delivered top-20, filtered to non-gold
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_control_windows_drops_gold_overlapping_delivered_moments() -> None:
+    # The delivered top-20 (product rank order). m1 covers the gold (>=50% of the
+    # 30s GT window) so it is a hit and dropped; the two distant moments are the
+    # genuine non-gold controls. The dropped count is surfaced for logging.
+    gold = _gold(100, 130)
+    delivered = [
+        _moment(105, 125, composite=9.0),     # covers the gold -> dropped
+        _moment(500, 520, composite=8.0),     # control
+        _moment(600, 620, composite=7.0),     # control
+    ]
+
+    result = swp.control_windows(delivered, [gold], threshold=0.5)
+
+    controls = result["controls"]
+    assert result["dropped_gold_overlap"] == 1
+    assert [(c["start"], c["end"]) for c in controls] == [(500.0, 520.0), (600.0, 620.0)]
+    # Product rank is preserved (1-based position in the delivered order).
+    assert [c["rank"] for c in controls] == [2, 3]
+    assert [c["composite_score"] for c in controls] == [8.0, 7.0]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Slice 4 — gold windows ARE the #56 llm_skipped bucket (reuse guard)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _cand(start, end):
+    return {"start_time": float(start), "end_time": float(end)}
+
+
+# A 2-chunk response (dur=2700): chunk 1 [t0,t0+2700) aborts mid-JSON, chunk 2
+# closes cleanly. A spoken gold in chunk 1 -> truncation; one in chunk 2 ->
+# llm_skipped. The probe must pick ONLY the llm_skipped gold.
+_RESPONSE = (
+    "===== CHUNK 1/2 =====\n"
+    '{\n  "moments": [\n    {"start": 200, "end": 230, "rationale": "cut off mid-stre'
+    "\n\n===== CHUNK 2/2 =====\n"
+    '{"moments": [{"start": 3000, "end": 3030, "rationale": "clean"}]}'
+)
+_SEGMENTS = [
+    _seg(195, 235, "real spoken words under the gold in the truncated first chunk"),
+    _seg(2990, 3035, "real spoken words under the gold in the clean second chunk"),
+]
+
+
+def test_gold_windows_are_exactly_the_56_llm_skipped_golds_not_reclassified() -> None:
+    # Two hard-miss golds: one truncation, one llm_skipped (per #56). The probe
+    # consumes the #56 hard_miss result and must surface ONLY the llm_skipped gold
+    # as a gold window — it sub-selects an already-classified set, never re-derives.
+    manifest = {"V": [_gold(200, 230, views=300_000, desc="truncation gold"),
+                      _gold(3000, 3030, views=300_000, desc="llm_skipped gold")]}
+    raw = {"V": [_cand(0, 5)]}                          # covers neither -> both hard_miss
+    pool = {"V": [_cand(0, 5)]}
+
+    hm = hmd.run(manifest, raw, pool, anchor_vod_ids=["V"], headline_min_views=100_000,
+                 segments_by_vod={"V": _SEGMENTS}, response_by_vod={"V": _RESPONSE})
+
+    golds = swp.llm_skipped_golds(hm["hard_miss"], "floor")
+
+    assert [(g["vod_id"], g["start"], g["end"]) for g in golds] == [("V", 3000.0, 3030.0)]
+    assert golds[0]["desc"] == "llm_skipped gold"
+    # Pinned directly against #56: exactly the golds hmd put in the llm_skipped bucket.
+    expected = [g for g in hm["hard_miss"]["floor"]["golds"] if g["bucket"] == hmd.LLM_SKIPPED]
+    assert golds == expected
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Slice 5 — run() assembles per-VOD gold + control windows, each with an excerpt
+# ─────────────────────────────────────────────────────────────────────────────
+
+# VOD "V": gold A [200,230] truncation (chunk 1), gold B [3000,3030] llm_skipped
+# (chunk 2). Segments carry speech under both golds AND under two control windows.
+_V_SEGMENTS = [
+    _seg(195, 235, "gold A speech inside the truncated first chunk with plenty of real spoken words"),
+    _seg(495, 525, "control one speech delivered non gold"),
+    _seg(595, 625, "control two speech delivered non gold"),
+    _seg(2990, 3035, "gold B speech inside the clean second chunk with plenty of real spoken words"),
+]
+
+
+def test_run_assembles_gold_and_control_windows_with_excerpts() -> None:
+    manifest = {"V": [_gold(200, 230, views=300_000, desc="truncation gold"),
+                      _gold(3000, 3030, views=300_000, desc="llm_skipped gold")]}
+    raw = {"V": [_cand(0, 5)]}                          # covers neither -> both hard_miss
+    pool = {"V": [_cand(0, 5)]}
+    # Delivered top-20: one overlaps gold A (dropped), two are genuine controls.
+    final = {"V": [_moment(205, 225, composite=9.0),
+                   _moment(500, 520, composite=8.0),
+                   _moment(600, 620, composite=7.0)]}
+
+    result = swp.run(
+        manifest, raw, pool, final, anchor_vod_ids=["V"], headline_min_views=100_000,
+        segments_by_vod={"V": _V_SEGMENTS}, response_by_vod={"V": _RESPONSE}, pad_sec=90)
+
+    vod = result["vods"]["V"]
+    # Gold window = only the llm_skipped gold, with its symmetric excerpt.
+    assert [(g["start"], g["end"]) for g in vod["gold_windows"]] == [(3000.0, 3030.0)]
+    assert "gold B speech" in vod["gold_windows"][0]["excerpt"]["text"]
+    assert vod["gold_windows"][0]["headline"] is True            # 300k >= 100k
+
+    # Control windows = the delivered non-gold top-20, each with its own excerpt
+    # built by the SAME builder (identical treatment to gold).
+    assert [(c["start"], c["end"]) for c in vod["control_windows"]] == [(500.0, 520.0), (600.0, 620.0)]
+    assert "control one speech" in vod["control_windows"][0]["excerpt"]["text"]
+    assert "control two speech" in vod["control_windows"][1]["excerpt"]["text"]
+    # The gold-overlapping delivered moment is dropped and the bound is logged.
+    assert vod["control_dropped_gold_overlap"] == 1
+    assert result["counts"]["gold_windows"] == {"floor": 1, "headline": 1}
+    assert result["counts"]["control_windows"] == 2
+
+
+def test_run_surfaces_vods_without_final_moments_as_a_coverage_gap() -> None:
+    # V has an llm_skipped gold but no loadable final_moments.json — its controls
+    # can't be assembled. That is a surfaced coverage gap, never a silent miss: the
+    # gold window still stands, the control set is empty, and V is named in gaps.
+    manifest = {"V": [_gold(200, 230, views=300_000, desc="truncation gold"),
+                      _gold(3000, 3030, views=300_000, desc="llm_skipped gold")]}
+    raw = {"V": [_cand(0, 5)]}
+    pool = {"V": [_cand(0, 5)]}
+
+    result = swp.run(
+        manifest, raw, pool, final_by_vod={}, anchor_vod_ids=["V"], headline_min_views=100_000,
+        segments_by_vod={"V": _V_SEGMENTS}, response_by_vod={"V": _RESPONSE}, pad_sec=90)
+
+    assert result["gaps"]["no_final_moments"] == ["V"]
+    vod = result["vods"]["V"]
+    assert len(vod["gold_windows"]) == 1                  # the gold window still stands
+    assert vod["control_windows"] == []                  # no controls assembled
+    assert vod["control_dropped_gold_overlap"] == 0
+    assert result["counts"]["control_windows"] == 0
+
+
+# ── Job-dir writer for the CLI test (the pipeline_debug_* replay layout) ──────
+def _row(start, end, composite=8.0):
+    virality = composite / 10.0
+    return {"start_time": float(start), "end_time": float(end),
+            "viral_score": composite, "composite_score": composite,
+            "llm_virality": virality, "hook": virality, "flow": virality,
+            "value": virality, "trend": virality, "reason": "row"}
+
+
+def _write_job_dir(storage, vod_id, ts, *, raw, segments, response, final, mtime):
+    debug = storage / f"pipeline_debug_{ts}_{vod_id}" / "debug"
+    debug.mkdir(parents=True)
+    (debug / "llm_moment_finder_moments_raw.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in raw), encoding="utf-8")
+    (debug / "segments.jsonl").write_text(
+        "".join(json.dumps(s) + "\n" for s in segments), encoding="utf-8")
+    (debug / "llm_moment_finder_response.txt").write_text(response, encoding="utf-8")
+    (debug / "final_moments.json").write_text(
+        json.dumps({"moments": final}), encoding="utf-8")
+    os.utime(debug.parent, (mtime, mtime))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Slice 6 — the CLI replays the real artifact layout into a window-probe report
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_main_assembles_windows_from_replay_artifacts(tmp_path) -> None:
+    manifest_path = tmp_path / "manifest.jsonl"
+    manifest_path.write_text(
+        json.dumps({
+            "vod_id": "V",
+            "gt_moments": [{"start": 3000.0, "end": 3030.0, "views": 300_000,
+                            "gt_tier": "gold", "desc": "V llm_skipped"}],
+        }) + "\n", encoding="utf-8")
+    anchor_csv = tmp_path / "anchors.csv"
+    anchor_csv.write_text("vod_id\nV\n", encoding="utf-8")
+    storage = tmp_path / "storage"
+    storage.mkdir()
+    # Single-chunk clean response -> the gold is llm_skipped (transcript present,
+    # nothing truncated). Raw covers nothing -> hard_miss. Delivered top-20 holds
+    # one gold-overlapping moment (dropped) and one genuine non-gold control.
+    clean_response = json.dumps({"moments": [{"start": 10, "end": 30, "rationale": "ok"}]})
+    _write_job_dir(
+        storage, "V", "20260101T000000000000Z",
+        raw=[_row(1.0, 19.0)],
+        segments=[
+            _seg(2990, 3035, "the llm skipped gold window with plenty of real spoken words here"),
+            _seg(495, 525, "the delivered control window speech here"),
+        ],
+        response=clean_response,
+        final=[_moment(3005, 3025, composite=9.0),   # overlaps the gold -> dropped
+               _moment(500, 520, composite=8.0)],     # genuine non-gold control
+        mtime=1000.0)
+    out_path = tmp_path / "report.json"
+
+    rc = swp.main([
+        "--manifest", str(manifest_path),
+        "--anchor-csv", str(anchor_csv),
+        "--predictions-dir", str(storage),
+        "--output", str(out_path),
+        "--json",
+    ])
+
+    assert rc == 0
+    artifact = json.loads(out_path.read_text(encoding="utf-8"))
+    vod = artifact["vods"]["V"]
+    assert [(g["start"], g["end"]) for g in vod["gold_windows"]] == [(3000.0, 3030.0)]
+    assert "llm skipped gold window" in vod["gold_windows"][0]["excerpt"]["text"]
+    assert [(c["start"], c["end"]) for c in vod["control_windows"]] == [(500.0, 520.0)]
+    assert "delivered control window" in vod["control_windows"][0]["excerpt"]["text"]
+    assert vod["control_dropped_gold_overlap"] == 1
+    assert "computed_at" in artifact
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Guard — reconcile the assembly against #56 + the real artifacts (no network)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_STORAGE_DIR = eval_clip_finder.DEFAULT_STORAGE_DIR
+_CHAINSFR_VOD = "2772745645"
+_MISSING_PREDICTION_VODS = ["2756055866", "2764976309", "2770356205", "2771207666", "2773650615"]
+
+
+def _real_artifacts_present() -> bool:
+    return any(_STORAGE_DIR.glob("pipeline_debug_*"))
+
+
+@pytest.mark.skipif(
+    not _real_artifacts_present(),
+    reason="real pipeline_debug artifacts not present (tmp/storage is gitignored)",
+)
+def test_window_probe_reconciles_with_56_on_real_artifacts() -> None:
+    # Assemble over the real artifacts and pin: (a) the gold-window set is exactly
+    # #56's llm_skipped golds — same counts AND same windows, both tiers (the reuse
+    # guard, no re-classification); (b) controls load for every gold VOD; (c)
+    # ChainsFR is a named gold window with a real excerpt; (d) the coverage gap is
+    # surfaced, not counted.
+    manifest = eval_clip_finder.load_manifest()
+    anchors = eval_clip_finder.read_anchor_vod_ids()
+    (raw, pool, final_by_vod, segments_by_vod, response_by_vod,
+     chunk_duration_by_vod, _gaps) = swp.build_inputs(anchors, _STORAGE_DIR)
+
+    result = swp.run(
+        manifest, raw, pool, final_by_vod,
+        segments_by_vod=segments_by_vod, response_by_vod=response_by_vod,
+        chunk_duration_by_vod=chunk_duration_by_vod, anchor_vod_ids=anchors)
+    decomposition = hmd.run(
+        manifest, raw, pool, segments_by_vod=segments_by_vod, response_by_vod=response_by_vod,
+        chunk_duration_by_vod=chunk_duration_by_vod, anchor_vod_ids=anchors)
+
+    # (a) Reuse guard: gold windows == #56 llm_skipped, both tiers (frozen 17 / 9).
+    assert result["counts"]["gold_windows"] == {"floor": 17, "headline": 9}
+    for tier in ("floor", "headline"):
+        expected = {(g["vod_id"], g["start"], g["end"])
+                    for g in decomposition["hard_miss"][tier]["golds"]
+                    if g["bucket"] == hmd.LLM_SKIPPED}
+        got = {(w["vod_id"], w["start"], w["end"])
+               for entry in result["vods"].values() for w in entry["gold_windows"]
+               if (tier == "floor" or w["headline"])}
+        assert got == expected
+
+    # (b) Controls assembled for every gold VOD (none missing final_moments here).
+    assert result["gaps"]["no_final_moments"] == []
+    assert result["counts"]["control_windows"] > 0
+    for entry in result["vods"].values():
+        assert len(entry["control_windows"]) > 0
+
+    # (c) ChainsFR is a named gold window with a non-trivial transcript excerpt.
+    chainsfr = result["vods"][_CHAINSFR_VOD]["gold_windows"]
+    assert any("ChainsFR" in g["desc"] for g in chainsfr)
+    assert all(g["excerpt"]["text"] for g in chainsfr)
+
+    # (d) The 5 missing-prediction VODs stay a surfaced coverage gap, not counted.
+    assert result["gaps"]["missing_prediction_vods"] == _MISSING_PREDICTION_VODS
