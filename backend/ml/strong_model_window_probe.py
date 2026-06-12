@@ -1,39 +1,51 @@
-"""Strong-model Window-Probe — data assembly (PRD #60, Phase 1).
+"""Strong-model Window-Probe — assembly (#61) + paid Sonnet rating (#62), PRD #60.
 
-The free, offline tracer that de-risks the probe's data assembly *before* any paid
-Sonnet call (#62) or separation analysis (#63). It does NOT add a new measurement
-layer; it **composes** the existing seams:
+The probe that de-risks, then runs, the single paid step of Generation Phase 2. It
+does NOT add a new measurement layer; it **composes** the existing seams:
 
   * `hard_miss_decomposition` (#56) — the `llm_skipped` bucket *is* the gold window
     set (consumed directly, never re-classified),
-  * `eval_clip_finder.is_hit` (#49) — the gold/non-gold test + tier filtering, and
+  * `eval_clip_finder.is_hit` (#49) — the gold/non-gold test + tier filtering,
   * the `replay_harness` (#47) loaders — `segments.jsonl` and the delivered
-    `final_moments.json` (the flash-lite top-20) from the `pipeline_debug_*` dirs.
+    `final_moments.json` (the flash-lite top-20) from the `pipeline_debug_*` dirs, and
+  * the `repost_virality_judge` (#48) judge — its compact score-only prompt, parser
+    (with truncation salvage) and Sonnet provider seam, reused not rebuilt.
 
-For every window — gold AND control, treated identically — it builds a modest
-symmetric transcript excerpt (~60-120 s each side) from `segments.jsonl`. The
-control set is the delivered top-20 filtered to non-gold; coverage-gaps (windows
-with no loadable artifacts) stay surfaced, never silently counted. No paid call:
-the Sonnet rating (#62) and the separation/gate (#63) are later slices.
+Assembly (#61): for every window — gold AND control, treated identically — it builds
+a modest symmetric transcript excerpt (~60-120 s each side) from `segments.jsonl`;
+the control set is the delivered top-20 filtered to non-gold; coverage-gaps stay
+surfaced, never silently counted.
+
+Rating (#62): the strong model rates each window's excerpt on repost-virality, gold
+AND control in ONE scored set (identical form). The raw response is persisted BEFORE
+parsing, so `--replay` re-scores net-free without paying again; a window the model
+did not score is dropped fail-closed (a truncated response never reads as "scored
+everything"). The within-set separation + 0.66 gate is #63.
 
 Usage (inside the Docker container):
-  python -m ml.strong_model_window_probe
-  python -m ml.strong_model_window_probe --json
+  python -m ml.strong_model_window_probe                    # free assembly only (#61)
+  python -m ml.strong_model_window_probe --rate             # PAID: one Sonnet call/VOD
+  python -m ml.strong_model_window_probe --replay [--json]  # free re-score from disk
 """
 from __future__ import annotations
 
 import argparse
 import datetime
 import json
+import logging
 import pathlib
 import sys
+from typing import Callable
 
 BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from ml import directional_eval, eval_clip_finder, hard_miss_decomposition as hmd, replay_harness
+from ml import (directional_eval, eval_clip_finder, hard_miss_decomposition as hmd,
+                repost_virality_judge, replay_harness)
 from ml.eval_clip_finder import COVERAGE_THRESHOLD, is_hit
+
+logger = logging.getLogger(__name__)
 
 # The #56 bucket whose golds this probe rates: the model saw the transcript and
 # skipped it. Consumed directly from hard_miss_decomposition, never re-classified.
@@ -244,6 +256,204 @@ def run(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Paid Sonnet rating — score gold + control windows (one set), persist-before-parse
+# ─────────────────────────────────────────────────────────────────────────────
+# The single paid step (PRD #60, #62): the strong model (Sonnet via
+# `anthropic_model_topk`, identical to the #50 judge) rates each window excerpt —
+# gold AND control, in ONE scored set so both get the identical prompt/score form —
+# on repost-virality. Composed, never rebuilt: the compact score-only prompt
+# (`build_judge_prompt`, no rationales → no JSON truncation), the parser
+# (`parse_judge_scores`, with truncation salvage) and the provider seam
+# (`anthropic_sonnet_provider`) are the #48 judge's. The raw response is persisted
+# BEFORE parsing, so a `--replay` re-scores net-free, without paying again.
+
+GOLD = "gold"
+CONTROL = "control"
+
+# Where the paid run persists each VOD's raw response + parsed per-window scores,
+# so a later --replay re-scores without paying again (its own artifacts subdir).
+DEFAULT_ARTIFACTS_DIR = BACKEND_ROOT / "ml" / "artifacts" / "strong_model_window_probe"
+
+
+def vod_windows(entry: dict) -> list[dict]:
+    """One VOD's gold + control windows as a single list, each tagged with its kind.
+
+    The probe rates gold and control together so they share one model invocation
+    and one identical prompt — the within-set separation the #63 gate reads is only
+    meaningful when both sets were scored by the same call. Original window fields
+    are preserved; a ``kind`` of ``GOLD``/``CONTROL`` is added.
+    """
+    return ([{**g, "kind": GOLD} for g in entry.get("gold_windows", [])]
+            + [{**c, "kind": CONTROL} for c in entry.get("control_windows", [])])
+
+
+def _window_row(window: dict) -> dict:
+    """A window as the compact-prompt Row shape (`build_judge_prompt` reads `text`)."""
+    return {
+        "start_time": window["start"],
+        "end_time": window["end"],
+        "text": str(window.get("excerpt", {}).get("text") or ""),
+    }
+
+
+def rate_windows(
+    windows: list[dict],
+    *,
+    call_provider: repost_virality_judge.CallProviderFn,
+    persist_raw,
+) -> dict:
+    """Score a single set of windows (gold + control) through the reused #48 judge.
+
+    Builds the compact score-only prompt over the windows' excerpts, calls the
+    injected provider, persists the raw response BEFORE parsing, then parses the
+    compact scores (truncation-salvaged) and attaches the raw 0-1 ``repost_virality``
+    to each window by its 1-based id. A window the model did not score is DROPPED,
+    never back-filled — fail-closed, so a truncated response never reads as "scored
+    everything"; the drop count is logged. Returns ``{scored, dropped, raw}``.
+    """
+    rows = [_window_row(w) for w in windows]
+    prompt = repost_virality_judge.build_judge_prompt(rows)
+    raw = call_provider(prompt)
+    persist_raw(raw)
+    scores = repost_virality_judge.parse_judge_scores(raw)
+    scored: list[dict] = []
+    dropped: list[dict] = []
+    for index, window in enumerate(windows, start=1):
+        if index in scores:
+            scored.append({**window, "score": scores[index]})
+        else:
+            dropped.append(window)
+    logger.info(json.dumps(
+        {"event": "window_probe_rated", "windows": len(windows),
+         "scored": len(scored), "dropped": len(dropped)}, sort_keys=True))
+    return {"scored": scored, "dropped": dropped, "raw": raw}
+
+
+# vod_id, windows -> the rate_windows result (paid Sonnet+persist, or replay-from-disk).
+MakeRaterFn = Callable[[str, list[dict]], dict]
+
+
+def _raw_path(artifacts_dir: pathlib.Path, vod_id: str) -> pathlib.Path:
+    return artifacts_dir / f"{vod_id}.raw.txt"
+
+
+def _scores_path(artifacts_dir: pathlib.Path, vod_id: str) -> pathlib.Path:
+    return artifacts_dir / f"{vod_id}.scores.json"
+
+
+def _write_text(path: pathlib.Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def _persist_scores(path: pathlib.Path, scored: list[dict]) -> None:
+    """Persist the parsed per-window scores — the human-readable score artifact.
+
+    The raw response already replays everything; this is the explicit per-window
+    record the #63 separation reads: the window's identity (vod/tier/kind/desc) and
+    its raw 0-1 ``repost_virality`` ``score``.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = [
+        {
+            "vod_id": w.get("vod_id"),
+            "start": w.get("start"),
+            "end": w.get("end"),
+            "kind": w.get("kind"),
+            "headline": w.get("headline"),
+            "rank": w.get("rank"),
+            "desc": w.get("desc"),
+            "score": w.get("score"),
+        }
+        for w in scored
+    ]
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def persisted_response_provider(raw: str) -> repost_virality_judge.CallProviderFn:
+    """A network-free provider that replays one persisted raw response.
+
+    Re-evaluation binds the rating's provider seam to this instead of paid Sonnet:
+    the prompt is ignored and the saved raw text is returned, so the *same* parser
+    decodes it on the path the paid run used — re-scorable without paying again.
+    """
+
+    def _call(_prompt: str) -> str:
+        return raw
+
+    return _call
+
+
+def paid_make_rater(artifacts_dir: pathlib.Path, *, provider=None) -> MakeRaterFn:
+    """Per-VOD rater bound to paid Sonnet, persisting raw response + parsed scores.
+
+    The provider defaults to the configured strong model (Sonnet via
+    ``anthropic_model_topk``, identical to the #50 judge); tests inject a fake. One
+    paid call per VOD (gold + control in one prompt). The raw response is persisted
+    BEFORE parsing (the re-evaluable artifact); the parsed per-window scores after.
+    """
+    call_provider = provider or repost_virality_judge.anthropic_sonnet_provider()
+
+    def _make(vod_id: str, windows: list[dict]) -> dict:
+        raw_path = _raw_path(artifacts_dir, vod_id)
+        result = rate_windows(
+            windows, call_provider=call_provider,
+            persist_raw=lambda text: _write_text(raw_path, text))
+        _persist_scores(_scores_path(artifacts_dir, vod_id), result["scored"])
+        return result
+
+    return _make
+
+
+def replay_make_rater(artifacts_dir: pathlib.Path) -> MakeRaterFn:
+    """Per-VOD rater bound to the persisted raw response — re-scores without paying."""
+
+    def _make(vod_id: str, windows: list[dict]) -> dict:
+        raw = _raw_path(artifacts_dir, vod_id).read_text(encoding="utf-8")
+        return rate_windows(
+            windows, call_provider=persisted_response_provider(raw),
+            persist_raw=lambda _text: None)
+
+    return _make
+
+
+def run_rating(assembled: dict, *, make_rater: MakeRaterFn) -> dict:
+    """Rate every VOD's gold + control window set through the injected rater.
+
+    Consumes the ``run`` assembly (#61) and, per VOD, scores its combined gold +
+    control windows in one set (``vod_windows``) via ``make_rater`` (paid Sonnet or
+    replay). Every cap is surfaced, never silent: a VOD whose assembly yielded no
+    windows is named, and the per-VOD count of windows the model did not score
+    (fail-closed drops) is recorded — so a truncated response never reads as "scored
+    everything". Returns the per-VOD scored/dropped windows + the aggregate counts.
+    """
+    vods: dict[str, dict] = {}
+    no_windows: list[str] = []
+    dropped_unscored_by_vod: dict[str, int] = {}
+    total_scored = 0
+    total_dropped = 0
+    for vod_id, entry in assembled["vods"].items():
+        windows = vod_windows(entry)
+        if not windows:
+            no_windows.append(vod_id)
+            continue
+        result = make_rater(vod_id, windows)
+        vods[vod_id] = {"scored": result["scored"], "dropped": result["dropped"]}
+        total_scored += len(result["scored"])
+        total_dropped += len(result["dropped"])
+        if result["dropped"]:
+            dropped_unscored_by_vod[vod_id] = len(result["dropped"])
+    return {
+        "vods": vods,
+        "counts": {"scored": total_scored, "dropped": total_dropped},
+        "caps": {
+            "vods_without_windows": no_windows,
+            "dropped_unscored_by_vod": dropped_unscored_by_vod,
+        },
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Artifact bridge — compose the #56 inputs + the delivered final_moments loader
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -325,11 +535,44 @@ def format_report(result: dict) -> str:
         for c in entry["control_windows"]:
             lines.append(_excerpt_line(c, f"rank {c['rank']:>2}  comp {c['composite_score']:.2f}"))
 
+    if result.get("rating"):
+        lines.append("")
+        lines.append(_format_rating(result))
+
     lines.append("")
     lines.append(
         f"Caveat (thin n): gold windows floor={counts['gold_windows']['floor']} / "
         f"headline={counts['gold_windows']['headline']} — the separation gate (#63) reads off "
-        f"the North-Star (headline). This slice only assembles the data; no Sonnet call yet (#62).")
+        f"the North-Star (headline). This slice rates the windows; the 0.66 gate is #63.")
+    return "\n".join(lines)
+
+
+def _format_rating(result: dict) -> str:
+    """The per-window Sonnet scores (gold + control), by VOD, + the surfaced caps.
+
+    #62 produces the scores; the within-set separation + 0.66 gate is #63. The raw
+    0-1 ``repost_virality`` is shown so the gold-vs-control split is already legible.
+    """
+    rating = result["rating"]
+    counts = rating["counts"]
+    caps = rating["caps"]
+    lines = [
+        "=" * 78,
+        f"WINDOW RATING ({result.get('rating_mode', '?')}): {result['ranking_model']} "
+        f"repost-virality per window (gold + control, one scored set)",
+        "=" * 78,
+        f"Scored: {counts['scored']}   Dropped (unscored, fail-closed): {counts['dropped']}",
+    ]
+    if caps["vods_without_windows"]:
+        lines.append(f"⚠  VODs with no windows to rate: {', '.join(caps['vods_without_windows'])}")
+    if caps["dropped_unscored_by_vod"]:
+        lines.append(f"⚠  Unscored drops by VOD (truncation/omission): {caps['dropped_unscored_by_vod']}")
+    for vod_id, entry in rating["vods"].items():
+        lines.append(f"  VOD {vod_id}:")
+        for w in sorted(entry["scored"], key=lambda x: -x.get("score", 0.0)):
+            tag = w["kind"] if w["kind"] == GOLD else f"control r{w.get('rank', '?')}"
+            lines.append(f"    {w['score']:.3f}  [{tag:^12}] [{w['start']:.1f}-{w['end']:.1f}]"
+                         f"  {str(w.get('desc') or '')[:48]}")
     return "\n".join(lines)
 
 
@@ -349,6 +592,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="Symmetric transcript pad on each side of a window (~60-120s)")
     parser.add_argument("--hit-threshold", type=float, default=COVERAGE_THRESHOLD,
                         help="is_hit coverage threshold for filtering controls to non-gold")
+    parser.add_argument("--artifacts-dir", default=str(DEFAULT_ARTIFACTS_DIR),
+                        help="Where raw responses + parsed scores persist (re-evaluable)")
+    parser.add_argument("--rate", action="store_true",
+                        help="PAID: rate the assembled windows with Sonnet, persist raw+scores")
+    parser.add_argument("--replay", action="store_true",
+                        help="Re-score the windows from persisted raw responses — NO paid call")
     parser.add_argument("--output", type=pathlib.Path, default=None)
     parser.add_argument("--json", dest="output_json", action="store_true")
     args = parser.parse_args(argv)
@@ -372,6 +621,23 @@ def main(argv: list[str] | None = None) -> int:
         chunk_duration_by_vod=chunk_duration_by_vod, anchor_vod_ids=anchors,
         headline_min_views=args.headline_min_views, hit_threshold=args.hit_threshold,
         pad_sec=args.pad_sec)
+
+    # Optional second step (#62): rate the assembled windows. Default (neither flag)
+    # is the free assembly only (#61). --replay re-scores net-free from persisted
+    # responses; --rate is the single paid Sonnet call (persists raw+scores).
+    if args.rate or args.replay:
+        artifacts_dir = pathlib.Path(args.artifacts_dir)
+        if args.replay:
+            make_rater = replay_make_rater(artifacts_dir)
+            mode = "replay (free, persisted responses)"
+        else:
+            make_rater = paid_make_rater(artifacts_dir)
+            mode = "PAID (anthropic Sonnet)"
+        print(f"strong_model_window_probe: rating mode={mode}  artifacts={artifacts_dir}",
+              file=sys.stderr)
+        result["rating"] = run_rating(result, make_rater=make_rater)
+        result["rating_mode"] = "replay" if args.replay else "paid"
+
     result["computed_at"] = datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00", "Z")
 
     payload = json.dumps(result, indent=2, ensure_ascii=False)

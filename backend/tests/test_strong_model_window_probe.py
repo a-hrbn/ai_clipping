@@ -230,6 +230,117 @@ def test_run_surfaces_vods_without_final_moments_as_a_coverage_gap() -> None:
     assert result["counts"]["control_windows"] == 0
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# Issue #62 — the paid Sonnet window-rating + persist/replay. rate_windows is the
+# core: gold AND control windows (one set) scored identically through the reused
+# repost_virality_judge compact prompt + parser, raw persisted BEFORE parsing.
+# All tests run net-free over the Fake adapter / persisted raw-response fixtures.
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _win(start, end, kind, text, **extra):
+    return {"vod_id": "V", "start": float(start), "end": float(end),
+            "kind": kind, "excerpt": {"text": text}, **extra}
+
+
+def test_rate_windows_scores_gold_and_control_by_one_based_id() -> None:
+    # gold + control in ONE scored set: the 1-based id maps each window to its
+    # score, identical prompt/score form for both. The raw 0-1 repost_virality is
+    # attached (not the 1-10 pipeline rescale — the #63 separation reads the raw).
+    windows = [
+        _win(3000, 3030, "gold", "the gold transcript excerpt under the skipped window"),
+        _win(500, 520, "control", "the delivered control transcript excerpt here"),
+    ]
+    raw = '{"scores": [{"id": 1, "repost_virality": 0.8}, {"id": 2, "repost_virality": 0.3}]}'
+
+    saved: list[str] = []
+    result = swp.rate_windows(windows, call_provider=lambda _p: raw, persist_raw=saved.append)
+
+    assert [w["score"] for w in result["scored"]] == [0.8, 0.3]
+    assert [w["kind"] for w in result["scored"]] == ["gold", "control"]
+    assert result["dropped"] == []
+    # Persisted the raw response BEFORE parsing (the re-evaluable artifact).
+    assert saved == [raw]
+
+
+def test_rate_windows_salvages_truncated_json_and_drops_unscored_fail_closed() -> None:
+    # A real Sonnet truncation: the compact score array aborts mid-item after two
+    # complete entries. The reused salvage recovers ids 1 and 2; window 3 has no
+    # score and is DROPPED (fail-closed) — never read as "scored everything". The
+    # full truncated raw is still persisted (persist happens before the parse).
+    windows = [
+        _win(3000, 3030, "gold", "gold window one"),
+        _win(500, 520, "control", "control window two"),
+        _win(600, 620, "control", "control window three never scored"),
+    ]
+    truncated = ('{"scores": [{"id": 1, "repost_virality": 0.7}, '
+                 '{"id": 2, "repost_virality": 0.4}, {"id": 3, "repost_vira')
+
+    saved: list[str] = []
+    result = swp.rate_windows(windows, call_provider=lambda _p: truncated, persist_raw=saved.append)
+
+    assert [(w["kind"], w["score"]) for w in result["scored"]] == [("gold", 0.7), ("control", 0.4)]
+    # Window 3 is surfaced as dropped, not silently scored.
+    assert [(w["start"], w["end"]) for w in result["dropped"]] == [(600.0, 620.0)]
+    # The whole truncated raw is persisted regardless — diagnosable, replayable.
+    assert saved == [truncated]
+
+
+def test_paid_rater_persists_raw_and_scores_then_replays_identically(tmp_path) -> None:
+    # The full persist/replay round-trip, net-free: the paid factory (provider
+    # injected with a fake — the real wiring binds Sonnet) persists the raw BEFORE
+    # parsing and the per-window scores AFTER; the replay factory re-scores
+    # bit-identical from the persisted raw, never touching the network.
+    windows = [
+        _win(3000, 3030, "gold", "the gold transcript excerpt", views=300_000, desc="ChainsFR"),
+        _win(500, 520, "control", "the control transcript excerpt", rank=3),
+    ]
+    raw = '{"scores": [{"id": 1, "repost_virality": 0.9}, {"id": 2, "repost_virality": 0.2}]}'
+
+    recorded: list[str] = []
+    paid = swp.paid_make_rater(tmp_path, provider=lambda prompt: recorded.append(prompt) or raw)
+    paid_out = paid("V", windows)
+
+    # raw.txt persisted verbatim; scores.json carries the per-window scores + kind.
+    assert (tmp_path / "V.raw.txt").read_text(encoding="utf-8") == raw
+    scores_json = json.loads((tmp_path / "V.scores.json").read_text(encoding="utf-8"))
+    assert [(s["kind"], s["score"]) for s in scores_json] == [("gold", 0.9), ("control", 0.2)]
+    # gold + control went in ONE prompt (one paid call per VOD), identical form.
+    assert len(recorded) == 1
+
+    # Replay binds the persisted raw — no network — and reproduces the scores exactly.
+    replay_out = swp.replay_make_rater(tmp_path)("V", windows)
+    assert replay_out["scored"] == paid_out["scored"]
+    assert [w["score"] for w in replay_out["scored"]] == [0.9, 0.2]
+
+
+def test_run_rating_scores_each_vod_set_and_surfaces_caps() -> None:
+    # The orchestrator rates each VOD's gold+control set through the injected rater
+    # and surfaces every cap: a VOD with no windows is named, and per-VOD unscored
+    # drops are counted (never silently treated as "scored everything").
+    assembled = {"vods": {
+        "V1": {
+            "gold_windows": [{"vod_id": "V1", "start": 3000.0, "end": 3030.0,
+                              "headline": True, "desc": "g", "excerpt": {"text": "gold"}}],
+            "control_windows": [
+                {"vod_id": "V1", "start": 500.0, "end": 520.0, "rank": 2, "excerpt": {"text": "c1"}},
+                {"vod_id": "V1", "start": 600.0, "end": 620.0, "rank": 3, "excerpt": {"text": "c2"}}],
+        },
+        "V2": {"gold_windows": [], "control_windows": []},   # no windows → a cap
+    }}
+    # The model scores ids 1 and 2; the third window (2nd control) is dropped.
+    raw = '{"scores": [{"id": 1, "repost_virality": 0.8}, {"id": 2, "repost_virality": 0.5}]}'
+    make_rater = lambda _vod, windows: swp.rate_windows(
+        windows, call_provider=lambda _p: raw, persist_raw=lambda _t: None)
+
+    result = swp.run_rating(assembled, make_rater=make_rater)
+
+    assert result["caps"]["vods_without_windows"] == ["V2"]
+    assert result["caps"]["dropped_unscored_by_vod"] == {"V1": 1}
+    assert result["counts"] == {"scored": 2, "dropped": 1}
+    assert [(w["kind"], w["score"]) for w in result["vods"]["V1"]["scored"]] == [
+        ("gold", 0.8), ("control", 0.5)]
+
+
 # ── Job-dir writer for the CLI test (the pipeline_debug_* replay layout) ──────
 def _row(start, end, composite=8.0):
     virality = composite / 10.0
@@ -304,6 +415,57 @@ def test_main_assembles_windows_from_replay_artifacts(tmp_path) -> None:
     assert "computed_at" in artifact
 
 
+def test_main_replay_rescoreswindows_from_persisted_raw_no_network(tmp_path) -> None:
+    # End-to-end --replay: the CLI assembles the windows (1 gold + 1 control for V),
+    # then re-scores them from a persisted V.raw.txt — NO network, NO paid call. The
+    # report carries the per-window scores by kind, exactly what #63 will read.
+    manifest_path = tmp_path / "manifest.jsonl"
+    manifest_path.write_text(
+        json.dumps({
+            "vod_id": "V",
+            "gt_moments": [{"start": 3000.0, "end": 3030.0, "views": 300_000,
+                            "gt_tier": "gold", "desc": "V llm_skipped"}],
+        }) + "\n", encoding="utf-8")
+    anchor_csv = tmp_path / "anchors.csv"
+    anchor_csv.write_text("vod_id\nV\n", encoding="utf-8")
+    storage = tmp_path / "storage"
+    storage.mkdir()
+    clean_response = json.dumps({"moments": [{"start": 10, "end": 30, "rationale": "ok"}]})
+    _write_job_dir(
+        storage, "V", "20260101T000000000000Z",
+        raw=[_row(1.0, 19.0)],
+        segments=[_seg(2990, 3035, "the llm skipped gold window with real spoken words"),
+                  _seg(495, 525, "the delivered control window speech here")],
+        response=clean_response,
+        final=[_moment(3005, 3025, composite=9.0),   # overlaps the gold -> dropped
+               _moment(500, 520, composite=8.0)],     # genuine non-gold control
+        mtime=1000.0)
+    # The persisted paid response: window 1 = gold, window 2 = control (assembly order).
+    artifacts_dir = tmp_path / "artifacts"
+    artifacts_dir.mkdir()
+    (artifacts_dir / "V.raw.txt").write_text(
+        '{"scores": [{"id": 1, "repost_virality": 0.85}, {"id": 2, "repost_virality": 0.30}]}',
+        encoding="utf-8")
+    out_path = tmp_path / "report.json"
+
+    rc = swp.main([
+        "--manifest", str(manifest_path),
+        "--anchor-csv", str(anchor_csv),
+        "--predictions-dir", str(storage),
+        "--artifacts-dir", str(artifacts_dir),
+        "--replay",
+        "--output", str(out_path),
+        "--json",
+    ])
+
+    assert rc == 0
+    artifact = json.loads(out_path.read_text(encoding="utf-8"))
+    assert artifact["rating_mode"] == "replay"
+    scored = artifact["rating"]["vods"]["V"]["scored"]
+    assert [(w["kind"], w["score"]) for w in scored] == [("gold", 0.85), ("control", 0.30)]
+    assert artifact["rating"]["counts"] == {"scored": 2, "dropped": 0}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Guard — reconcile the assembly against #56 + the real artifacts (no network)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -364,3 +526,42 @@ def test_window_probe_reconciles_with_56_on_real_artifacts() -> None:
 
     # (d) The 5 missing-prediction VODs stay a surfaced coverage gap, not counted.
     assert result["gaps"]["missing_prediction_vods"] == _MISSING_PREDICTION_VODS
+
+
+_ARTIFACTS_DIR = swp.DEFAULT_ARTIFACTS_DIR
+
+
+def _probe_artifacts_present() -> bool:
+    """The (gitignored) persisted window-probe raw responses from a real paid run."""
+    return (_real_artifacts_present() and _ARTIFACTS_DIR.exists()
+            and any(_ARTIFACTS_DIR.glob("*.raw.txt")))
+
+
+@pytest.mark.skipif(
+    not _probe_artifacts_present(),
+    reason="no persisted window-probe artifacts (no paid Sonnet run yet — #62 is net-free)",
+)
+def test_replay_rescores_real_window_assembly_net_free() -> None:
+    # When a real paid run HAS persisted its raw responses, --replay re-scores the
+    # real window assembly net-free and reconciles: every rated VOD's scored +
+    # dropped windows account for exactly the assembled gold + control set (the
+    # fail-closed invariant), and every score is a real 0-1. No network, no re-pay.
+    manifest = eval_clip_finder.load_manifest()
+    anchors = eval_clip_finder.read_anchor_vod_ids()
+    (raw, pool, final_by_vod, segments_by_vod, response_by_vod,
+     chunk_duration_by_vod, _gaps) = swp.build_inputs(anchors, _STORAGE_DIR)
+    result = swp.run(
+        manifest, raw, pool, final_by_vod,
+        segments_by_vod=segments_by_vod, response_by_vod=response_by_vod,
+        chunk_duration_by_vod=chunk_duration_by_vod, anchor_vod_ids=anchors)
+
+    # Rate only the VODs that actually have a persisted raw (a partial paid run is
+    # honestly partial, never re-priced); reconcile each against its assembly.
+    rated = {v: e for v, e in result["vods"].items()
+             if swp._raw_path(_ARTIFACTS_DIR, v).exists()}
+    assert rated, "guard says a raw exists, but none mapped to an assembled VOD"
+    for vod_id, entry in rated.items():
+        windows = swp.vod_windows(entry)
+        out = swp.replay_make_rater(_ARTIFACTS_DIR)(vod_id, windows)
+        assert len(out["scored"]) + len(out["dropped"]) == len(windows)
+        assert all(0.0 <= w["score"] <= 1.0 for w in out["scored"])
