@@ -24,22 +24,17 @@ sys.modules.setdefault("whisper", types.SimpleNamespace(load_model=lambda *_a, *
 
 from ml import eval_clip_finder, hard_miss_decomposition as hmd, llm_moment_finder as d0
 
-# The observed truncation point on 2769594798: chunks 4 and 5 hit completion_tokens
-# 31990 against our 32000 cap. The fix must request a budget comfortably above this.
-_OBSERVED_TRUNCATION_TOKENS = 31990
-
-
-def test_production_generation_config_requests_budget_above_truncation_point() -> None:
-    # The fix lands in the production generation config: both the canonical code
-    # default and the settings value request 64000 tokens — above the 31990 that
-    # truncated, with headroom — so the covering chunk can complete. flash-lite
-    # supports up to 64k output; model-independent (no model swap).
+def test_production_generation_config_raises_token_budget_to_64000() -> None:
+    # The change lands in the production generation config: the canonical code
+    # default and the settings value both request 64000 (was 32000), same model (no
+    # swap). NOTE — net-positive headroom, NOT a proven truncation cure: a live
+    # re-gen (#68) showed dense chunks fill 64000 too (completion 63990), because
+    # max_moments=180 scales output to any budget. Kept as a harmless headroom bump.
     from config import Settings
 
     assert d0.DEFAULT_MAX_TOKENS == 64000
     assert Settings().moment_finder_max_tokens == 64000
-    # Above the observed truncation point — the cap was ours, not the model's.
-    assert Settings().moment_finder_max_tokens > _OBSERVED_TRUNCATION_TOKENS
+    assert Settings().moment_finder_max_tokens > 32000   # strictly more headroom than before
 
 
 def _gold(start, end, views=0.0, desc=""):
@@ -75,19 +70,21 @@ _SEGMENTS = [
 ]
 
 
-def test_fix_deterministically_resolves_the_truncation_for_the_gold() -> None:
-    # The Darth Maul gold (VOD 2769594798). With the OLD budget the covering chunk
-    # aborted mid-moment: the #56 detector reads it as truncation AND no parsed
-    # candidate covers the gold (its moment never closed). With the budget raised,
-    # the SAME chunk completes: the detector clears it AND a candidate now covers the
-    # gold — the truncation bucket resolves to 0. Deterministic, no LLM call.
+def test_a_completed_covering_chunk_recovers_the_gold_a_truncated_one_loses_it() -> None:
+    # The mechanism the truncation bucket rests on — NOT a claim that 64000 achieves
+    # completion (the live #68 re-gen showed it does not: dense chunks fill 64000 too).
+    # With a truncated covering chunk the #56 detector reads truncation AND no
+    # candidate covers the Darth Maul gold (its moment never closed); with the SAME
+    # chunk *completed* the detector clears it AND a candidate covers the gold. This
+    # pins what truncation costs and what completion recovers — the model-independent
+    # output-size fix (out of scope) is what would actually complete these chunks.
     gold = _gold(10470, 10482, views=98_090, desc="Darth Maul Sneakers")
 
-    # OLD budget → truncated chunk → truncation, gold uncovered.
+    # Truncated chunk → truncation, gold uncovered.
     assert hmd.is_truncated(gold, _SEGMENTS, _TRUNCATED_RESPONSE) is True
     assert _covers_gold(d0.parse_moments(_TRUNCATED_RESPONSE), gold) is False
 
-    # FIXED budget → completed chunk → not truncation, gold now has a candidate.
+    # Completed chunk → not truncation, gold now has a candidate.
     assert hmd.is_truncated(gold, _SEGMENTS, _FIXED_RESPONSE) is False
     assert _covers_gold(d0.parse_moments(_FIXED_RESPONSE), gold) is True
 

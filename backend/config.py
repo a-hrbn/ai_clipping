@@ -253,8 +253,10 @@ class Settings(BaseSettings):
     moment_finder_max_tokens: int = 64000
     # Long VODs are split into ~45-min windows so each LLM call keeps its output
     # under moment_finder_max_tokens. 0 disables chunking (single call per VOD).
-    # 64000 (was 32000): a 45-min/180-moment chunk could exceed 32000 and abort
-    # mid-JSON — the #56 `truncation` hard_miss (VOD 2769594798). 64000 clears it.
+    # 64000 (was 32000): net-positive headroom for the #56 `truncation` hard_miss
+    # (VOD 2769594798), but NOT a cure — a live re-gen (#68) showed dense chunks fill
+    # 64000 too (max_moments=180 scales output to any budget). Real fix = fewer
+    # moments/chunk (chunk_duration/max_moments), out of scope for #68.
     moment_finder_chunk_duration_sec: float = 2700.0
     moment_finder_chunk_overlap_sec: float = 120.0
     moment_finder_timeout_sec: float = 900.0
