@@ -153,6 +153,39 @@ def load_replay_inputs(
     return raw_rows, segments
 
 
+def _snap_dedupe_rescore(
+    raw_rows: Sequence[dict],
+    segments: Sequence[RichSegment],
+    rank_score_fn: RankScoreFn | None,
+) -> list[dict]:
+    """snap_boundaries -> dedupe -> rank_score_fn: the shared pre-ranking base.
+
+    The point where ``replay_ranked_pool`` (rank only) and ``replay_postprocess``
+    (enforce_diversity + rank + top_k) diverge — every step a call into the real
+    serving function, so both stay free of eval/serving skew.
+    """
+    snapped = _post_processor.snap_boundaries(list(raw_rows), list(segments))
+    deduped = _dedupe_rows(snapped)
+    return (rank_score_fn or _identity)(deduped)
+
+
+def replay_ranked_pool(
+    raw_rows: Sequence[dict],
+    segments: Sequence[RichSegment],
+    *,
+    rank_score_fn: RankScoreFn | None = None,
+) -> list[dict]:
+    """The deduped pool, rescored and rank-ordered — no diversity, no top_k.
+
+    snap_boundaries -> dedupe -> rank_score_fn -> rank. This is the candidate
+    currency a re-rank/judge operates on (every candidate that survives dedupe,
+    in rank order), the seam where the buried-real gold actually sit (median
+    rank ~141). ``replay_postprocess`` is enforce_diversity + top_k layered on
+    top of this pool.
+    """
+    return _rank_post_processed_rows(_snap_dedupe_rescore(raw_rows, segments, rank_score_fn))
+
+
 def replay_postprocess(
     raw_rows: Sequence[dict],
     segments: Sequence[RichSegment],
@@ -167,10 +200,7 @@ def replay_postprocess(
     ``rank_score_fn`` (the default) the output is bit-equal to the serving path on
     the same input. ``top_k > 0`` truncates to the K highest-ranked rows.
     """
-    rank_score_fn = rank_score_fn or _identity
-    snapped = _post_processor.snap_boundaries(list(raw_rows), list(segments))
-    deduped = _dedupe_rows(snapped)
-    rescored = rank_score_fn(deduped)
+    rescored = _snap_dedupe_rescore(raw_rows, segments, rank_score_fn)
     diverse = _post_processor.enforce_diversity(rescored)
     ranked = _rank_post_processed_rows(diverse)
     return ranked[:top_k] if top_k > 0 else ranked

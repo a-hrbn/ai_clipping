@@ -140,6 +140,39 @@ class DedupeTests(unittest.TestCase):
         self.assertNotIn("drop", reasons)
 
 
+class ReplayRankedPoolTests(unittest.TestCase):
+    def test_returns_full_deduped_pool_in_rank_order_without_top_k(self) -> None:
+        # The deduped-pool seam (the judge-shortlist currency): snap -> dedupe ->
+        # rank, but NO enforce_diversity / top_k. Both rows survive dedupe and
+        # neither is truncated, so the pool holds both in composite-rank order —
+        # while the top_k path would cut to one.
+        segments = _segments()
+        rows = [
+            _row(1, 0.0, 8.0, 8.0, reason="A"),
+            _row(2, 100.0, 108.0, 7.0, reason="B"),
+        ]
+
+        pool = replay_harness.replay_ranked_pool(rows, segments)
+
+        self.assertEqual([r["reason"] for r in pool], ["A", "B"])  # ranked by composite
+        self.assertEqual(len(replay_harness.replay_postprocess(rows, segments, top_k=1)), 1)
+        self.assertEqual(len(pool), 2)  # the pool ignores top_k entirely
+
+    def test_rank_score_fn_reorders_the_pool(self) -> None:
+        segments = _segments()
+        rows = [
+            _row(1, 0.0, 8.0, 8.0, reason="A"),
+            _row(2, 100.0, 108.0, 7.0, reason="B"),
+        ]
+
+        def by_start_time(deduped: list[dict]) -> list[dict]:
+            return [dict(r, composite_score=r["start_time"]) for r in deduped]
+
+        pool = replay_harness.replay_ranked_pool(rows, segments, rank_score_fn=by_start_time)
+
+        self.assertEqual(pool[0]["reason"], "B")  # later start wins under the override
+
+
 def _write_job_dir(storage: pathlib.Path, vod_id: str, ts: str, *, raw, segments, mtime: float) -> pathlib.Path:
     """Write a pipeline_debug_<ts>_<vod> job dir; omit an artifact by passing None."""
     job_dir = storage / f"pipeline_debug_{ts}_{vod_id}"
