@@ -20,7 +20,11 @@ from config import settings
 
 
 DEFAULT_MAX_MOMENTS = 180
-DEFAULT_MAX_TOKENS = 32000
+# 64000 (not 32000): a 45-min/180-moment chunk's JSON output can exceed 32000 tokens
+# and abort mid-moment — the #56 `truncation` hard_miss (e.g. VOD 2769594798 chunks
+# hit completion_tokens 31990 ≈ 32000). 64000 clears that with headroom and stays
+# within gemini-2.5-flash-lite's output ceiling (model-independent — no model swap).
+DEFAULT_MAX_TOKENS = 64000
 # Long VODs are split into time windows so each LLM call gets its own output-token
 # budget — a single call truncates at ~max_tokens and silently drops the back of a
 # multi-hour stream. ~45 min/window keeps each call's output under the ceiling.

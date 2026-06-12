@@ -171,7 +171,7 @@ def _moment_params() -> MomentParams:
         max_moments=int(getattr(settings, "moment_finder_max_moments", 180) or 180),
         min_duration_sec=float(getattr(settings, "moment_finder_min_duration_sec", 8.0) or 8.0),
         max_duration_sec=float(getattr(settings, "moment_finder_max_duration_sec", 90.0) or 90.0),
-        max_tokens=int(getattr(settings, "moment_finder_max_tokens", 32000) or 32000),
+        max_tokens=int(getattr(settings, "moment_finder_max_tokens", 64000) or 64000),
         chunk_duration_sec=float(getattr(settings, "moment_finder_chunk_duration_sec", 2700.0) or 0.0),
         chunk_overlap_sec=float(getattr(settings, "moment_finder_chunk_overlap_sec", 120.0) or 0.0),
         timeout_sec=float(getattr(settings, "moment_finder_timeout_sec", 900.0) or 900.0),
