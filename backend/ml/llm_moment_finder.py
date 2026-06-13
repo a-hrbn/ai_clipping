@@ -20,7 +20,14 @@ from config import settings
 
 
 DEFAULT_MAX_MOMENTS = 180
-DEFAULT_MAX_TOKENS = 32000
+# 64000 (was 32000): a 45-min/180-moment chunk's JSON can exceed the budget and abort
+# mid-moment — the #56 `truncation` hard_miss (VOD 2769594798 chunks hit completion
+# 31990 ≈ 32000). 64000 adds headroom (no model swap) but does NOT eliminate
+# truncation: a live re-gen (#68) showed dense chunks fill 64000 too (completion
+# 63990) — max_moments=180 scales output to any budget. The model-independent cure is
+# fewer moments per chunk (chunk_duration/max_moments); out of scope for #68's
+# floor-only quick-win, so 64000 stays as net-positive headroom, not a proven fix.
+DEFAULT_MAX_TOKENS = 64000
 # Long VODs are split into time windows so each LLM call gets its own output-token
 # budget — a single call truncates at ~max_tokens and silently drops the back of a
 # multi-hour stream. ~45 min/window keeps each call's output under the ceiling.

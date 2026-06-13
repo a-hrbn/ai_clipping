@@ -50,6 +50,18 @@ DEFAULT_TOP_K = 20
 RAW_MOMENTS_ARTIFACT = "llm_moment_finder_moments_raw.jsonl"
 SEGMENTS_ARTIFACT = "segments.jsonl"
 
+# The generation-stage debug artifacts a root-cause decomposition reads on top of
+# the two replayable ones: the chunked LLM response (truncation proof), the
+# per-chunk token usage (the truncation pre-filter) and the stage summary (the
+# chunk geometry).
+RESPONSE_ARTIFACT = "llm_moment_finder_response.txt"
+USAGE_ARTIFACT = "llm_moment_finder_usage.json"
+STAGE_ARTIFACT = "llm_moment_finder_stage.json"
+
+# The product's delivered top-20 (post dedupe + enforce_diversity + top_k), in
+# product-rank order — the control set the window-probe rates the gold against.
+FINAL_MOMENTS_ARTIFACT = "final_moments.json"
+
 # rows -> rows. The single variation point; default identity keeps the current
 # composite order. A fn may overwrite each row's composite_score and/or reorder.
 RankScoreFn = Callable[[list[dict]], list[dict]]
@@ -130,6 +142,12 @@ def _load_segments(path: pathlib.Path) -> list[RichSegment]:
                 end=float(obj.get("end") or 0.0),
                 text=str(obj.get("text") or ""),
                 chat_spike_score=float(obj.get("chat_spike_score") or 0.0),
+                # The emote-class scores feed _build_chat_marker's dominant-class
+                # label; dropping them degrades the re-gen prompt vs production
+                # (the #65 skew guard), so they must round-trip too.
+                chat_hype_score=float(obj.get("chat_hype_score") or 0.0),
+                chat_funny_score=float(obj.get("chat_funny_score") or 0.0),
+                chat_shock_score=float(obj.get("chat_shock_score") or 0.0),
                 voice_energy_burst_score=float(obj.get("voice_energy_burst_score") or 0.0),
             )
         )
@@ -151,6 +169,55 @@ def load_replay_inputs(
     raw_rows = eval_clip_finder._read_moments_jsonl(job_dir / "debug" / RAW_MOMENTS_ARTIFACT)
     segments = _load_segments(job_dir / "debug" / SEGMENTS_ARTIFACT)
     return raw_rows, segments
+
+
+def _read_json_artifact(path: pathlib.Path) -> dict:
+    """A debug JSON artifact as a dict, or ``{}`` when absent/unparseable."""
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def load_generation_artifacts(
+    vod_id: str,
+    storage: pathlib.Path,
+) -> tuple[list[RichSegment], str, dict, dict] | None:
+    """Load (segments, response_text, usage, stage) for a VOD's replayable job dir.
+
+    Resolves the same newest replayable job dir as ``load_replay_inputs`` and
+    reads the generation-stage debug artifacts a root-cause decomposition needs
+    on top of the raw rows — ``response.txt`` (the chunked LLM output whose
+    mid-JSON abort proves truncation), ``usage.json`` (the per-chunk token
+    pre-filter) and ``stage.json`` (the chunk geometry). Returns ``None`` when the
+    VOD has no replayable job dir (a coverage gap); ``response_text`` is ``""`` and
+    ``usage``/``stage`` are ``{}`` when an individual artifact is missing.
+    """
+    job_dir = _resolve_replay_job_dir(storage, vod_id)
+    if job_dir is None:
+        return None
+    debug = job_dir / "debug"
+    segments = _load_segments(debug / SEGMENTS_ARTIFACT)
+    response_path = debug / RESPONSE_ARTIFACT
+    response_text = response_path.read_text(encoding="utf-8") if response_path.exists() else ""
+    usage = _read_json_artifact(debug / USAGE_ARTIFACT)
+    stage = _read_json_artifact(debug / STAGE_ARTIFACT)
+    return segments, response_text, usage, stage
+
+
+def load_final_moments(vod_id: str, storage: pathlib.Path) -> list[dict] | None:
+    """The VOD's delivered top-20 (``final_moments.json``) in product-rank order.
+
+    Resolves the same newest replayable job dir as ``load_replay_inputs`` and reads
+    the delivered final set via ``eval_clip_finder._read_final_moments_json`` (no
+    reimplemented I/O). ``None`` means the VOD has no replayable job dir (a coverage
+    gap); an empty list means the job dir holds no/empty ``final_moments.json``.
+    """
+    job_dir = _resolve_replay_job_dir(storage, vod_id)
+    if job_dir is None:
+        return None
+    return eval_clip_finder._read_final_moments_json(job_dir / "debug" / FINAL_MOMENTS_ARTIFACT)
 
 
 def _snap_dedupe_rescore(
