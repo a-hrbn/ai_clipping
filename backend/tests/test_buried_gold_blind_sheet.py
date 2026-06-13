@@ -428,3 +428,352 @@ def test_real_artifact_selection_reconciles_with_clean_but_buried_baseline() -> 
     # The missing-prediction VODs stay a surfaced coverage gap, never counted.
     assert result["missing_prediction_vods"] == directional_eval.missing_prediction_vods(
         gold, raw_by_vod)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Slice 2 (PRD #69, issue #71) — the blind 8-choice sheet layer
+#
+# On top of the selection, per selected gold: the covering candidate (the answer)
+# + 7 over-ranking non-covering decoys, all rendered through the *same*
+# build_excerpt (identical pad_sec, no special treatment), deterministically
+# shuffled, the gold hidden. Output: a readable sheet (A-H + answer/recognized)
+# + a sealed key in a separate structure.
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _seg(start, end, text):
+    """A transcript segment in the shape build_excerpt reads (start/end/text)."""
+    return {"start": float(start), "end": float(end), "text": text}
+
+
+def _selected(vod_id, start, end, *, buried_rank, views=0.0, gt_tier="gold", desc=""):
+    """A selected buried gold in the shape Slice 1's select_buried_golds emits."""
+    return {"vod_id": vod_id, "start": float(start), "end": float(end),
+            "buried_rank": buried_rank, "views": float(views),
+            "gt_tier": gt_tier, "desc": desc}
+
+
+def _pool_with_cover_at(cover, rank):
+    """Ranked pool: ``rank-1`` far non-covering over-rankers, then ``cover`` at
+    1-based ``rank`` (the shallowest covering candidate = the buried_rank)."""
+    decoys = [_cand(1000 + i * 100, 1000 + i * 100 + 20) for i in range(rank - 1)]
+    return decoys + [cover]
+
+
+def _segments_for(pool):
+    """One distinct standalone sentence segment inside each candidate window, so
+    every excerpt carries its own text (windows are spaced so none bleed)."""
+    return [_seg(c["start_time"], c["end_time"], f"Sentence number {i} stands alone here.")
+            for i, c in enumerate(pool)]
+
+
+def test_choice_entry_has_eight_choices_with_gold_letter_on_the_covering_candidate() -> None:
+    gold = _selected("V", 100, 130, buried_rank=25, views=300_000)
+    cover = _cand(102, 122)               # a 20s clip-sized window covering [100,130]
+    pool = _pool_with_cover_at(cover, 25)  # 24 far over-rankers + cover at rank 25
+    segments = _segments_for(pool)
+
+    entry = bgbs.build_choice_entry(gold, pool, segments, sheet_id="sheet_01")
+
+    # Exactly 8 anonymous lettered choices A-H.
+    assert [c["letter"] for c in entry["choices"]] == list("ABCDEFGH")
+    # The gold letter names one of them, and it is the covering candidate.
+    assert entry["gold_letter"] in bgbs.CHOICE_LETTERS
+    gold_choice = next(c for c in entry["choices"] if c["letter"] == entry["gold_letter"])
+    assert gold_choice["candidate"]["start_time"] == 102.0
+    assert gold_choice["candidate"]["end_time"] == 122.0
+
+
+def test_gold_letter_is_hit_and_every_decoy_is_not() -> None:
+    # The whole point of the sheet: the answer is a *real* covering candidate and
+    # not one of the 7 decoys covers the gold — so the human can't win by spotting
+    # "the one that overlaps". This is checked against the frozen is_hit seam.
+    from ml import eval_clip_finder
+
+    gold = _selected("V", 100, 130, buried_rank=25, views=300_000)
+    cover = _cand(102, 122)
+    pool = _pool_with_cover_at(cover, 25)
+    segments = _segments_for(pool)
+
+    entry = bgbs.build_choice_entry(gold, pool, segments, sheet_id="sheet_01")
+
+    gt = {"start": gold["start"], "end": gold["end"]}
+    gold_choice = next(c for c in entry["choices"] if c["letter"] == entry["gold_letter"])
+    decoys = [c for c in entry["choices"] if c["letter"] != entry["gold_letter"]]
+
+    assert eval_clip_finder.is_hit(gt, gold_choice["candidate"])
+    assert len(decoys) == 7
+    assert all(not eval_clip_finder.is_hit(gt, c["candidate"]) for c in decoys)
+
+
+# ── decoy selection: over-rankers first, fill from deeper, surface the shortfall ─
+
+def test_select_decoys_draws_from_over_rankers_when_enough_available() -> None:
+    gold = _selected("V", 100, 130, buried_rank=25)
+    cover = _cand(102, 122)
+    pool = _pool_with_cover_at(cover, 25)  # 24 over-ranking non-coverers + cover
+
+    pick = bgbs.select_decoys(gold, pool, 25)
+
+    over_rankers = pool[:24]
+    assert pick["shortfall"] == 0
+    assert pick["overrank_used"] == 7
+    assert len(pick["decoys"]) == 7
+    # Every decoy is one of the candidates that over-ranked the gold.
+    assert all(d in over_rankers for d in pick["decoys"])
+
+
+def test_select_decoys_fills_from_deeper_pool_when_over_rankers_short() -> None:
+    # The covering candidate is shallow (rank 3) so only 2 candidates over-rank it
+    # — the remaining 5 decoys are topped up from the deeper non-covering pool.
+    gold = _selected("V", 100, 130, buried_rank=3)
+    cover = _cand(102, 122)
+    over = [_cand(1000, 1020), _cand(1100, 1120)]                        # ranks 1,2
+    deeper = [_cand(2000 + i * 100, 2000 + i * 100 + 20) for i in range(7)]  # ranks 4..10
+    pool = over + [cover] + deeper
+
+    pick = bgbs.select_decoys(gold, pool, 3)
+
+    assert pick["overrank_used"] == 2   # only two genuine over-rankers existed
+    assert len(pick["decoys"]) == 7     # topped up from the deeper pool
+    assert pick["shortfall"] == 0
+    assert cover not in pick["decoys"]  # the covering candidate is never a decoy
+
+
+def test_select_decoys_surfaces_shortfall_when_too_few_non_coverers() -> None:
+    gold = _selected("V", 100, 130, buried_rank=3)
+    cover = _cand(102, 122)
+    over = [_cand(1000, 1020), _cand(1100, 1120)]  # 2 over-rankers
+    deeper = [_cand(2000, 2020)]                    # only 1 deeper non-coverer
+    pool = over + [cover] + deeper
+
+    pick = bgbs.select_decoys(gold, pool, 3)
+
+    assert len(pick["decoys"]) == 3  # 2 over + 1 deeper, all available
+    assert pick["shortfall"] == 4    # 7 - 3 surfaced, not silently capped
+
+
+def test_choice_entry_surfaces_decoy_shortfall_with_fewer_choices() -> None:
+    # When the gold can't muster 7 decoys, the block shrinks (gold + available
+    # decoys) and the shortfall is carried out — never padded with a covering
+    # candidate, never silently capped to 8.
+    gold = _selected("V", 100, 130, buried_rank=3)
+    cover = _cand(102, 122)
+    over = [_cand(1000, 1020), _cand(1100, 1120)]
+    deeper = [_cand(2000, 2020)]
+    pool = over + [cover] + deeper
+    segments = _segments_for(pool)
+
+    entry = bgbs.build_choice_entry(gold, pool, segments, sheet_id="sheet_01")
+
+    assert entry["shortfall"] == 4
+    assert len(entry["choices"]) == 4  # 1 covering + 3 available decoys
+    assert entry["gold_letter"] in [c["letter"] for c in entry["choices"]]
+
+
+# ── excerpt parity (no special treatment) + deterministic shuffle ───────────────
+
+def test_all_eight_excerpts_use_build_excerpt_with_identical_pad_sec() -> None:
+    from ml import strong_model_window_probe as smwp
+
+    gold = _selected("V", 100, 130, buried_rank=25)
+    cover = _cand(102, 122)
+    pool = _pool_with_cover_at(cover, 25)
+    segments = _segments_for(pool)
+
+    entry = bgbs.build_choice_entry(gold, pool, segments, sheet_id="sheet_01")
+
+    assert len(entry["choices"]) == 8
+    for choice in entry["choices"]:
+        # Identical pad on every choice — the gold window gets no special treatment.
+        assert choice["excerpt"]["pad_sec"] == bgbs.EXCERPT_PAD_SEC == 12.0
+        # Each excerpt is exactly what the shared pure build_excerpt produces — same
+        # function for gold and decoys, so length/format can't leak the answer.
+        cand = choice["candidate"]
+        expected = smwp.build_excerpt(
+            cand["start_time"], cand["end_time"], segments, pad_sec=12.0)
+        assert choice["excerpt"] == expected
+
+
+def test_shuffle_is_deterministic_for_a_fixed_seed() -> None:
+    gold = _selected("V", 100, 130, buried_rank=25)
+    cover = _cand(102, 122)
+    pool = _pool_with_cover_at(cover, 25)
+    segments = _segments_for(pool)
+
+    first = bgbs.build_choice_entry(gold, pool, segments, sheet_id="sheet_01")
+    second = bgbs.build_choice_entry(gold, pool, segments, sheet_id="sheet_01")
+
+    # Same gold (same vod_id + window) -> identical arrangement and answer, run to
+    # run. Pinned literally so a regression to process-salted randomness is caught:
+    # sheet and key are produced in separate invocations and must agree.
+    assert first["gold_letter"] == second["gold_letter"] == "D"
+    assert ([c["candidate"] for c in first["choices"]]
+            == [c["candidate"] for c in second["choices"]])
+
+
+def test_shuffle_depends_on_the_gold_identity() -> None:
+    # A different gold window seeds a different arrangement — the shuffle is keyed
+    # on identity, not a global constant.
+    cover = _cand(102, 122)
+    pool = _pool_with_cover_at(cover, 25)
+    segments = _segments_for(pool)
+    gold_a = _selected("V", 100, 130, buried_rank=25)
+    gold_b = _selected("V", 500, 530, buried_rank=25)
+
+    assert bgbs._shuffle_seed("V", gold_a) != bgbs._shuffle_seed("V", gold_b)
+
+
+# ── build_sheet: entries + a separate sealed key, shortfalls logged ─────────────
+
+def test_build_sheet_emits_entries_and_a_separate_sealed_key() -> None:
+    selected = [_selected("V", 100, 130, buried_rank=25, views=300_000)]
+    cover = _cand(102, 122)
+    pool = _pool_with_cover_at(cover, 25)
+    segments = _segments_for(pool)
+
+    sheet = bgbs.build_sheet(selected, {"V": pool}, {"V": segments})
+
+    assert [e["sheet_id"] for e in sheet["entries"]] == ["sheet_01"]
+    entry = sheet["entries"][0]
+    # The key is a separate structure: sheet_id -> answer + provenance.
+    assert set(sheet["key"]) == {"sheet_01"}
+    assert sheet["key"]["sheet_01"] == {
+        "gold_letter": entry["gold_letter"], "views": 300_000.0,
+        "buried_rank": 25, "vod_id": "V"}
+    # The sealed answer points at the covering candidate.
+    gold_choice = next(c for c in entry["choices"]
+                       if c["letter"] == sheet["key"]["sheet_01"]["gold_letter"])
+    assert gold_choice["candidate"] == cover
+
+
+def test_build_sheet_logs_decoy_shortfall(caplog) -> None:
+    import logging
+
+    selected = [_selected("V", 100, 130, buried_rank=3, views=300_000)]
+    cover = _cand(102, 122)
+    pool = [_cand(1000, 1020), _cand(1100, 1120)] + [cover] + [_cand(2000, 2020)]
+    segments = _segments_for(pool)
+
+    with caplog.at_level(logging.INFO, logger="ml.buried_gold_blind_sheet"):
+        sheet = bgbs.build_sheet(selected, {"V": pool}, {"V": segments})
+
+    assert sheet["shortfalls"] == [
+        {"sheet_id": "sheet_01", "vod_id": "V", "shortfall": 4}]
+    assert any("blind_sheet_decoy_shortfall" in r.getMessage() for r in caplog.records)
+
+
+# ── rendering: caveat header, no spoilers, the key seals the answer ─────────────
+
+def test_sheet_render_carries_caveat_hides_answer_and_key_seals_it() -> None:
+    selected = [_selected("VODSECRET", 100, 130, buried_rank=25, views=300_000)]
+    cover = _cand(102, 122)
+    pool = _pool_with_cover_at(cover, 25)
+    segments = _segments_for(pool)
+    sheet = bgbs.build_sheet(selected, {"VODSECRET": pool}, {"VODSECRET": segments})
+
+    rendered = bgbs.format_sheet(sheet)
+    keytext = bgbs.format_key(sheet)
+
+    # Caveat in the header: upper-bound reading + recognized exclusion + caps.
+    assert "UPPER BOUND" in rendered
+    assert "recognized" in rendered
+    assert "cap" in rendered
+    # The sheet shows A–H + an answer/recognized field…
+    for letter in "ABCDEFGH":
+        assert f"[{letter}]" in rendered
+    assert "Your pick (A–H)" in rendered
+    # …but none of the sealed-key fields leak onto the sheet.
+    assert "gold_letter" not in rendered
+    assert "VODSECRET" not in rendered           # vod_id lives only in the key
+    assert "300000" not in rendered and "300,000" not in rendered  # views sealed
+    # The sealed key (separate output) carries the answer + provenance.
+    assert "gold_letter" in keytext
+    assert "VODSECRET" in keytext
+    assert sheet["key"]["sheet_01"]["gold_letter"] in "ABCDEFGH"
+
+
+# ── CLI: --sheet-out / --key-out write the sheet + sealed key offline ───────────
+
+def test_main_writes_sheet_and_sealed_key_offline(tmp_path) -> None:
+    # The gold is [0,30]; its real covering candidate is the lowest-scored of 26
+    # candidates, so the real replay buries it at rank 26 (>20) with 25 distinct
+    # over-ranking non-coverers — enough for a full 8-way block.
+    segments = [
+        {"start": float(i * 100), "end": float(i * 100 + 30),
+         "text": f"A clean standalone sentence number {i}."}
+        for i in range(26)
+    ]
+    raw = [_row(5.0, 25.0, 1.0, reason="the buried covering candidate")] + [
+        _row(i * 100 + 5, i * 100 + 25, 9.0, reason=f"decoy {i}") for i in range(1, 26)
+    ]
+    manifest_path = tmp_path / "manifest.jsonl"
+    manifest_path.write_text(json.dumps({
+        "vod_id": "V",
+        "gt_moments": [{"start": 0.0, "end": 30.0, "views": 300_000,
+                        "gt_tier": "gold", "desc": "reveal"}],
+    }) + "\n", encoding="utf-8")
+    anchor_csv = tmp_path / "anchors.csv"
+    anchor_csv.write_text("vod_id\nV\n", encoding="utf-8")
+    storage = tmp_path / "storage"
+    storage.mkdir()
+    _write_job_dir(storage, "V", "20260101T000000000000Z",
+                   raw=raw, segments=segments, mtime=1000.0)
+    sheet_path = tmp_path / "sheet.txt"
+    key_path = tmp_path / "key.json"
+
+    rc = bgbs.main([
+        "--manifest", str(manifest_path),
+        "--anchor-csv", str(anchor_csv),
+        "--predictions-dir", str(storage),
+        "--sheet-out", str(sheet_path),
+        "--key-out", str(key_path),
+    ])
+
+    assert rc == 0
+    assert sheet_path.exists() and key_path.exists()
+    key = json.loads(key_path.read_text(encoding="utf-8"))
+    assert list(key) == ["sheet_01"]
+    assert key["sheet_01"]["gold_letter"] in "ABCDEFGH"
+    assert key["sheet_01"]["vod_id"] == "V"
+    assert key["sheet_01"]["buried_rank"] == 26
+    sheet_text = sheet_path.read_text(encoding="utf-8")
+    assert "UPPER BOUND" in sheet_text
+    assert "gold_letter" not in sheet_text       # the answer stays sealed
+    assert all(f"[{letter}]" in sheet_text for letter in "ABCDEFGH")
+
+
+# ── reconcile sheet creation against the real pipeline_debug_* artifacts ────────
+
+@pytest.mark.skipif(
+    not _real_artifacts_present(),
+    reason="real pipeline_debug artifacts / gold manifest not present (tmp/storage is gitignored)",
+)
+def test_real_artifact_sheet_creation() -> None:
+    manifest = eval_clip_finder.load_manifest()
+    anchors = eval_clip_finder.read_anchor_vod_ids()
+
+    raw_by_vod, pool_by_vod, segments_by_vod, _gaps = bgbs.build_replay_inputs(
+        anchors, _STORAGE_DIR)
+    result = bgbs.run(manifest, raw_by_vod, pool_by_vod, anchor_vod_ids=anchors)
+    sheet = bgbs.build_sheet(result["selected"], pool_by_vod, segments_by_vod)
+
+    # One block per selected gold; the key seals one answer per block.
+    assert len(sheet["entries"]) == len(result["selected"])
+    assert set(sheet["key"]) == {e["sheet_id"] for e in sheet["entries"]}
+    for entry in sheet["entries"]:
+        gt = {"start": next(g["start"] for g in result["selected"]
+                            if g["vod_id"] == entry["vod_id"]
+                            and g["buried_rank"] == entry["buried_rank"]),
+              "end": next(g["end"] for g in result["selected"]
+                          if g["vod_id"] == entry["vod_id"]
+                          and g["buried_rank"] == entry["buried_rank"])}
+        gold_choice = next(c for c in entry["choices"]
+                           if c["letter"] == entry["gold_letter"])
+        decoys = [c for c in entry["choices"] if c["letter"] != entry["gold_letter"]]
+        # The acceptance invariants hold on the real artifacts: the answer covers
+        # the gold, every decoy does not, and all excerpts share the same pad.
+        assert eval_clip_finder.is_hit(gt, gold_choice["candidate"])
+        assert all(not eval_clip_finder.is_hit(gt, c["candidate"]) for c in decoys)
+        assert {c["excerpt"]["pad_sec"] for c in entry["choices"]} == {bgbs.EXCERPT_PAD_SEC}
+    # The rendered sheet never leaks the answer.
+    assert "gold_letter" not in bgbs.format_sheet(sheet)
