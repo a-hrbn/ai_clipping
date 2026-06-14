@@ -12,7 +12,12 @@
 #   - Order     : sequential, shared working tree (slices are dependency-chained;
 #                 #77 builds on #76's committed code).
 #   - Branch    : one run-branch `ralph/afk-<ts>` off main. Commits land there.
-#                 The loop NEVER pushes or opens a PR — a human reviews first.
+#   - Integrate : on a fully-green run (every selected issue CLOSED, no fail-fast
+#                 abort), the run-branch is fast-forwarded into main, main is
+#                 pushed to origin, and the local run-branch is deleted. On ANY
+#                 failure the branch is kept unpushed for a human to review.
+#                 Pass --no-push (RALPH_NO_PUSH=1) to keep the old never-push
+#                 behavior. Individual /tdd attempts still only commit, never push.
 #   - Retry     : up to RALPH_MAX_ATTEMPTS fresh clients per issue; stop when the
 #                 issue goes CLOSED.
 #   - Failure   : fail-fast. If an issue exhausts its attempts still open, comment
@@ -26,6 +31,7 @@
 #   ./scripts/ralph_tdd.sh 76 77           # process exactly these, in this order
 #   ./scripts/ralph_tdd.sh --dry-run       # print the resolved plan, spawn nothing
 #   ./scripts/ralph_tdd.sh --yes           # skip the confirmation prompt (cron)
+#   ./scripts/ralph_tdd.sh --no-push       # commit-only; never push/delete (old behavior)
 #
 # Env knobs (defaults in brackets):
 #   RALPH_MAX_ATTEMPTS    [3]               retries per issue before giving up
@@ -34,6 +40,7 @@
 #   RALPH_EFFORT          [xhigh]           --effort
 #   RALPH_LABEL           [ready-for-agent] selection label
 #   RALPH_YES             [0]               1 = skip confirmation
+#   RALPH_NO_PUSH         [0]               1 = never push main / delete the branch
 #   RALPH_RENDER_HEAD     [8]               lines of a tool result shown before truncating
 #
 # Each attempt streams a live, Claude-Code-style transcript to the terminal
@@ -52,6 +59,7 @@ MODEL="${RALPH_MODEL:-opus}"
 EFFORT="${RALPH_EFFORT:-xhigh}"
 LABEL="${RALPH_LABEL:-ready-for-agent}"
 ASSUME_YES="${RALPH_YES:-0}"
+NO_PUSH="${RALPH_NO_PUSH:-0}"
 RENDER_HEAD="${RALPH_RENDER_HEAD:-8}"
 RENDERER="$SCRIPT_DIR/ralph_stream_render.jq"
 DRY_RUN=0
@@ -62,9 +70,10 @@ for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=1 ;;
     --yes|-y)  ASSUME_YES=1 ;;
-    -h|--help) sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --no-push) NO_PUSH=1 ;;
+    -h|--help) sed -n '2,48p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     [0-9]*)    EXPLICIT_ISSUES+=("$arg") ;;
-    *) echo "ralph: unknown argument '$arg' (expected issue numbers, --dry-run, --yes)" >&2; exit 2 ;;
+    *) echo "ralph: unknown argument '$arg' (expected issue numbers, --dry-run, --yes, --no-push)" >&2; exit 2 ;;
   esac
 done
 
@@ -154,6 +163,11 @@ echo "   container     : $CONTAINER   (via $DOCKER)"
 echo "   model/effort  : $MODEL / $EFFORT"
 echo "   max attempts  : $MAX_ATTEMPTS   timeout/attempt: $ATTEMPT_TIMEOUT"
 echo "   logs          : $LOG_DIR"
+if [ "$NO_PUSH" -eq 1 ]; then
+  echo "   on success    : commit-only (--no-push) — nothing pushed, branch kept"
+else
+  echo "   on success    : ff-merge into main, push origin main, delete $RUN_BRANCH"
+fi
 echo "   issues (in order):"
 for n in "${ISSUES[@]}"; do printf "     #%-5s %s\n" "$n" "${TITLE[$n]}"; done
 echo "=============================================================="
@@ -164,7 +178,12 @@ if [ "$DRY_RUN" -eq 1 ]; then
 fi
 
 if [ "$ASSUME_YES" -ne 1 ]; then
-  read -r -p "Proceed? This runs claude --dangerously-skip-permissions over the above. [y/N] " ans
+  if [ "$NO_PUSH" -eq 1 ]; then
+    prompt="Proceed? This runs claude --dangerously-skip-permissions over the above. [y/N] "
+  else
+    prompt="Proceed? This runs claude --dangerously-skip-permissions over the above AND, on a fully-green run, pushes the result to origin/main automatically. [y/N] "
+  fi
+  read -r -p "$prompt" ans
   case "$ans" in y|Y|yes|YES) ;; *) echo "ralph: aborted."; exit 1 ;; esac
 fi
 
@@ -242,6 +261,52 @@ for n in "${ISSUES[@]}"; do
   fi
 done
 
+# --- integrate on a fully-green run -----------------------------------------
+# On success (every selected issue CLOSED, no fail-fast abort) and unless
+# --no-push was given, fast-forward the run-branch into main, push main to
+# origin, and delete the local run-branch. Anything less keeps the branch
+# unpushed for a human (the original "never push" behavior). The push to origin
+# is the only step that can legitimately fail (e.g. origin/main moved under a
+# multi-hour run); on a rejected/failed push we keep the branch, never force or
+# rebase unattended unreviewed work, and surface a non-zero exit.
+INTEGRATION_MSG=""
+if [ "$overall_rc" -ne 0 ]; then
+  INTEGRATION_MSG=" review: git log $RUN_BRANCH   (run not fully green — nothing was pushed)"
+elif [ "$NO_PUSH" -eq 1 ]; then
+  INTEGRATION_MSG=" review: git log $RUN_BRANCH   (--no-push — nothing was pushed)"
+else
+  set +e
+  new_commits="$(git rev-list --count "main..$RUN_BRANCH" 2>/dev/null)"
+  git switch main >/dev/null 2>&1
+  switch_rc=$?
+  if [ "$switch_rc" -ne 0 ]; then
+    overall_rc=1
+    INTEGRATION_MSG=" integrate ABORTED: could not switch to main (dirty tree?); branch kept: $RUN_BRANCH"
+  elif [ "${new_commits:-0}" -eq 0 ]; then
+    git branch -d "$RUN_BRANCH" >/dev/null 2>&1
+    INTEGRATION_MSG=" integrate: no new commits — deleted empty branch $RUN_BRANCH"
+  else
+    git merge --ff-only "$RUN_BRANCH" >/dev/null 2>&1
+    merge_rc=$?
+    if [ "$merge_rc" -ne 0 ]; then
+      overall_rc=1
+      INTEGRATION_MSG=" integrate ABORTED: ff-merge of $RUN_BRANCH into main failed (rc=$merge_rc); branch kept"
+    else
+      echo "ralph: pushing main to origin…"
+      git push origin main
+      push_rc=$?
+      if [ "$push_rc" -ne 0 ]; then
+        overall_rc=1
+        INTEGRATION_MSG=" push REJECTED (rc=$push_rc): origin/main moved? main is merged locally but UNPUSHED; branch kept: $RUN_BRANCH — resolve manually (no force/rebase was attempted)"
+      else
+        git branch -d "$RUN_BRANCH" >/dev/null 2>&1
+        INTEGRATION_MSG=" integrate: $new_commits commit(s) ff-merged into main, pushed to origin/main, branch $RUN_BRANCH deleted"
+      fi
+    fi
+  fi
+  set -e
+fi
+
 # --- summary -----------------------------------------------------------------
 echo
 echo "=============================================================="
@@ -252,7 +317,7 @@ for n in "${ISSUES[@]}"; do
   printf " #%-6s %-14s %-9s %-8s\n" "$n" "${RESULT[$n]}" "${ATTEMPTS[$n]}" "${DURATION[$n]}"
 done
 echo " logs: $LOG_DIR"
-echo " review: git log $RUN_BRANCH   (nothing was pushed)"
+echo "$INTEGRATION_MSG"
 echo "=============================================================="
 
 exit "$overall_rc"
