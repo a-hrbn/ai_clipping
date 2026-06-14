@@ -19,11 +19,23 @@ Das Frontend (`frontend/`, Next.js) reicht Jobs ein und zeigt Clips zur Review.
 
 ## Produkt-These & Nordstern
 
-**Produkt:** ein **Autopilot**-Viral-Clip-Finder — die Pipeline liefert die fertigen
-Top-Clips final aus, ohne Mensch-im-Loop. Der Differentiator gegenüber generischen
-Findern (OpusClips) ist **Streamer-Spezialisierung**: der Finder wird auf *einen*
-Streamer getunt und reproduziert dessen virales Clip-Profil genauer als ein
-One-size-fits-all-Modell. Aktueller Test-Streamer: **Jynxzi**.
+**Produkt:** ein **Autopilot**-Viral-Clip-Finder, spezialisiert auf *einen* Streamer
+(Test-Streamer: **Jynxzi**). Differentiator gegenüber generischen Findern (OpusClips)
+ist **Streamer-Spezialisierung** — aber *nicht* als besseres Content-Verständnis: vier
+Diagnose-Tracks haben belegt, dass virale Diskriminierung aus dem VOD-Content tot ist
+(Ranking, Generation, generische Kontext-Virality, und zuletzt clipper-spezifische
+Kontext-Ähnlichkeit als Text-Signal → Blind-Sheet 0/10 → **WALL**, #69). Die
+Spezialisierung überlebt nur als **First-party-Outcome-Flywheel**: Jynxzi-spezifische
+Retention-Daten aus *eigenen* geposteten Clips, die kein generischer Finder sammelt.
+
+**Mechanismus:** nach WALL ist der Autopilot kein Pre-Publication-Ranker, sondern ein
+**Harvesting-Loop** — der Generator liefert ein *diverses* Kandidaten-Set (gute
+Abdeckung statt Ranking), das gepostet, am First-party-Outcome gemessen und dessen
+Gewinner geerntet/skaliert werden. Der „Ranker" ist der Markt.
+
+**Nordstern:** Retention/Performance der *selbst geposteten* Clips (nicht mehr recall@20
+gegen @Iboclipss). Der gesamte Offline-Apparat (recall@20, Gold-Manifest, GT-Flywheel)
+ist auf **Bootstrap-Saat + Generator-Regressions-Wächter** demoted, nicht gelöscht.
 
 ## Sprache
 
@@ -93,3 +105,30 @@ loop, data pipeline.
 Datensatz bekannt-guter Momente (jsonl). Maßstab, gegen den der Clip-Finder bewertet
 wird — ein Treffer deckt ≥ 50 % des GT-Fensters ab (`ml/eval_clip_finder.py`).
 _Avoid_: ground truth file, labels.
+
+### Outcome-Signal
+
+**Third-party outcome**: Publikums-Performance an *fremden* geposteten Clips — heute
+@Iboclipss-/andere Jynxzi-Kanal-View-Counts, die der GT-Flywheel auf die Quell-VODs
+matcht. Nur sichtbar für Momente, die ein Fremd-Clipper *gewählt* hat (kein Signal über
+dessen übersprungene Kandidaten), und auf ~View-Count reduziert. _Avoid_: engagement,
+virality (unqualifiziert).
+
+**First-party outcome**: Publikums-Performance an *eigenen* geposteten Clips — die
+Retention-Kurve (`retention_3s`/`retention_50pct`/`completion`) plus Views-vs-Baseline,
+wie sie `import_yt_retention` zu Outcome-Rows verlabelt. Reicher als third-party
+(Abbruchkurve statt nur View-Count) und misst *selbst gewählte Kandidaten inkl.
+Verlierer*. _Avoid_: engagement, performance (unqualifiziert).
+
+**Harvesting-Loop** (Test-and-Learn): der Produktkern nach WALL. Statt Virality *vor dem
+Posten* vorherzusagen (Content-Ranking, widerlegt), wird ein diverses Kandidaten-Set
+gepostet, am First-party-Outcome gemessen und die Gewinner geerntet/skaliert — der
+„Ranker" ist der Markt. Der Generator liefert *Abdeckung* (`raw@any`), nicht Reihenfolge.
+_Avoid_: ranker, predictor (für diese Rolle).
+
+**Facette** (Stratum): eine grobe, *berechenbare* Kategorie eines Moments (Goal-Family
+via `infer_goal_family`, Chat-Emotion, Längen-Bucket), über die der Harvesting-Loop
+stratifiziert sampelt. WALL-konform: keine feinkörnige Virality-Vorhersage, nur
+*Abdeckung* — die am Outcome gemessene **Gewinner-Facette IST** das streamer-spezifische,
+lernbare Moat-Wissen, das kein generischer Finder hat. _Avoid_: cluster, bucket
+(unqualifiziert), label.
