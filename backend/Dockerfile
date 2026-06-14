@@ -41,6 +41,11 @@ RUN apt-get update \
 
 WORKDIR /app/backend
 
+# pytest lives only in the [dev] extra; install it as its own cache-stable layer
+# (before COPY, so source changes don't bust it) so the test suite can run inside
+# the container. See scripts/ralph_tdd.sh.
+RUN python -m pip install "pytest>=8.3.3,<9.0.0"
+
 COPY . .
 
 RUN python -m pip install --upgrade pip setuptools wheel \
