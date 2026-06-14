@@ -121,9 +121,10 @@ You are running UNATTENDED in a headless Ralph loop. No human will answer you.
   comments for context from any prior attempt on this same issue.
 - Make reasonable interface and behavior decisions yourself.
 - Run tests ONLY inside the backend container, like this:
-      docker exec -w /app/backend $CONTAINER python -m pytest tests/ -q
-  (narrow to the relevant test file/node while iterating). Do NOT create a host
-  venv or run pytest on the host.
+      $DOCKER exec -w /app/backend $CONTAINER python -m pytest tests/ -q
+  (narrow to the relevant test file/node while iterating). Use exactly that
+  docker binary ('$DOCKER' — bare 'docker' is disabled in this WSL distro). Do
+  NOT create a host venv or run pytest on the host.
 - Do real vertical-slice TDD: one test -> minimal code -> repeat. No horizontal
   slicing (do not write all tests first).
 - Commit your work as you go. Commit ONLY — do NOT push and do NOT open a PR;
@@ -140,7 +141,7 @@ EOF
 echo "=============================================================="
 echo " Ralph TDD run"
 echo "   branch        : $RUN_BRANCH  (off $(git branch --show-current))"
-echo "   container     : $CONTAINER"
+echo "   container     : $CONTAINER   (via $DOCKER)"
 echo "   model/effort  : $MODEL / $EFFORT"
 echo "   max attempts  : $MAX_ATTEMPTS   timeout/attempt: $ATTEMPT_TIMEOUT"
 echo "   logs          : $LOG_DIR"

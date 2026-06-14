@@ -1,5 +1,21 @@
 #!/usr/bin/env bash
 
+# Resolve a working docker binary. Under Docker Desktop on WSL *without* WSL
+# integration enabled for this distro, bare `docker` is a stub that errors
+# ("could not be found in this WSL 2 distro"); the Windows `docker.exe` still
+# works via interop. Prefer native `docker` when its daemon is reachable, else
+# fall back to docker.exe. Override by exporting DOCKER=... .
+resolve_docker_bin() {
+  if command -v docker >/dev/null 2>&1 && docker version >/dev/null 2>&1; then
+    printf 'docker'
+  elif command -v docker.exe >/dev/null 2>&1 && docker.exe version >/dev/null 2>&1; then
+    printf 'docker.exe'
+  else
+    printf 'docker'   # nothing works — let callers fail with docker's own message
+  fi
+}
+DOCKER="${DOCKER:-$(resolve_docker_bin)}"
+
 normalize_boolish() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
 }
@@ -16,20 +32,20 @@ is_truthy() {
 }
 
 docker_gpu_available() {
-  if ! command -v docker >/dev/null 2>&1; then
+  if ! command -v "$DOCKER" >/dev/null 2>&1; then
     return 1
   fi
-  docker run --rm --gpus all --entrypoint /bin/sh alpine:3.20 -c true >/dev/null 2>&1
+  "$DOCKER" run --rm --gpus all --entrypoint /bin/sh alpine:3.20 -c true >/dev/null 2>&1
 }
 
 backend_image_from_compose() {
-  docker compose "$@" config --images | awk '/^ai-clipping-backend/ { print; exit }'
+  "$DOCKER" compose "$@" config --images | awk '/^ai-clipping-backend/ { print; exit }'
 }
 
 image_created_epoch() {
   local image="$1"
   local created
-  created="$(docker image inspect -f '{{.Created}}' "$image" 2>/dev/null || true)"
+  created="$("$DOCKER" image inspect -f '{{.Created}}' "$image" 2>/dev/null || true)"
   if [ -z "$created" ]; then
     echo 0
     return 0
@@ -39,7 +55,7 @@ image_created_epoch() {
 
 container_backend_bind_mount() {
   local container="$1"
-  docker inspect -f '{{range .Mounts}}{{if eq .Destination "/app/backend"}}{{.Source}}{{end}}{{end}}' "$container" 2>/dev/null || true
+  "$DOCKER" inspect -f '{{range .Mounts}}{{if eq .Destination "/app/backend"}}{{.Source}}{{end}}{{end}}' "$container" 2>/dev/null || true
 }
 
 latest_backend_build_input_epoch() {
@@ -80,11 +96,11 @@ latest_backend_build_input_epoch() {
 }
 
 compose_service_build_backend() {
-  docker compose "$@" build backend
+  "$DOCKER" compose "$@" build backend
 }
 
 compose_service_up_backend() {
-  docker compose "$@" up -d backend
+  "$DOCKER" compose "$@" up -d backend
 }
 
 ensure_backend_image_current() {
@@ -121,7 +137,7 @@ ensure_backend_image_current() {
     return 1
   fi
 
-  if ! docker image inspect "$image" >/dev/null 2>&1; then
+  if ! "$DOCKER" image inspect "$image" >/dev/null 2>&1; then
     echo "Backend image missing: $image. Building backend image."
     compose_service_build_backend "${compose_args[@]}"
     return 0
@@ -153,7 +169,7 @@ ensure_backend_image_current() {
 
 # True wenn der genannte Container existiert UND läuft.
 container_running() {
-  [ "$(docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = "true" ]
+  [ "$("$DOCKER" inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = "true" ]
 }
 
 # CUDA-Backend bevorzugen, sonst CPU-Backend; sonst mit Fehler abbrechen.
@@ -173,6 +189,5 @@ exec_in_backend() {
     exit 1
   fi
 
-  exec docker exec -w "$workdir" "$container" python -m "$module" "$@"
+  exec "$DOCKER" exec -w "$workdir" "$container" python -m "$module" "$@"
 }
-
