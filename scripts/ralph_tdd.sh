@@ -34,6 +34,11 @@
 #   RALPH_EFFORT          [xhigh]           --effort
 #   RALPH_LABEL           [ready-for-agent] selection label
 #   RALPH_YES             [0]               1 = skip confirmation
+#   RALPH_RENDER_HEAD     [8]               lines of a tool result shown before truncating
+#
+# Each attempt streams a live, Claude-Code-style transcript to the terminal
+# (tool calls, results, text) via `--output-format stream-json` rendered by
+# scripts/ralph_stream_render.jq; a colour-stripped copy lands in the .log.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -47,6 +52,8 @@ MODEL="${RALPH_MODEL:-opus}"
 EFFORT="${RALPH_EFFORT:-xhigh}"
 LABEL="${RALPH_LABEL:-ready-for-agent}"
 ASSUME_YES="${RALPH_YES:-0}"
+RENDER_HEAD="${RALPH_RENDER_HEAD:-8}"
+RENDERER="$SCRIPT_DIR/ralph_stream_render.jq"
 DRY_RUN=0
 
 # --- arg parsing -------------------------------------------------------------
@@ -67,6 +74,8 @@ die() { echo "ralph: $*" >&2; exit 1; }
 command -v claude >/dev/null 2>&1 || die "claude CLI not found on PATH."
 command -v gh     >/dev/null 2>&1 || die "gh CLI not found on PATH."
 command -v timeout >/dev/null 2>&1 || die "coreutils 'timeout' not found on PATH."
+command -v jq     >/dev/null 2>&1 || die "jq not found on PATH (needed to render the live transcript)."
+[ -f "$RENDERER" ] || die "stream renderer missing: $RENDERER"
 
 cd "$ROOT_DIR"
 
@@ -189,6 +198,10 @@ for n in "${ISSUES[@]}"; do
 
     # Fresh client per attempt. We ignore claude's exit code for control flow —
     # the GitHub issue state is the source of truth — but we record it.
+    # stream-json + --verbose emits every tool call/result/text as JSON events;
+    # the jq renderer turns them into a live, colourised Claude-Code-style
+    # transcript on the console, and tee writes a colour-stripped copy to $log.
+    # PIPESTATUS[0] is `timeout` (== claude's rc, or 124 on timeout).
     set +e
     timeout "$ATTEMPT_TIMEOUT" \
       claude -p "/tdd Implement GitHub issue #$n end-to-end, unattended. Close it when green." \
@@ -196,7 +209,10 @@ for n in "${ISSUES[@]}"; do
         --effort "$EFFORT" \
         --dangerously-skip-permissions \
         --append-system-prompt "$AUTONOMY_PROMPT" \
-      2>&1 | tee "$log"
+        --output-format stream-json --verbose \
+      2>&1 \
+      | jq -rR --unbuffered --argjson head_n "$RENDER_HEAD" -f "$RENDERER" \
+      | tee >(sed -u 's/\x1b\[[0-9;]*m//g' > "$log")
     claude_rc="${PIPESTATUS[0]}"
     set -e
     [ "$claude_rc" -eq 124 ] && echo "    (claude hit the ${ATTEMPT_TIMEOUT} timeout)"
