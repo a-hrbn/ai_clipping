@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import csv
 import json
 import pathlib
 import statistics
@@ -182,9 +183,22 @@ def derive_retention(row: dict) -> dict:
     avg_view_percentage = row.get("averageViewPercentage")
     curve = _read_curve(row)
     if not curve:
-        # No curve. ``degraded_avp_only`` keeps the short (flagged) when the
-        # scalar averageViewPercentage survived; ``missing`` marks a truly-empty
-        # retention row that build_short_report will drop+log. Never abort.
+        # No curve. The rich Studio export still carries a direct watched-to-end
+        # completion ("Bis zum Ende angesehen %"); read it as completion (0–1) with
+        # the curve-only fields (3s / 50pct) left None — a partial but real signal,
+        # flagged ``studio_endwatch`` so it is never mistaken for a true curve.
+        watched_to_end = row.get("watched_to_end_pct")
+        if watched_to_end is not None:
+            return {
+                "retention_3s": None,
+                "retention_50pct": None,
+                "completion": watched_to_end / 100.0,
+                "retention_source": "studio_endwatch",
+                "averageViewPercentage": avg_view_percentage,
+            }
+        # ``degraded_avp_only`` keeps the short (flagged) when only the scalar
+        # averageViewPercentage survived; ``missing`` marks a truly-empty retention
+        # row that build_short_report will drop+log. Never abort.
         source = "degraded_avp_only" if avg_view_percentage is not None else "missing"
         return {
             "retention_3s": None,
@@ -236,6 +250,74 @@ def _as_float(value) -> float:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Studio-CSV ingest — reconcile the real YouTube-Studio export (Slice 4, #79)
+#
+# The operator's real export is a German Studio "Tabellendaten.csv", not the
+# public-schema JSONL the parser was first built against. It carries German
+# headers, a leading "Gesamt" totals row and quoted titles. read_studio_csv maps
+# it onto the row shape derive_retention already consumes, locating columns by
+# NAME (German label -> field) so an added avp column can shift positions without
+# breaking the map. Offline: a plain local CSV read, no network.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Id column (the Studio "Videos" column); its "Gesamt" totals row is never a short.
+_STUDIO_ID_COLUMN = "Videos"
+_STUDIO_TOTALS_ROW = "Gesamt"
+
+# German Studio-export numeric column label -> the row field the mine consumes. Located
+# by EXACT name so an added/re-ordered column never shifts the mapping — and so avp's
+# "… in Prozent (%)" column is never confused with the bare "Durchschnittliche
+# Wiedergabedauer" (a h:mm:ss duration) sitting beside it. The two retention columns are
+# optional: the default export omits them; the rich re-export adds watched-to-end + avp.
+_STUDIO_NUMERIC_COLUMNS = {
+    "Dauer": "duration_s",
+    "Aufrufe": "views",
+    "Bis zum Ende angesehen (%)": "watched_to_end_pct",
+    "Durchschnittliche Wiedergabedauer in Prozent (%)": "averageViewPercentage",
+}
+
+
+def read_studio_csv(path) -> list[dict]:
+    """Read the real German YouTube-Studio "Tabellendaten.csv" into mine rows.
+
+    Locates columns by their German header label (not position) so the parser
+    survives an added/re-ordered column (the rich re-export shuffles every column),
+    drops the leading "Gesamt" totals row, and emits one dict per short shaped like
+    the JSONL the mine already consumes. A retention column that the export omits is
+    simply absent on the row (no faked 0) — derive_retention then degrades honestly.
+    """
+    rows: list[dict] = []
+    with pathlib.Path(path).open(encoding="utf-8", newline="") as handle:
+        for record in csv.DictReader(handle):
+            video_id = (record.get(_STUDIO_ID_COLUMN) or "").strip()
+            if not video_id or video_id == _STUDIO_TOTALS_ROW:
+                continue  # totals row / blank line — not a short
+            row = {"video_id": video_id}
+            title = (record.get("Videotitel") or "").strip()
+            if title:
+                row["title"] = title  # kept for the title-based goal-family facet
+            for column, field in _STUDIO_NUMERIC_COLUMNS.items():
+                cell = (record.get(column) or "").strip()
+                if cell:
+                    row[field] = _as_float(cell)
+            rows.append(row)
+    return rows
+
+
+def read_metrics(path) -> list[dict]:
+    """Read the mine's metrics input, dispatching on file type.
+
+    A ``.csv`` path is the real German YouTube-Studio export (``read_studio_csv``);
+    anything else is the public-schema JSONL the mine was first built against
+    (``row_identity.read_jsonl``). Both yield the same downstream row shape.
+    """
+    path = pathlib.Path(path)
+    if path.suffix.lower() == ".csv":
+        return read_studio_csv(path)
+    return row_identity.read_jsonl(path, strict=False)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Aggregate — the diagnostic roll-up (reports, routes not)
 #
 # The directional pre-look over the per-short rows (PRD #75 Slice 3, issue #78):
@@ -247,6 +329,15 @@ def _as_float(value) -> float:
 
 # The three retention fields every aggregate ranges over (same order as the report).
 RETENTION_FIELDS = ("retention_3s", "retention_50pct", "completion")
+
+# The avp scalar the degraded path carries when no curve is present. In the real
+# curve-less Studio export (Slice 4, #79) it is the *only* live retention signal, so
+# the spread and facet medians must range over it too — otherwise a curve-less run
+# would surface nothing. Curve fields then stay empty (n=0), never faked as a 0.
+AVP_FIELD = "averageViewPercentage"
+
+# Every field the spread / facet medians range over: the curve fields plus avp.
+SPREAD_FIELDS = RETENTION_FIELDS + (AVP_FIELD,)
 
 # The forward loop gates on early-retention and completion — the τ-baseline suggests
 # thresholds for *those* fields only (retention_50pct is not a gate knob).
@@ -302,7 +393,7 @@ def facet_medians(shorts: list[dict]) -> list[dict]:
             "goal_family": goal_family,
             "length_bucket": length_bucket,
             "n": len(members),
-            "median": {f: _median([m.get(f) for m in members]) for f in RETENTION_FIELDS},
+            "median": {f: _median([m.get(f) for m in members]) for f in SPREAD_FIELDS},
         }
         for (goal_family, length_bucket), members in groups.items()
     ]
@@ -324,7 +415,7 @@ def retention_spread(shorts: list[dict]) -> dict:
     Degraded (avp-only) shorts carry None and are skipped per field — never folded
     in as a 0 that would understate or inflate the spread.
     """
-    return {f: _field_spread([s.get(f) for s in shorts]) for f in RETENTION_FIELDS}
+    return {f: _field_spread([s.get(f) for s in shorts]) for f in SPREAD_FIELDS}
 
 
 def _field_spread(values: list) -> dict:
@@ -416,6 +507,11 @@ def main(argv: list[str] | None = None, *, transcribe=None) -> int:
         "--media-dir", type=pathlib.Path, default=None,
         help="Local directory of short media (<video_id>.mp4); transcribed offline "
              "for the goal-family/length facet. Omit to leave facets empty.")
+    parser.add_argument(
+        "--facet-from-title", action="store_true",
+        help="Read the goal-family facet off the short's TITLE (packaging) instead of "
+             "its transcript — the cheap, media-free facet path for the confounded "
+             "pre-look. Packaging-semantics, not content.")
     parser.add_argument("--output", type=pathlib.Path, default=DEFAULT_OUTPUT,
                         help="Per-short report JSONL destination.")
     parser.add_argument("--aggregate-output", type=pathlib.Path, default=DEFAULT_AGGREGATE_OUTPUT,
@@ -425,10 +521,13 @@ def main(argv: list[str] | None = None, *, transcribe=None) -> int:
                         help="Print the full report (shorts + drops + aggregate) as JSON.")
     args = parser.parse_args(argv)
 
-    if transcribe is None and args.media_dir is not None:
-        transcribe = _media_dir_transcribe(args.media_dir)
+    if transcribe is None:
+        if args.facet_from_title:
+            transcribe = _title_transcribe
+        elif args.media_dir is not None:
+            transcribe = _media_dir_transcribe(args.media_dir)
 
-    raw_rows = row_identity.read_jsonl(pathlib.Path(args.metrics), strict=False)
+    raw_rows = read_metrics(args.metrics)
     report = build_short_report(raw_rows, transcribe=transcribe)
     report_aggregate = aggregate(report)
 
@@ -453,6 +552,17 @@ def main(argv: list[str] | None = None, *, transcribe=None) -> int:
         print(_format_summary(report, output=args.output))
         print(format_aggregate(report_aggregate))
     return 0
+
+
+def _title_transcribe(row: dict) -> str | None:
+    """A row -> "transcript" seam that returns the short's TITLE as the topic text.
+
+    The title is the short's packaging; ``infer_goal_family`` reads the goal-family off
+    it directly, so the facet needs no media download / Whisper. Packaging-semantics,
+    not content — the cheap facet path for the confounded pre-look (#79). Returns None
+    for a title-less row so it is logged as a drop rather than mis-faceted.
+    """
+    return row.get("title") or None
 
 
 def _media_dir_transcribe(media_dir: pathlib.Path):
@@ -510,10 +620,10 @@ def format_aggregate(report_aggregate: dict) -> str:
         + ")",
         "  RETENTION SPREAD (does it vary meaningfully?):",
     ]
-    for field in RETENTION_FIELDS:
+    for field in SPREAD_FIELDS:
         s = report_aggregate["retention_spread"][field]
         lines.append(
-            f"    {field:<15} n={s['n']:>2}  min {_fmt_num(s['min'])}  median {_fmt_num(s['median'])}  "
+            f"    {field:<22} n={s['n']:>2}  min {_fmt_num(s['min'])}  median {_fmt_num(s['median'])}  "
             f"max {_fmt_num(s['max'])}  iqr {_fmt_num(s['iqr'])}  stdev {_fmt_num(s['stdev'])}")
     lines.append("  MEDIAN RETENTION per goal-family×length (with n):")
     for cell in report_aggregate["facet_medians"]:
@@ -521,7 +631,7 @@ def format_aggregate(report_aggregate: dict) -> str:
         lines.append(
             f"    {str(cell['goal_family']):<12} {str(cell['length_bucket']):<5} n={cell['n']:>2}  "
             f"r3s {_fmt_num(med['retention_3s'])}  r50 {_fmt_num(med['retention_50pct'])}  "
-            f"compl {_fmt_num(med['completion'])}")
+            f"compl {_fmt_num(med['completion'])}  avp {_fmt_num(med['averageViewPercentage'])}")
     lines.append("  τ-BASELINE (percentile threshold suggestions; not a gate):")
     for field, cuts in report_aggregate["tau_baseline"].items():
         lines.append(

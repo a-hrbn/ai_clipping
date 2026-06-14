@@ -477,3 +477,187 @@ def test_main_writes_aggregate_artifact_and_includes_it_in_json(tmp_path, capsys
     payload = json.loads(capsys.readouterr().out)
     assert payload["aggregate"]["n_shorts"] == 2
     assert payload["aggregate"]["drop_summary"]["n_input"] == 2
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Slice 4 (issue #79): reconcile the REAL YouTube-Studio export against the parser.
+# The operator's export is a German Studio "Tabellendaten.csv": German headers, a
+# leading "Gesamt" totals row, and titles quoted because they contain commas. The
+# reconciliation surprise is that the default column set carries NO retention curve
+# and no avp column. The format-fix reads the real CSV into the row shape
+# derive_retention already consumes, locating columns by NAME so an added avp column
+# can shift positions without breaking the map. The header fixture mirrors the real
+# export byte-for-byte (tmp/.../Tabellendaten.csv).
+# ─────────────────────────────────────────────────────────────────────────────
+
+_STUDIO_HEADER = (
+    "Videos,Videotitel,Veröffentlichungszeitpunkt des Videos,Dauer,Aufrufe,"
+    "Wiedergabezeit (Stunden),Abonnenten,Impressionen,Klickrate der Impressionen (%)"
+)
+
+
+def test_read_studio_csv_maps_real_columns_and_skips_totals_row(tmp_path) -> None:
+    # The real Studio export leads with a "Gesamt" totals row and quotes titles that
+    # contain commas. read_studio_csv drops the totals row and maps the German columns
+    # onto the row shape the mine consumes (video_id / duration_s / views).
+    csv_path = tmp_path / "Tabellendaten.csv"
+    csv_path.write_text(
+        _STUDIO_HEADER + "\n"
+        "Gesamt,,,,32757,86.4206,6,11754,6.3\n"
+        'Ws649UG936E,"Jynxzi Crashes Out, In Chess #shorts","Mar 29, 2026",10,2396,4.3651,0,1104,17.66\n',
+        encoding="utf-8")
+
+    rows = hsm.read_studio_csv(csv_path)
+
+    assert len(rows) == 1  # the "Gesamt" totals row is dropped, not parsed as a short
+    row = rows[0]
+    assert row["video_id"] == "Ws649UG936E"
+    assert row["duration_s"] == 10.0
+    assert row["views"] == 2396.0
+
+
+def test_read_studio_csv_reads_endwatch_completion_and_avp_columns(tmp_path) -> None:
+    # The rich re-export adds "Bis zum Ende angesehen (%)" (watched-to-end, a real
+    # completion signal) and "Durchschnittliche Wiedergabedauer in Prozent (%)" (avp,
+    # loop-inflatable past 100%). read_studio_csv surfaces both by EXACT column name —
+    # avp's column must not be confused with the bare "Durchschnittliche
+    # Wiedergabedauer" (a h:mm:ss duration sitting right beside it).
+    csv_path = tmp_path / "Tabellendaten.csv"
+    csv_path.write_text(
+        "Videos,Dauer,Bis zum Ende angesehen (%),Durchschnittliche Wiedergabedauer,"
+        "Durchschnittliche Wiedergabedauer in Prozent (%),Aufrufe\n"
+        "Gesamt,,62.74,0:00:17,76.61,32757\n"
+        "Ws649UG936E,10,72.45,0:00:14,149.22,2396\n",
+        encoding="utf-8")
+
+    rows = hsm.read_studio_csv(csv_path)
+
+    assert len(rows) == 1
+    assert rows[0]["watched_to_end_pct"] == 72.45
+    assert rows[0]["averageViewPercentage"] == 149.22  # avp, loop-inflated past 100%
+
+
+def test_derive_retention_reads_completion_from_studio_end_watch_without_a_curve() -> None:
+    # The rich Studio export has no curve but carries watched-to-end completion + avp.
+    # derive_retention reads completion off the end-watch field (62% -> 0.62), leaves
+    # the curve-only fields (3s / 50pct) None, carries avp, and flags the source as the
+    # studio export — never "curve" (there is none) and never "degraded_avp_only"
+    # (completion IS present, so it is not avp-only).
+    row = {"video_id": "x", "duration_s": 23.0,
+           "watched_to_end_pct": 62.0, "averageViewPercentage": 85.5}
+
+    derived = hsm.derive_retention(row)
+
+    assert derived["completion"] == 0.62
+    assert derived["retention_3s"] is None
+    assert derived["retention_50pct"] is None
+    assert derived["averageViewPercentage"] == 85.5
+    assert derived["retention_source"] == "studio_endwatch"
+
+
+def test_main_runs_on_a_studio_csv_export_and_spreads_completion_and_avp(tmp_path, capsys) -> None:
+    # End-to-end on the REAL export shape: a ``.csv`` metrics file routes through the
+    # Studio reader (no curve), each short carries watched-to-end completion + avp, and
+    # the aggregate spreads both. Two shorts: completion [0.60, 0.70] -> median 0.65;
+    # avp present for both. Offline — a plain local CSV read, no network.
+    export = tmp_path / "Tabellendaten.csv"
+    export.write_text(
+        "Videos,Dauer,Bis zum Ende angesehen (%),"
+        "Durchschnittliche Wiedergabedauer in Prozent (%),Aufrufe\n"
+        "Gesamt,,65.0,90.0,5000\n"
+        "aaa,20,60.0,80.0,1000\n"
+        "bbb,30,70.0,120.0,2000\n",
+        encoding="utf-8")
+    out = tmp_path / "report.jsonl"
+    agg_out = tmp_path / "aggregate.json"
+
+    rc = hsm.main(["--metrics", str(export), "--output", str(out),
+                   "--aggregate-output", str(agg_out), "--json"])
+
+    assert rc == 0
+    written = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert [s["short_id"] for s in written] == ["clips:aaa", "clips:bbb"]
+    assert [s["completion"] for s in written] == [0.60, 0.70]
+    assert [s["retention_source"] for s in written] == ["studio_endwatch", "studio_endwatch"]
+    aggregate = json.loads(agg_out.read_text(encoding="utf-8"))
+    assert aggregate["retention_spread"]["completion"]["median"] == pytest.approx(0.65)
+    assert aggregate["retention_spread"]["averageViewPercentage"]["n"] == 2
+
+
+def test_read_studio_csv_keeps_the_video_title_for_title_based_faceting(tmp_path) -> None:
+    # The Videotitel column is kept verbatim so the facet's goal-family can be read off
+    # the title (packaging) without transcribing media — the cheap facet path for the
+    # confounded pre-look (#79). The "Gesamt" totals row carries no title and is dropped.
+    csv_path = tmp_path / "Tabellendaten.csv"
+    csv_path.write_text(
+        "Videos,Videotitel,Dauer,Aufrufe\n"
+        "Gesamt,,,32757\n"
+        'abc,"Jynxzi Crashes Out In Chess 💀 #funny #rage",30,1000\n',
+        encoding="utf-8")
+
+    rows = hsm.read_studio_csv(csv_path)
+
+    assert rows[0]["title"] == "Jynxzi Crashes Out In Chess 💀 #funny #rage"
+
+
+def test_main_facets_from_titles_on_a_studio_csv_without_media(tmp_path, capsys) -> None:
+    # --facet-from-title reads the goal-family off the title (packaging) — no media, no
+    # Whisper. A "#funny #rage" short classifies "reaction"; length from Dauer (30s ->
+    # lang); the title rides along as the auditable excerpt. The cheap facet for #79.
+    export = tmp_path / "Tabellendaten.csv"
+    export.write_text(
+        "Videos,Videotitel,Dauer,Bis zum Ende angesehen (%),Aufrufe\n"
+        "Gesamt,,,62.0,5000\n"
+        'reax,"Jynxzi Crashes Out In Chess 💀 #funny #rage",30,70.0,1000\n',
+        encoding="utf-8")
+    out = tmp_path / "report.jsonl"
+
+    rc = hsm.main(["--metrics", str(export), "--output", str(out),
+                   "--aggregate-output", str(tmp_path / "agg.json"),
+                   "--facet-from-title", "--json"])
+
+    assert rc == 0
+    written = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert written[0]["goal_family"] == "reaction"
+    assert written[0]["length_bucket"] == "lang"  # 30s >= 25s boundary
+    assert "Crashes Out" in written[0]["transcript_excerpt"]
+
+
+def test_aggregate_spreads_avp_so_a_curveless_run_surfaces_signal() -> None:
+    # The real Studio export has NO retention curve — only averageViewPercentage
+    # survives, so the three curve fields are None and the aggregate must still
+    # surface a spread over avp (the only live retention signal). avp = [30,45,55,70]
+    # -> median 50, min 30, max 70; the curve-field spreads stay empty (n=0), never
+    # faked as a 0 that would invent variation.
+    shorts = [
+        _short_row("reaction", "kurz", short_id="clips:a", averageViewPercentage=30.0),
+        _short_row("reaction", "kurz", short_id="clips:b", averageViewPercentage=45.0),
+        _short_row("quote", "lang", short_id="clips:c", averageViewPercentage=55.0),
+        _short_row("quote", "lang", short_id="clips:d", averageViewPercentage=70.0),
+    ]
+
+    spread = hsm.retention_spread(shorts)
+
+    avp = spread["averageViewPercentage"]
+    assert avp["n"] == 4
+    assert avp["min"] == 30.0
+    assert avp["median"] == 50.0
+    assert avp["max"] == 70.0
+    assert spread["completion"]["n"] == 0  # no curve → curve field empty, not faked
+
+
+def test_facet_medians_include_avp_for_the_curveless_facet_tendency() -> None:
+    # #75's question is goal-family×length, so the facet cells must read off avp in the
+    # curve-less export. reaction×kurz avp [40,60] -> median 50; quote×lang avp [20] ->
+    # 20. Each cell's median dict carries avp alongside the (here-empty) curve fields.
+    shorts = [
+        _short_row("reaction", "kurz", short_id="clips:a", averageViewPercentage=40.0),
+        _short_row("reaction", "kurz", short_id="clips:b", averageViewPercentage=60.0),
+        _short_row("quote", "lang", short_id="clips:c", averageViewPercentage=20.0),
+    ]
+
+    cells = hsm.facet_medians(shorts)
+
+    by_facet = {(c["goal_family"], c["length_bucket"]): c for c in cells}
+    assert by_facet[("reaction", "kurz")]["median"]["averageViewPercentage"] == 50.0
+    assert by_facet[("quote", "lang")]["median"]["averageViewPercentage"] == 20.0
