@@ -4,6 +4,23 @@ from pathlib import Path
 from config import BACKEND_ROOT, PROJECT_ROOT, _prepare_local_cache_path, _resolve_local_project_path
 
 
+def _chmod_enforces_write_permission(directory: Path) -> bool:
+    """Return True if writing into a chmod 0o500 directory is actually blocked.
+
+    Some filesystems (e.g. WSL DrvFS / 9p Windows mounts) ignore POSIX mode
+    bits, so a write probe succeeds even on a read-only directory. The
+    unwritable-dir fallback can only be exercised where chmod is enforced.
+    ``directory`` is expected to already be chmod 0o500.
+    """
+    probe = directory / ".enforce_probe"
+    try:
+        probe.write_text("x", encoding="utf-8")
+    except OSError:
+        return True
+    probe.unlink(missing_ok=True)
+    return False
+
+
 class ConfigPathTests(unittest.TestCase):
     def test_relative_cache_paths_resolve_inside_project(self) -> None:
         resolved = _resolve_local_project_path(
@@ -26,6 +43,12 @@ class ConfigPathTests(unittest.TestCase):
         root.mkdir(parents=True, exist_ok=True)
         root.chmod(0o500)
         try:
+            if not _chmod_enforces_write_permission(root):
+                self.skipTest(
+                    "filesystem does not enforce chmod write permissions "
+                    "(e.g. WSL DrvFS/9p mount); cannot exercise the "
+                    "unwritable-dir fallback"
+                )
             resolved = _prepare_local_cache_path(root, fallback_name="test_config_fallback")
         finally:
             root.chmod(0o700)
