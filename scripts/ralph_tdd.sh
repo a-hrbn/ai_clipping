@@ -43,9 +43,11 @@
 #   RALPH_NO_PUSH         [0]               1 = never push main / delete the branch
 #   RALPH_RENDER_HEAD     [8]               lines of a tool result shown before truncating
 #
-# Each attempt streams a live, Claude-Code-style transcript to the terminal
-# (tool calls, results, text) via `--output-format stream-json` rendered by
-# scripts/ralph_stream_render.jq; a colour-stripped copy lands in the .log.
+# Each attempt's transcript (tool calls, results, text) is rendered from
+# `--output-format stream-json` by scripts/ralph_stream_render.jq into a
+# compact, colour-stripped per-attempt .log; it is NOT streamed to the terminal
+# (follow a live attempt with `tail -f` on its .log). The terminal only shows
+# Ralph's own plan, per-attempt status lines and the final summary.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -218,8 +220,8 @@ for n in "${ISSUES[@]}"; do
     # Fresh client per attempt. We ignore claude's exit code for control flow —
     # the GitHub issue state is the source of truth — but we record it.
     # stream-json + --verbose emits every tool call/result/text as JSON events;
-    # the jq renderer turns them into a live, colourised Claude-Code-style
-    # transcript on the console, and tee writes a colour-stripped copy to $log.
+    # the jq renderer turns them into a compact Claude-Code-style transcript,
+    # colour-stripped (sed) into $log — nothing is echoed to the terminal.
     # PIPESTATUS[0] is `timeout` (== claude's rc, or 124 on timeout).
     set +e
     timeout "$ATTEMPT_TIMEOUT" \
@@ -231,7 +233,7 @@ for n in "${ISSUES[@]}"; do
         --output-format stream-json --verbose \
       2>&1 \
       | jq -rR --unbuffered --argjson head_n "$RENDER_HEAD" -f "$RENDERER" \
-      | tee >(sed -u 's/\x1b\[[0-9;]*m//g' > "$log")
+      | sed -u 's/\x1b\[[0-9;]*m//g' > "$log"
     claude_rc="${PIPESTATUS[0]}"
     set -e
     [ "$claude_rc" -eq 124 ] && echo "    (claude hit the ${ATTEMPT_TIMEOUT} timeout)"
