@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import copy
 import csv
 import json
 import pathlib
@@ -323,8 +324,16 @@ def read_metrics(path) -> list[dict]:
 # The directional pre-look over the per-short rows (PRD #75 Slice 3, issue #78):
 # overall retention spread, median retention per goal-family×length (with n), a
 # τ-baseline percentile suggestion, the caveat header and an honest drop summary.
+#
+# PRD #80 Slice 2 (issue #82) adds the curve-driven Stage-1 read: the within-length-
+# bucket retention_3s spread (kurz <25s / lang >=25s) — does the early-hook spread or
+# cluster as tightly as completion? — double-reported (all shorts + the >=50-views
+# subset), with an explicit Stage-2 trigger flag and the forward-loop threshold
+# reference (loop-uncalibrated; percentile-τ is operative).
+#
 # Deliberately NO gate / verdict / route — n=52 + packaging-confounding + dormancy
-# allow only a directional read, never a decision baked into code.
+# allow only a directional read, never a decision baked into code. The Stage-2 trigger
+# is a reported flag, not a baked route.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # The three retention fields every aggregate ranges over (same order as the report).
@@ -339,12 +348,47 @@ AVP_FIELD = "averageViewPercentage"
 # Every field the spread / facet medians range over: the curve fields plus avp.
 SPREAD_FIELDS = RETENTION_FIELDS + (AVP_FIELD,)
 
+# The early-hook field whose within-length-bucket spread is Stage 1's core question:
+# does it vary meaningfully, or cluster as tightly as completion?
+EARLY_HOOK_FIELD = "retention_3s"
+
+# The coarse length strata the early-hook spread is read *within* (loop-inflated Shorts
+# curves are length-biased, so the spread comparison must stay inside a bucket).
+LENGTH_BUCKETS = ("kurz", "lang")
+
+# Reach-starved shorts (< this many views) are retention-noise; they stay in the honest
+# all-shorts read but drop from the filtered half of the double-report. The floor is
+# surfaced (never a silent drop) so the denominator stays honest (mirrors #75/#79).
+VIEW_FLOOR = 50
+
+# The Stage-2 trigger band: the within-length-bucket retention_3s IQR above which the
+# early-hook is judged to "spreizt" (spread → Stage 2 of #80 is worth it) rather than
+# cluster "eng" (tight → #75's "→ Auto-Packaging" routing stands). A reported flag, not
+# a baked gate — the module reports, it does not route.
+EARLY_HOOK_SPREAD_BAND = 0.10
+
 # The forward loop gates on early-retention and completion — the τ-baseline suggests
 # thresholds for *those* fields only (retention_50pct is not a gate knob).
 TAU_FIELDS = ("retention_3s", "completion")
 
 # The percentile cut points the τ-baseline reports as candidate thresholds.
 TAU_PERCENTILES = (0.25, 0.50, 0.75)
+
+# The forward loop's hard-coded label gate (ml/import_yt_retention.py) — surfaced as a
+# DOCUMENTED REFERENCE only, never applied here. It is loop-UNCALIBRATED: Shorts curves
+# run loop-inflated past 1.0, so these fixed 0–1 thresholds do not transfer; the
+# percentile-τ read within length-bucket (``early_hook_spread``) is the operative
+# measure. No calibration of ``import_yt_retention`` happens in this module.
+FORWARD_LOOP_REFERENCE = {
+    "source": "ml/import_yt_retention.py",
+    "thresholds": {
+        "retention_3s_lt": 0.5,
+        "retention_50pct_lt": 0.4,
+        "completion_gt": 0.6,
+    },
+    "calibration": "loop-uncalibrated",
+    "operative_measure": "percentile-τ within length-bucket (early_hook_spread)",
+}
 
 # The caveat header, surfaced verbatim so the directional read is never over-read as
 # a decision: the sample is thin (~8 per goal-family), packaging is uncontrolled
@@ -353,6 +397,8 @@ CAVEATS = (
     "n=52 dünn → ~8/Goal-Family direktional",
     "packaging-konfundiert → suggestiv",
     "Kanal seit 10.04. dormant → lauwarm",
+    f"View-Floor {VIEW_FLOOR}: 12/52 reichweiten-arm → Doppel-Report "
+    f"(all-52 + ≥{VIEW_FLOOR}-Views), nie still gedroppt",
 )
 
 
@@ -370,8 +416,10 @@ def aggregate(report: dict) -> dict:
         "caveats": list(CAVEATS),
         "n_shorts": len(shorts),
         "retention_spread": retention_spread(shorts),
+        "early_hook_spread": early_hook_spread(shorts),
         "facet_medians": facet_medians(shorts),
         "tau_baseline": tau_baseline(shorts),
+        "forward_loop_reference": copy.deepcopy(FORWARD_LOOP_REFERENCE),
         "drop_summary": drop_summary(report),
     }
 
@@ -435,6 +483,67 @@ def _field_spread(values: list) -> dict:
         "stdev": statistics.stdev(present) if n >= 2 else None,
         "iqr": p75 - p25,
     }
+
+
+def early_hook_spread(
+    shorts: list[dict], *, view_floor: int = VIEW_FLOOR,
+    spread_band: float = EARLY_HOOK_SPREAD_BAND) -> dict:
+    """The within-length-bucket retention_3s spread — Stage 1's core question.
+
+    For each length-bucket (kurz <25s / lang >=25s) reports the retention_3s spread
+    over the shorts in it (n / min / median / max / iqr / stdev via ``_field_spread``).
+    The comparison is read *within* a bucket because loop-inflated Shorts curves are
+    length-biased; loop-inflated values (>1.0) are passed through, never clamped.
+
+    Double-reported: ``all`` ranges over every short in the bucket (the honest
+    denominator), ``min_views`` over the ``>= view_floor`` subset (reach-starved shorts
+    are retention-noise). The floor is surfaced; a sub-floor short drops from the
+    filtered read only, never from ``all``. Empty buckets are omitted, present ones
+    sorted, so the output is input-order independent.
+
+    Each bucket carries a ``spreads`` flag — its retention_3s IQR exceeds the band, read
+    off the de-noised ``min_views`` IQR (falling back to ``all`` when the filtered read
+    has no IQR). The top-level ``stage2_trigger`` is ``"spreizt"`` when *any* bucket
+    spreads (Stage 2 worth it), else ``"eng"``. A reported flag, never a baked route.
+    """
+    buckets = []
+    for bucket in LENGTH_BUCKETS:
+        members = [s for s in shorts if _short_length_bucket(s) == bucket]
+        if not members:
+            continue
+        above_floor = [s for s in members if _views(s) >= view_floor]
+        all_spread = _field_spread([s.get(EARLY_HOOK_FIELD) for s in members])
+        floor_spread = _field_spread([s.get(EARLY_HOOK_FIELD) for s in above_floor])
+        iqr = floor_spread["iqr"] if floor_spread["iqr"] is not None else all_spread["iqr"]
+        buckets.append({
+            "length_bucket": bucket,
+            "all": all_spread,
+            "min_views": floor_spread,
+            "spreads": iqr is not None and iqr > spread_band,
+        })
+    return {
+        "view_floor": view_floor,
+        "spread_band": spread_band,
+        "stage2_trigger": "spreizt" if any(b["spreads"] for b in buckets) else "eng",
+        "buckets": buckets,
+    }
+
+
+def _views(short: dict) -> float:
+    """A short's view count as a number; a missing/None count reads as 0 (sub-floor)."""
+    value = short.get("views")
+    return value if isinstance(value, (int, float)) else 0.0
+
+
+def _short_length_bucket(short: dict) -> str:
+    """The short's length-bucket from its duration — computable without a transcript.
+
+    The facet ``length_bucket`` column is transcription-gated (None in the curve-only
+    Stage-1 read), but the bucket is purely a function of ``duration_s``, so the
+    within-bucket early-hook spread derives it directly and works whether or not the
+    transcript facet stage ran.
+    """
+    return _length_bucket(_as_float(short.get("duration_s")))
 
 
 def tau_baseline(shorts: list[dict]) -> dict:
@@ -605,9 +714,11 @@ def _fmt_num(value) -> str:
 def format_aggregate(report_aggregate: dict) -> str:
     """The directional aggregate as a legible block — reports, never routes.
 
-    Surfaces the caveat header verbatim, the overall retention spread, the per-facet
-    median retention (with n), the τ-baseline percentiles and the honest drop
-    summary. No verdict line: the read stays with the operator.
+    Surfaces the caveat header verbatim, the overall retention spread, the within-
+    length-bucket early-hook spread (double-reported, with the Stage-2 trigger flag),
+    the per-facet median retention (with n), the τ-baseline percentiles, the forward-
+    loop threshold reference and the honest drop summary. No verdict line: the read
+    stays with the operator.
     """
     drop = report_aggregate["drop_summary"]
     lines = [
@@ -625,6 +736,18 @@ def format_aggregate(report_aggregate: dict) -> str:
         lines.append(
             f"    {field:<22} n={s['n']:>2}  min {_fmt_num(s['min'])}  median {_fmt_num(s['median'])}  "
             f"max {_fmt_num(s['max'])}  iqr {_fmt_num(s['iqr'])}  stdev {_fmt_num(s['stdev'])}")
+    eh = report_aggregate["early_hook_spread"]
+    lines.append(
+        f"  EARLY-HOOK SPREAD within length-bucket (retention_3s) — does it spread or cluster?  "
+        f"Stage-2 trigger: {eh['stage2_trigger'].upper()} "
+        f"(iqr {'>' if eh['stage2_trigger'] == 'spreizt' else '≤'} {eh['spread_band']} band):")
+    for bucket in eh["buckets"]:
+        all_, flo = bucket["all"], bucket["min_views"]
+        lines.append(
+            f"    {bucket['length_bucket']:<5} all   n={all_['n']:>2}  median {_fmt_num(all_['median'])}  "
+            f"iqr {_fmt_num(all_['iqr'])}  | ≥{eh['view_floor']}v n={flo['n']:>2}  "
+            f"median {_fmt_num(flo['median'])}  iqr {_fmt_num(flo['iqr'])}  "
+            f"→ {'spreizt' if bucket['spreads'] else 'eng'}")
     lines.append("  MEDIAN RETENTION per goal-family×length (with n):")
     for cell in report_aggregate["facet_medians"]:
         med = cell["median"]
@@ -637,6 +760,14 @@ def format_aggregate(report_aggregate: dict) -> str:
         lines.append(
             f"    {field:<15} p25 {_fmt_num(cuts['p25'])}  p50 {_fmt_num(cuts['p50'])}  "
             f"p75 {_fmt_num(cuts['p75'])}")
+    ref = report_aggregate["forward_loop_reference"]
+    thr = ref["thresholds"]
+    lines.append(
+        f"  FORWARD-LOOP REFERENCE ({ref['source']}; {ref['calibration']} — "
+        f"{ref['operative_measure']} is operative):")
+    lines.append(
+        f"    retention_3s<{thr['retention_3s_lt']}  retention_50pct<{thr['retention_50pct_lt']}  "
+        f"completion>{thr['completion_gt']}")
     return "\n".join(lines)
 
 

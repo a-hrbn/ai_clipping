@@ -162,6 +162,67 @@ def test_main_runs_offline_against_a_fake_fetcher_and_prints_json(tmp_path, caps
     assert out.read_bytes() == first  # idempotent re-run
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Slice 2 (issue #82): the within-bucket early-hook spread + double-report + Stage-2
+# trigger ride along the curve-driven aggregate end-to-end. The mine's extended
+# aggregate (historical_short_mine.early_hook_spread) reads retention_3s spread WITHIN
+# a length-bucket, double-reported (all + >=50 views), with a Stage-2 trigger flag and
+# the forward-loop threshold reference. Curves injected/fake, no network. Hand-computed.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Three curves for 10s shorts (query ratio 3s/10s = 0.3, landing on the 0.3 point so
+# retention_3s is read off by hand): 1.20 (loop-inflated past 1.0), 0.50, 0.80.
+_R3S_120 = [{"elapsedVideoTimeRatio": 0.0, "audienceWatchRatio": 1.90},
+            {"elapsedVideoTimeRatio": 0.3, "audienceWatchRatio": 1.20},
+            {"elapsedVideoTimeRatio": 1.0, "audienceWatchRatio": 0.80}]
+_R3S_050 = [{"elapsedVideoTimeRatio": 0.0, "audienceWatchRatio": 1.00},
+            {"elapsedVideoTimeRatio": 0.3, "audienceWatchRatio": 0.50},
+            {"elapsedVideoTimeRatio": 1.0, "audienceWatchRatio": 0.30}]
+_R3S_080 = [{"elapsedVideoTimeRatio": 0.0, "audienceWatchRatio": 1.00},
+            {"elapsedVideoTimeRatio": 0.3, "audienceWatchRatio": 0.80},
+            {"elapsedVideoTimeRatio": 1.0, "audienceWatchRatio": 0.50}]
+
+
+def test_main_writes_within_bucket_early_hook_spread_double_report_and_trigger(tmp_path, capsys) -> None:
+    # End-to-end, no network: three curve-driven 10s (kurz) shorts. retention_3s
+    # all-read [0.50,0.80,1.20] n=3 (the loop-inflated 1.20 passed through); the
+    # <50-views short ("c") drops from the >=50-views read -> min_views n=2. The IQR
+    # spreads past the band -> stage2_trigger "spreizt". The forward-loop thresholds
+    # ride along as a loop-uncalibrated reference, the view-floor as a caveat.
+    import json
+
+    export = tmp_path / "Tabellendaten.csv"
+    export.write_text(
+        "Videos,Dauer,Aufrufe\n"
+        "Gesamt,,5000\n"
+        "a,10,1000\n"
+        "b,10,1000\n"
+        "c,10,10\n",
+        encoding="utf-8")
+    out = tmp_path / "report.jsonl"
+    agg_out = tmp_path / "aggregate.json"
+    curves = {"a": _R3S_120, "b": _R3S_050, "c": _R3S_080}
+
+    rc = pull.main(
+        ["--metrics", str(export), "--output", str(out),
+         "--aggregate-output", str(agg_out), "--json"],
+        fetch_curve=lambda video_id: curves.get(video_id))
+
+    assert rc == 0
+    aggregate = json.loads(agg_out.read_text(encoding="utf-8"))
+    eh = aggregate["early_hook_spread"]
+    kurz = {b["length_bucket"]: b for b in eh["buckets"]}["kurz"]
+    assert kurz["all"]["n"] == 3                       # honest denominator keeps all three
+    assert kurz["all"]["max"] == 1.20                  # loop-inflated, passed through
+    assert kurz["min_views"]["n"] == 2                 # the <50-views short drops from the filtered read
+    assert eh["view_floor"] == 50
+    assert eh["stage2_trigger"] == "spreizt"           # iqr past the band
+    ref = aggregate["forward_loop_reference"]
+    assert ref["thresholds"]["retention_3s_lt"] == 0.5
+    assert ref["calibration"] == "loop-uncalibrated"
+    assert any("view-floor" in c.lower() for c in aggregate["caveats"])
+
+
 def test_default_fetcher_is_wired_into_main_but_defers_the_network_adapter(tmp_path) -> None:
     # The seam ships with a default so production needs no injection, but the real
     # read-only YT-Analytics adapter is a later slice. A run with NO injected fetcher

@@ -661,3 +661,159 @@ def test_facet_medians_include_avp_for_the_curveless_facet_tendency() -> None:
     by_facet = {(c["goal_family"], c["length_bucket"]): c for c in cells}
     assert by_facet[("reaction", "kurz")]["median"]["averageViewPercentage"] == 50.0
     assert by_facet[("quote", "lang")]["median"]["averageViewPercentage"] == 20.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Slice 5 (issue #82): within-bucket early-hook spread + double-report + Stage-2
+# trigger + forward-loop reference. The aggregate's core Stage-1 read: does
+# retention_3s spread WITHIN a length-bucket (kurz <25s / lang >=25s) at all, or
+# cluster as tightly as completion? Loop-inflated Shorts curves are length-biased,
+# so the comparison is *within* buckets. Reported twice (all shorts + the >=50-views
+# subset), with an explicit Stage-2 trigger flag. Reports, routes not. Hand-computed.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_early_hook_spread_reports_retention_3s_within_each_length_bucket() -> None:
+    # retention_3s spread is read WITHIN each length-bucket. kurz r3s
+    # [0.50,0.70,1.10,1.50] (one loop-inflated past 1.0) -> n=4, median 0.90, max
+    # 1.50 (passed through, never clamped), iqr 0.55 (p75 1.20 - p25 0.65). lang r3s
+    # [0.80,0.90] -> n=2, median 0.85. Hand-computed.
+    # The bucket is derived from duration_s (kurz <25s / lang >=25s), NOT the facet
+    # length_bucket column — that column is transcription-gated and None in the
+    # curve-only Stage-1 read this slice serves.
+    shorts = [
+        _short_row("a", None, short_id="clips:a", retention_3s=0.50, views=1000, duration_s=10.0),
+        _short_row("a", None, short_id="clips:b", retention_3s=0.70, views=1000, duration_s=10.0),
+        _short_row("a", None, short_id="clips:c", retention_3s=1.10, views=1000, duration_s=10.0),
+        _short_row("a", None, short_id="clips:d", retention_3s=1.50, views=1000, duration_s=10.0),
+        _short_row("a", None, short_id="clips:e", retention_3s=0.80, views=1000, duration_s=30.0),
+        _short_row("a", None, short_id="clips:f", retention_3s=0.90, views=1000, duration_s=30.0),
+    ]
+
+    spread = hsm.early_hook_spread(shorts)
+
+    by_bucket = {b["length_bucket"]: b for b in spread["buckets"]}
+    assert by_bucket["kurz"]["all"]["n"] == 4
+    assert by_bucket["kurz"]["all"]["median"] == pytest.approx(0.90)
+    assert by_bucket["kurz"]["all"]["max"] == 1.50  # loop-inflated, passed through
+    assert by_bucket["kurz"]["all"]["iqr"] == pytest.approx(0.55)
+    assert by_bucket["lang"]["all"]["n"] == 2
+    assert by_bucket["lang"]["all"]["median"] == pytest.approx(0.85)
+
+
+def test_early_hook_spread_double_reports_all_vs_min_views_subset() -> None:
+    # Double report: the spread is read once over ALL shorts (honest denominator) and
+    # once over the >=50-views subset (reach-starved shorts are retention-noise). A
+    # short with <50 views drops from the filtered read but stays in the all read —
+    # never silently dropped. kurz: A(views 100, r3s 0.80) + B(views 10, r3s 0.50).
+    shorts = [
+        _short_row("a", None, short_id="clips:a", retention_3s=0.80, views=100, duration_s=10.0),
+        _short_row("a", None, short_id="clips:b", retention_3s=0.50, views=10, duration_s=10.0),
+    ]
+
+    spread = hsm.early_hook_spread(shorts)
+
+    kurz = {b["length_bucket"]: b for b in spread["buckets"]}["kurz"]
+    assert kurz["all"]["n"] == 2              # both kept in the honest denominator
+    assert kurz["all"]["median"] == pytest.approx(0.65)
+    assert kurz["min_views"]["n"] == 1        # the <50-views short drops from the filtered read
+    assert kurz["min_views"]["median"] == 0.80
+    assert spread["view_floor"] == 50         # the floor is surfaced, not hidden
+
+
+def test_stage2_trigger_is_eng_when_retention_3s_clusters_tightly() -> None:
+    # When retention_3s clusters as tightly as completion WITHIN every length-bucket
+    # (iqr below the band), the early-hook is no lever: the flag reads "eng" and #75's
+    # "-> Auto-Packaging" routing stands. kurz r3s [0.80,0.82,0.84,0.86] -> iqr 0.03 <
+    # 0.10 band. Reports, it does not route.
+    shorts = [
+        _short_row("a", None, short_id=f"clips:{i}", retention_3s=r, views=1000, duration_s=10.0)
+        for i, r in enumerate([0.80, 0.82, 0.84, 0.86])
+    ]
+
+    spread = hsm.early_hook_spread(shorts)
+
+    assert spread["stage2_trigger"] == "eng"
+    assert {b["length_bucket"]: b["spreads"] for b in spread["buckets"]} == {"kurz": False}
+
+
+def test_stage2_trigger_is_spreizt_when_retention_3s_spreads_within_a_bucket() -> None:
+    # When retention_3s spreads within a length-bucket past the band, Stage 2 is worth
+    # it: the flag reads "spreizt". kurz r3s [0.50,0.70,1.10,1.50] -> iqr 0.55 > 0.10
+    # band (one value loop-inflated past 1.0, passed through). Reports, it does not route.
+    shorts = [
+        _short_row("a", None, short_id=f"clips:{i}", retention_3s=r, views=1000, duration_s=10.0)
+        for i, r in enumerate([0.50, 0.70, 1.10, 1.50])
+    ]
+
+    spread = hsm.early_hook_spread(shorts)
+
+    assert spread["stage2_trigger"] == "spreizt"
+    assert {b["length_bucket"]: b["spreads"] for b in spread["buckets"]} == {"kurz": True}
+    assert spread["spread_band"] == pytest.approx(0.10)
+
+
+def test_aggregate_carries_forward_loop_thresholds_as_loop_uncalibrated_reference() -> None:
+    # The forward loop's hard-coded gate (ml/import_yt_retention.py: 3s<0.5 / 50pct<0.4 /
+    # completion>0.6) is surfaced as a DOCUMENTED REFERENCE only — never applied here, and
+    # marked loop-uncalibrated (Shorts curves are loop-inflated, so the fixed 0-1 thresholds
+    # don't transfer; the percentile-τ within-bucket read is operative).
+    report = {
+        "shorts": [_short_row("a", "kurz", short_id="clips:a", retention_3s=0.8, views=100)],
+        "drops": [],
+    }
+
+    ref = hsm.aggregate(report)["forward_loop_reference"]
+
+    assert ref["thresholds"]["retention_3s_lt"] == 0.5
+    assert ref["thresholds"]["retention_50pct_lt"] == 0.4
+    assert ref["thresholds"]["completion_gt"] == 0.6
+    assert ref["calibration"] == "loop-uncalibrated"
+    assert "import_yt_retention" in ref["source"]
+
+
+def test_aggregate_composes_early_hook_spread_and_surfaces_the_view_floor_caveat() -> None:
+    # The aggregate composes the within-bucket early-hook spread (with its Stage-2
+    # trigger) and surfaces the view-floor in the caveat header, so the double-report's
+    # filtered half can never be over-read as a silent drop. Two reactions, kurz, r3s
+    # [0.80,0.90] both >=50 views -> the early_hook_spread rides along under the caveats.
+    report = {
+        "shorts": [
+            _short_row("reaction", None, short_id="clips:a", retention_3s=0.80, views=1000, duration_s=10.0),
+            _short_row("reaction", None, short_id="clips:b", retention_3s=0.90, views=1000, duration_s=10.0),
+        ],
+        "drops": [],
+    }
+
+    agg = hsm.aggregate(report)
+
+    assert "early_hook_spread" in agg
+    assert agg["early_hook_spread"]["stage2_trigger"] in {"eng", "spreizt"}
+    assert agg["early_hook_spread"]["buckets"][0]["length_bucket"] == "kurz"
+    blob = " ".join(agg["caveats"]).lower()
+    assert "view-floor" in blob   # the view floor is surfaced as a caveat
+    assert "50" in blob
+
+
+def test_aggregate_with_early_hook_spread_still_reports_no_gate_or_verdict() -> None:
+    # Slice 2 adds the Stage-2 *trigger* flag, but the module still reports — it does
+    # not route. No key in the extended aggregate names a verdict or a route; the flag
+    # is "stage2_trigger" / "spreads", never a baked decision.
+    report = {
+        "shorts": [_short_row("reaction", "kurz", short_id="clips:a", retention_3s=0.8, views=100)],
+        "drops": [],
+    }
+
+    agg = hsm.aggregate(report)
+
+    def _all_keys(obj):
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                yield key
+                yield from _all_keys(value)
+        elif isinstance(obj, list):
+            for value in obj:
+                yield from _all_keys(value)
+
+    keys = [k.lower() for k in _all_keys(agg)]
+    assert not any("verdict" in k or "route" in k for k in keys)
