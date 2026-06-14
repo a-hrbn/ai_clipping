@@ -127,8 +127,23 @@ gepostet, am First-party-Outcome gemessen und die Gewinner geerntet/skaliert —
 _Avoid_: ranker, predictor (für diese Rolle).
 
 **Facette** (Stratum): eine grobe, *berechenbare* Kategorie eines Moments (Goal-Family
-via `infer_goal_family`, Chat-Emotion, Längen-Bucket), über die der Harvesting-Loop
-stratifiziert sampelt. WALL-konform: keine feinkörnige Virality-Vorhersage, nur
-*Abdeckung* — die am Outcome gemessene **Gewinner-Facette IST** das streamer-spezifische,
-lernbare Moat-Wissen, das kein generischer Finder hat. _Avoid_: cluster, bucket
-(unqualifiziert), label.
+via `infer_goal_family` aus dem Transkript des Shorts, Längen-Bucket), über die der
+Harvesting-Loop stratifiziert sampelt (`derive_facets`). Chat-Emotion ist bewusst
+**ausgeschlossen** — ein VOD-only-Signal, das im geposteten Short nicht verfügbar ist.
+WALL-konform: keine feinkörnige Virality-Vorhersage, nur *Abdeckung* — die am Outcome
+gemessene **Gewinner-Facette IST** das streamer-spezifische, lernbare Moat-Wissen, das
+kein generischer Finder hat. _Avoid_: cluster, bucket (unqualifiziert), label.
+
+**Packaging**: Die *Aufmachung* eines geposteten Shorts als Outcome-Hebel — alles
+außer der Moment-Wahl: Reframe-Layout, Caption-Stil, Hook-Titel. Die Gegen-Größe, gegen
+die der **Moment** im Harvesting-Loop disentangled wird ("ist Moment-Auswahl überhaupt
+mein Hebel, oder dominiert Packaging?"). _Avoid_: presentation, style (unqualifiziert).
+
+**Packaging-Vorlage** (constant packaging template): Das über einen Forward-Loop-Batch
+*konstant gehaltene* Packaging, damit Retention-Streuung dem **Moment** zurechenbar ist
+statt der Aufmachung — das Herz des Moment-vs-Packaging-Disentanglements. Ihre kanonische
+Form ist aus den bestehenden 52 @donni_clips-Shorts abgeleitet (ein vertikaler
+„Reaction-Stack": Facecam über Gameplay). Bewusst *kein* generisches Face-Tracking — das
+führte pro-Clip-Variation ein und wäre selbst ein Packaging-Confound. Welcher Crop/Font/
+Titel das konkret ist, ist Implementierung und lebt nicht hier. _Avoid_: template, format,
+layout (unqualifiziert).
