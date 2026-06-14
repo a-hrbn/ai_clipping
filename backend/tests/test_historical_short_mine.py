@@ -11,7 +11,10 @@ fixtures in, exact retention fields / drops / report rows out. Prior art:
 tests/test_outcome_view_weighting.py, tests/test_gap_decomposition.py.
 """
 import json
+import statistics
 import types
+
+import pytest
 
 from ml import historical_short_mine as hsm
 from ml import row_identity
@@ -286,3 +289,191 @@ def test_main_writes_facets_with_injected_transcription(tmp_path, capsys) -> Non
     assert "his reaction" in written[0]["transcript_excerpt"]
     payload = json.loads(capsys.readouterr().out)
     assert {"short_id": "clips:mute", "reason": "untranscribable"} in payload["drops"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Slice 3 (issue #78): aggregate + τ-baseline + caveat-header (reports, routes not).
+# The diagnostic roll-up over the per-short rows — overall retention spread, median
+# retention per goal-family×length (with n), a τ-baseline percentile suggestion, the
+# caveat header (n / packaging / dormant) and an honest drop summary. Deliberately
+# NO gate/verdict/route: n=52 + packaging-confounding + dormancy allow only a
+# directional read, not a decision. Hand-computed fixtures pin the exact aggregates.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _short_row(goal_family, length_bucket, **fields):
+    """A per-short report row as build_short_report emits — facet + retention fields."""
+    row = {
+        "short_id": fields.pop("short_id", f"clips:{goal_family}_{length_bucket}"),
+        "retention_3s": None,
+        "retention_50pct": None,
+        "completion": None,
+        "goal_family": goal_family,
+        "length_bucket": length_bucket,
+    }
+    row.update(fields)
+    return row
+
+
+def test_facet_medians_group_by_goal_family_and_length_with_correct_n() -> None:
+    # Median retention is reported per (goal-family × length) cell with the cell's
+    # n. reaction×kurz has three shorts -> median completion of [0.40,0.50,0.60] is
+    # 0.50, n=3; quote×lang has one -> its own value, n=1. Hand-computed.
+    shorts = [
+        _short_row("reaction", "kurz", short_id="clips:a", completion=0.40),
+        _short_row("reaction", "kurz", short_id="clips:b", completion=0.60),
+        _short_row("reaction", "kurz", short_id="clips:c", completion=0.50),
+        _short_row("quote", "lang", short_id="clips:d", completion=0.20),
+    ]
+
+    cells = hsm.facet_medians(shorts)
+
+    by_facet = {(c["goal_family"], c["length_bucket"]): c for c in cells}
+    assert by_facet[("reaction", "kurz")]["n"] == 3
+    assert by_facet[("reaction", "kurz")]["median"]["completion"] == 0.50
+    assert by_facet[("quote", "lang")]["n"] == 1
+    assert by_facet[("quote", "lang")]["median"]["completion"] == 0.20
+
+
+def test_retention_spread_reports_overall_variation_views_decoupled() -> None:
+    # The headline "does retention vary meaningfully?" read: per field min / median /
+    # max / iqr / stdev over all kept shorts. completion = [0.20,0.40,0.60,0.80] ->
+    # median 0.50, iqr 0.30 (p75 0.65 − p25 0.35), stdev hand-checked. A degraded
+    # (avp-only) short carries completion None and is skipped — never folded as a 0.
+    shorts = [
+        _short_row("reaction", "kurz", short_id="clips:a", completion=0.20),
+        _short_row("reaction", "kurz", short_id="clips:b", completion=0.40),
+        _short_row("quote", "lang", short_id="clips:c", completion=0.60),
+        _short_row("quote", "lang", short_id="clips:d", completion=0.80),
+        _short_row("story", "kurz", short_id="clips:e", completion=None),
+    ]
+
+    comp = hsm.retention_spread(shorts)["completion"]
+
+    assert comp["n"] == 4  # the None-completion short is excluded, not counted as 0
+    assert comp["min"] == 0.20
+    assert comp["max"] == 0.80
+    assert comp["median"] == 0.50
+    assert comp["iqr"] == pytest.approx(0.30)
+    assert comp["stdev"] == pytest.approx(statistics.stdev([0.20, 0.40, 0.60, 0.80]))
+
+
+def test_tau_baseline_suggests_retention_percentiles_for_gate_fields() -> None:
+    # The τ-baseline turns real retention into threshold suggestions for the forward
+    # loop's gate. retention_3s = [0.50,0.70,0.80,0.90] -> p25 0.65, p50 0.75, p75
+    # 0.825 (linear interpolation, hand-computed). It covers the gate fields
+    # (retention_3s / completion), not retention_50pct — those are the loop's knobs.
+    shorts = [
+        _short_row("a", "kurz", short_id="clips:a", retention_3s=0.50, completion=0.20),
+        _short_row("a", "kurz", short_id="clips:b", retention_3s=0.70, completion=0.40),
+        _short_row("a", "kurz", short_id="clips:c", retention_3s=0.80, completion=0.60),
+        _short_row("a", "kurz", short_id="clips:d", retention_3s=0.90, completion=0.80),
+    ]
+
+    tau = hsm.tau_baseline(shorts)
+
+    assert tau["retention_3s"]["p25"] == pytest.approx(0.65)
+    assert tau["retention_3s"]["p50"] == 0.75
+    assert tau["retention_3s"]["p75"] == pytest.approx(0.825)
+    assert set(tau) == {"retention_3s", "completion"}
+
+
+def test_drop_summary_breaks_down_each_bottleneck_with_honest_denominator() -> None:
+    # Every bottleneck is surfaced with an honest denominator: n_input is kept +
+    # dropped (not just the survivors), and each drop reason — missing retention vs
+    # un-transcribable (= no transcript, so no facet either) — is counted, so a
+    # silent cap can never read as "all covered".
+    report = {
+        "shorts": [_short_row("reaction", "kurz", short_id="clips:keep")],
+        "drops": [
+            {"short_id": "clips:no_ret", "reason": "missing_retention_row"},
+            {"short_id": "clips:mute", "reason": "untranscribable"},
+            {"short_id": "clips:mute2", "reason": "untranscribable"},
+        ],
+    }
+
+    summary = hsm.drop_summary(report)
+
+    assert summary["n_input"] == 4  # 1 kept + 3 dropped — the honest denominator
+    assert summary["n_kept"] == 1
+    assert summary["n_dropped"] == 3
+    assert summary["by_reason"]["missing_retention_row"] == 1
+    assert summary["by_reason"]["untranscribable"] == 2
+
+
+def test_aggregate_carries_caveat_header_and_composes_subaggregates() -> None:
+    # The aggregate header carries the three caveats explicitly (n / packaging /
+    # dormant) so "a facet leads" can never be over-read, and it composes the
+    # spread, facet medians, τ-baseline and drop summary into one report.
+    report = {
+        "shorts": [
+            _short_row("reaction", "kurz", short_id="clips:a", retention_3s=0.80, completion=0.40),
+            _short_row("reaction", "kurz", short_id="clips:b", retention_3s=0.90, completion=0.60),
+        ],
+        "drops": [{"short_id": "clips:x", "reason": "missing_retention_row"}],
+    }
+
+    agg = hsm.aggregate(report)
+
+    blob = " ".join(agg["caveats"]).lower()
+    assert "n=52" in blob          # thin sample → directional
+    assert "packaging" in blob     # packaging-confounded → suggestive
+    assert "dormant" in blob       # dormant channel → lukewarm
+    assert agg["n_shorts"] == 2
+    assert agg["retention_spread"]["completion"]["n"] == 2
+    assert agg["facet_medians"][0]["goal_family"] == "reaction"
+    assert "p50" in agg["tau_baseline"]["retention_3s"]
+    assert agg["drop_summary"]["n_dropped"] == 1
+
+
+def test_aggregate_reports_but_does_not_route_no_gate_or_verdict() -> None:
+    # The module reports, it does not route: unlike b_narrow_probe /
+    # strong_model_window_probe there is NO pre-fixed gate, verdict or route in the
+    # output — n=52 + packaging-confounding + dormancy allow only a directional read.
+    report = {
+        "shorts": [_short_row("reaction", "kurz", short_id="clips:a", completion=0.5)],
+        "drops": [],
+    }
+
+    agg = hsm.aggregate(report)
+
+    def _all_keys(obj):
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                yield key
+                yield from _all_keys(value)
+        elif isinstance(obj, list):
+            for value in obj:
+                yield from _all_keys(value)
+
+    keys = [k.lower() for k in _all_keys(agg)]
+    assert not any("verdict" in k or "route" in k for k in keys)
+
+
+def test_main_writes_aggregate_artifact_and_includes_it_in_json(tmp_path, capsys) -> None:
+    # End-to-end through the CLI (no network): the aggregate is written as its own
+    # JSON artifact and rides along in the --json payload. Both shorts are 30s
+    # (lang) reactions; completion [0.40, 0.70] -> facet-cell median 0.55, n=2.
+    export = tmp_path / "retention_export.jsonl"
+    rows = [
+        _short(video_id="strong", duration_s=30.0, audience_retention=_STRONG_CURVE),
+        _short(video_id="plain", duration_s=30.0),
+    ]
+    export.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    out = tmp_path / "report.jsonl"
+    agg_out = tmp_path / "aggregate.json"
+
+    rc = hsm.main(
+        ["--metrics", str(export), "--output", str(out),
+         "--aggregate-output", str(agg_out), "--json"],
+        transcribe=lambda row: "his reaction was hilarious")
+
+    assert rc == 0
+    aggregate = json.loads(agg_out.read_text(encoding="utf-8"))
+    assert any("n=52" in caveat for caveat in aggregate["caveats"])
+    cell = aggregate["facet_medians"][0]
+    assert (cell["goal_family"], cell["length_bucket"], cell["n"]) == ("reaction", "lang", 2)
+    assert cell["median"]["completion"] == pytest.approx(0.55)
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["aggregate"]["n_shorts"] == 2
+    assert payload["aggregate"]["drop_summary"]["n_input"] == 2

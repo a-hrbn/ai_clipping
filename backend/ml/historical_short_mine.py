@@ -1,18 +1,27 @@
-"""Historical-short-mine — read-only retention ingest + per-short report (Step 0).
+"""Historical-short-mine — read-only retention ingest + per-short report + aggregate.
 
-PRD #75 / issue #76 (Slice 1). The cheapest possible first look at the
-first-party-outcome pivot (ADR docs/adr/0001-first-party-outcome-flywheel.md):
-turn a locally exported YT audience-retention curve for the 52 already-posted
-@donni_clips shorts into a per-short report, *before* the forward loop is built.
+PRD #75 (Step 0). The cheapest possible first look at the first-party-outcome
+pivot (ADR docs/adr/0001-first-party-outcome-flywheel.md): turn a locally exported
+YT audience-retention curve for the 52 already-posted @donni_clips shorts into a
+per-short report *and* a directional aggregate, *before* the forward loop is built.
 
-This slice is the ingest skeleton only. A tolerant parser derives per-short
+Ingest (Slice 1, #76): a tolerant parser derives per-short
 ``retention_3s``/``retention_50pct``/``completion`` from the YT-*relative*
 audience-retention curve (``elapsedVideoTimeRatio`` -> ``audienceWatchRatio``)
 plus ``averageViewPercentage`` as the degraded fallback. Retention is read
 **views-decoupled** (views are a secondary field, never a positive-gate) per the
 ADR's cold-start win. The report is keyed by ``row_identity`` so re-runs are
-idempotent and join-able with a later VOD attribution. Facet columns
-(goal_family / length_bucket / transcript_excerpt) stay empty until Slice 2.
+idempotent and join-able with a later VOD attribution.
+
+Facet (Slice 2, #77): each short is transcribed (mp4 -> wav -> text) and classified
+into its facet — goal-family (``infer_goal_family``, transcript as topic) ×
+length-bucket — from the short's *own* content (no VOD attribution, no chat-emotion).
+
+Aggregate (Slice 3, #78): the diagnostic roll-up — overall retention spread, median
+retention per goal-family×length (with n), a τ-baseline percentile suggestion, and
+an honest drop summary, under an explicit caveat header (n / packaging / dormant).
+It **reports, it does not route**: no pre-fixed gate, no verdict — n=52 +
+packaging-confounding + dormancy permit only a directional read.
 
 Offline only: no network, no paid call, no serving touch, no new pipeline stage.
 Built against the public YT-Analytics schema; reconciliation against the real
@@ -24,6 +33,7 @@ import argparse
 import collections
 import json
 import pathlib
+import statistics
 import sys
 import tempfile
 
@@ -226,10 +236,174 @@ def _as_float(value) -> float:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Aggregate — the diagnostic roll-up (reports, routes not)
+#
+# The directional pre-look over the per-short rows (PRD #75 Slice 3, issue #78):
+# overall retention spread, median retention per goal-family×length (with n), a
+# τ-baseline percentile suggestion, the caveat header and an honest drop summary.
+# Deliberately NO gate / verdict / route — n=52 + packaging-confounding + dormancy
+# allow only a directional read, never a decision baked into code.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# The three retention fields every aggregate ranges over (same order as the report).
+RETENTION_FIELDS = ("retention_3s", "retention_50pct", "completion")
+
+# The forward loop gates on early-retention and completion — the τ-baseline suggests
+# thresholds for *those* fields only (retention_50pct is not a gate knob).
+TAU_FIELDS = ("retention_3s", "completion")
+
+# The percentile cut points the τ-baseline reports as candidate thresholds.
+TAU_PERCENTILES = (0.25, 0.50, 0.75)
+
+# The caveat header, surfaced verbatim so the directional read is never over-read as
+# a decision: the sample is thin (~8 per goal-family), packaging is uncontrolled
+# (confounded), and the channel has been dormant since 10.04. (lukewarm signal).
+CAVEATS = (
+    "n=52 dünn → ~8/Goal-Family direktional",
+    "packaging-konfundiert → suggestiv",
+    "Kanal seit 10.04. dormant → lauwarm",
+)
+
+
+def aggregate(report: dict) -> dict:
+    """The diagnostic roll-up over the per-short report — reports, routes not.
+
+    Composes the overall retention spread, the per-facet median retention (with n),
+    the τ-baseline percentile suggestion and an honest drop summary, under the
+    explicit caveat header (n / packaging / dormant). There is deliberately **no**
+    gate, verdict or route: n=52 + packaging-confounding + dormancy permit only a
+    directional read, so the decision stays with the reader, never baked into code.
+    """
+    shorts = report["shorts"]
+    return {
+        "caveats": list(CAVEATS),
+        "n_shorts": len(shorts),
+        "retention_spread": retention_spread(shorts),
+        "facet_medians": facet_medians(shorts),
+        "tau_baseline": tau_baseline(shorts),
+        "drop_summary": drop_summary(report),
+    }
+
+
+def facet_medians(shorts: list[dict]) -> list[dict]:
+    """Median retention per facet cell (goal-family × length-bucket), with n.
+
+    Groups the kept shorts by their (goal_family, length_bucket) facet and reports,
+    for each cell, its short count ``n`` and the median of each retention field over
+    the shorts in the cell that carry it (degraded avp-only shorts contribute None
+    and are skipped per field — never silently counted as a 0). Cells are sorted by
+    facet so the aggregate is input-order independent.
+    """
+    groups: dict[tuple, list[dict]] = collections.defaultdict(list)
+    for short in shorts:
+        groups[(short.get("goal_family"), short.get("length_bucket"))].append(short)
+    cells = [
+        {
+            "goal_family": goal_family,
+            "length_bucket": length_bucket,
+            "n": len(members),
+            "median": {f: _median([m.get(f) for m in members]) for f in RETENTION_FIELDS},
+        }
+        for (goal_family, length_bucket), members in groups.items()
+    ]
+    cells.sort(key=lambda c: (str(c["goal_family"]), str(c["length_bucket"])))
+    return cells
+
+
+def _median(values: list) -> float | None:
+    """Median over the non-None values, or None when the cell has none present."""
+    present = [v for v in values if v is not None]
+    return statistics.median(present) if present else None
+
+
+def retention_spread(shorts: list[dict]) -> dict:
+    """Overall retention variation per field — the "does it vary meaningfully?" read.
+
+    For each retention field reports n, min/median/max, the inter-quartile range
+    (p75 − p25) and the sample stdev over all kept shorts that carry the field.
+    Degraded (avp-only) shorts carry None and are skipped per field — never folded
+    in as a 0 that would understate or inflate the spread.
+    """
+    return {f: _field_spread([s.get(f) for s in shorts]) for f in RETENTION_FIELDS}
+
+
+def _field_spread(values: list) -> dict:
+    present = sorted(v for v in values if v is not None)
+    n = len(present)
+    if n == 0:
+        return {k: None for k in ("min", "p25", "median", "p75", "max", "stdev", "iqr")} | {"n": 0}
+    p25 = _percentile(present, 0.25)
+    p75 = _percentile(present, 0.75)
+    return {
+        "n": n,
+        "min": present[0],
+        "p25": p25,
+        "median": _percentile(present, 0.5),
+        "p75": p75,
+        "max": present[-1],
+        "stdev": statistics.stdev(present) if n >= 2 else None,
+        "iqr": p75 - p25,
+    }
+
+
+def tau_baseline(shorts: list[dict]) -> dict:
+    """A τ-baseline threshold suggestion from real retention percentiles.
+
+    For each gate field (retention_3s / completion) reports the p25/p50/p75 cut
+    points so the forward loop's thresholds are set from real numbers rather than a
+    gut guess. A suggestion, not a gate — the module reports, it does not route.
+    """
+    return {
+        field: {
+            f"p{int(q * 100)}": _percentile([s.get(field) for s in shorts], q)
+            for q in TAU_PERCENTILES
+        }
+        for field in TAU_FIELDS
+    }
+
+
+def drop_summary(report: dict) -> dict:
+    """Per-bottleneck drop breakdown with an honest denominator.
+
+    ``n_input`` counts kept + dropped shorts (the real total, not just the
+    survivors) so a silent cap can never read as "all 52 covered". ``by_reason``
+    surfaces every bottleneck that fired — ``missing_retention_row`` (no retention)
+    and ``untranscribable`` (no transcript, hence no classifiable facet either).
+    """
+    drops = report["drops"]
+    n_kept = len(report["shorts"])
+    n_dropped = len(drops)
+    return {
+        "n_input": n_kept + n_dropped,
+        "n_kept": n_kept,
+        "n_dropped": n_dropped,
+        "by_reason": dict(collections.Counter(d["reason"] for d in drops)),
+    }
+
+
+def _percentile(values: list, q: float) -> float | None:
+    """Linear-interpolation percentile (q in [0,1]) — numpy/`inclusive`-style.
+
+    Hand-computable: the query lands at rank ``q*(n-1)`` in the sorted values and
+    interpolates between the bracketing ranks. None-safe; None when no value present.
+    """
+    present = sorted(v for v in values if v is not None)
+    if not present:
+        return None
+    if len(present) == 1:
+        return present[0]
+    pos = q * (len(present) - 1)
+    lo = int(pos)
+    hi = min(lo + 1, len(present) - 1)
+    return present[lo] + (pos - lo) * (present[hi] - present[lo])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CLI
 # ─────────────────────────────────────────────────────────────────────────────
 
 DEFAULT_OUTPUT = BACKEND_ROOT / "ml" / "artifacts" / "historical_short_mine_per_short.jsonl"
+DEFAULT_AGGREGATE_OUTPUT = BACKEND_ROOT / "ml" / "artifacts" / "historical_short_mine_aggregate.json"
 
 
 def main(argv: list[str] | None = None, *, transcribe=None) -> int:
@@ -244,8 +418,11 @@ def main(argv: list[str] | None = None, *, transcribe=None) -> int:
              "for the goal-family/length facet. Omit to leave facets empty.")
     parser.add_argument("--output", type=pathlib.Path, default=DEFAULT_OUTPUT,
                         help="Per-short report JSONL destination.")
+    parser.add_argument("--aggregate-output", type=pathlib.Path, default=DEFAULT_AGGREGATE_OUTPUT,
+                        help="Aggregate report JSON destination (spread, facet medians, "
+                             "τ-baseline, caveats, drop summary).")
     parser.add_argument("--json", dest="output_json", action="store_true",
-                        help="Print the full report (shorts + drops) as JSON.")
+                        help="Print the full report (shorts + drops + aggregate) as JSON.")
     args = parser.parse_args(argv)
 
     if transcribe is None and args.media_dir is not None:
@@ -253,8 +430,12 @@ def main(argv: list[str] | None = None, *, transcribe=None) -> int:
 
     raw_rows = row_identity.read_jsonl(pathlib.Path(args.metrics), strict=False)
     report = build_short_report(raw_rows, transcribe=transcribe)
+    report_aggregate = aggregate(report)
 
     row_identity.write_jsonl(args.output, report["shorts"])
+    args.aggregate_output.parent.mkdir(parents=True, exist_ok=True)
+    args.aggregate_output.write_text(
+        json.dumps(report_aggregate, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
     if report["drops"]:
         # No silent truncation: surface every dropped short (and why) so the
@@ -267,9 +448,10 @@ def main(argv: list[str] | None = None, *, transcribe=None) -> int:
             file=sys.stderr)
 
     if args.output_json:
-        print(json.dumps(report, ensure_ascii=True))
+        print(json.dumps({**report, "aggregate": report_aggregate}, ensure_ascii=True))
     else:
         print(_format_summary(report, output=args.output))
+        print(format_aggregate(report_aggregate))
     return 0
 
 
@@ -301,6 +483,50 @@ def _format_summary(report: dict, *, output: pathlib.Path) -> str:
         f"  drops: {len(report['drops'])}"
         + (f" ({_format_reasons(reasons)})" if reasons else ""),
     ]
+    return "\n".join(lines)
+
+
+def _fmt_num(value) -> str:
+    if value is None:
+        return "  —  "
+    return f"{value:.3f}" if isinstance(value, float) else str(value)
+
+
+def format_aggregate(report_aggregate: dict) -> str:
+    """The directional aggregate as a legible block — reports, never routes.
+
+    Surfaces the caveat header verbatim, the overall retention spread, the per-facet
+    median retention (with n), the τ-baseline percentiles and the honest drop
+    summary. No verdict line: the read stays with the operator.
+    """
+    drop = report_aggregate["drop_summary"]
+    lines = [
+        "",
+        "  AGGREGATE — directional pre-look (berichtet, routet nicht):",
+        f"  ⚠  Caveats: {' | '.join(report_aggregate['caveats'])}",
+        f"  n_shorts={report_aggregate['n_shorts']}  "
+        f"(kept {drop['n_kept']}/{drop['n_input']}, dropped {drop['n_dropped']}"
+        + (f": {_format_reasons(collections.Counter(drop['by_reason']))}" if drop["by_reason"] else "")
+        + ")",
+        "  RETENTION SPREAD (does it vary meaningfully?):",
+    ]
+    for field in RETENTION_FIELDS:
+        s = report_aggregate["retention_spread"][field]
+        lines.append(
+            f"    {field:<15} n={s['n']:>2}  min {_fmt_num(s['min'])}  median {_fmt_num(s['median'])}  "
+            f"max {_fmt_num(s['max'])}  iqr {_fmt_num(s['iqr'])}  stdev {_fmt_num(s['stdev'])}")
+    lines.append("  MEDIAN RETENTION per goal-family×length (with n):")
+    for cell in report_aggregate["facet_medians"]:
+        med = cell["median"]
+        lines.append(
+            f"    {str(cell['goal_family']):<12} {str(cell['length_bucket']):<5} n={cell['n']:>2}  "
+            f"r3s {_fmt_num(med['retention_3s'])}  r50 {_fmt_num(med['retention_50pct'])}  "
+            f"compl {_fmt_num(med['completion'])}")
+    lines.append("  τ-BASELINE (percentile threshold suggestions; not a gate):")
+    for field, cuts in report_aggregate["tau_baseline"].items():
+        lines.append(
+            f"    {field:<15} p25 {_fmt_num(cuts['p25'])}  p50 {_fmt_num(cuts['p50'])}  "
+            f"p75 {_fmt_num(cuts['p75'])}")
     return "\n".join(lines)
 
 
