@@ -24,10 +24,10 @@ Das Frontend (`frontend/`, Next.js) reicht Jobs ein und zeigt Clips zur Review.
 ist **Streamer-Spezialisierung** — aber *nicht* als besseres Content-Verständnis: vier
 Diagnose-Tracks haben belegt, dass virale Diskriminierung aus dem VOD-Content tot ist
 (Ranking, Generation, generische Kontext-Virality, und zuletzt clipper-spezifische
-Kontext-Ähnlichkeit als Text-Signal → Blind-Sheet 0/10 → **WALL**, #69). _Offen (#90):_
-diese Text-Signal-Evidenz lief auf einem qualitativ schwachen, sprecher-losen Transkript;
-ein Re-Test auf High-Fidelity-Transkript prüft, ob die WALL ein Transkript-Artefakt ist —
-bis das Verdikt vorliegt, ist sie Arbeits-Annahme, nicht geschlossener Beweis. Die
+Kontext-Ähnlichkeit als Text-Signal → Blind-Sheet 0/10 → **WALL**, #69). _Offen (#90, eng):_
+die Text-Signal-Evidenz lief bereits auf einem **starken** Transkriptions-Modell — nur
+Catchphrase-Biasing und Sprecher-Trennung fehlten; ein enger Re-Test prüft den letzten
+billigen Hebel (Glossar-Biasing). Die WALL gilt damit als belastbare Arbeits-Annahme. Die
 Spezialisierung überlebt nur als **First-party-Outcome-Flywheel**: Jynxzi-spezifische
 Retention-Daten aus *eigenen* geposteten Clips, die kein generischer Finder sammelt.
 
