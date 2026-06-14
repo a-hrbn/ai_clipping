@@ -224,12 +224,63 @@ def test_main_writes_within_bucket_early_hook_spread_double_report_and_trigger(t
 
 
 def test_default_fetcher_is_wired_into_main_but_defers_the_network_adapter(tmp_path) -> None:
-    # The seam ships with a default so production needs no injection, but the real
-    # read-only YT-Analytics adapter is a later slice. A run with NO injected fetcher
-    # must therefore refuse *clearly* (NotImplementedError) rather than hit the network
-    # or silently return no curve — proving the wiring is present and offline-safe.
+    # The seam ships with a default so production needs no injection. Without creds AND
+    # without an injected fetcher a run must refuse *clearly* (NotImplementedError) rather
+    # than hit the network or silently return no curve — the default fetcher is the
+    # offline-safe fallback, the real adapter only wires in when --client-secret is given.
     export = _studio_csv(tmp_path)
 
     with pytest.raises(NotImplementedError):
         pull.main(["--metrics", str(export), "--output", str(tmp_path / "o.jsonl"),
                    "--aggregate-output", str(tmp_path / "a.json")])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Slice 4 (issue #84): --client-secret wires the REAL read-only YT-Analytics adapter
+# (#83) into the pull CLI, so the full module (real adapter + #82 aggregate) runs over
+# the 52 with one command. The network transport (authorized_query) is the only seam
+# faked — a canned reports.query table stands in for the API, no network in the test.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_main_with_client_secret_builds_real_adapter_and_runs_curve_driven(tmp_path) -> None:
+    # The #84 wiring: passing --client-secret makes main build the REAL fetcher from the
+    # creds (authorized_query(client_secret, token) -> build_fetcher) and run the full
+    # module end-to-end — NO fetcher injected. The creds flow through to authorized_query;
+    # the canned API table is mapped, merged by video_id and drives retention_3s (source
+    # "curve"), proving the real adapter — not the fake — produced the report offline.
+    import json
+
+    export = tmp_path / "Tabellendaten.csv"
+    export.write_text(
+        "Videos,Dauer,Aufrufe\n"
+        "Gesamt,,5000\n"
+        "vid1,30,1000\n",
+        encoding="utf-8")
+    out = tmp_path / "report.jsonl"
+    agg_out = tmp_path / "aggregate.json"
+
+    # The API's reports.query result-table shape; build_fetcher maps it onto the curve.
+    # 3s/30s = 0.1 lands on the 0.80 point so retention_3s is read off by hand.
+    canned = {
+        "columnHeaders": [{"name": "elapsedVideoTimeRatio"}, {"name": "audienceWatchRatio"}],
+        "rows": [[0.0, 1.00], [0.1, 0.80], [0.5, 0.55], [1.0, 0.40]],
+    }
+    seen = {}
+
+    def fake_authorized_query(client_secret, token):
+        seen["client_secret"], seen["token"] = client_secret, token
+        return lambda **params: canned  # the canned API transport — no network
+
+    rc = pull.main(
+        ["--metrics", str(export), "--output", str(out),
+         "--aggregate-output", str(agg_out),
+         "--client-secret", "/creds/client_secret.json"],
+        authorized_query=fake_authorized_query)
+
+    assert rc == 0
+    assert seen["client_secret"] == "/creds/client_secret.json"  # creds reach the adapter
+    short = json.loads(out.read_text(encoding="utf-8").splitlines()[0])
+    assert short["short_id"] == "clips:vid1"
+    assert short["retention_source"] == "curve"  # the REAL adapter drove it, offline
+    assert short["retention_3s"] == 0.80

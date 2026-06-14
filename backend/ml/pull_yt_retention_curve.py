@@ -17,9 +17,10 @@ the existing degraded path (``studio_endwatch`` / ``degraded_avp_only``), is fla
 and logged, and is kept — never an aborted run. Short identity is stable via
 ``row_identity`` (``clips:<video_id>``) so re-runs are idempotent.
 
-The real read-only ``youtubeAnalytics.reports.query`` adapter is a later slice — the
-default fetcher is wired but defers to it, so a no-fetcher run refuses clearly instead
-of silently fetching nothing.
+The real read-only ``youtubeAnalytics.reports.query`` adapter (#83) wires in via
+``--client-secret`` (issue #84), so the full module — real adapter + #82 aggregate —
+runs over the 52 with one command. Without creds and without an injected fetcher the
+default fallback refuses clearly instead of silently fetching nothing.
 """
 from __future__ import annotations
 
@@ -77,18 +78,37 @@ def _video_id(row: dict) -> str:
 
 
 def default_fetcher(video_id: str) -> list[dict]:
-    """The wired default — defers to the real read-only YT-Analytics adapter.
+    """The no-creds fallback — refuses clearly instead of fetching nothing.
 
-    The seam ships with a default so production needs no injection, but the read-only
-    ``youtubeAnalytics.reports.query`` adapter (Scope ``yt-analytics.readonly``) is a
-    later slice. Until it lands the default refuses *clearly* rather than silently
-    returning no curve (which would mis-read as "all shorts degraded") or hitting the
-    network from a slice that is meant to stay offline. Tests inject a fake fetcher.
+    The real read-only ``youtubeAnalytics.reports.query`` adapter (Scope
+    ``yt-analytics.readonly``) wires in via ``--client-secret`` (see :func:`_resolve_fetcher`).
+    Without creds AND without an injected fetcher this fallback refuses *clearly* rather
+    than silently returning no curve (which would mis-read as "all shorts degraded") or
+    hitting the network. Tests inject a fake fetcher; the real run passes ``--client-secret``.
     """
     raise NotImplementedError(
-        "pull_yt_retention_curve: the real read-only youtubeAnalytics.reports.query "
-        "adapter (yt-analytics.readonly) is a later slice — inject a fetcher to run "
-        f"offline (video_id={video_id!r}).")
+        "pull_yt_retention_curve: pass --client-secret to wire the real read-only "
+        "youtubeAnalytics.reports.query adapter (yt-analytics.readonly), or inject a "
+        f"fetcher to run offline (video_id={video_id!r}).")
+
+
+def _resolve_fetcher(client_secret: str | None, token,
+                     authorized_query: "Callable | None") -> Fetcher:
+    """Pick the fetcher for a run with no fetcher injected.
+
+    With ``--client-secret`` the real read-only YT-Analytics adapter (#83) is wired in:
+    the creds build a ``reports.query`` callable (``authorized_query`` — injectable so the
+    network transport is fakeable offline) which ``build_fetcher`` wraps into the #81 seam.
+    Without creds the default fallback stays, refusing clearly rather than fetching nothing.
+    """
+    if not client_secret:
+        return default_fetcher
+    # Lazy: yt_analytics_fetcher imports Fetcher from this module (circular at import time)
+    # and pulls the google libs only on the real OAuth path; tests inject authorized_query.
+    from ml import yt_analytics_fetcher as ytf
+    build_query = authorized_query or ytf.authorized_query
+    query = build_query(client_secret, token or ytf.DEFAULT_TOKEN)
+    return ytf.build_fetcher(query)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -99,12 +119,22 @@ DEFAULT_OUTPUT = BACKEND_ROOT / "ml" / "artifacts" / "pull_yt_retention_curve_pe
 DEFAULT_AGGREGATE_OUTPUT = BACKEND_ROOT / "ml" / "artifacts" / "pull_yt_retention_curve_aggregate.json"
 
 
-def main(argv: list[str] | None = None, *, fetch_curve: Fetcher | None = None) -> int:
+def main(argv: list[str] | None = None, *, fetch_curve: Fetcher | None = None,
+         authorized_query: "Callable | None" = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "--metrics", required=True,
         help="Curve-less Studio export (CSV) of the already-posted shorts; read offline.")
+    parser.add_argument(
+        "--client-secret", default=None,
+        help="Operator OAuth desktop client_secret.json (gitignored). When given, the real "
+             "read-only youtubeAnalytics.reports.query adapter (yt-analytics.readonly) is "
+             "wired in over all shorts; omit it (and inject no fetcher) and the run refuses.")
+    parser.add_argument(
+        "--token", type=pathlib.Path, default=None,
+        help="Cached OAuth token path (gitignored). Defaults to the adapter's DEFAULT_TOKEN; "
+             "reused across runs.")
     parser.add_argument("--output", type=pathlib.Path, default=DEFAULT_OUTPUT,
                         help="Per-short report JSONL destination.")
     parser.add_argument("--aggregate-output", type=pathlib.Path, default=DEFAULT_AGGREGATE_OUTPUT,
@@ -115,7 +145,7 @@ def main(argv: list[str] | None = None, *, fetch_curve: Fetcher | None = None) -
     args = parser.parse_args(argv)
 
     if fetch_curve is None:
-        fetch_curve = default_fetcher
+        fetch_curve = _resolve_fetcher(args.client_secret, args.token, authorized_query)
 
     raw_rows = hsm.read_metrics(args.metrics)
     report = pull_report(raw_rows, fetch_curve=fetch_curve)
