@@ -17,6 +17,14 @@ Entry-Points: `ml/gt_pipeline.py` (orchestriert den Flywheel), `ml/gt_capture.py
 
 Das Frontend (`frontend/`, Next.js) reicht Jobs ein und zeigt Clips zur Review.
 
+## Produkt-These & Nordstern
+
+**Produkt:** ein **Autopilot**-Viral-Clip-Finder — die Pipeline liefert die fertigen
+Top-Clips final aus, ohne Mensch-im-Loop. Der Differentiator gegenüber generischen
+Findern (OpusClips) ist **Streamer-Spezialisierung**: der Finder wird auf *einen*
+Streamer getunt und reproduziert dessen virales Clip-Profil genauer als ein
+One-size-fits-all-Modell. Aktueller Test-Streamer: **Jynxzi**.
+
 ## Sprache
 
 Arbeits- und Antwortsprache: **Deutsch**. Domänen-/Code-Begriffe (`Producer`,
