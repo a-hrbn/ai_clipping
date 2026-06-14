@@ -44,6 +44,13 @@ vision = [
   "mtcnn>=1.0.0,<2.0.0",
   "tf-keras>=2.21.0,<3.0.0",
 ]
+# Real read-only YT-Analytics fetcher adapter (ml/yt_analytics_fetcher.py, #83). Only
+# the OAuth spike path needs these — imported lazily, so offline tests/CI never pull them.
+yt = [
+  "google-api-python-client>=2.130.0,<3.0.0",
+  "google-auth>=2.30.0,<3.0.0",
+  "google-auth-oauthlib>=1.2.0,<2.0.0",
+]
 [tool.setuptools]
 packages = ["ml", "producers", "routers", "services"]
 py-modules = ["config", "job_manager", "main", "models", "pipeline", "pipeline_worker"]
