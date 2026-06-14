@@ -5,6 +5,11 @@
 !.env.example
 !.env.*.example
 
+# Google OAuth client secret + cached tokens (never commit)
+client_secret*.json
+*oauth*token*.json
+yt_*token*.json
+
 .claude/
 .codex/
 .pytest_cache/
