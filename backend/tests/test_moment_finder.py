@@ -81,6 +81,29 @@ def test_find_moments_reuses_d0_prompt_filters_noise_and_builds_ranked_candidate
     assert "llm_moment_finder" in ranked.rationale
 
 
+def test_rich_segments_map_streamer_role_to_streamer_name() -> None:
+    # WALL-Re-Test (#92): the diarizer's STREAMER role is rendered as the
+    # streamer's name in the finder prompt; guests keep their stable GUEST_n
+    # label and un-diarized segments stay UNKNOWN.
+    segments = [
+        RichSegment(start=0.0, end=2.0, text="streamer line", speaker="STREAMER"),
+        RichSegment(start=2.0, end=4.0, text="guest line", speaker="GUEST_1"),
+        RichSegment(start=4.0, end=6.0, text="unknown line", speaker="UNKNOWN"),
+    ]
+
+    out = moment_finder.rich_segments_to_transcript_segments(segments, streamer_name="Jynxzi")
+
+    assert [s.speaker for s in out] == ["Jynxzi", "GUEST_1", "UNKNOWN"]
+
+
+def test_rich_segments_keep_streamer_role_when_no_name_given() -> None:
+    segments = [RichSegment(start=0.0, end=2.0, text="streamer line", speaker="STREAMER")]
+
+    out = moment_finder.rich_segments_to_transcript_segments(segments)
+
+    assert out[0].speaker == "STREAMER"
+
+
 def test_find_moments_eval_recall_off_skips_raw_and_typed(monkeypatch) -> None:
     """Serving default (eval_recall=False): no raw/pre-diversity branch and no
     typed RankedCandidate are materialized; the post-processed dict-rows (the one

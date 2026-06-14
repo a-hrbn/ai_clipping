@@ -72,6 +72,42 @@ class TranscriberChunkingTests(unittest.TestCase):
         self.assertFalse(model.calls[0][1]["fp16"])
         self.assertFalse(model.calls[0][1]["word_timestamps"])
 
+    def test_transcribe_chunk_passes_configured_glossary_as_initial_prompt(self) -> None:
+        # WALL-Re-Test (#92): the Jynxzi glossary is biased into Whisper via
+        # initial_prompt so verbal-tic catchphrases survive instead of being
+        # smoothed to dictionary words. The model stays large-v3-turbo.
+        class _Model:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def transcribe(self, path, **kwargs):
+                self.calls.append((path, kwargs))
+                return {"segments": []}
+
+        glossary = "Balright, Darth Maura, Me ho, Hivise"
+        model = _Model()
+        with patch.object(transcriber.settings, "whisper_initial_prompt", glossary), \
+             patch("services.transcriber._model_device_name", return_value="cpu"):
+            transcriber._transcribe_chunk(model, Path("/tmp/chunk.wav"))
+
+        self.assertEqual(model.calls[0][1]["initial_prompt"], glossary)
+
+    def test_transcribe_chunk_omits_initial_prompt_when_glossary_blank(self) -> None:
+        class _Model:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def transcribe(self, path, **kwargs):
+                self.calls.append((path, kwargs))
+                return {"segments": []}
+
+        model = _Model()
+        with patch.object(transcriber.settings, "whisper_initial_prompt", ""), \
+             patch("services.transcriber._model_device_name", return_value="cpu"):
+            transcriber._transcribe_chunk(model, Path("/tmp/chunk.wav"))
+
+        self.assertNotIn("initial_prompt", model.calls[0][1])
+
     def test_faster_whisper_backend_converts_segments(self) -> None:
         class _Segment:
             start = 0.5

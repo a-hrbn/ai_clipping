@@ -38,6 +38,33 @@ def test_format_transcript_uses_absolute_seconds_as_authoritative_timestamp() ->
     assert "[t=1184s - t=1186s | clock=19:44 - 19:46] Is this even legal?" in prompt_transcript.text
 
 
+def test_format_transcript_renders_speaker_when_diarized() -> None:
+    # WALL-Re-Test (#92): a diarized segment carries its speaker into the finder
+    # transcript format so the finder can track banter/troll who-said-what.
+    prompt_transcript = d0.format_transcript_for_prompt(
+        [
+            d0.TranscriptSegment(start=10.0, end=12.0, text="real reaction", speaker="Jynxzi"),
+        ],
+        filter_noise=True,
+    )
+
+    assert "[t=10s - t=12s | clock=00:10 - 00:12 | spk=Jynxzi] real reaction" in prompt_transcript.text
+
+
+def test_format_transcript_omits_speaker_when_unknown() -> None:
+    # Base (no-diarization) transcripts keep today's exact format — speaker
+    # defaults to UNKNOWN and renders no spk= marker, so base-vs-neu stays clean.
+    prompt_transcript = d0.format_transcript_for_prompt(
+        [
+            d0.TranscriptSegment(start=10.0, end=12.0, text="real reaction"),
+        ],
+        filter_noise=True,
+    )
+
+    assert "spk=" not in prompt_transcript.text
+    assert "[t=10s - t=12s | clock=00:10 - 00:12] real reaction" in prompt_transcript.text
+
+
 def test_parse_moments_repairs_missing_commas_between_objects() -> None:
     moments = d0.parse_moments(
         """

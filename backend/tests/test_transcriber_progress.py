@@ -57,6 +57,63 @@ class TranscriberProgressTests(unittest.TestCase):
         self.assertEqual(len(result), 3)
         self.assertEqual(updates, [(1, 3, "chunk_000.wav"), (2, 3, "chunk_001.wav"), (3, 3, "chunk_002.wav")])
 
+    def test_initial_prompt_argument_overrides_glossary_setting(self) -> None:
+        # The transcribe() initial_prompt argument is the in-process override of
+        # the whisper_initial_prompt setting (WALL-Re-Test #92): a direct caller
+        # can bias one transcription's glossary without mutating global settings.
+        captured: list[dict] = []
+
+        class _Model:
+            def transcribe(self, path, **kwargs):
+                captured.append(kwargs)
+                return {"segments": [{"start": 0.0, "end": 1.0, "text": "hi"}]}
+
+        fake_chunks = [pathlib.Path("/tmp/chunk_000.wav")]
+
+        with patch("services.transcriber.subprocess.run", return_value=None), \
+             patch.object(transcriber, "_whisper_model", None), \
+             patch.object(transcriber, "_whisper_runtime_logged", False), \
+             patch("services.transcriber.whisper.load_model", return_value=_Model()), \
+             patch.object(transcriber.settings, "whisper_initial_prompt", "SETTING_GLOSSARY"), \
+             patch("services.transcriber._model_device_name", return_value="cpu"), \
+             patch("services.transcriber.settings.hf_token", None), \
+             patch("pathlib.Path.glob", return_value=fake_chunks), \
+             patch("services.transcriber._chunk_frame_count", return_value=16000):
+            transcriber.transcribe_with_progress(
+                pathlib.Path("/tmp/audio.wav"),
+                initial_prompt="PARAM_GLOSSARY",
+            )
+
+        self.assertEqual(captured[0].get("initial_prompt"), "PARAM_GLOSSARY")
+
+    def test_initial_prompt_override_does_not_leak_to_later_calls(self) -> None:
+        # The override is scoped to its own transcription; a later call with no
+        # argument falls back to the (here empty) setting.
+        captured: list[dict] = []
+
+        class _Model:
+            def transcribe(self, path, **kwargs):
+                captured.append(kwargs)
+                return {"segments": [{"start": 0.0, "end": 1.0, "text": "hi"}]}
+
+        fake_chunks = [pathlib.Path("/tmp/chunk_000.wav")]
+
+        with patch("services.transcriber.subprocess.run", return_value=None), \
+             patch.object(transcriber, "_whisper_model", None), \
+             patch.object(transcriber, "_whisper_runtime_logged", False), \
+             patch("services.transcriber.whisper.load_model", return_value=_Model()), \
+             patch.object(transcriber.settings, "whisper_initial_prompt", ""), \
+             patch("services.transcriber._model_device_name", return_value="cpu"), \
+             patch("services.transcriber.settings.hf_token", None), \
+             patch("pathlib.Path.glob", return_value=fake_chunks), \
+             patch("services.transcriber._chunk_frame_count", return_value=16000):
+            transcriber.transcribe_with_progress(
+                pathlib.Path("/tmp/audio.wav"), initial_prompt="ONE_SHOT")
+            transcriber.transcribe_with_progress(pathlib.Path("/tmp/audio.wav"))
+
+        self.assertEqual(captured[0].get("initial_prompt"), "ONE_SHOT")
+        self.assertNotIn("initial_prompt", captured[1])
+
     def test_reuses_durable_chunk_cache_without_loading_model(self) -> None:
         class _Model:
             def transcribe(self, path, *_args, **_kwargs):

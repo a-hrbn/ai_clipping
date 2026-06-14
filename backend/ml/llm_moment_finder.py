@@ -56,6 +56,7 @@ class TranscriptSegment:
     start: float
     end: float
     text: str
+    speaker: str = "UNKNOWN"
     chat_spike_score: float = 0.0
     chat_hype_score: float = 0.0
     chat_funny_score: float = 0.0
@@ -137,6 +138,19 @@ def _build_chat_marker(segment: "TranscriptSegment") -> str:
         parts.append(f"vol={vol:.2f}")
 
     return (" | " + " | ".join(parts)) if parts else ""
+
+
+def _build_speaker_marker(segment: "TranscriptSegment") -> str:
+    """Render the diarized speaker as ` | spk=<name>`.
+
+    Empty for UNKNOWN (the un-diarized default) so a base transcript keeps the
+    exact pre-diarization line format — the WALL-Re-Test (#92) base-vs-neu split
+    stays attributable to the diarization lever, not a format drift.
+    """
+    speaker = str(getattr(segment, "speaker", "") or "").strip()
+    if not speaker or speaker == "UNKNOWN":
+        return ""
+    return f" | spk={speaker}"
 
 
 def normalize_provider(provider: str) -> str:
@@ -248,10 +262,12 @@ def format_transcript_for_prompt(
             dropped_reasons[drop_reason] += 1
             continue
         chat_marker = _build_chat_marker(segment)
+        speaker_marker = _build_speaker_marker(segment)
         lines.append(
             "["
             f"t={format_seconds_for_prompt(segment.start)}s - t={format_seconds_for_prompt(segment.end)}s"
             f" | clock={format_time(segment.start)} - {format_time(segment.end)}"
+            f"{speaker_marker}"
             f"{chat_marker}"
             f"] {text}"
         )

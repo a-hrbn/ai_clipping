@@ -51,14 +51,15 @@ def find_moments(
     chunk_overlap_sec: float = d0.DEFAULT_CHUNK_OVERLAP_SEC,
     eval_recall: bool = False,
 ) -> MomentFinderResult:
-    transcript_segments = rich_segments_to_transcript_segments(segments)
+    profile_spec = d0.load_clip_profile(profile)
+    streamer_name = str((profile_spec or {}).get("streamer") or "")
+    transcript_segments = rich_segments_to_transcript_segments(segments, streamer_name=streamer_name)
     prompt_transcript = d0.format_transcript_for_prompt(
         transcript_segments,
         filter_noise=filter_transcript_noise,
     )
     resolved_provider = d0.normalize_provider(provider)
     resolved_model = d0.resolve_provider_model(resolved_provider, model)
-    profile_spec = d0.load_clip_profile(profile)
 
     # Split long VODs into time windows so each LLM call gets its own output-token
     # budget. A single call truncates at ~max_tokens and silently drops the back
@@ -249,7 +250,23 @@ def _cross_chunk_rank_scores(
     return scores
 
 
-def rich_segments_to_transcript_segments(segments: Sequence[RichSegment]) -> list[d0.TranscriptSegment]:
+def _render_speaker(raw_speaker: object, streamer_name: str) -> str:
+    """Map the diarizer's STREAMER role to the streamer's name (WALL-Re-Test #92).
+
+    STREAMER → ``streamer_name`` when one is configured (else the role label is
+    kept); GUEST_n and UNKNOWN pass through unchanged. UNKNOWN renders no marker
+    downstream, so an un-diarized transcript keeps its exact pre-diarization form.
+    """
+    speaker = str(raw_speaker or "UNKNOWN").strip() or "UNKNOWN"
+    if speaker == "STREAMER" and streamer_name:
+        return streamer_name
+    return speaker
+
+
+def rich_segments_to_transcript_segments(
+    segments: Sequence[RichSegment], *, streamer_name: str = ""
+) -> list[d0.TranscriptSegment]:
+    streamer = str(streamer_name or "").strip()
     transcript_segments: list[d0.TranscriptSegment] = []
     for segment in segments:
         start = float(getattr(segment, "start", 0.0) or 0.0)
@@ -261,6 +278,7 @@ def rich_segments_to_transcript_segments(segments: Sequence[RichSegment]) -> lis
             start=start,
             end=end,
             text=text,
+            speaker=_render_speaker(getattr(segment, "speaker", "UNKNOWN"), streamer),
             chat_spike_score=float(getattr(segment, "chat_spike_score", 0.0) or 0.0),
             chat_hype_score=float(getattr(segment, "chat_hype_score", 0.0) or 0.0),
             chat_funny_score=float(getattr(segment, "chat_funny_score", 0.0) or 0.0),

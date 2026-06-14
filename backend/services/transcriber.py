@@ -67,6 +67,18 @@ def _vad_filter_enabled() -> bool:
     return bool(getattr(settings, "whisper_vad_filter", True))
 
 
+def _resolved_initial_prompt(override: str | None = None) -> str:
+    """The glossary biased into Whisper via initial_prompt (empty = no biasing).
+
+    ``override`` is the per-call argument threaded down from :func:`transcribe`;
+    when ``None`` (the default, and the case in the isolate-chunks subprocess
+    worker) it falls back to settings.whisper_initial_prompt — the production seam
+    that survives the subprocess because the worker inherits the same env."""
+    if override is not None:
+        return str(override).strip()
+    return str(getattr(settings, "whisper_initial_prompt", "") or "").strip()
+
+
 def _resolved_whisper_backend() -> str:
     requested = str(getattr(settings, "whisper_backend", "auto") or "auto").strip().lower()
     requested = requested.replace("_", "-")
@@ -295,8 +307,15 @@ class RichSegment:
         return (self.start, self.end, self.text)
 
 
-def transcribe(audio_path: pathlib.Path, *, enable_diarization: bool = True) -> list[RichSegment]:
-    return transcribe_with_progress(audio_path, enable_diarization=enable_diarization)
+def transcribe(
+    audio_path: pathlib.Path,
+    *,
+    enable_diarization: bool = True,
+    initial_prompt: str | None = None,
+) -> list[RichSegment]:
+    return transcribe_with_progress(
+        audio_path, enable_diarization=enable_diarization, initial_prompt=initial_prompt
+    )
 
 
 def transcribe_with_progress(
@@ -306,6 +325,7 @@ def transcribe_with_progress(
     enable_diarization: bool = True,
     cache_key: str | None = None,
     isolate_chunks: bool = False,
+    initial_prompt: str | None = None,
 ) -> list[RichSegment]:
     chunks_dir = audio_path.parent / "chunks"
     chunks_dir.mkdir(exist_ok=True)
@@ -371,7 +391,9 @@ def transcribe_with_progress(
                 try:
                     if model is None:
                         model = _get_model()
-                    result = _transcribe_chunk(model, chunk_file)
+                    # initial_prompt threads only down this in-process path; the
+                    # isolate_chunks subprocess worker reads the setting instead.
+                    result = _transcribe_chunk(model, chunk_file, initial_prompt=initial_prompt)
                 except RuntimeError as exc:
                     if _EMPTY_TRANSCRIBE_ERROR_SNIPPET not in str(exc):
                         raise
@@ -1044,13 +1066,17 @@ def _calc_tempo(seg: dict, time_offset: float) -> float:
     return round(word_count / segment_duration, 2) if segment_duration > 0 else 0.0
 
 
-def _transcribe_chunk(model: object, chunk_file: pathlib.Path) -> dict:
+def _transcribe_chunk(
+    model: object, chunk_file: pathlib.Path, *, initial_prompt: str | None = None
+) -> dict:
     if _whisper_model_backend == "faster-whisper":
-        return _transcribe_chunk_faster(model, chunk_file)
-    return _transcribe_chunk_openai(model, chunk_file)
+        return _transcribe_chunk_faster(model, chunk_file, initial_prompt=initial_prompt)
+    return _transcribe_chunk_openai(model, chunk_file, initial_prompt=initial_prompt)
 
 
-def _transcribe_chunk_openai(model: whisper.Whisper, chunk_file: pathlib.Path) -> dict:
+def _transcribe_chunk_openai(
+    model: whisper.Whisper, chunk_file: pathlib.Path, *, initial_prompt: str | None = None
+) -> dict:
     with _whisper_inference_lock:
         use_fp16 = str(_model_device_name(model)).startswith("cuda")
         transcribe_kwargs: dict[str, object] = {
@@ -1061,13 +1087,18 @@ def _transcribe_chunk_openai(model: whisper.Whisper, chunk_file: pathlib.Path) -
         configured_language = str(settings.whisper_language or "").strip().lower()
         if configured_language:
             transcribe_kwargs["language"] = configured_language
+        resolved_prompt = _resolved_initial_prompt(initial_prompt)
+        if resolved_prompt:
+            transcribe_kwargs["initial_prompt"] = resolved_prompt
         return model.transcribe(
             str(chunk_file),
             **transcribe_kwargs,
         )
 
 
-def _transcribe_chunk_faster(model: object, chunk_file: pathlib.Path) -> dict:
+def _transcribe_chunk_faster(
+    model: object, chunk_file: pathlib.Path, *, initial_prompt: str | None = None
+) -> dict:
     with _whisper_inference_lock:
         configured_language = str(settings.whisper_language or "").strip().lower()
         transcribe_kwargs: dict[str, object] = {
@@ -1076,6 +1107,9 @@ def _transcribe_chunk_faster(model: object, chunk_file: pathlib.Path) -> dict:
         }
         if configured_language:
             transcribe_kwargs["language"] = configured_language
+        resolved_prompt = _resolved_initial_prompt(initial_prompt)
+        if resolved_prompt:
+            transcribe_kwargs["initial_prompt"] = resolved_prompt
         segments_iter, _info = model.transcribe(str(chunk_file), **transcribe_kwargs)
         segments = []
         for segment in segments_iter:

@@ -115,6 +115,10 @@ class Settings(BaseSettings):
     whisper_backend: str = "auto"
     whisper_compute_type: str = ""
     whisper_word_timestamps: bool = False
+    # Glossary biased into Whisper via its initial_prompt so a streamer's verbal-tic
+    # catchphrases survive instead of being smoothed to dictionary words (WALL-Re-Test
+    # #92). Empty = no biasing (the model stays whatever whisper_model is).
+    whisper_initial_prompt: str = ""
     transcription_chunk_seconds: int = 180
     # Concurrent VODs in a pipeline-debug workflow. 0 = auto: GPU slots + 1
     # (capped at 4), so one VOD can download/ffmpeg/chat while the GPU slots
