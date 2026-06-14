@@ -11,6 +11,7 @@ fixtures in, exact retention fields / drops / report rows out. Prior art:
 tests/test_outcome_view_weighting.py, tests/test_gap_decomposition.py.
 """
 import json
+import types
 
 from ml import historical_short_mine as hsm
 from ml import row_identity
@@ -153,3 +154,135 @@ def test_main_runs_offline_writes_jsonl_and_prints_json(tmp_path, capsys) -> Non
     first = out.read_bytes()
     hsm.main(["--metrics", str(export), "--output", str(out)])
     assert out.read_bytes() == first
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Slice 2 (issue #77): transcription + goal-family + length-bucket per short.
+# The facet is derived from the short's *own* transcript (no VOD attribution).
+# Transcription is injected/faked here — these tests never touch the network or
+# the real Whisper/ffmpeg stack.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_short_report_classifies_goal_family_from_injected_transcript() -> None:
+    # The facet's goal-family comes from the short's own transcript via
+    # clip_strategy.infer_goal_family (transcript as topic): a clip whose
+    # transcript reads as a reaction is classified "reaction".
+    row = _short(video_id="reax")
+
+    report = hsm.build_short_report(
+        [row], transcribe=lambda r: "his reaction was absolutely priceless")
+
+    assert report["shorts"][0]["goal_family"] == "reaction"
+
+
+def test_length_bucket_splits_at_the_25_second_boundary() -> None:
+    # Length-bucket is "kurz" below 25s and "lang" at/above it. The boundary is
+    # exact: 24.9s -> kurz, 25.0s -> lang.
+    kurz = _short(video_id="kurz", duration_s=24.9)
+    lang = _short(video_id="lang", duration_s=25.0)
+
+    report = hsm.build_short_report(
+        [kurz, lang], transcribe=lambda r: "some spoken words")
+
+    by_id = {s["short_id"]: s for s in report["shorts"]}
+    assert by_id["clips:kurz"]["length_bucket"] == "kurz"
+    assert by_id["clips:lang"]["length_bucket"] == "lang"
+
+
+def test_report_carries_transcript_excerpt_and_no_chat_emotion_facet() -> None:
+    # The report surfaces a transcript excerpt so each facet is auditable. Chat-
+    # emotion is deliberately NOT a facet: the chat signal lives in the VOD, not
+    # in the posted short, so the Mine must not fake a facet it cannot compute.
+    row = _short(video_id="exc")
+
+    report = hsm.build_short_report(
+        [row], transcribe=lambda r: "the streamer breaks down the whole play")
+
+    short = report["shorts"][0]
+    assert "the streamer breaks down" in short["transcript_excerpt"]
+    assert not any("chat" in key for key in short)
+
+
+def test_untranscribable_short_is_dropped_and_surfaced_not_silently_emitted() -> None:
+    # A short whose media cannot be transcribed (transcribe -> None) or yields a
+    # blank transcript cannot be classified — it must be surfaced as a logged
+    # drop, never emitted as a bogus "general" short. Both retention-present
+    # shorts otherwise clear Slice 1, so only the facet stage drops them.
+    ok = _short(video_id="ok")
+    missing_media = _short(video_id="no_media")
+    blank = _short(video_id="silent")
+
+    def transcribe(row):
+        return {"ok": "his honest take on the meta", "no_media": None, "silent": "   "}[
+            row["video_id"]]
+
+    report = hsm.build_short_report([ok, missing_media, blank], transcribe=transcribe)
+
+    assert [s["short_id"] for s in report["shorts"]] == ["clips:ok"]
+    assert {"short_id": "clips:no_media", "reason": "untranscribable"} in report["drops"]
+    assert {"short_id": "clips:silent", "reason": "untranscribable"} in report["drops"]
+
+
+def test_transcribe_short_composes_audio_extractor_then_transcriber(tmp_path) -> None:
+    # The production transcription seam is mp4 -> wav (audio_extractor) -> text
+    # (transcriber.transcribe), joining the segment texts. Both leaf seams are
+    # injected here, so no ffmpeg / Whisper / network is touched.
+    media = tmp_path / "clip.mp4"
+    media.write_bytes(b"fake mp4")
+    seen = {}
+
+    def fake_extract(video_path, job_id, *, output_path):
+        seen["extract_src"] = video_path
+        output_path.write_bytes(b"fake wav")
+        return output_path
+
+    def fake_transcribe(wav_path):
+        # Read the wav now: transcribe_short cleans up its temp wav on return.
+        seen["transcribe_bytes"] = wav_path.read_bytes()
+        return [types.SimpleNamespace(text="hello"), types.SimpleNamespace(text="world")]
+
+    text = hsm.transcribe_short(media, extract=fake_extract, transcribe=fake_transcribe)
+
+    assert text == "hello world"
+    assert seen["extract_src"] == media
+    assert seen["transcribe_bytes"] == b"fake wav"  # transcriber reads the extracted wav
+
+
+def test_transcribe_short_returns_none_for_missing_media(tmp_path) -> None:
+    # A short whose media file is absent transcribes to None — build_short_report
+    # then logs it as an untranscribable drop rather than aborting the run.
+    absent = tmp_path / "absent.mp4"
+
+    text = hsm.transcribe_short(
+        absent, extract=_unreached, transcribe=_unreached)
+
+    assert text is None
+
+
+def _unreached(*_args, **_kwargs):
+    raise AssertionError("leaf seam must not run for missing media")
+
+
+def test_main_writes_facets_with_injected_transcription(tmp_path, capsys) -> None:
+    # End-to-end through the CLI with transcription injected (no network): the
+    # written per-short report carries goal-family, length-bucket and a
+    # transcript excerpt, and an un-transcribable short surfaces as a drop.
+    export = tmp_path / "retention_export.jsonl"
+    rows = [_short(video_id="reax", duration_s=30.0), _short(video_id="mute")]
+    export.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    out = tmp_path / "report.jsonl"
+
+    transcripts = {"reax": "his reaction was hilarious", "mute": None}
+    rc = hsm.main(
+        ["--metrics", str(export), "--output", str(out), "--json"],
+        transcribe=lambda row: transcripts[row["video_id"]])
+
+    assert rc == 0
+    written = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert [s["short_id"] for s in written] == ["clips:reax"]  # mute dropped
+    assert written[0]["goal_family"] == "reaction"
+    assert written[0]["length_bucket"] == "lang"
+    assert "his reaction" in written[0]["transcript_excerpt"]
+    payload = json.loads(capsys.readouterr().out)
+    assert {"short_id": "clips:mute", "reason": "untranscribable"} in payload["drops"]
