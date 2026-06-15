@@ -107,6 +107,17 @@ def test_build_rerun_env_sets_levers_without_flipping_model(tmp_path) -> None:
     assert env["FOO"] == "bar"  # base env preserved
 
 
+def test_build_rerun_env_enables_eval_recall_so_neu_dirs_are_replayable(tmp_path) -> None:
+    # The neu run goes through the serving worker, where the raw-recall branch +
+    # the moments_raw.jsonl dump are off (serving doesn't pay for them). But the
+    # compare harness replays that raw artifact — and base was an eval-capture run
+    # with it on. So the re-run must opt into eval_recall for base-vs-neu parity;
+    # without it the neu dirs are not replayable and every VOD drops.
+    env = rr.build_rerun_env(tmp_path / "neu", base_env={})
+
+    assert env["MOMENT_FINDER_EVAL_RECALL"] == "true"
+
+
 def test_cli_dry_run_prints_selected_subset(tmp_path, capsys) -> None:
     # The CLI composes manifest-load + select_subset against the base dir; --dry-run
     # surfaces the subset without re-running anything.
@@ -132,6 +143,42 @@ def test_cli_dry_run_prints_selected_subset(tmp_path, capsys) -> None:
     out = json.loads(capsys.readouterr().out)
     assert out["subset"] == ["111"]
     assert out["dry_run"] is True
+
+
+def test_is_replayable_requires_both_debug_artifacts(tmp_path) -> None:
+    job = tmp_path / "pipeline_debug_WF_vodX"
+    debug = job / "debug"
+    debug.mkdir(parents=True)
+    assert rr._is_replayable(job) is False                       # neither artifact
+    (debug / "segments.jsonl").write_text("{}\n", encoding="utf-8")
+    assert rr._is_replayable(job) is False                       # only segments
+    (debug / "llm_moment_finder_moments_raw.jsonl").write_text("{}\n", encoding="utf-8")
+    assert rr._is_replayable(job) is True                        # both -> done
+
+
+def test_pipeline_run_vod_skips_already_replayable_vod_on_resume(tmp_path, capsys) -> None:
+    # Resumability: a re-launched driver must NOT re-spawn the heavy pipeline for a
+    # VOD it already finished. With the replayable artifacts in place, pipeline_run_vod
+    # returns the dir without ever importing pipeline_runner or spawning a subprocess —
+    # so a fake subprocess.run that explodes proves the spawn path was never reached.
+    neu = tmp_path / "neu"
+    debug = neu / "pipeline_debug_WF_vodX" / "debug"
+    debug.mkdir(parents=True)
+    (debug / "segments.jsonl").write_text("{}\n", encoding="utf-8")
+    (debug / "llm_moment_finder_moments_raw.jsonl").write_text("{}\n", encoding="utf-8")
+
+    def _boom(*_a, **_k):
+        raise AssertionError("pipeline must not be spawned for an already-replayable VOD")
+
+    original = rr.subprocess.run
+    rr.subprocess.run = _boom
+    try:
+        result = rr.pipeline_run_vod("vodX", neu, workflow_id="WF")
+    finally:
+        rr.subprocess.run = original
+
+    assert result == neu / "pipeline_debug_WF_vodX"
+    assert "skip (resume)" in capsys.readouterr().err
 
 
 def test_glossary_terms_are_the_initial_prompt_entities() -> None:

@@ -85,6 +85,7 @@ def test_glossary_and_speaker_compose_end_to_end(monkeypatch) -> None:
          patch("services.transcriber._model_device_name", return_value="cpu"), \
          patch.object(transcriber.settings, "hf_token", "fake-token"), \
          patch.object(transcriber, "_load_pyannote_pipeline", return_value=_FakePyannotePipeline()), \
+         patch.object(transcriber, "_load_diarization_audio", return_value=(object(), 16000)), \
          patch("pathlib.Path.glob", return_value=[pathlib.Path("/tmp/chunk_000.wav")]), \
          patch("services.transcriber._chunk_frame_count", return_value=16000):
         segments = transcriber.transcribe(

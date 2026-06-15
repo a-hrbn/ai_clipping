@@ -109,6 +109,19 @@ Datensatz bekannt-guter Momente (jsonl). Maßstab, gegen den der Clip-Finder bew
 wird — ein Treffer deckt ≥ 50 % des GT-Fensters ab (`ml/eval_clip_finder.py`).
 _Avoid_: ground truth file, labels.
 
+**Coverage-Miss** (`raw@any`-Lücke): Ein Gold, für das der Generator *gar keinen*
+Kandidaten erzeugt hat — es fehlt schon im rohen Pool, bevor irgendein Ranking
+greift. `raw@any` misst das Gegenteil (Anteil der Golds, die *irgendein* roher
+Kandidat deckt). Kein Re-Ranker — egal wie stark — kann einen Coverage-Miss
+zurückholen; nur der Generator kann es. _Avoid_: generation gap, pool miss.
+
+**Ranking-Miss** (`clean_but_buried`): Ein Gold, das *im* Pool liegt, aber unter
+Rang 20 vergraben ist (`buried_rank > 20`) — der Generator hat es erzeugt, das
+Ranking hat es nicht in die ausgelieferten Top-20 gehoben. Die *einzige*
+Gold-Population, die ein Re-Ranker überhaupt retten kann. Strikt vom Coverage-Miss
+zu trennen: „recall@20 ist schlecht" vermischt beide. _Avoid_: low rank, buried
+(unqualifiziert).
+
 ### Outcome-Signal
 
 **Third-party outcome**: Publikums-Performance an *fremden* geposteten Clips — heute

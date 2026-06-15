@@ -1224,7 +1224,12 @@ def _diarize(audio_path: pathlib.Path, segments: list[RichSegment]) -> list[Rich
                 "pipeline_not_loaded",
             )
             return segments
-        diarization = pipeline(str(audio_path))
+        # Feed an in-memory waveform, not the path: pyannote's default file decoder
+        # (torchcodec) fails to load in some CUDA images (missing libnvrtc), which
+        # would silently no-op diarization. soundfile decodes the wav directly.
+        waveform, sample_rate = _load_diarization_audio(audio_path)
+        diar_output = pipeline({"waveform": waveform, "sample_rate": sample_rate})
+        diarization = _diarization_annotation(diar_output)
     except Exception as exc:
         logger.warning(
             "transcriber_diarization_unavailable audio=%s reason=%s error_type=%s error=%s",
@@ -1263,18 +1268,63 @@ def _diarize(audio_path: pathlib.Path, segments: list[RichSegment]) -> list[Rich
     return segments
 
 
+def _load_diarization_audio(audio_path: pathlib.Path):
+    """Load audio as an in-memory ``(waveform, sample_rate)`` for pyannote.
+
+    Bypasses pyannote's default file-path decoder (torchcodec), which fails to load
+    in some CUDA images (missing ``libnvrtc``) and would silently no-op diarization.
+    soundfile (libsndfile) decodes the wav directly; the waveform is reshaped to the
+    ``(channel, time)`` tensor pyannote expects.
+    """
+    import soundfile as sf
+    import torch
+
+    data, sample_rate = sf.read(str(audio_path), dtype="float32", always_2d=True)
+    # soundfile yields (time, channel); pyannote wants (channel, time).
+    waveform = torch.from_numpy(data).transpose(0, 1).contiguous()
+    return waveform, sample_rate
+
+
+def _diarization_annotation(diar_output):
+    """The speaker ``Annotation`` from a pyannote diarization result.
+
+    pyannote 4.x returns a ``DiarizeOutput`` whose ``.speaker_diarization`` is the
+    Annotation; 3.x returned the Annotation directly. Accept either so the
+    ``.itertracks`` consumer downstream doesn't care which version is installed.
+    """
+    return getattr(diar_output, "speaker_diarization", diar_output)
+
+
+def _move_pipeline_to_device(pipeline):
+    """Move a diarization pipeline to CUDA when available — pyannote on CPU is far
+    too slow for full VODs (minutes of audio → minutes of wall-clock). Best-effort:
+    a pipeline without ``.to`` (e.g. a test fake) or a failed move stays on CPU.
+    """
+    if pipeline is None:
+        return pipeline
+    try:
+        import torch
+
+        if torch.cuda.is_available() and hasattr(pipeline, "to"):
+            pipeline.to(torch.device("cuda"))
+    except Exception:  # GPU placement is an optimisation, never a hard requirement
+        pass
+    return pipeline
+
+
 def _load_pyannote_pipeline(Pipeline, hf_token: str | None):
     model_id = "pyannote/speaker-diarization-3.1"
     token = str(hf_token or "").strip()
     if not token:
-        return Pipeline.from_pretrained(model_id)
+        return _move_pipeline_to_device(Pipeline.from_pretrained(model_id))
     try:
-        return Pipeline.from_pretrained(model_id, token=token)
+        pipeline = Pipeline.from_pretrained(model_id, token=token)
     except TypeError as exc:
         message = str(exc)
         if "token" not in message or "unexpected keyword" not in message:
             raise
-        return Pipeline.from_pretrained(model_id, use_auth_token=token)
+        pipeline = Pipeline.from_pretrained(model_id, use_auth_token=token)
+    return _move_pipeline_to_device(pipeline)
 
 
 def _diarization_failure_reason(exc: Exception) -> str:

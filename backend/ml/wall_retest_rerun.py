@@ -108,15 +108,20 @@ def build_rerun_env(
 ) -> dict[str, str]:
     """The subprocess env for a neu re-run: the two cheap levers + output redirect.
 
-    Overlays exactly three keys onto ``base_env`` — the glossary biased into
-    Whisper (``WHISPER_INITIAL_PROMPT``), diarization on
-    (``PIPELINE_ENABLE_DIARIZATION``) and the neu output dir (``STORAGE_DIR``, so
-    base stays untouched). ``WHISPER_MODEL`` is deliberately *not* set, so it
-    inherits large-v3-turbo from the base env / .env — no model flip (AC3).
+    Overlays onto ``base_env`` — the glossary biased into Whisper
+    (``WHISPER_INITIAL_PROMPT``), diarization on (``PIPELINE_ENABLE_DIARIZATION``),
+    the neu output dir (``STORAGE_DIR``, so base stays untouched), and eval-recall
+    on (``MOMENT_FINDER_EVAL_RECALL``). The last one is parity, not a lever: the
+    neu run goes through the serving worker, where the raw-recall branch and the
+    ``moments_raw.jsonl`` dump are off — but the compare harness replays that raw
+    artifact and base was an eval-capture run with it on, so without it every neu
+    dir is unreplayable and drops. ``WHISPER_MODEL`` is deliberately *not* set, so
+    it inherits large-v3-turbo from the base env / .env — no model flip (AC3).
     """
     env = dict(base_env) if base_env is not None else {}
     env["WHISPER_INITIAL_PROMPT"] = JYNXZI_GLOSSARY
     env["PIPELINE_ENABLE_DIARIZATION"] = "true"
+    env["MOMENT_FINDER_EVAL_RECALL"] = "true"
     env["STORAGE_DIR"] = str(predictions_dir)
     return env
 
@@ -159,6 +164,17 @@ def select_subset(
 # The real run_vod leaf — spawn the pipeline for one VOD with the levers on.
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _is_replayable(job_dir: pathlib.Path) -> bool:
+    """True once a neu job dir carries both debug artifacts the compare harness
+    replays — ``segments.jsonl`` (re-derived chat=/vol=) and the raw moments dump.
+    The single source of truth for "this VOD is done", used both to skip finished
+    VODs on resume and to judge a fresh run's output."""
+    debug = pathlib.Path(job_dir) / "debug"
+    return (debug / replay_harness.SEGMENTS_ARTIFACT).exists() and (
+        debug / replay_harness.RAW_MOMENTS_ARTIFACT
+    ).exists()
+
+
 def pipeline_run_vod(
     vod_id: str,
     predictions_dir: pathlib.Path,
@@ -180,24 +196,39 @@ def pipeline_run_vod(
 
     This is the heavy, network/GPU leaf the real Slice-3 run (#93) drives; the
     driver's own tests inject a fake in its place.
+
+    Resumable: a VOD whose neu dir is already replayable is returned as-is without
+    re-spawning, so a re-launched driver skips the VODs it already finished. Robust:
+    ``timeout_sec`` bounds the per-VOD wall-clock — a VOD that thrashes past it (the
+    long-VOD swap-thrash failure mode) is dropped, not left to hang the whole run.
     """
+    job_id = f"pipeline_debug_{workflow_id}_{vod_id}"
+    job_dir = pathlib.Path(predictions_dir) / job_id
+    if _is_replayable(job_dir):
+        print(f"wall_retest_rerun: vod={vod_id} already replayable — skip (resume)", file=sys.stderr)
+        return job_dir
+
     from pipeline_runner import build_subprocess_command, build_subprocess_env
 
-    job_id = f"pipeline_debug_{workflow_id}_{vod_id}"
     url = f"https://www.twitch.tv/videos/{vod_id}"
     env = build_rerun_env(predictions_dir, base_env=build_subprocess_env())
     command = build_subprocess_command(
         job_id=job_id, url=url, video_path=None, profile=profile,
         strategy={"platform": "twitch"},
     )
-    completed = subprocess.run(
-        command, cwd=str(BACKEND_ROOT), env=env,
-        capture_output=True, text=True, timeout=timeout_sec,
-    )
-    job_dir = pathlib.Path(predictions_dir) / job_id
-    replayable = (job_dir / "debug" / replay_harness.SEGMENTS_ARTIFACT).exists() and (
-        job_dir / "debug" / replay_harness.RAW_MOMENTS_ARTIFACT
-    ).exists()
+    try:
+        completed = subprocess.run(
+            command, cwd=str(BACKEND_ROOT), env=env,
+            capture_output=True, text=True, timeout=timeout_sec,
+        )
+    except subprocess.TimeoutExpired:
+        print(
+            f"wall_retest_rerun: vod={vod_id} TIMED OUT after {timeout_sec}s — drop "
+            f"(likely memory-thrash on a long VOD)",
+            file=sys.stderr,
+        )
+        return None
+    replayable = _is_replayable(job_dir)
     if completed.returncode != 0 or not replayable:
         print(
             f"wall_retest_rerun: vod={vod_id} run returncode={completed.returncode} "
@@ -225,6 +256,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--workflow-id", default="wallretest",
                         help="Job-id stem for the neu pipeline_debug_* dirs")
     parser.add_argument("--profile", default="jynxzi")
+    parser.add_argument("--vod-timeout-sec", type=float, default=5400.0,
+                        help="Per-VOD wall-clock cap (default 90 min); a VOD that "
+                             "thrashes past it is dropped, not left to hang the run")
     parser.add_argument("--dry-run", action="store_true",
                         help="Only select and print the subset; do not re-run the pipeline")
     parser.add_argument("--json", dest="output_json", action="store_true")
@@ -246,6 +280,7 @@ def main(argv: list[str] | None = None) -> int:
             return pipeline_run_vod(
                 vod_id, predictions_dir,
                 workflow_id=args.workflow_id, profile=args.profile,
+                timeout_sec=args.vod_timeout_sec,
             )
 
         rerun = rerun_subset(subset, pathlib.Path(args.predictions_dir), run_vod=_run_vod)

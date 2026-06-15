@@ -209,6 +209,52 @@ class TranscriberChunkingTests(unittest.TestCase):
             )
         )
 
+    def test_diarization_annotation_unwraps_pyannote4_diarize_output(self) -> None:
+        # pyannote 4.x returns a DiarizeOutput; the speaker Annotation (the thing
+        # with .itertracks the timeline builder needs) is .speaker_diarization.
+        annotation = object()
+
+        class _DiarizeOutput:
+            speaker_diarization = annotation
+
+        self.assertIs(transcriber._diarization_annotation(_DiarizeOutput()), annotation)
+
+    def test_diarization_annotation_passes_through_legacy_annotation(self) -> None:
+        # pyannote 3.x returned the Annotation directly (no .speaker_diarization).
+        class _Annotation:
+            def itertracks(self, yield_label=False):
+                return []
+
+        annotation = _Annotation()
+        self.assertIs(transcriber._diarization_annotation(annotation), annotation)
+
+    def test_move_pipeline_to_device_uses_cuda_when_available(self) -> None:
+        class _Pipeline:
+            moved_to = None
+
+            def to(self, device):
+                self.moved_to = device
+                return self
+
+        # torch is imported lazily inside the helper — inject a fake so the test
+        # is independent of whether a real torch/GPU is present in the test env.
+        fake_torch = types.ModuleType("torch")
+        fake_torch.cuda = types.SimpleNamespace(is_available=lambda: True)
+        fake_torch.device = lambda d: d
+
+        pipeline = _Pipeline()
+        with patch.dict(sys.modules, {"torch": fake_torch}):
+            returned = transcriber._move_pipeline_to_device(pipeline)
+
+        self.assertIs(returned, pipeline)
+        self.assertEqual(pipeline.moved_to, "cuda")
+
+    def test_move_pipeline_to_device_tolerates_pipeline_without_to(self) -> None:
+        # A fake/None pipeline (no .to) must not crash — GPU placement is best-effort.
+        sentinel = object()
+        self.assertIs(transcriber._move_pipeline_to_device(sentinel), sentinel)
+        self.assertIsNone(transcriber._move_pipeline_to_device(None))
+
 
 if __name__ == "__main__":
     unittest.main()
