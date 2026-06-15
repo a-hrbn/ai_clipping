@@ -96,7 +96,7 @@ def _log_cut(cut: ShortlistCut) -> None:
 def judge_shortlist_rerank(
     judge: RerankFn,
     *,
-    depth: int = DEFAULT_SHORTLIST_DEPTH,
+    depth: int | None = DEFAULT_SHORTLIST_DEPTH,
     on_cut: OnCutFn | None = None,
 ) -> RankScoreFn:
     """Scope a per-candidate judge to the deduped top-``depth``, cutting the tail.
@@ -107,6 +107,12 @@ def judge_shortlist_rerank(
     shortlist positions. Candidates ranked beyond ``depth`` are cut: never scored,
     never back-filled with a default that would distort top-k (PRD #46).
 
+    ``depth=None`` judges the WHOLE deduped pool — no top-N cut (#98). The
+    archetype re-test runs both arms at full depth so every ``clean_but_buried`` gold
+    reaches the judge regardless of rank (a 200-cut hid 16/50 of them on gold∪silver);
+    the cut record then reads ``cut=0`` and ``scored==pool_size``, making the
+    cut-removal legible rather than silent.
+
     Both reductions are surfaced through ``on_cut`` (default: a structured log):
     the depth ``cut`` AND the ``judge_dropped`` count of shortlisted candidates the
     fail-closed judge did not score — so a truncated response never reads as
@@ -115,13 +121,13 @@ def judge_shortlist_rerank(
 
     def _rank_score_fn(rows: list[Row]) -> list[Row]:
         ranked = _rank_post_processed_rows(rows)
-        shortlist = ranked[:depth]
+        shortlist = ranked if depth is None else ranked[:depth]
         scored = judge(shortlist)
         (on_cut or _log_cut)({
             "pool_size": len(ranked),
             "depth": depth,
             "shortlist_size": len(shortlist),
-            "cut": max(0, len(ranked) - depth),
+            "cut": 0 if depth is None else max(0, len(ranked) - depth),
             "scored": len(scored),
             "judge_dropped": len(shortlist) - len(scored),
         })

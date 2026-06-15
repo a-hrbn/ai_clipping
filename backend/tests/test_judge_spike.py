@@ -99,6 +99,36 @@ def test_shortlist_rerank_surfaces_the_cut_not_silently() -> None:
     }
 
 
+def test_shortlist_rerank_depth_none_scores_the_full_pool_with_no_cut() -> None:
+    # depth=None (#98): the WHOLE deduped pool is judged — no top-N cut — so every
+    # clean_but_buried gold reaches the judge regardless of rank (a 200-cut hid 16/50
+    # of them). The cut record makes the cut-removal legible: scored == pool_size.
+    rows = [
+        _row(start=100.0, end=120.0, composite=9.0),
+        _row(start=200.0, end=220.0, composite=7.0),
+        _row(start=300.0, end=320.0, composite=5.0),
+        _row(start=400.0, end=420.0, composite=3.0),
+        _row(start=500.0, end=520.0, composite=1.0),
+    ]
+    judge = repost_virality_judge.fake_repost_virality_judge(
+        {1: 0.9, 2: 0.8, 3: 0.7, 4: 0.6, 5: 0.5})
+    cuts: list[dict] = []
+    rank_score_fn = judge_spike.judge_shortlist_rerank(judge, depth=None, on_cut=cuts.append)
+
+    out = rank_score_fn([dict(r) for r in rows])
+
+    # All 5 scored — even the deepest-ranked candidate (rank 5) survives, never cut.
+    assert len(out) == 5
+    assert cuts[0] == {
+        "pool_size": 5,
+        "depth": None,
+        "shortlist_size": 5,
+        "cut": 0,
+        "scored": 5,
+        "judge_dropped": 0,
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Slice 3 — a persisted raw response re-evaluates for free (no re-pay)
 # ─────────────────────────────────────────────────────────────────────────────

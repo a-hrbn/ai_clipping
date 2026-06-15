@@ -334,3 +334,405 @@ def test_replay_load_inputs_surfaces_a_vod_with_no_persisted_raw_as_a_gap(tmp_pa
     # returns None (a surfaced coverage gap), never a re-priced call.
     load = arm_a.replay_load_inputs(tmp_path / "storage", tmp_path)
     assert load("never_judged") is None
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Issue #98 — Arm B (Archetype-Rubric) + the combined-tier B-vs-A verdict.
+# Arm B is the archetype arm: the SAME neutral base as Arm A + the 8 Jynxzi
+# archetypes injected (the single isolated variable). The verdict reads combined
+# (gold∪silver) floor recall@20 from both arms and gates on a pre-fixed +0.03 cut.
+# ═════════════════════════════════════════════════════════════════════════════
+
+# A small, deterministic archetype fixture — the prompt builder takes archetypes as
+# a parameter, so the unit test is not coupled to the real 8-archetype profile.
+_ARCHETYPES = [
+    {"name": "BALRIGHT_VERBAL_TIC", "description": "his signature catchphrase moment",
+     "transcript_signals": ["says balright", "rapid-fire verbal tic"], "weight": 0.3},
+    {"name": "MOD_TROLL_BETRAYAL", "description": "a mod turns on him mid-stream",
+     "transcript_signals": ["mod betrays him"], "weight": 0.2},
+]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Slice 8 — Arm B's archetype prompt: the neutral base + the archetypes (name +
+# description + transcript_signals via render_profile_rules) + the score-higher
+# instruction; the block lives ONLY in Arm B, never in Arm A's neutral prompt.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_archetype_prompt_injects_archetypes_and_score_higher_on_the_neutral_base() -> None:
+    rows = [_row(start=100.0, end=120.0, text="he calmly explains the en passant trap")]
+
+    prompt = arm_a.build_archetype_judge_prompt(rows, archetypes=_ARCHETYPES)
+
+    # SAME neutral base: still transcript-fed, score-only, 0-1, the same response contract.
+    assert "he calmly explains the en passant trap" in prompt
+    assert '"scores"' in prompt and '"repost_virality"' in prompt
+    assert "0.0" in prompt and "1.0" in prompt
+    assert '"rationale"' not in prompt
+    # The archetypes: name + description + transcript_signals, rendered via the SAME
+    # render_profile_rules the serving finder uses ("listen for:" is its signal format).
+    assert "BALRIGHT_VERBAL_TIC" in prompt and "his signature catchphrase moment" in prompt
+    assert "says balright" in prompt  # a transcript_signal made it in
+    assert "MOD_TROLL_BETRAYAL" in prompt
+    assert "listen for:" in prompt
+    # The single-variable instruction: reward a transcript that matches an archetype.
+    assert "archetype" in prompt.lower()
+    assert "higher" in prompt.lower()
+
+
+def test_archetype_block_appears_only_in_arm_b_never_in_arm_a() -> None:
+    rows = [_row(start=100.0, end=120.0, text="content")]
+
+    arm_b_prompt = arm_a.build_archetype_judge_prompt(rows, archetypes=_ARCHETYPES)
+    arm_a_prompt = arm_a.build_neutral_judge_prompt(rows)
+
+    # The isolated variable: the archetype block is in B and absent from A — same base,
+    # one difference. (Arm A's own neutrality is locked by its Slice-1 test above.)
+    assert "BALRIGHT_VERBAL_TIC" in arm_b_prompt
+    assert "BALRIGHT_VERBAL_TIC" not in arm_a_prompt
+    assert "archetype" not in arm_a_prompt.lower()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Slice 9 — the combined-tier verdict gate: B − A on combined (gold∪silver) floor
+# recall@20, against the pre-fixed +0.03 cut; fail-closed when unmeasurable.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _arm_floor(floor20: float | None) -> dict:
+    """The slice of a directional_eval.run result the combined-tier gate reads — the
+    combined (gold∪silver) floor recall@20."""
+    return {"floor": {"recall": {"20": floor20}}}
+
+
+def test_combined_gate_passes_iff_floor_recall_clears_the_prefixed_cut() -> None:
+    # The cut is pre-fixed IN CODE (+0.03) — read explicitly, never rationalised after.
+    assert arm_a.COMBINED_GATE_CUT == 0.03
+
+    # Exactly +0.03 (B 0.40 − A 0.37) clears the cut → PASS. The gate reads the
+    # combined floor (run_arm scores over gold∪silver, equally weighted).
+    gate = arm_a.evaluate_combined_gate(_arm_floor(0.40), _arm_floor(0.37))
+
+    assert gate["passed"] is True
+    assert gate["k"] == 20
+    assert gate["cut"] == 0.03
+    assert gate["combined_floor_recall_at_20"] == {"current": 0.40, "baseline": 0.37, "delta": 0.03}
+    assert "PASS" in gate["reason"]
+
+
+def test_combined_gate_is_no_go_when_the_rise_is_below_the_cut() -> None:
+    # +0.02 (< +0.03) → NO-GO even though recall rose — the cut is the bar, not "> 0".
+    gate = arm_a.evaluate_combined_gate(_arm_floor(0.39), _arm_floor(0.37))
+
+    assert gate["passed"] is False
+    assert gate["combined_floor_recall_at_20"]["delta"] == 0.02
+    assert "NO-GO" in gate["reason"]
+
+
+def test_combined_gate_fails_closed_when_a_recall_is_unmeasurable() -> None:
+    # A missing recall on either side is never read as an improvement (fail-closed).
+    gate = arm_a.evaluate_combined_gate(_arm_floor(0.50), _arm_floor(None))
+
+    assert gate["passed"] is False
+    assert gate["combined_floor_recall_at_20"]["delta"] is None
+    assert "NO-GO" in gate["reason"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Slice 10 — per-gold moves: exactly the golds served in B's top-20 but not A's.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _gt_hit(gt_index: int, desc: str, views: float, hit_rank: int | None) -> dict:
+    """One row of a directional_eval per-VOD gt-hit table (the move-diff reads these)."""
+    return {
+        "gt_index": gt_index, "gt_start": 0.0, "gt_end": 0.0,
+        "desc": desc, "views": views,
+        "hit": hit_rank is not None, "hit_rank": hit_rank,
+    }
+
+
+def test_per_gold_moves_lists_exactly_golds_served_in_b_not_a_ordered_by_views() -> None:
+    # Arm A served only "reveal"; "buried-low"/"buried-high"/"deep" were missed by A.
+    arm_a_res = {"per_vod": [
+        {"vod_id": "v1", "gt_hits": [
+            _gt_hit(0, "reveal", 1_000_000.0, 5),       # served in A AND B → not a move
+            _gt_hit(1, "buried-low", 200_000.0, None),  # missed in A, served in B → MOVE
+            _gt_hit(2, "deep", 800_000.0, None),        # missed in A AND B → not a move
+        ]},
+        {"vod_id": "v2", "gt_hits": [
+            _gt_hit(0, "buried-high", 900_000.0, None),  # missed in A, served in B → MOVE
+        ]},
+    ]}
+    arm_b_res = {"per_vod": [
+        {"vod_id": "v1", "gt_hits": [
+            _gt_hit(0, "reveal", 1_000_000.0, 3),
+            _gt_hit(1, "buried-low", 200_000.0, 8),
+            _gt_hit(2, "deep", 800_000.0, None),
+        ]},
+        {"vod_id": "v2", "gt_hits": [
+            _gt_hit(0, "buried-high", 900_000.0, 12),
+        ]},
+    ]}
+
+    moves = arm_a.per_gold_moves(arm_b_res, arm_a_res)
+
+    # Exactly the two golds B served in its top-20 that A did not — highest views first,
+    # each carrying A's rank (None when A never served it) and B's new rank.
+    assert [m["desc"] for m in moves] == ["buried-high", "buried-low"]
+    assert moves[0] == {
+        "vod_id": "v2", "gt_index": 0, "desc": "buried-high",
+        "views": 900_000.0, "a_rank": None, "b_rank": 12,
+    }
+    assert moves[1]["vod_id"] == "v1"
+    assert moves[1]["a_rank"] is None and moves[1]["b_rank"] == 8
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Slice 11 — read-only breakdowns: gold-only, silver-only, combined-headline
+# recall@20 (carried, not gated). Re-scored per tier from each arm's predictions.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_BREAKDOWN_MANIFEST = {
+    "v1": [
+        {"gt_tier": "gold", "start": 100.0, "end": 120.0, "views": 1_400_000.0,
+         "desc": "G", "source_url": "x"},
+        {"gt_tier": "silver", "start": 300.0, "end": 330.0, "views": 50_000.0,
+         "desc": "S", "source_url": "x"},
+    ],
+}
+
+
+def _pred(start: float, end: float) -> dict:
+    return {"start_time": start, "end_time": end}
+
+
+def test_breakdowns_carry_gold_only_silver_only_and_combined_headline_recall() -> None:
+    # Arm A serves only the gold; Arm B serves gold + silver (the archetype rubric
+    # lifted the silver into the top-20). Predictions double as the raw pool, so each
+    # VOD is scored (not a coverage gap).
+    arm_a_res = {
+        "final_by_vod": {"v1": [_pred(100.0, 120.0)]},
+        "raw_by_vod": {"v1": [_pred(100.0, 120.0)]},
+        "headline": {"recall": {"20": 1.0}},  # the 1.4M gold is in the served top-20
+    }
+    arm_b_res = {
+        "final_by_vod": {"v1": [_pred(100.0, 120.0), _pred(300.0, 330.0)]},
+        "raw_by_vod": {"v1": [_pred(100.0, 120.0), _pred(300.0, 330.0)]},
+        "headline": {"recall": {"20": 1.0}},
+    }
+
+    breakdowns = arm_a.build_breakdowns(_BREAKDOWN_MANIFEST, ["v1"], arm_b_res, arm_a_res)
+
+    # gold-only: both arms serve the gold → 1.0 each, no move.
+    assert breakdowns["gold_only_recall_at_20"] == {"current": 1.0, "baseline": 1.0, "delta": 0.0}
+    # silver-only: A misses the silver (0.0), B serves it (1.0) → +1.0. This is the
+    # read-only colour the combined gate's headline number hides.
+    assert breakdowns["silver_only_recall_at_20"] == {"current": 1.0, "baseline": 0.0, "delta": 1.0}
+    # combined-headline: read straight from each arm's headline tier (views ≥ 100k).
+    assert breakdowns["combined_headline_recall_at_20"] == {"current": 1.0, "baseline": 1.0, "delta": 0.0}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Slice 12 — run_verdict end-to-end: both arms at FULL depth (no top-N cut), the
+# pre-fixed gate, breakdowns, and per-gold moves, all from real arm results.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _verdict_segments() -> list[RichSegment]:
+    # Four well-separated candidate windows, each its own segment pair, so snap lands
+    # cleanly and all four survive enforce_diversity.
+    return [
+        RichSegment(start=100.0, end=110.0, text="Gold one."),
+        RichSegment(start=110.0, end=120.0, text="It lands."),
+        RichSegment(start=300.0, end=315.0, text="Silver beat."),
+        RichSegment(start=315.0, end=330.0, text="It continues."),
+        RichSegment(start=900.0, end=910.0, text="Junk one."),
+        RichSegment(start=910.0, end=920.0, text="More junk."),
+        RichSegment(start=1100.0, end=1115.0, text="Junk two."),
+        RichSegment(start=1115.0, end=1130.0, text="Yet more junk."),
+    ]
+
+
+def _verdict_raw_rows() -> list[dict]:
+    # Composites give a clean rank order C1>C2>C3>C4, so the judge's 1-based ids map to
+    # id1→C1[100-120], id2→C2[300-330], id3→C3[900-920], id4→C4[1100-1130].
+    return [
+        _row(start=100.0, end=120.0, composite=8.0),    # C1 — covers the gold G1
+        _row(start=300.0, end=330.0, composite=6.0),    # C2 — covers the silver G2
+        _row(start=900.0, end=920.0, composite=4.0),    # C3 — junk (no gold here)
+        _row(start=1100.0, end=1130.0, composite=2.0),  # C4 — junk
+    ]
+
+
+# gold∪silver population = 2 (one gold G1 at 1.4M, one silver G2 at 50k).
+_VERDICT_MANIFEST = {
+    "v1": [
+        {"gt_tier": "gold", "start": 100.0, "end": 120.0, "views": 1_400_000.0,
+         "desc": "G1", "source_url": "x"},
+        {"gt_tier": "silver", "start": 300.0, "end": 330.0, "views": 50_000.0,
+         "desc": "G2", "source_url": "x"},
+    ],
+}
+
+# Two canned judge verdicts addressed by the composite rank ids. SERVE_JUNK lifts the
+# two junk candidates (ids 3,4) to the top; SERVE_GOLDS lifts the gold-covering ones.
+_SERVE_JUNK = (
+    '{"scores": [{"id": 1, "repost_virality": 0.1}, {"id": 2, "repost_virality": 0.1}, '
+    '{"id": 3, "repost_virality": 0.9}, {"id": 4, "repost_virality": 0.8}]}'
+)
+_SERVE_GOLDS = (
+    '{"scores": [{"id": 1, "repost_virality": 0.9}, {"id": 2, "repost_virality": 0.8}, '
+    '{"id": 3, "repost_virality": 0.1}, {"id": 4, "repost_virality": 0.1}]}'
+)
+
+
+def _verdict_load_inputs(vod_id: str):
+    return (_verdict_raw_rows(), _verdict_segments()) if vod_id == "v1" else None
+
+
+def _make_judge_serving(raw: str):
+    """A per-VOD make_judge whose canned judge verdict is ``raw`` (network-free)."""
+    def _make(_vod_id: str, segments: list):
+        return arm_a.neutral_repost_judge(
+            call_provider=arm_a.fake_gemini_provider(raw),
+            persist_raw=lambda _t: None,
+            segments=segments,
+        )
+    return _make
+
+
+def test_run_verdict_passes_when_arm_b_lifts_golds_into_the_served_top_20() -> None:
+    # Arm A serves the two junk candidates (0 golds); Arm B serves the gold-covering
+    # candidates (both golds). top_k=2 so the judge ranking actually decides the served set.
+    verdict = arm_a.run_verdict(
+        ["v1"], _VERDICT_MANIFEST,
+        make_judge_a=_make_judge_serving(_SERVE_JUNK),
+        make_judge_b=_make_judge_serving(_SERVE_GOLDS),
+        load_inputs_a=_verdict_load_inputs,
+        top_k=2,
+    )
+
+    # Both arms judged the FULL deduped pool — no top-N cut. The cut-removal is legible:
+    # scored == pool_size, cut 0, depth None (#98 AC).
+    assert verdict["depth"] is None
+    cut_b = verdict["arm_b"]["shortlist_cuts"]["v1"]
+    assert cut_b["pool_size"] == 4 and cut_b["scored"] == 4 and cut_b["cut"] == 0
+    assert cut_b["depth"] is None
+
+    # The gate: B combined floor recall@20 = 1.0, A = 0.0 → +1.0 ≥ +0.03 → PASS.
+    assert verdict["gate"]["passed"] is True
+    assert verdict["gate"]["combined_floor_recall_at_20"] == {"current": 1.0, "baseline": 0.0, "delta": 1.0}
+
+    # Read-only breakdowns colour the move: both the gold and the silver tier rose.
+    bd = verdict["breakdowns"]
+    assert bd["gold_only_recall_at_20"]["delta"] == 1.0
+    assert bd["silver_only_recall_at_20"]["delta"] == 1.0
+    assert bd["combined_headline_recall_at_20"]["delta"] == 1.0
+
+    # per-gold moves: exactly G1 and G2 entered B's top-20 (not A's), biggest views first.
+    moves = verdict["per_gold_moves"]
+    assert [m["desc"] for m in moves] == ["G1", "G2"]
+    assert moves[0]["a_rank"] is None and moves[0]["b_rank"] == 1
+    assert moves[1]["a_rank"] is None and moves[1]["b_rank"] == 2
+
+
+def test_run_verdict_is_no_go_when_arm_b_lifts_nothing_over_arm_a() -> None:
+    # Both arms serve junk → identical 0.0 combined floor recall → delta 0 < +0.03 → NO-GO.
+    verdict = arm_a.run_verdict(
+        ["v1"], _VERDICT_MANIFEST,
+        make_judge_a=_make_judge_serving(_SERVE_JUNK),
+        make_judge_b=_make_judge_serving(_SERVE_JUNK),
+        load_inputs_a=_verdict_load_inputs,
+        top_k=2,
+    )
+
+    assert verdict["gate"]["passed"] is False
+    assert verdict["gate"]["combined_floor_recall_at_20"]["delta"] == 0.0
+    assert "NO-GO" in verdict["gate"]["reason"]
+    # No gold moved into B's top-20 that wasn't already in A's.
+    assert verdict["per_gold_moves"] == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Slice 13 — the Arm B make_judge wiring: the archetype prompt builder + the 8
+# committed Jynxzi archetypes flow into the real judge.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_load_jynxzi_archetypes_returns_the_eight_committed_archetypes() -> None:
+    archetypes = arm_a.load_jynxzi_archetypes()
+
+    # The 8 Jynxzi archetypes the AC pins, each with the fields render_profile_rules
+    # renders (name + description + transcript_signals).
+    assert len(archetypes) == 8
+    assert all(
+        a.get("name") and a.get("description") and a.get("transcript_signals")
+        for a in archetypes
+    )
+
+
+def test_paid_make_judge_with_archetype_builder_feeds_archetypes_into_the_prompt(tmp_path) -> None:
+    captured: dict[str, str] = {}
+
+    def recording(prompt: str) -> str:
+        captured["prompt"] = prompt
+        return '{"scores": [{"id": 1, "repost_virality": 0.5}]}'
+
+    make = arm_a.paid_make_judge(
+        tmp_path, provider=recording,
+        build_prompt=arm_a.archetype_prompt_builder(_ARCHETYPES))
+    judge = make("v1", _arm_segments())
+    judge([_row(start=100.0, end=120.0)])
+
+    # Arm B's real make_judge injects the archetype block into the judge prompt; a
+    # neutral make_judge (the default) would not (Arm A's neutrality is locked elsewhere).
+    assert "BALRIGHT_VERBAL_TIC" in captured["prompt"]
+    assert "listen for:" in captured["prompt"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Slice 14 — the verdict replays bit-for-bit network-free from the persisted A and
+# B raw responses (each arm's own artifact dir).
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_verdict_paid_persists_both_arms_then_replays_bit_for_bit_without_paying(tmp_path) -> None:
+    arm_a_dir = tmp_path / "arm_a"
+    arm_b_dir = tmp_path / "arm_b"
+    a_calls: list[str] = []
+    b_calls: list[str] = []
+
+    def rec_a(_prompt: str) -> str:
+        a_calls.append("a")
+        return _SERVE_JUNK
+
+    def rec_b(_prompt: str) -> str:
+        b_calls.append("b")
+        return _SERVE_GOLDS
+
+    paid = arm_a.run_verdict(
+        ["v1"], _VERDICT_MANIFEST,
+        make_judge_a=arm_a.paid_make_judge(arm_a_dir, provider=rec_a),
+        make_judge_b=arm_a.paid_make_judge(
+            arm_b_dir, provider=rec_b,
+            build_prompt=arm_a.archetype_prompt_builder(_ARCHETYPES)),
+        load_inputs_a=_verdict_load_inputs,
+        top_k=2,
+    )
+
+    # Each arm persisted its own unparsed raw to its OWN dir — the replayable artifacts.
+    assert (arm_a_dir / "v1.raw.txt").read_text(encoding="utf-8") == _SERVE_JUNK
+    assert (arm_b_dir / "v1.raw.txt").read_text(encoding="utf-8") == _SERVE_GOLDS
+    assert a_calls == ["a"] and b_calls == ["b"]  # one paid call per arm per VOD
+    assert paid["gate"]["passed"] is True
+
+    # Replay: each arm reads ITS persisted raw; neither provider fires again.
+    before_a, before_b = list(a_calls), list(b_calls)
+    replay = arm_a.run_verdict(
+        ["v1"], _VERDICT_MANIFEST,
+        make_judge_a=arm_a.replay_make_judge(arm_a_dir),
+        make_judge_b=arm_a.replay_make_judge(
+            arm_b_dir, build_prompt=arm_a.archetype_prompt_builder(_ARCHETYPES)),
+        load_inputs_a=_verdict_load_inputs,
+        top_k=2,
+    )
+
+    assert a_calls == before_a and b_calls == before_b  # no new paid calls during replay
+    # Identical inputs + identical persisted A and B responses ⇒ identical verdict.
+    assert replay == paid
