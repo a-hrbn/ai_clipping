@@ -49,6 +49,27 @@ def _video_output_kwargs(video_path: pathlib.Path) -> dict:
     return {"vcodec": "libx264", "preset": "ultrafast", "acodec": "aac", "movflags": "+faststart"}
 
 
+def cut_raw_segment(
+    video_path: pathlib.Path, start: float, end: float, output_path: pathlib.Path
+) -> None:
+    """Cut ``[start, end)`` of ``video_path`` into ``output_path`` as a raw 16:9 clip.
+
+    The same ffmpeg ``ss``/``t`` invocation + :func:`_video_output_kwargs` ``cut_clips``
+    uses, but to an EXPLICIT ``output_path`` instead of ``video_path.parent/clips`` — so the
+    archetype-retest render adapter (#99) can point two arms at distinct
+    ``storage_dir/<arm_job_id>/clips/`` dirs without colliding. No reframe, no packaging, no
+    copy: it re-reads the cached video in place.
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    (
+        ffmpeg
+        .input(str(video_path), ss=start, t=end - start)
+        .output(str(output_path), **_video_output_kwargs(video_path))
+        .overwrite_output()
+        .run(quiet=True)
+    )
+
+
 def cut_clips(
     video_path: pathlib.Path,
     moments: list[Moment],

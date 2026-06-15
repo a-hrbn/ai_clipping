@@ -736,3 +736,250 @@ def test_verdict_paid_persists_both_arms_then_replays_bit_for_bit_without_paying
     assert a_calls == before_a and b_calls == before_b  # no new paid calls during replay
     # Identical inputs + identical persisted A and B responses ⇒ identical verdict.
     assert replay == paid
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Issue #99 — Render-Step: each arm's gated top-20 as raw 16:9 cuts → frontend jobs.
+# The render adapter cuts the EXACT replay_postprocess top-20 (no reframe/packaging,
+# no video copy) into storage_dir/<arm_job_id>/clips/, registers one frontend job per
+# (VOD, arm), and surfaces VODs with no local video.mp4 instead of dropping them. The
+# real ffmpeg cutter / jobs.json registry are injected seams — these tests are
+# ffmpeg-free and disk-light (a fake cutter, an in-memory store + register sink).
+# ═════════════════════════════════════════════════════════════════════════════
+
+import json
+
+from models import ClipResult, JobStatus
+from services.job_artifact_store import InMemoryJobArtifactStore
+
+
+def _top20(*windows: tuple) -> list[dict]:
+    """A gated top-20 the renderer consumes: post-processed rows in product-rank order."""
+    return [_row(start=s, end=e, composite=c) for (s, e, c) in windows]
+
+
+def _prebuilt_clips(job_id: str, *windows: tuple) -> list[ClipResult]:
+    """ClipResults built WITHOUT a cut — so a registration test never renders (#99 AC)."""
+    return [
+        ClipResult(
+            candidate_id=f"llm_moment_{rank:02d}", filename=f"clip_{rank:02d}.mp4",
+            download_url=f"/static/{job_id}/clips/clip_{rank:02d}.mp4",
+            start_time=s, end_time=e, viral_score=c, reason="")
+        for rank, (s, e, c) in enumerate(windows, start=1)
+    ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Slice 1 — render_arm_clips cuts the EXACT top-20 windows to clip_NN.mp4 via the
+# injected cutter, returning ClipResults with the existing /static/<job>/clips/ URLs.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_render_arm_clips_cuts_the_exact_top20_windows_to_clip_nn_with_static_urls(tmp_path) -> None:
+    clips_dir = tmp_path / "archetype_retest_v1_A" / "clips"
+    video = tmp_path / "_download_cache" / "twitch" / "vod_v1.mp4"
+    top20 = _top20((100.0, 120.0, 8.0), (300.0, 330.0, 6.0))
+
+    cuts: list[tuple] = []
+
+    def fake_cut_segment(video_path, start, end, output_path) -> None:
+        cuts.append((video_path, start, end, output_path))
+
+    clips = arm_a.render_arm_clips(
+        video, top20, "archetype_retest_v1_A", clips_dir, cut_segment=fake_cut_segment)
+
+    # Each top-20 moment is cut to clip_NN.mp4 (1-based rank), reading the cached video
+    # IN PLACE (the same video_path every cut — no copy) at its EXACT gated window.
+    assert [c[0] for c in cuts] == [video, video]
+    assert [(c[1], c[2]) for c in cuts] == [(100.0, 120.0), (300.0, 330.0)]
+    assert [c[3] for c in cuts] == [clips_dir / "clip_01.mp4", clips_dir / "clip_02.mp4"]
+
+    # The ClipResults the existing frontend viewer renders: clip_NN filenames, the
+    # /static/<job_id>/clips/ route URLs, and the exact gated windows in rank order.
+    assert [c.filename for c in clips] == ["clip_01.mp4", "clip_02.mp4"]
+    assert [c.download_url for c in clips] == [
+        "/static/archetype_retest_v1_A/clips/clip_01.mp4",
+        "/static/archetype_retest_v1_A/clips/clip_02.mp4",
+    ]
+    assert [(c.start_time, c.end_time) for c in clips] == [(100.0, 120.0), (300.0, 330.0)]
+    # The candidate_id matches the serving pipeline's final-moment shape (llm_moment_NN).
+    assert [c.candidate_id for c in clips] == ["llm_moment_01", "llm_moment_02"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Slice 2 — register_arm_job writes final_moments = the gated top-20 + registers a
+# done JobStatus carrying the ClipResults. Verifiable WITHOUT a render (#99 AC).
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_register_arm_job_writes_final_moments_and_a_done_job_without_rendering() -> None:
+    store = InMemoryJobArtifactStore()
+    registered: list = []
+    top20 = _top20((100.0, 120.0, 8.0), (300.0, 330.0, 6.0))
+    clips = _prebuilt_clips("archetype_retest_v1_A", (100.0, 120.0, 8.0), (300.0, 330.0, 6.0))
+
+    job = arm_a.register_arm_job(
+        "archetype_retest_v1_A", top20, clips,
+        store=store, register_job=registered.append, profile="archetype_retest_A")
+
+    # final_moments = the gated top-20 in the SAME serving shape ({moments, count}) the
+    # diagnostics endpoint already reads — exactly what the recall measured.
+    fm = store.read_final_moments("archetype_retest_v1_A")
+    assert fm["count"] == 2
+    assert [(m["start_time"], m["end_time"]) for m in fm["moments"]] == [(100.0, 120.0), (300.0, 330.0)]
+    assert [m["candidate_id"] for m in fm["moments"]] == ["llm_moment_01", "llm_moment_02"]
+
+    # A done job carrying the 20 ClipResults is registered through the injected sink —
+    # no cut happened here (the clips were pre-built), proving registration needs no render.
+    assert registered == [job]
+    assert job.job_id == "archetype_retest_v1_A"
+    assert job.status == "done" and job.progress_pct == 100
+    assert job.profile == "archetype_retest_A"
+    assert [c.download_url for c in job.clips] == [
+        "/static/archetype_retest_v1_A/clips/clip_01.mp4",
+        "/static/archetype_retest_v1_A/clips/clip_02.mp4",
+    ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Slice 3 — render_and_register_arm: A and B never collide (distinct job ids, clip
+# dirs, /static URLs); a VOD with no local video.mp4 is a surfaced gap, not dropped.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_render_and_register_arm_keeps_a_and_b_apart_and_surfaces_a_missing_video(tmp_path) -> None:
+    storage = tmp_path / "storage"
+    store = InMemoryJobArtifactStore()
+    top20 = _top20((100.0, 120.0, 8.0), (300.0, 330.0, 6.0))
+
+    cuts: list = []
+    registered: list = []
+    # v1 has a cached video; v2 does NOT — the surfaced render gap.
+    videos = {"v1": tmp_path / "_download_cache" / "twitch" / "vod_v1.mp4"}
+
+    def common() -> dict:
+        return dict(
+            storage_dir=storage, store=store, resolve_video=videos.get,
+            cut_segment=lambda _v, _s, _e, out: cuts.append(out),
+            register_job=registered.append)
+
+    res_a = arm_a.render_and_register_arm("v1", "A", top20, **common())
+    res_b = arm_a.render_and_register_arm("v1", "B", top20, **common())
+    res_gap = arm_a.render_and_register_arm("v2", "A", top20, **common())
+
+    # Collision-free: A and B get distinct archetype_retest_<vod>_<A|B> job ids…
+    assert res_a["job_id"] == "archetype_retest_v1_A"
+    assert res_b["job_id"] == "archetype_retest_v1_B"
+    assert res_a["rendered"] and res_b["rendered"]
+    assert {j.job_id for j in registered} == {"archetype_retest_v1_A", "archetype_retest_v1_B"}
+    # …and each arm's cuts land under ITS OWN storage_dir/<job_id>/clips/ (no shared dir).
+    assert {c.parent for c in cuts} == {
+        storage / "archetype_retest_v1_A" / "clips",
+        storage / "archetype_retest_v1_B" / "clips",
+    }
+    # A's registered clip URLs stay in A's namespace — they never point at B's.
+    a_job = next(j for j in registered if j.job_id == "archetype_retest_v1_A")
+    assert all("/static/archetype_retest_v1_A/clips/" in c.download_url for c in a_job.clips)
+    assert store.read_final_moments("archetype_retest_v1_B")["count"] == 2
+
+    # The VOD with no local video is a SURFACED gap — no cut, no job, named with the reason.
+    assert res_gap == {
+        "vod_id": "v2", "arm": "A", "job_id": "archetype_retest_v2_A",
+        "rendered": False, "reason": "no_local_video", "clip_count": 0,
+    }
+    assert "archetype_retest_v2_A" not in {j.job_id for j in registered}
+    assert store.read_final_moments("archetype_retest_v2_A") is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Slice 4 — render_both_arms: one frontend job per (VOD, arm), A and B side by side,
+# each rendering ITS OWN served top-20; VODs with no local video surfaced as gaps.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_render_both_arms_registers_one_job_per_vod_arm_and_surfaces_gaps(tmp_path) -> None:
+    storage = tmp_path / "storage"
+    store = InMemoryJobArtifactStore()
+    # Each arm serves its OWN top-20 — A's windows differ from B's (the whole point of the
+    # side-by-side review: the archetype rubric picked a different served set).
+    final_a = {"v1": _top20((100.0, 120.0, 8.0), (300.0, 330.0, 6.0)),
+               "v2": _top20((10.0, 30.0, 5.0))}
+    final_b = {"v1": _top20((500.0, 520.0, 9.0), (700.0, 720.0, 7.0)),
+               "v2": _top20((10.0, 30.0, 5.0))}
+    videos = {"v1": tmp_path / "vod_v1.mp4"}  # v2 has NO local video
+
+    cuts: list = []
+    registered: list = []
+    summary = arm_a.render_both_arms(
+        final_a, final_b,
+        storage_dir=storage, store=store, resolve_video=videos.get,
+        cut_segment=lambda _v, _s, _e, out: cuts.append(out),
+        register_job=registered.append)
+
+    # One frontend job per (VOD, arm) with a local video — A and B side by side for v1.
+    assert set(summary["registered_job_ids"]) == {"archetype_retest_v1_A", "archetype_retest_v1_B"}
+    assert {j.job_id for j in registered} == {"archetype_retest_v1_A", "archetype_retest_v1_B"}
+    # Each arm rendered ITS OWN served top-20 into its own final_moments (A's ≠ B's).
+    a_fm = store.read_final_moments("archetype_retest_v1_A")
+    b_fm = store.read_final_moments("archetype_retest_v1_B")
+    assert [(m["start_time"], m["end_time"]) for m in a_fm["moments"]] == [(100.0, 120.0), (300.0, 330.0)]
+    assert [(m["start_time"], m["end_time"]) for m in b_fm["moments"]] == [(500.0, 520.0), (700.0, 720.0)]
+    # v2 (no local video) is surfaced for BOTH arms — never silently dropped.
+    assert set(summary["render_gap_jobs"]) == {"archetype_retest_v2_A", "archetype_retest_v2_B"}
+    assert all(o["reason"] == "no_local_video"
+               for o in summary["outcomes"] if not o["rendered"])
+    assert not any(j.job_id.startswith("archetype_retest_v2") for j in registered)
+    # Cuts only happened for the video that exists (v1, both arms), in arm-scoped dirs.
+    assert {c.parent for c in cuts} == {
+        storage / "archetype_retest_v1_A" / "clips",
+        storage / "archetype_retest_v1_B" / "clips",
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Slice 5a — the real registry + video-resolver adapters (no ffmpeg). upsert_jobs_registry
+# merges an arm job into jobs.json without clobbering live jobs; cached_twitch_video
+# resolves the download cache, surfacing absence as None.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_upsert_jobs_registry_merges_without_clobbering_and_replaces_by_job_id(tmp_path) -> None:
+    registry = tmp_path / "jobs.json"
+    # A real serving job already in the registry — the offline render must NOT wipe it.
+    registry.write_text(
+        json.dumps([{"job_id": "real_job", "status": "done", "profile": "general"}]),
+        encoding="utf-8")
+
+    job = JobStatus(job_id="archetype_retest_v1_A", status="done",
+                    progress_pct=100, profile="archetype_retest_A")
+    arm_a.upsert_jobs_registry(registry, job)
+
+    data = json.loads(registry.read_text(encoding="utf-8"))
+    ids = [j["job_id"] for j in data]
+    # Merged: the existing live job is preserved AND the arm job is appended.
+    assert "real_job" in ids and "archetype_retest_v1_A" in ids
+    arm_row = next(j for j in data if j["job_id"] == "archetype_retest_v1_A")
+    assert arm_row["status"] == "done" and arm_row["profile"] == "archetype_retest_A"
+
+    # Re-running the render upserts by job_id — the same arm job replaces, never duplicates.
+    arm_a.upsert_jobs_registry(registry, job)
+    data2 = json.loads(registry.read_text(encoding="utf-8"))
+    assert [j["job_id"] for j in data2].count("archetype_retest_v1_A") == 1
+    assert "real_job" in [j["job_id"] for j in data2]
+
+
+def test_upsert_jobs_registry_starts_a_fresh_registry_when_absent(tmp_path) -> None:
+    registry = tmp_path / "jobs.json"  # no file yet
+    job = JobStatus(job_id="archetype_retest_v1_B", status="done",
+                    progress_pct=100, profile="archetype_retest_B")
+
+    arm_a.upsert_jobs_registry(registry, job)
+
+    data = json.loads(registry.read_text(encoding="utf-8"))
+    assert [j["job_id"] for j in data] == ["archetype_retest_v1_B"]
+
+
+def test_cached_twitch_video_resolves_the_download_cache_or_surfaces_absence(tmp_path) -> None:
+    cache = tmp_path / "_download_cache" / "twitch"
+    cache.mkdir(parents=True)
+    (cache / "vod_123.mp4").write_bytes(b"x")
+
+    # A cached VOD resolves to its in-place video.mp4 (read by the renderer, never copied)…
+    assert arm_a.cached_twitch_video("123", tmp_path) == cache / "vod_123.mp4"
+    # …and a VOD with no local video surfaces as None — the renderer turns that into a gap.
+    assert arm_a.cached_twitch_video("missing", tmp_path) is None

@@ -31,7 +31,7 @@ def _noop_progress(_fraction: float) -> None:
     pass
 
 
-def _moments_from_post_processed(rows: list[dict], platform: str) -> list[dict]:
+def moments_from_post_processed(rows: list[dict], platform: str) -> list[dict]:
     moments = []
     for i, row in enumerate(rows, start=1):
         start = float(row["start_time"])
@@ -85,7 +85,7 @@ class Clipping:
         streaming is handled inside the injected ``cut``.
         """
         progress(0.0)
-        candidates = _moments_from_post_processed(result.post_processed_moments, self._platform)
+        candidates = moments_from_post_processed(result.post_processed_moments, self._platform)
         moments = candidates[: self._top_k] if self._top_k > 0 else candidates
         self._store.write_final_moments(
             self._job_id, {"moments": moments, "count": len(moments)}

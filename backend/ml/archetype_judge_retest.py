@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import pathlib
 from typing import Callable
 
@@ -44,6 +45,8 @@ from ml import llm_moment_finder as d0
 from ml import repost_virality_judge
 from ml.repost_virality_judge import CallProviderFn, RerankFn, Row
 from ml.strong_model_window_probe import build_excerpt
+from models import ClipResult, JobStatus
+from producers.clipping import moments_from_post_processed
 
 logger = logging.getLogger(__name__)
 
@@ -621,3 +624,236 @@ def run_verdict(
         "arm_a": arm_a,
         "arm_b": arm_b,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Render-Step (#99) — each arm's gated top-20 as raw 16:9 cuts → frontend jobs
+#
+# The recall measured exactly ``replay_postprocess``'s served top-20; this renders
+# that SAME set as raw cuts and registers it as a frontend job, so the existing
+# job/clip viewer shows what the recall scored — no Pipeline-Re-Run, no reframe,
+# no video copy. The ffmpeg cutter is an injected seam (the module stays import-light
+# — ffmpeg is a Docker-only leaf), with a real default bound lazily inside Docker.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Raw 16:9 cuts deliberately carry no platform packaging (PRD #95: judge the moment
+# *selection*, not the Aufmachung — no Packaging-Confound).
+RENDER_PLATFORM = "general"
+
+# The frontend job-id namespace for an arm render: ``archetype_retest_<vod>_<A|B>``.
+# Keeps A and B in collision-free job dirs / ``/static`` URLs, and matches the static
+# route's job-id charset (alnum + ``-_``), so the existing viewer serves them unchanged.
+ARM_JOB_PREFIX = "archetype_retest"
+
+# ``vod_id -> the cached video.mp4 path, or None`` when the VOD has no local video — a
+# surfaced render gap, not a silent drop. The real adapter resolves the download cache
+# (``cached_twitch_video``); tests inject a vod→path map.
+ResolveVideoFn = Callable[[str], "pathlib.Path | None"]
+
+# ``video_path, start, end, output_path -> None`` — cut one raw 16:9 segment. The
+# real adapter is ffmpeg (``services.clipper.cut_raw_segment``); tests inject a
+# recording fake, so the renderer is exercised ffmpeg-free.
+CutSegmentFn = Callable[[pathlib.Path, float, float, pathlib.Path], None]
+
+# ``JobStatus -> None`` — the frontend-registry sink. The real adapter upserts the
+# job into ``jobs.json`` (``upsert_jobs_registry``); tests collect into a list, so
+# registration is verifiable without touching the on-disk registry.
+RegisterJobFn = Callable[[JobStatus], None]
+
+
+def _clip_result(moment: dict, *, filename: str, job_id: str, start: float, end: float) -> ClipResult:
+    """A ClipResult for one cut moment — the same fields the serving cutter emits,
+    so the existing viewer renders an arm clip exactly like a pipeline clip; only the
+    ``download_url`` points at this arm's own ``/static/<job_id>/clips/`` namespace."""
+    return ClipResult(
+        candidate_id=str(moment.get("candidate_id") or filename),
+        filename=filename,
+        download_url=f"/static/{job_id}/clips/{filename}",
+        start_time=start,
+        end_time=end,
+        viral_score=float(moment.get("viral_score") or 1.0),
+        reason=str(moment.get("reason") or ""),
+        selection_reasons=list(moment.get("selection_reasons") or []),
+        ranking_mode=moment.get("ranking_mode", "llm_moment_finder"),
+        platform=moment.get("platform", RENDER_PLATFORM),
+        variant_key=str(moment.get("variant_key") or "balanced"),
+        variant_label=moment.get("variant_label"),
+        projected_hook_score=moment.get("projected_hook_score"),
+        projected_retention_score=moment.get("projected_retention_score"),
+        composite_score=moment.get("composite_score"),
+        value_score=moment.get("value_score"),
+        trend_score=moment.get("trend_score"),
+    )
+
+
+def render_arm_clips(
+    video_path: pathlib.Path,
+    top20: list[dict],
+    job_id: str,
+    clips_dir: pathlib.Path,
+    *,
+    cut_segment: CutSegmentFn,
+) -> list[ClipResult]:
+    """Cut a gated top-20 as raw 16:9 clips into ``clips_dir/clip_NN.mp4`` → ClipResults.
+
+    ``top20`` is exactly ``replay_postprocess``'s output (the served set the recall
+    measured). ``moments_from_post_processed`` gives it the SAME final-moment shape the
+    serving pipeline writes (candidate_id ``llm_moment_NN``, viral/composite scores,
+    reason). Each moment NN is cut at its EXACT window by the injected ``cut_segment``
+    leaf-op — reading the cached video IN PLACE, no reframe/packaging, no copy — and gets
+    a ClipResult whose ``download_url`` is ``/static/<job_id>/clips/clip_NN.mp4``, the
+    exact shape the existing static route + job/clip viewer already serve.
+    """
+    moments = moments_from_post_processed(list(top20), RENDER_PLATFORM)
+    clips: list[ClipResult] = []
+    for rank, moment in enumerate(moments, start=1):
+        filename = f"clip_{rank:02d}.mp4"
+        start = float(moment["start_time"])
+        end = float(moment["end_time"])
+        cut_segment(video_path, start, end, clips_dir / filename)
+        clips.append(_clip_result(moment, filename=filename, job_id=job_id, start=start, end=end))
+    return clips
+
+
+def register_arm_job(
+    job_id: str,
+    top20: list[dict],
+    clips: list[ClipResult],
+    *,
+    store,
+    register_job: RegisterJobFn,
+    profile: str,
+) -> JobStatus:
+    """Register one (VOD, arm) as a frontend job: write ``final_moments`` + the JobStatus.
+
+    Writes ``final_moments`` = ``{"moments": <the gated top-20, serving-shaped>, "count"}``
+    via the store — the SAME artifact + shape the diagnostics endpoint already reads — and
+    registers a done JobStatus carrying the ClipResults through the injected ``register_job``
+    sink (the real one upserts ``jobs.json``). No cut happens here (the clips are passed in),
+    so registration is verifiable without rendering (#99 AC). ``profile`` labels the arm so
+    A and B are distinguishable in the viewer.
+    """
+    moments = moments_from_post_processed(list(top20), RENDER_PLATFORM)
+    store.write_final_moments(job_id, {"moments": moments, "count": len(moments)})
+    job = JobStatus(
+        job_id=job_id, status="done", progress_pct=100, profile=profile, clips=list(clips)
+    )
+    register_job(job)
+    return job
+
+
+def arm_job_id(vod_id: str, arm: str) -> str:
+    """The collision-free frontend job id for a (VOD, arm): ``archetype_retest_<vod>_<A|B>``."""
+    return f"{ARM_JOB_PREFIX}_{vod_id}_{arm}"
+
+
+def render_and_register_arm(
+    vod_id: str,
+    arm: str,
+    top20: list[dict],
+    *,
+    storage_dir: pathlib.Path,
+    store,
+    resolve_video: ResolveVideoFn,
+    cut_segment: CutSegmentFn,
+    register_job: RegisterJobFn,
+) -> dict:
+    """Render one (VOD, arm)'s gated top-20 as raw cuts and register the frontend job.
+
+    Resolves the VOD's cached ``video.mp4``; a VOD with NO local video is a SURFACED render
+    gap (``{"rendered": False, "reason": "no_local_video", …}``) — never silently dropped
+    (#99 AC). Otherwise it cuts the top-20 into ``storage_dir/<arm_job_id>/clips/`` and
+    registers the done job (final_moments + ClipResults). ``arm`` (``A``/``B``) gives A and B
+    distinct ``arm_job_id``s, clip dirs, and ``/static`` URLs, so the two never collide.
+    Returns a per-(VOD, arm) outcome row the orchestrator surfaces (rendered or gap).
+    """
+    job_id = arm_job_id(vod_id, arm)
+    video = resolve_video(vod_id)
+    if video is None:
+        return {"vod_id": vod_id, "arm": arm, "job_id": job_id,
+                "rendered": False, "reason": "no_local_video", "clip_count": 0}
+    clips_dir = pathlib.Path(storage_dir) / job_id / "clips"
+    clips = render_arm_clips(video, top20, job_id, clips_dir, cut_segment=cut_segment)
+    register_arm_job(job_id, top20, clips, store=store,
+                     register_job=register_job, profile=f"{ARM_JOB_PREFIX}_{arm}")
+    return {"vod_id": vod_id, "arm": arm, "job_id": job_id,
+            "rendered": True, "reason": None, "clip_count": len(clips)}
+
+
+def render_both_arms(
+    final_by_vod_a: dict[str, list[dict]],
+    final_by_vod_b: dict[str, list[dict]],
+    *,
+    storage_dir: pathlib.Path,
+    store,
+    resolve_video: ResolveVideoFn,
+    cut_segment: CutSegmentFn,
+    register_job: RegisterJobFn,
+) -> dict:
+    """Render BOTH arms' gated top-20s as raw cuts → one frontend job per (VOD, arm).
+
+    ``final_by_vod_a`` / ``final_by_vod_b`` are the served top-20 maps from the two arms
+    (the verdict's ``arm_a["final_by_vod"]`` / ``arm_b["final_by_vod"]``) — exactly what the
+    recall measured. For each VOD an arm served, it renders + registers that arm (``_A`` /
+    ``_B``), so the user sees A and B side by side in the existing viewer. VODs with no local
+    video are SURFACED render gaps, never silent drops. Returns the per-(VOD, arm) outcomes
+    plus the registered job ids and the surfaced render-gap job ids.
+    """
+    outcomes: list[dict] = []
+    for arm, final_by_vod in (("A", final_by_vod_a), ("B", final_by_vod_b)):
+        for vod_id, top20 in final_by_vod.items():
+            outcomes.append(render_and_register_arm(
+                vod_id, arm, top20,
+                storage_dir=storage_dir, store=store, resolve_video=resolve_video,
+                cut_segment=cut_segment, register_job=register_job))
+    return {
+        "outcomes": outcomes,
+        "registered_job_ids": [o["job_id"] for o in outcomes if o["rendered"]],
+        "render_gap_jobs": [o["job_id"] for o in outcomes if not o["rendered"]],
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Real adapters (#99) — the ffmpeg cutter wrapper, the jobs.json registry sink, and
+# the cached-video resolver the offline driver binds (the two-adapter "real" side).
+# ─────────────────────────────────────────────────────────────────────────────
+
+def upsert_jobs_registry(registry_path: pathlib.Path, job: JobStatus) -> None:
+    """Merge ``job`` into the ``jobs.json`` registry by job_id (the real register sink).
+
+    Reads the existing registry list (a missing or unparseable file starts empty — the
+    same tolerance ``job_manager._load_jobs`` applies), replaces any entry with the same
+    job_id, appends otherwise, and atomically rewrites (tempfile + ``os.replace``, mirroring
+    ``job_manager._persist_jobs``). Merging — not overwriting — means the offline render
+    leaves a running server's live jobs intact; on its next mtime reload the server picks
+    the arm jobs up and the existing job/clip viewer serves them.
+    """
+    registry_path = pathlib.Path(registry_path)
+    existing: list[dict] = []
+    if registry_path.exists():
+        try:
+            loaded = json.loads(registry_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, list):
+                existing = [row for row in loaded if isinstance(row, dict)]
+        except (OSError, json.JSONDecodeError):
+            existing = []
+    row = job.model_dump(mode="json")
+    merged = [r for r in existing if r.get("job_id") != job.job_id]
+    merged.append(row)
+
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = registry_path.parent / f"{registry_path.name}.{os.getpid()}.tmp"
+    tmp_path.write_text(json.dumps(merged, ensure_ascii=True, indent=2), encoding="utf-8")
+    os.replace(tmp_path, registry_path)
+
+
+def cached_twitch_video(vod_id: str, storage_dir: pathlib.Path) -> "pathlib.Path | None":
+    """The cached ``video.mp4`` for a Twitch VOD, or ``None`` when there is no local copy.
+
+    Resolves the download cache the serving pipeline writes
+    (``<storage_dir>/_download_cache/twitch/vod_<vod_id>.mp4`` — the layout
+    ``downloader._cache_path_for_url`` owns). ``None`` (no local video) is a SURFACED render
+    gap (the 6 VODs without a download are reported, not re-fetched), never a silent drop.
+    """
+    path = pathlib.Path(storage_dir) / "_download_cache" / "twitch" / f"vod_{vod_id}.mp4"
+    return path if path.exists() else None
