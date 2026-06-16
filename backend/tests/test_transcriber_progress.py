@@ -57,6 +57,44 @@ class TranscriberProgressTests(unittest.TestCase):
         self.assertEqual(len(result), 3)
         self.assertEqual(updates, [(1, 3, "chunk_000.wav"), (2, 3, "chunk_001.wav"), (3, 3, "chunk_002.wav")])
 
+    def test_stale_chunks_from_a_prior_longer_audio_are_not_transcribed(self) -> None:
+        # Regression: transcribing into a chunks dir that still holds a *longer*
+        # prior audio's surplus chunk must not inherit that surplus. ffmpeg's
+        # segment muxer (-y) only overwrites the files it writes, so a shorter
+        # audio leaves the prior run's higher chunks behind; globbing chunk_*.wav
+        # would then transcribe the leftover audio of the other stream.
+        with tempfile.TemporaryDirectory() as tmp:
+            audio_dir = pathlib.Path(tmp)
+            audio_path = audio_dir / "audio.wav"
+            audio_path.write_bytes(b"x")
+            chunks_dir = audio_dir / "chunks"
+            chunks_dir.mkdir()
+            (chunks_dir / "chunk_005.wav").write_bytes(b"leftover-from-a-longer-vod")
+
+            def fake_ffmpeg_segment(_cmd, *_a, **_k):
+                # the muxer writes only the current (short) audio's two chunks
+                (chunks_dir / "chunk_000.wav").write_bytes(b"a")
+                (chunks_dir / "chunk_001.wav").write_bytes(b"b")
+                return None
+
+            def fake_transcribe_chunk(_model, chunk_file, *, initial_prompt=None):
+                return {"segments": [{"start": 0.0, "end": 1.0, "text": chunk_file.stem}]}
+
+            with patch("services.transcriber.subprocess.run", side_effect=fake_ffmpeg_segment), \
+                 patch.object(transcriber, "_whisper_model", None), \
+                 patch.object(transcriber, "_whisper_runtime_logged", False), \
+                 patch("services.transcriber.whisper.load_model", return_value=object()), \
+                 patch("services.transcriber._transcribe_chunk", side_effect=fake_transcribe_chunk), \
+                 patch("services.transcriber.settings.hf_token", None), \
+                 patch("services.transcriber._chunk_frame_count", return_value=16000):
+                result = transcriber.transcribe_with_progress(audio_path)
+
+        texts = [segment.text for segment in result]
+        self.assertEqual(
+            texts, ["chunk_000", "chunk_001"],
+            f"stale leftover chunk leaked into the transcript: {texts}",
+        )
+
     def test_initial_prompt_argument_overrides_glossary_setting(self) -> None:
         # The transcribe() initial_prompt argument is the in-process override of
         # the whisper_initial_prompt setting (WALL-Re-Test #92): a direct caller

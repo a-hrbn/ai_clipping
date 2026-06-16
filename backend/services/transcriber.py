@@ -329,6 +329,12 @@ def transcribe_with_progress(
 ) -> list[RichSegment]:
     chunks_dir = audio_path.parent / "chunks"
     chunks_dir.mkdir(exist_ok=True)
+    # Clear any leftover chunk_*.wav from a prior, longer audio that shared this
+    # dir. ffmpeg's segment muxer (-y) only overwrites the files it writes, so a
+    # shorter audio would otherwise leave the previous run's surplus chunks behind
+    # and the glob below would transcribe that other audio onto this timeline.
+    for stale_chunk in chunks_dir.glob("chunk_*.wav"):
+        stale_chunk.unlink(missing_ok=True)
     chunk_cache_dir = _chunk_cache_dir(cache_key)
 
     # Split audio into fixed, non-overlapping chunks via ffmpeg CLI.
