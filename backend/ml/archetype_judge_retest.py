@@ -43,6 +43,7 @@ from typing import Callable
 from ml import directional_eval, judge_spike, replay_harness
 from ml import llm_moment_finder as d0
 from ml import repost_virality_judge
+from ml import transcribe_only_rerun
 from ml.repost_virality_judge import CallProviderFn, RerankFn, Row
 from ml.strong_model_window_probe import build_excerpt
 from models import ClipResult, JobStatus
@@ -439,6 +440,74 @@ def replay_load_inputs(
     return _load
 
 
+def fresh_segment_load_inputs(
+    storage: pathlib.Path, predictions_dir: pathlib.Path
+) -> LoadInputsFn:
+    """Pair the candidate POOL with the FRESH re-transcribed segments (#100, Slice 5).
+
+    The candidate pool (raw rows) is the deduped generation the #46/#50 pool already
+    holds — loaded from the VOD's original replayable job dir via
+    ``replay_harness.load_replay_inputs``. The segment timeline, however, is REPLACED by
+    the fresh transcribe-only ``segments.jsonl`` (``transcribe_only_<vod>/debug/``, the
+    consistent ``large-v3-turbo`` basis #100 minted), so the judge builds every excerpt
+    from the re-transcribed transcript — never the stale one the pool dir was generated
+    against. A VOD missing EITHER the pool OR the fresh transcript is a surfaced coverage
+    gap (``None``), never judged on a half-stale input.
+    """
+
+    def _load(vod_id: str):
+        loaded = replay_harness.load_replay_inputs(vod_id, pathlib.Path(storage))
+        if loaded is None:
+            return None
+        raw_rows, _stale_segments = loaded
+        fresh_path = transcribe_only_rerun.fresh_segments_path(
+            pathlib.Path(predictions_dir), vod_id)
+        if not fresh_path.exists():
+            return None
+        return raw_rows, replay_harness.load_segments(fresh_path)
+
+    return _load
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Issue #101 — the consistency pre-condition: no paid call until the #100 report is
+# clean for the VODs being judged (the documented no-video exclusions never block).
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TranscriptConsistencyError(RuntimeError):
+    """The paid run's pre-condition failed: a judged VOD's fresh transcript is flagged
+    (or missing) in the #100 consistency report. Raised BEFORE any paid Gemini call so a
+    drifted transcript never reaches the judge (PRD #95 / #101 — the paid run starts only
+    after a green consistency report)."""
+
+
+def assert_transcripts_consistent(
+    report: "transcribe_only_rerun.ConsistencyReport", judged_vod_ids: list[str]
+) -> None:
+    """Hard gate: refuse the paid run unless EVERY judged VOD passed the #100 report.
+
+    ``report`` is the ``transcribe_only_rerun.ConsistencyReport`` over the fresh
+    transcripts. The documented exclusions (anchor VODs with no local video) make
+    ``report.clean`` False but are NOT in ``judged_vod_ids`` — they never block. A judged
+    VOD that is FLAGGED, or absent from the report entirely (no fresh transcript minted),
+    is fail-closed: it raises ``TranscriptConsistencyError`` naming the offenders, so the
+    paid run aborts before a single drifted transcript is judged.
+    """
+    by_id = {r.vod_id: r for r in report.vod_reports}
+    offenders: list[str] = []
+    for vod_id in judged_vod_ids:
+        vod_report = by_id.get(vod_id)
+        if vod_report is None:
+            offenders.append(f"{vod_id} (no fresh transcript)")
+        elif not vod_report.passed:
+            offenders.append(f"{vod_id} ({','.join(vod_report.flags)})")
+    if offenders:
+        raise TranscriptConsistencyError(
+            "consistency report not clean for judged VODs — aborting paid run: "
+            + "; ".join(offenders)
+        )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # The verdict — the pre-fixed combined-tier B-vs-A gate (#98)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -624,6 +693,162 @@ def run_verdict(
         "arm_a": arm_a,
         "arm_b": arm_b,
     }
+
+
+# The pre-fixed follow-on decision, IN CODE before the run (PRD #95 verdict table):
+# a PASS (combined floor r@20 B−A ≥ +0.03) means the archetype-judge lever lives →
+# follow-on serving/blend-α PRD; a NO-GO closes the ranking-track cell directly.
+DECISION_ARCHETYPE_JUDGE_LIVES = "ARCHETYPE_JUDGE_LIVES"
+DECISION_RANKING_TRACK_CLOSED = "RANKING_TRACK_CLOSED"
+
+
+def verdict_decision(verdict: dict) -> str:
+    """The pre-fixed follow-on decision a verdict reads to — ABLESEN, nicht rationalisiert.
+
+    PASS (the gate cleared the +0.03 combined-floor cut) → ``ARCHETYPE_JUDGE_LIVES``;
+    otherwise ``RANKING_TRACK_CLOSED``. The mapping is fixed in code before the paid run.
+    """
+    return (DECISION_ARCHETYPE_JUDGE_LIVES if verdict["gate"]["passed"]
+            else DECISION_RANKING_TRACK_CLOSED)
+
+
+def format_verdict_table(verdict: dict) -> str:
+    """The pre-fixed verdict table the runbook reads off (the verdict, not a rationalisation).
+
+    One block: the gated headline (PASS/NO-GO + the follow-on decision label), the gate's
+    own reason line (B − A combined floor r@20 against the +0.03 cut), the read-only
+    breakdown cells (gold-only / silver-only / combined-headline), and the per-gold moves
+    (the golds B served in its top-20 that A did not). Everything is read straight from the
+    verdict — the reader sees the numbers and the fixed decision, not an interpretation.
+    """
+    gate = verdict["gate"]
+    lines = [
+        f"VERDICT: {'PASS' if gate['passed'] else 'NO-GO'} → {verdict_decision(verdict)}",
+        f"  gate: {gate['reason']}",
+        "  read-only breakdowns (carried, not gated):",
+    ]
+    breakdowns = verdict.get("breakdowns", {})
+    for key in ("gold_only_recall_at_20", "silver_only_recall_at_20",
+                "combined_headline_recall_at_20"):
+        cell = breakdowns.get(key)
+        if cell:
+            lines.append(
+                f"    {key}: B {_fmt(cell['current'])} − A {_fmt(cell['baseline'])} "
+                f"= {_signed(cell['delta'])}")
+    moves = verdict.get("per_gold_moves", [])
+    lines.append(
+        f"  per-gold moves (golds B served in top-20 that A did not): {len(moves)}")
+    for move in moves:
+        lines.append(
+            f"    {move['vod_id']} '{move['desc']}' views={move['views']:.0f} "
+            f"A=#{move['a_rank']} → B=#{move['b_rank']}")
+    return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Issue #101 — the paid / replay drivers: wire both arms onto the FRESH transcripts,
+# gate the paid run on the #100 report, persist per arm, replay free.
+#
+# arm_a / arm_b raw-response dirs live under one ``artifacts_root`` so the two arms
+# never share a persisted file; both read the same candidate pool + fresh transcripts
+# (only the prompt differs), so B − A isolates exactly the archetypes.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _arm_dirs(artifacts_root: pathlib.Path) -> "tuple[pathlib.Path, pathlib.Path]":
+    root = pathlib.Path(artifacts_root)
+    return root / "arm_a", root / "arm_b"
+
+
+def _judged_in_report(
+    anchor_ids: list[str], report: "transcribe_only_rerun.ConsistencyReport"
+) -> list[str]:
+    """The anchors the paid run will actually judge — those covered by the consistency
+    report (a fresh transcript was minted). The no-video exclusions, absent from the
+    report, fall out here and surface later as coverage gaps, never as gate failures."""
+    covered = {r.vod_id for r in report.vod_reports}
+    return [v for v in anchor_ids if v in covered]
+
+
+def run_paid_verdict(
+    anchor_ids: list[str],
+    manifest: dict[str, list[dict]],
+    *,
+    storage: pathlib.Path,
+    predictions_dir: pathlib.Path,
+    artifacts_root: pathlib.Path,
+    report: "transcribe_only_rerun.ConsistencyReport",
+    provider: CallProviderFn | None = None,
+    archetypes: "list | None" = None,
+    **verdict_kwargs,
+) -> dict:
+    """The paid two-arm run: gate on the #100 report, then judge both arms and persist.
+
+    The HARD gate fires first — ``assert_transcripts_consistent`` over the judged anchors
+    — so a single drifted transcript aborts BEFORE any paid Gemini call (no money spent,
+    nothing persisted). Then both arms run ``run_verdict`` over the shared fresh-transcript
+    inputs (``fresh_segment_load_inputs`` — #100's basis, never the stale pool transcript),
+    with the SAME ``provider`` but different prompts: Arm A neutral, Arm B the archetype
+    rubric (``archetypes`` defaults to the 8 committed Jynxzi archetypes). Each arm persists
+    its raw response to its OWN dir, so a later ``run_replay_verdict`` reproduces the verdict
+    network-free.
+    """
+    assert_transcripts_consistent(report, _judged_in_report(anchor_ids, report))
+    archetypes = load_jynxzi_archetypes() if archetypes is None else archetypes
+    arm_a_dir, arm_b_dir = _arm_dirs(artifacts_root)
+    load_inputs = fresh_segment_load_inputs(storage, predictions_dir)
+    return run_verdict(
+        anchor_ids, manifest,
+        make_judge_a=paid_make_judge(arm_a_dir, provider=provider),
+        make_judge_b=paid_make_judge(
+            arm_b_dir, provider=provider,
+            build_prompt=archetype_prompt_builder(archetypes)),
+        load_inputs_a=load_inputs,
+        **verdict_kwargs,
+    )
+
+
+def _gated_replay_inputs(artifacts_dir: pathlib.Path, base_load: LoadInputsFn) -> LoadInputsFn:
+    """Per-arm replay loader: a VOD with no persisted raw for THIS arm is a surfaced gap,
+    so a VOD only the other arm judged never folds in as a silent miss."""
+
+    def _load(vod_id: str):
+        if not _raw_path(artifacts_dir, vod_id).exists():
+            return None
+        return base_load(vod_id)
+
+    return _load
+
+
+def run_replay_verdict(
+    anchor_ids: list[str],
+    manifest: dict[str, list[dict]],
+    *,
+    storage: pathlib.Path,
+    predictions_dir: pathlib.Path,
+    artifacts_root: pathlib.Path,
+    archetypes: "list | None" = None,
+    **verdict_kwargs,
+) -> dict:
+    """Reproduce the verdict free, network-free, from the persisted A and B raw responses.
+
+    Each arm re-scores its OWN persisted raw (``replay_make_judge``) over the SAME fresh
+    transcripts the paid run used; the per-arm gate (``_gated_replay_inputs``) surfaces a
+    VOD an arm never judged as a coverage gap rather than re-pricing it. With identical
+    inputs and identical persisted responses, the result is bit-for-bit the paid verdict —
+    the read-only ``--replay`` the runbook reads the verdict table from.
+    """
+    archetypes = load_jynxzi_archetypes() if archetypes is None else archetypes
+    arm_a_dir, arm_b_dir = _arm_dirs(artifacts_root)
+    base_load = fresh_segment_load_inputs(storage, predictions_dir)
+    return run_verdict(
+        anchor_ids, manifest,
+        make_judge_a=replay_make_judge(arm_a_dir),
+        make_judge_b=replay_make_judge(
+            arm_b_dir, build_prompt=archetype_prompt_builder(archetypes)),
+        load_inputs_a=_gated_replay_inputs(arm_a_dir, base_load),
+        load_inputs_b=_gated_replay_inputs(arm_b_dir, base_load),
+        **verdict_kwargs,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -813,6 +1038,29 @@ def render_both_arms(
     }
 
 
+def render_verdict(
+    verdict: dict,
+    *,
+    storage_dir: pathlib.Path,
+    store,
+    resolve_video: ResolveVideoFn,
+    cut_segment: CutSegmentFn,
+    register_job: RegisterJobFn,
+) -> dict:
+    """Render BOTH arms straight from a verdict (paid or replay) → one job per (VOD, arm).
+
+    Reads each arm's ``final_by_vod`` — the served top-20 the recall measured — so what the
+    user reviews in the existing job/clip viewer is byte-identical to what the verdict
+    scored (PRD #95 User Story 19). A thin read over ``run_verdict``'s output; the rendering,
+    collision-free arm dirs, and surfaced no-video gaps are all ``render_both_arms``.
+    """
+    return render_both_arms(
+        verdict["arm_a"]["final_by_vod"], verdict["arm_b"]["final_by_vod"],
+        storage_dir=storage_dir, store=store, resolve_video=resolve_video,
+        cut_segment=cut_segment, register_job=register_job,
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Real adapters (#99) — the ffmpeg cutter wrapper, the jobs.json registry sink, and
 # the cached-video resolver the offline driver binds (the two-adapter "real" side).
@@ -857,3 +1105,134 @@ def cached_twitch_video(vod_id: str, storage_dir: pathlib.Path) -> "pathlib.Path
     """
     path = pathlib.Path(storage_dir) / "_download_cache" / "twitch" / f"vod_{vod_id}.mp4"
     return path if path.exists() else None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Issue #101 — the copy-paste CLI: `run` (gate + paid + persist), `replay` (free
+# verdict), `render` (both arms → frontend jobs). The runbook drives these; the heavy
+# leaves (Gemini, ffmpeg, the jobs.json sink) are injected so unit tests stay net-free.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# The artifacts root holding the two arms' persisted raw responses, under the storage
+# dir so `run` writes them and a later `replay`/`render` re-reads the same files.
+DEFAULT_ARTIFACTS_SUBDIR = "archetype_judge_retest"
+
+
+def build_fresh_consistency_report(
+    storage: pathlib.Path, anchor_ids: list[str]
+) -> "transcribe_only_rerun.ConsistencyReport":
+    """Re-derive the #100 consistency report from the fresh transcripts on disk.
+
+    A VOD is *completed* (re-transcribed) when its fresh ``segments.jsonl`` exists; the
+    rest are *excluded* (no local video — the documented 6), carried through so they are
+    surfaced, never silently judged. The report over the completed VODs is the same
+    fail-closed verdict #100 reads — the pre-condition the paid run gates on.
+    """
+    storage = pathlib.Path(storage)
+    completed = [
+        v for v in anchor_ids
+        if transcribe_only_rerun.fresh_segments_path(storage, v).exists()
+    ]
+    excluded = [v for v in anchor_ids if v not in completed]
+    per_vod = transcribe_only_rerun.load_report_inputs(storage, completed)
+    return transcribe_only_rerun.build_consistency_report(per_vod, excluded=excluded)
+
+
+def _default_render_adapters(storage: pathlib.Path):
+    """The real render side, imported lazily (ffmpeg + the prod store are Docker-only)."""
+    from services.clipper import cut_raw_segment
+    from services.job_artifact_store import RealFsJobArtifactStore
+
+    store = RealFsJobArtifactStore(storage)
+
+    def register(job: JobStatus) -> None:
+        upsert_jobs_registry(store.jobs_registry_path(), job)
+
+    return store, cut_raw_segment, register
+
+
+def main(
+    argv: "list[str] | None" = None,
+    *,
+    provider: "CallProviderFn | None" = None,
+    cut_segment: "CutSegmentFn | None" = None,
+    register_job: "RegisterJobFn | None" = None,
+    store=None,
+) -> int:
+    """The archetype-judge re-test driver — ``run`` / ``replay`` / ``render`` (PRD #95 #101).
+
+    ``run`` gates on the fresh consistency report, then judges both arms over the
+    re-transcribed segments and persists each raw (``--only`` restricts to one VOD — the
+    1-VOD smoke). ``replay`` reproduces the verdict free from the persisted raws. ``render``
+    re-reads them and renders both arms' gated top-20s into frontend jobs. The verdict table
+    is read off (PASS → ARCHETYPE_JUDGE_LIVES, NO-GO → RANKING_TRACK_CLOSED). Returns 0 on a
+    read verdict / completed render; non-zero only when the consistency gate aborts the run.
+    """
+    import argparse
+
+    from ml import eval_clip_finder
+
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("mode", choices=("run", "replay", "render"))
+    parser.add_argument("--storage", required=True,
+                        help="The storage dir: candidate pools + fresh #100 transcripts + arm dirs")
+    parser.add_argument("--artifacts-root", default=None,
+                        help="Where the two arms' raw responses persist "
+                             "(default <storage>/" + DEFAULT_ARTIFACTS_SUBDIR + ")")
+    parser.add_argument("--manifest", default=str(eval_clip_finder.DEFAULT_MANIFEST))
+    parser.add_argument("--anchor-csv", default=str(eval_clip_finder.DEFAULT_ANCHOR_CSV))
+    parser.add_argument("--only", default=None,
+                        help="Restrict to one VOD id — the 1-VOD smoke (both arms)")
+    parser.add_argument("--top-k", type=int, default=DEFAULT_TOP_K)
+    args = parser.parse_args(argv)
+
+    storage = pathlib.Path(args.storage)
+    artifacts_root = (pathlib.Path(args.artifacts_root) if args.artifacts_root
+                      else storage / DEFAULT_ARTIFACTS_SUBDIR)
+    manifest = eval_clip_finder.load_manifest(pathlib.Path(args.manifest))
+    anchors = eval_clip_finder.read_anchor_vod_ids(pathlib.Path(args.anchor_csv))
+    if args.only:
+        anchors = [v for v in anchors if v == args.only]
+
+    common = dict(storage=storage, predictions_dir=storage,
+                  artifacts_root=artifacts_root, top_k=args.top_k)
+
+    if args.mode == "run":
+        report = build_fresh_consistency_report(storage, anchors)
+        try:
+            verdict = run_paid_verdict(
+                anchors, manifest, report=report, provider=provider, **common)
+        except TranscriptConsistencyError as exc:
+            print(f"ABORTED — paid run refused: {exc}")
+            return 1
+        print(format_verdict_table(verdict))
+        return 0
+
+    if args.mode == "replay":
+        verdict = run_replay_verdict(anchors, manifest, **common)
+        print(format_verdict_table(verdict))
+        return 0
+
+    # render: reconstruct both arms' served top-20s free (replay), then cut + register.
+    verdict = run_replay_verdict(anchors, manifest, **common)
+    if store is None or cut_segment is None or register_job is None:
+        d_store, d_cut, d_register = _default_render_adapters(storage)
+        store = store or d_store
+        cut_segment = cut_segment or d_cut
+        register_job = register_job or d_register
+    summary = render_verdict(
+        verdict, storage_dir=storage, store=store,
+        resolve_video=lambda vod_id: cached_twitch_video(vod_id, storage),
+        cut_segment=cut_segment, register_job=register_job)
+    print(f"rendered {len(summary['registered_job_ids'])} arm jobs; "
+          f"{len(summary['render_gap_jobs'])} render gaps (no local video)")
+    for job_id in summary["registered_job_ids"]:
+        print(f"  registered: {job_id}")
+    for job_id in summary["render_gap_jobs"]:
+        print(f"  render gap (no local video): {job_id}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

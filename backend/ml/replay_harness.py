@@ -125,7 +125,7 @@ def _resolve_replay_job_dir(storage: pathlib.Path, vod_id: str) -> pathlib.Path 
     return None
 
 
-def _load_segments(path: pathlib.Path) -> list[RichSegment]:
+def load_segments(path: pathlib.Path) -> list[RichSegment]:
     """Parse ``segments.jsonl`` into the RichSegment timeline snap_boundaries reads."""
     segments: list[RichSegment] = []
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -152,6 +152,12 @@ def _load_segments(path: pathlib.Path) -> list[RichSegment]:
             )
         )
     return segments
+
+
+# Back-compat private alias: prior callers (and one test) reference the underscore
+# name; ``load_segments`` is the same parser, now public so an offline driver can
+# read a fresh (re-transcribed) ``segments.jsonl`` through the trusted path.
+_load_segments = load_segments
 
 
 def load_replay_inputs(

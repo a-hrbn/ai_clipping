@@ -18,8 +18,11 @@ import types
 # transcription stack. Prior art (test_judge_spike) stubs whisper the same way.
 sys.modules.setdefault("whisper", types.SimpleNamespace(load_model=lambda *_a, **_k: None))
 
+import pytest
+
 from ml import archetype_judge_retest as arm_a
-from services.transcriber import RichSegment
+from ml import transcribe_only_rerun as T
+from services.transcriber import RichSegment, format_jsonl
 
 
 def _row(*, start: float, end: float, composite: float = 5.0, text: str = "") -> dict:
@@ -983,3 +986,349 @@ def test_cached_twitch_video_resolves_the_download_cache_or_surfaces_absence(tmp
     assert arm_a.cached_twitch_video("123", tmp_path) == cache / "vod_123.mp4"
     # …and a VOD with no local video surfaces as None — the renderer turns that into a gap.
     assert arm_a.cached_twitch_video("missing", tmp_path) is None
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Issue #101 — the paid-run driver: read #100's fresh re-transcribed segments,
+# gate on the consistency report, run paid → replay → render, read the verdict.
+# The whole CLI is exercised on net-free / ffmpeg-free injected leaves (a fake
+# Gemini provider, a recording cutter, a list register sink) — never a paid call.
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _write_jsonl(path, rows) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Slice 101-1 — fresh_segment_load_inputs pairs the original candidate pool (raw
+# rows) with the FRESH re-transcribed segments (#100), NEVER the stale ones; a VOD
+# missing either the pool or the fresh transcript is a surfaced gap (None).
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_fresh_segment_inputs_pair_the_pool_with_the_retranscribed_segments(tmp_path) -> None:
+    storage = tmp_path / "storage"
+    # The original replayable job dir: the candidate POOL + the STALE segments.
+    pool_debug = storage / "pipeline_debug_run_v1" / "debug"
+    _write_jsonl(pool_debug / "llm_moment_finder_moments_raw.jsonl",
+                 [{"start_time": 100.0, "end_time": 120.0, "llm_virality": 0.8}])
+    _write_jsonl(pool_debug / "segments.jsonl",
+                 [{"start": 100.0, "end": 120.0, "text": "STALE transcript from the old run"}])
+    # The fresh transcribe-only dir (#100): the re-transcribed segments the judge MUST read.
+    fresh_debug = storage / "transcribe_only_v1" / "debug"
+    _write_jsonl(fresh_debug / "segments.jsonl",
+                 [{"start": 100.0, "end": 120.0, "text": "FRESH transcript from large-v3-turbo"}])
+
+    load = arm_a.fresh_segment_load_inputs(storage, storage)
+    loaded = load("v1")
+
+    assert loaded is not None
+    raw_rows, segments = loaded
+    # The candidate pool comes from the original job dir…
+    assert [r["start_time"] for r in raw_rows] == [100.0]
+    # …but the transcript is the FRESH re-transcribed one (#100), never the stale dir's
+    # — the whole point of Slice 5: the judge scores #100's consistent transcript basis.
+    assert [s.text for s in segments] == ["FRESH transcript from large-v3-turbo"]
+    assert all("STALE" not in s.text for s in segments)
+
+
+def test_fresh_segment_inputs_surface_a_gap_when_pool_or_fresh_transcript_is_missing(tmp_path) -> None:
+    storage = tmp_path / "storage"
+    load = arm_a.fresh_segment_load_inputs(storage, storage)
+
+    # A VOD with a fresh transcript but NO candidate pool — surfaced gap, never scored.
+    _write_jsonl(storage / "transcribe_only_nopool" / "debug" / "segments.jsonl",
+                 [{"start": 0.0, "end": 10.0, "text": "fresh but no pool"}])
+    assert load("nopool") is None
+
+    # A VOD with a candidate pool but NO fresh transcript — the re-transcription never
+    # covered it, so it is a surfaced gap (we never judge it on a stale transcript).
+    pool_debug = storage / "pipeline_debug_run_nofresh" / "debug"
+    _write_jsonl(pool_debug / "llm_moment_finder_moments_raw.jsonl", [{"start_time": 5.0, "end_time": 15.0}])
+    _write_jsonl(pool_debug / "segments.jsonl", [{"start": 5.0, "end": 15.0, "text": "stale only"}])
+    assert load("nofresh") is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Slice 101-2 — the hard consistency gate: refuse the paid run unless EVERY judged
+# VOD passed the #100 report. Documented exclusions (no local video) never block; a
+# flagged OR missing judged VOD aborts before any paid call (fail-closed).
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _consistency_report(passed_ids, flagged=None, excluded=()):
+    flagged = flagged or {}
+    reports = [T.VodReport(vod_id=v, passed=True, flags=[]) for v in passed_ids]
+    reports += [T.VodReport(vod_id=v, passed=False, flags=list(fl)) for v, fl in flagged.items()]
+    clean = not excluded and not flagged
+    return T.ConsistencyReport(clean=clean, vod_reports=reports, excluded=list(excluded))
+
+
+def test_consistency_gate_passes_when_every_judged_vod_is_clean_despite_exclusions() -> None:
+    # 2 documented exclusions (no local video) make report.clean False — but they are
+    # NOT in the judged set, so they must NOT block the paid run (#100 fail-closed semantics).
+    report = _consistency_report(["v1", "v2"], excluded=["g1", "g2"])
+    assert report.clean is False
+
+    # No raise: every judged VOD passed.
+    arm_a.assert_transcripts_consistent(report, ["v1", "v2"])
+
+
+def test_consistency_gate_aborts_when_a_judged_vod_is_flagged() -> None:
+    report = _consistency_report(["v1"], flagged={"v2": ["over_run"]})
+
+    with pytest.raises(arm_a.TranscriptConsistencyError) as exc:
+        arm_a.assert_transcripts_consistent(report, ["v1", "v2"])
+
+    # The abort names the offending VOD + its flag — surfaced, never silently judged.
+    assert "v2" in str(exc.value) and "over_run" in str(exc.value)
+
+
+def test_consistency_gate_aborts_when_a_judged_vod_has_no_fresh_transcript() -> None:
+    # A judged VOD absent from the report has no fresh transcript — we have no consistency
+    # verdict for it, so fail-closed: we never judge it on a stale / missing transcript.
+    report = _consistency_report(["v1"])
+
+    with pytest.raises(arm_a.TranscriptConsistencyError) as exc:
+        arm_a.assert_transcripts_consistent(report, ["v1", "v_missing"])
+
+    assert "v_missing" in str(exc.value)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Slice 101-3 — run_paid_verdict: the gate clears, both arms judge on the FRESH
+# transcripts and persist to their OWN dirs (the archetype prompt routes to Arm B),
+# and run_replay_verdict reproduces the verdict bit-for-bit, network-free.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _retest_storage(tmp_path):
+    """A storage dir holding v1's candidate POOL + the fresh #100 transcripts on disk."""
+    storage = tmp_path / "storage"
+    pool = storage / "pipeline_debug_run_v1" / "debug"
+    _write_jsonl(pool / "llm_moment_finder_moments_raw.jsonl", _verdict_raw_rows())
+    # A deliberately STALE pool-dir transcript — the loader must ignore it for the fresh one.
+    _write_jsonl(pool / "segments.jsonl", [{"start": 0.0, "end": 1.0, "text": "STALE"}])
+    # Fresh #100 segments via the REAL serializer, so they carry the canonical writer schema
+    # the consistency report checks (the CLI `run` mode builds that report off them).
+    fresh = storage / "transcribe_only_v1" / "debug"
+    fresh.mkdir(parents=True, exist_ok=True)
+    (fresh / "segments.jsonl").write_text(format_jsonl(_verdict_segments()), encoding="utf-8")
+    return storage
+
+
+def test_run_paid_verdict_persists_both_arms_then_replays_bit_for_bit(tmp_path) -> None:
+    storage = _retest_storage(tmp_path)
+    artifacts = tmp_path / "artifacts"
+    report = _consistency_report(["v1"])  # clean → the gate lets the paid run proceed
+
+    calls: list[str] = []
+
+    def provider(prompt: str) -> str:
+        calls.append("call")
+        # Prompt-sensitive: Arm B carries the archetype block, Arm A does not — proving
+        # the prompt routing is real (and letting B lift the gold A's rubric buried).
+        return _SERVE_GOLDS if "archetype" in prompt.lower() else _SERVE_JUNK
+
+    paid = arm_a.run_paid_verdict(
+        ["v1"], _VERDICT_MANIFEST,
+        storage=storage, predictions_dir=storage, artifacts_root=artifacts,
+        report=report, provider=provider, archetypes=_ARCHETYPES, top_k=2)
+
+    # Each arm persisted its OWN unparsed raw to its OWN dir; the archetype prompt routed
+    # to Arm B (gold-serving response), the neutral prompt to Arm A (junk-serving).
+    assert (artifacts / "arm_a" / "v1.raw.txt").read_text(encoding="utf-8") == _SERVE_JUNK
+    assert (artifacts / "arm_b" / "v1.raw.txt").read_text(encoding="utf-8") == _SERVE_GOLDS
+    assert calls == ["call", "call"]  # one paid call per arm
+    # The judge scored the FRESH-transcript candidate set and Arm B lifted the gold A
+    # missed → the pre-fixed combined-floor gate reads PASS.
+    assert paid["gate"]["passed"] is True
+
+    # Replay: each arm reads ITS persisted raw; the provider must NOT fire again.
+    before = list(calls)
+    replay = arm_a.run_replay_verdict(
+        ["v1"], _VERDICT_MANIFEST,
+        storage=storage, predictions_dir=storage, artifacts_root=artifacts,
+        archetypes=_ARCHETYPES, top_k=2)
+
+    assert calls == before  # no new paid calls during the free replay
+    # Identical inputs + identical persisted A and B responses ⇒ identical verdict.
+    assert replay == paid
+
+
+def test_run_paid_verdict_aborts_with_no_paid_calls_when_a_judged_vod_is_flagged(tmp_path) -> None:
+    storage = _retest_storage(tmp_path)
+    artifacts = tmp_path / "artifacts"
+    report = _consistency_report([], flagged={"v1": ["over_run"]})  # v1 is flagged
+
+    calls: list[str] = []
+
+    def provider(prompt: str) -> str:
+        calls.append("call")
+        return _SERVE_GOLDS
+
+    with pytest.raises(arm_a.TranscriptConsistencyError):
+        arm_a.run_paid_verdict(
+            ["v1"], _VERDICT_MANIFEST,
+            storage=storage, predictions_dir=storage, artifacts_root=artifacts,
+            report=report, provider=provider, archetypes=_ARCHETYPES, top_k=2)
+
+    # The hard gate fired BEFORE any paid call — no money spent, no raw persisted.
+    assert calls == []
+    assert not (artifacts / "arm_a" / "v1.raw.txt").exists()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Slice 101-5 — render_verdict renders BOTH arms straight from a verdict's served
+# top-20s (arm_a/arm_b final_by_vod) → one frontend job per (VOD, arm), so what the
+# user reviews is byte-identical to what the recall measured.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_render_verdict_renders_both_arms_from_the_verdicts_served_top20s(tmp_path) -> None:
+    storage = tmp_path / "storage"
+    store = InMemoryJobArtifactStore()
+    # A verdict shape (the only fields render_verdict reads): each arm's served top-20.
+    verdict = {
+        "arm_a": {"final_by_vod": {"v1": _top20((100.0, 120.0, 8.0), (300.0, 330.0, 6.0))}},
+        "arm_b": {"final_by_vod": {"v1": _top20((500.0, 520.0, 9.0))}},
+    }
+    videos = {"v1": tmp_path / "vod_v1.mp4"}
+
+    cuts: list = []
+    registered: list = []
+    summary = arm_a.render_verdict(
+        verdict, storage_dir=storage, store=store, resolve_video=videos.get,
+        cut_segment=lambda _v, _s, _e, out: cuts.append(out),
+        register_job=registered.append)
+
+    # One frontend job per (VOD, arm) — A and B side by side.
+    assert set(summary["registered_job_ids"]) == {"archetype_retest_v1_A", "archetype_retest_v1_B"}
+    # Each arm rendered ITS OWN served top-20 (A's windows ≠ B's) — exactly the verdict's set.
+    a_fm = store.read_final_moments("archetype_retest_v1_A")
+    b_fm = store.read_final_moments("archetype_retest_v1_B")
+    assert [(m["start_time"], m["end_time"]) for m in a_fm["moments"]] == [(100.0, 120.0), (300.0, 330.0)]
+    assert [(m["start_time"], m["end_time"]) for m in b_fm["moments"]] == [(500.0, 520.0)]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Slice 101-6 — format_verdict_table: the pre-fixed verdict ABLESEN — the gated line
+# (B−A combined floor r@20 vs the +0.03 cut), the read-only breakdowns, the per-gold
+# moves, and the follow-on decision label fixed in code (PASS → ARCHETYPE_JUDGE_LIVES,
+# NO-GO → RANKING_TRACK_CLOSED). No post-hoc interpretation.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _passing_verdict() -> dict:
+    return arm_a.run_verdict(
+        ["v1"], _VERDICT_MANIFEST,
+        make_judge_a=_make_judge_serving(_SERVE_JUNK),
+        make_judge_b=_make_judge_serving(_SERVE_GOLDS),
+        load_inputs_a=_verdict_load_inputs, top_k=2)
+
+
+def _no_go_verdict() -> dict:
+    return arm_a.run_verdict(
+        ["v1"], _VERDICT_MANIFEST,
+        make_judge_a=_make_judge_serving(_SERVE_JUNK),
+        make_judge_b=_make_judge_serving(_SERVE_JUNK),
+        load_inputs_a=_verdict_load_inputs, top_k=2)
+
+
+def test_verdict_table_reads_a_pass_as_archetype_judge_lives() -> None:
+    table = arm_a.format_verdict_table(_passing_verdict())
+
+    # The read: PASS → the pre-fixed ARCHETYPE_JUDGE_LIVES decision, never the NO-GO label.
+    assert "PASS" in table
+    assert arm_a.DECISION_ARCHETYPE_JUDGE_LIVES in table
+    assert arm_a.DECISION_RANKING_TRACK_CLOSED not in table
+    # The gated line is surfaced verbatim (combined floor r@20, the +0.03 cut)…
+    assert "combined floor" in table.lower() and "0.03" in table
+    # …and the per-gold moves the reader interprets the effect by (G1/G2 entered B's top-20).
+    assert "G1" in table and "G2" in table
+
+
+def test_verdict_table_reads_a_no_go_as_ranking_track_closed() -> None:
+    table = arm_a.format_verdict_table(_no_go_verdict())
+
+    assert "NO-GO" in table
+    assert arm_a.DECISION_RANKING_TRACK_CLOSED in table
+    assert arm_a.DECISION_ARCHETYPE_JUDGE_LIVES not in table
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Slice 101-7 — the CLI: `run` gates + judges + persists + prints the verdict table
+# (--only = the 1-VOD smoke); `render` re-reads the persisted raws free and registers
+# one frontend job per (VOD, arm). Every heavy leaf (Gemini, ffmpeg, the registry) is
+# injected, so the whole copy-paste surface is exercised net-free / ffmpeg-free.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _cli_fixture(tmp_path):
+    storage = _retest_storage(tmp_path)
+    # A meta sidecar so the consistency report can score v1 (span 100–1130 ⇒ clean at 1130).
+    T.fresh_meta_path(storage, "v1").write_text(
+        json.dumps({"duration_sec": 1130.0}), encoding="utf-8")
+    # A cached local video so the render step produces clips (not a no-video gap).
+    cache = storage / "_download_cache" / "twitch"
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / "vod_v1.mp4").write_bytes(b"x")
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text(
+        json.dumps({"vod_id": "v1", "gt_moments": _VERDICT_MANIFEST["v1"]}), encoding="utf-8")
+    csv_path = tmp_path / "anchors.csv"
+    csv_path.write_text("vod_id\nv1\n", encoding="utf-8")
+    return storage, manifest, csv_path
+
+
+def test_cli_run_then_render_routes_through_paid_replay_and_registers_both_arms(tmp_path, capsys) -> None:
+    storage, manifest, csv_path = _cli_fixture(tmp_path)
+    base = ["--storage", str(storage), "--manifest", str(manifest),
+            "--anchor-csv", str(csv_path), "--top-k", "2"]
+
+    calls: list[str] = []
+
+    def provider(prompt: str) -> str:
+        calls.append("call")
+        return _SERVE_GOLDS if "archetype" in prompt.lower() else _SERVE_JUNK
+
+    # `run --only v1` is the 1-VOD smoke: the gate clears, both arms judge + persist, and
+    # the verdict table is printed with the pre-fixed decision read off (not rationalised).
+    rc = arm_a.main(["run", "--only", "v1", *base], provider=provider)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "VERDICT:" in out and arm_a.DECISION_ARCHETYPE_JUDGE_LIVES in out
+    assert calls == ["call", "call"]  # one paid call per arm, just the one smoke VOD
+    assert (storage / "archetype_judge_retest" / "arm_a" / "v1.raw.txt").exists()
+    assert (storage / "archetype_judge_retest" / "arm_b" / "v1.raw.txt").exists()
+
+    # `render` re-reads the persisted raws FREE (no paid call) and registers one frontend
+    # job per (VOD, arm) through the injected sink — A and B side by side in the viewer.
+    cuts: list = []
+    registered: list = []
+    rc = arm_a.main(
+        ["render", *base], store=InMemoryJobArtifactStore(),
+        cut_segment=lambda _v, _s, _e, out: cuts.append(out),
+        register_job=registered.append)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert calls == ["call", "call"]  # render never pays — it replays the persisted raws
+    assert {j.job_id for j in registered} == {"archetype_retest_v1_A", "archetype_retest_v1_B"}
+
+
+def test_cli_run_aborts_nonzero_when_the_consistency_report_flags_a_judged_vod(tmp_path, capsys) -> None:
+    storage, manifest, csv_path = _cli_fixture(tmp_path)
+    # Break v1's transcript coverage: a tiny duration makes span_end overrun → `over_run` flag.
+    T.fresh_meta_path(storage, "v1").write_text(
+        json.dumps({"duration_sec": 10.0}), encoding="utf-8")
+
+    calls: list[str] = []
+
+    def provider(prompt: str) -> str:
+        calls.append("call")
+        return _SERVE_GOLDS
+
+    rc = arm_a.main(
+        ["run", "--storage", str(storage), "--manifest", str(manifest),
+         "--anchor-csv", str(csv_path), "--top-k", "2"], provider=provider)
+    out = capsys.readouterr().out
+
+    # The paid run is refused before any paid call — surfaced, non-zero, documented.
+    assert rc != 0
+    assert "ABORT" in out.upper() and "v1" in out
+    assert calls == []
