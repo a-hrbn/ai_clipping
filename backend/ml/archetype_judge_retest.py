@@ -102,6 +102,8 @@ def neutral_repost_judge(
     pad_sec: float = EXCERPT_PAD_SEC,
     build_prompt: "Callable[[list[Row]], str] | None" = None,
     chunk_size: "int | None" = None,
+    max_retries: int = 0,
+    complete_threshold: float = 0.9,
 ) -> RerankFn:
     """The real judge adapter: judge a deduped candidate set on the chosen rubric.
 
@@ -122,9 +124,14 @@ def neutral_repost_judge(
     ``None`` = one call). gemini-2.5-pro can't reliably score ~1000 candidates in a
     single call (over-generation / empty response, #101), so the paid run batches at a
     size both arms handle. Each batch is numbered 1..N on its own and parsed batch-locally,
-    then the scored batches are concatenated in pool order. The provider is called (and the
-    raw persisted) once per batch, in order — so a replay re-reads each batch's raw in the
-    same order.
+    then the scored batches are concatenated in pool order.
+
+    ``max_retries`` retries a batch that scores below ``complete_threshold`` of its
+    candidates — gemini-2.5-pro occasionally returns a valid JSON covering only a FRACTION
+    of the batch (61/400 observed, #101), silently dropping the rest; a retry usually comes
+    back complete (nondeterminism). The FULLEST response is kept and persisted, so exactly
+    ONE raw per batch is persisted in order — a replay (``max_retries=0``) re-reads each
+    batch's persisted raw once, never retrying.
     """
     render_prompt = build_prompt or build_neutral_judge_prompt
 
@@ -132,15 +139,25 @@ def neutral_repost_judge(
         enriched = _attach_excerpts(rows, segments, pad_sec)
         size = chunk_size if chunk_size else (len(rows) or 1)
         reranked: list[Row] = []
-        batches = 0
+        batches = incomplete = 0
         for start in range(0, len(rows), size):
             batch_rows = rows[start:start + size]
             prompt = render_prompt(enriched[start:start + size])
-            raw = call_provider(prompt)
-            persist_raw(raw)
-            scores = repost_virality_judge.parse_judge_scores(raw)
-            reranked.extend(repost_virality_judge.apply_scores(batch_rows, scores))
+            need = len(batch_rows) * complete_threshold
+            best_raw, best_rows = "", []
+            for _attempt in range(max_retries + 1):
+                raw = call_provider(prompt)
+                scored = repost_virality_judge.apply_scores(
+                    batch_rows, repost_virality_judge.parse_judge_scores(raw))
+                if len(scored) > len(best_rows):
+                    best_raw, best_rows = raw, scored
+                if len(best_rows) >= need:
+                    break
+            persist_raw(best_raw)
+            reranked.extend(best_rows)
             batches += 1
+            if len(best_rows) < need:
+                incomplete += 1
         if rows and not reranked:
             raise EmptyJudgeResponseError(
                 f"judge scored 0 of {len(rows)} candidates — empty/over-truncated "
@@ -154,6 +171,7 @@ def neutral_repost_judge(
                     "scored": len(reranked),
                     "dropped": len(rows) - len(reranked),
                     "batches": batches,
+                    "incomplete_batches": incomplete,
                 },
                 ensure_ascii=True,
                 sort_keys=True,
@@ -439,14 +457,17 @@ def paid_make_judge(
     pad_sec: float = EXCERPT_PAD_SEC,
     build_prompt: "Callable[[list[Row]], str] | None" = None,
     chunk_size: "int | None" = None,
+    max_retries: int = 3,
 ) -> MakeJudgeFn:
     """Per-VOD judge bound to the paid provider, persisting each raw response.
 
     Defaults the provider to gemini-2.5-pro (temp 0); tests inject a network-free fake.
-    Each batch's raw response is persisted BEFORE parsing — the re-evaluable artifacts a
-    ``--replay`` re-reads (batch 0 → ``{vod_id}.raw.txt``, later batches → ``.batch_NN``).
-    ``chunk_size`` splits an oversized pool into reliable batches (#101). ``build_prompt``
-    selects the rubric: omitted = Arm A (neutral); ``archetype_prompt_builder`` = Arm B.
+    The fullest response per batch is persisted (batch 0 → ``{vod_id}.raw.txt``, later
+    batches → ``.batch_NN``) — the re-evaluable artifacts a ``--replay`` re-reads.
+    ``chunk_size`` splits an oversized pool into reliable batches; ``max_retries`` (default
+    3) re-asks an under-scored batch and keeps the fullest, since gemini-2.5-pro
+    occasionally drops part of a batch (#101). ``build_prompt`` selects the rubric: omitted
+    = Arm A (neutral); ``archetype_prompt_builder`` = Arm B.
     """
     call_provider = provider or gemini_pro_provider()
 
@@ -464,6 +485,7 @@ def paid_make_judge(
             pad_sec=pad_sec,
             build_prompt=build_prompt,
             chunk_size=chunk_size,
+            max_retries=max_retries,
         )
 
     return _make

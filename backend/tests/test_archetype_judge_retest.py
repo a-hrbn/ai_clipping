@@ -188,6 +188,49 @@ def test_judge_aborts_loudly_when_zero_of_n_candidates_is_scored() -> None:
         call_provider=lambda _p: "", persist_raw=lambda _t: None, segments=[])([]) == []
 
 
+def _scores_json(n: int) -> str:
+    items = ", ".join(f'{{"id": {i}, "repost_virality": 0.5}}' for i in range(1, n + 1))
+    return '{"scores": [' + items + ']}'
+
+
+def test_judge_retries_an_undercount_batch_and_keeps_the_fullest_response() -> None:
+    # gemini-2.5-pro occasionally returns a valid JSON that scores only a FRACTION of the
+    # batch (61/400 observed, #101) — silently dropping the rest. A paid run retries an
+    # under-scored batch and keeps the fullest response; the kept (best) raw is persisted.
+    rows = [_row(start=i * 10.0, end=i * 10.0 + 5.0) for i in range(10)]
+    lazy = _scores_json(3)   # 3/10 = 30% < the 90% completeness bar → retry
+    full = _scores_json(10)  # the retry comes back complete
+    responses = iter([lazy, full])
+    persisted: list[str] = []
+
+    judge = arm_a.neutral_repost_judge(
+        call_provider=lambda _p: next(responses), persist_raw=persisted.append,
+        segments=[], max_retries=3)
+    out = judge([dict(r) for r in rows])
+
+    # Retried once → the full response is kept; all 10 scored; only the BEST raw persisted.
+    assert len(out) == 10
+    assert persisted == [full]
+
+
+def test_judge_does_not_retry_when_retries_are_disabled() -> None:
+    # The replay path uses max_retries=0: it must consume exactly ONE persisted raw per
+    # batch (the paid run already kept the fullest), never call again.
+    rows = [_row(start=i * 10.0, end=i * 10.0 + 5.0) for i in range(10)]
+    calls: dict = {"i": 0}
+
+    def provider(_p: str) -> str:
+        calls["i"] += 1
+        return _scores_json(1)  # lazy, but retries disabled → used as-is
+
+    judge = arm_a.neutral_repost_judge(
+        call_provider=provider, persist_raw=lambda _t: None, segments=[], max_retries=0)
+    out = judge([dict(r) for r in rows])
+
+    assert calls["i"] == 1   # no retry
+    assert len(out) == 1     # only the 1 scored survives (fail-closed drops the rest)
+
+
 def test_judge_chunks_a_large_pool_into_batches_and_merges_scores_in_pool_order() -> None:
     # gemini-2.5-pro can't reliably score ~1000 candidates in one call (over-generation /
     # empty response, #101). chunk_size splits the pool into batches scored independently
