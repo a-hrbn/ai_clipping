@@ -188,6 +188,38 @@ def test_judge_aborts_loudly_when_zero_of_n_candidates_is_scored() -> None:
         call_provider=lambda _p: "", persist_raw=lambda _t: None, segments=[])([]) == []
 
 
+def test_judge_chunks_a_large_pool_into_batches_and_merges_scores_in_pool_order() -> None:
+    # gemini-2.5-pro can't reliably score ~1000 candidates in one call (over-generation /
+    # empty response, #101). chunk_size splits the pool into batches scored independently
+    # and merges — each batch is numbered 1..N on its own, so the parser maps batch-locally.
+    rows = [_row(start=i * 100.0, end=i * 100.0 + 20.0) for i in range(5)]
+    # chunk_size=2 → batches of [2, 2, 1] → 3 provider calls, each numbered from id 1.
+    batch_responses = [
+        '{"scores": [{"id": 1, "repost_virality": 0.9}, {"id": 2, "repost_virality": 0.8}]}',
+        '{"scores": [{"id": 1, "repost_virality": 0.7}, {"id": 2, "repost_virality": 0.6}]}',
+        '{"scores": [{"id": 1, "repost_virality": 0.5}]}',
+    ]
+    calls: dict = {"i": 0}
+    persisted: list[str] = []
+
+    def provider(_prompt: str) -> str:
+        r = batch_responses[calls["i"]]
+        calls["i"] += 1
+        return r
+
+    judge = arm_a.neutral_repost_judge(
+        call_provider=provider, persist_raw=persisted.append, segments=[], chunk_size=2)
+    out = judge([dict(r) for r in rows])
+
+    # One provider call + one persisted raw PER batch (3), in order.
+    assert calls["i"] == 3
+    assert persisted == batch_responses
+    # All 5 candidates scored; batch-local ids mapped back, merged in pool order, scores on
+    # the 1-10 scale. The whole pool is covered without a single oversized call.
+    assert [r["start_time"] for r in out] == [0.0, 100.0, 200.0, 300.0, 400.0]
+    assert [r["composite_score"] for r in out] == [9.0, 8.0, 7.0, 6.0, 5.0]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Slice 4 — the Gemini provider seam binds gemini-2.5-pro at temp 0, text only
 # ─────────────────────────────────────────────────────────────────────────────
@@ -365,6 +397,36 @@ def test_paid_arm_persists_raw_then_replays_bit_for_bit_without_paying(tmp_path)
     assert paid_calls == before  # no new paid calls during replay
     # Identical inputs + identical persisted responses ⇒ identical arm result.
     assert replay == paid
+
+
+def test_paid_chunked_persists_one_raw_per_batch_then_replays_in_order(tmp_path) -> None:
+    rows = [_row(start=i * 100.0, end=i * 100.0 + 20.0) for i in range(3)]
+    # chunk_size=2 → batch 0 = rows[0,1], batch 1 = rows[2].
+    batch_resps = [
+        '{"scores": [{"id": 1, "repost_virality": 0.9}, {"id": 2, "repost_virality": 0.8}]}',
+        '{"scores": [{"id": 1, "repost_virality": 0.5}]}',
+    ]
+    calls: dict = {"i": 0}
+
+    def provider(_prompt: str) -> str:
+        r = batch_resps[calls["i"]]
+        calls["i"] += 1
+        return r
+
+    paid = arm_a.paid_make_judge(tmp_path, provider=provider, chunk_size=2)("v1", [])
+    out = paid([dict(r) for r in rows])
+
+    # Batch 0 keeps the back-compat <vod>.raw.txt; later batches get <vod>.batch_NN.raw.txt.
+    assert (tmp_path / "v1.raw.txt").read_text(encoding="utf-8") == batch_resps[0]
+    assert (tmp_path / "v1.batch_01.raw.txt").read_text(encoding="utf-8") == batch_resps[1]
+    assert [r["composite_score"] for r in out] == [9.0, 8.0, 5.0]
+
+    # Replay re-reads BOTH batch raws in order, no provider call, reproduces bit-for-bit.
+    replay_calls = list(batch_resps)  # unused — the provider must NOT fire on replay
+    replay = arm_a.replay_make_judge(tmp_path, chunk_size=2)("v1", [])
+    rout = replay([dict(r) for r in rows])
+    assert [r["composite_score"] for r in rout] == [9.0, 8.0, 5.0]
+    assert replay_calls == batch_resps  # untouched
 
 
 def test_replay_load_inputs_surfaces_a_vod_with_no_persisted_raw_as_a_gap(tmp_path) -> None:

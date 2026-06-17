@@ -101,6 +101,7 @@ def neutral_repost_judge(
     segments: list,
     pad_sec: float = EXCERPT_PAD_SEC,
     build_prompt: "Callable[[list[Row]], str] | None" = None,
+    chunk_size: "int | None" = None,
 ) -> RerankFn:
     """The real judge adapter: judge a deduped candidate set on the chosen rubric.
 
@@ -116,16 +117,30 @@ def neutral_repost_judge(
     ``build_prompt`` is the ONE thing the two arms vary: it defaults to Arm A's neutral
     ``build_neutral_judge_prompt``; Arm B passes ``archetype_prompt_builder(archetypes)``
     so the same adapter renders the archetype variant.
+
+    ``chunk_size`` splits the pool into batches scored in separate calls (default
+    ``None`` = one call). gemini-2.5-pro can't reliably score ~1000 candidates in a
+    single call (over-generation / empty response, #101), so the paid run batches at a
+    size both arms handle. Each batch is numbered 1..N on its own and parsed batch-locally,
+    then the scored batches are concatenated in pool order. The provider is called (and the
+    raw persisted) once per batch, in order — so a replay re-reads each batch's raw in the
+    same order.
     """
     render_prompt = build_prompt or build_neutral_judge_prompt
 
     def _rerank(rows: list[Row]) -> list[Row]:
         enriched = _attach_excerpts(rows, segments, pad_sec)
-        prompt = render_prompt(enriched)
-        raw = call_provider(prompt)
-        persist_raw(raw)
-        scores = repost_virality_judge.parse_judge_scores(raw)
-        reranked = repost_virality_judge.apply_scores(rows, scores)
+        size = chunk_size if chunk_size else (len(rows) or 1)
+        reranked: list[Row] = []
+        batches = 0
+        for start in range(0, len(rows), size):
+            batch_rows = rows[start:start + size]
+            prompt = render_prompt(enriched[start:start + size])
+            raw = call_provider(prompt)
+            persist_raw(raw)
+            scores = repost_virality_judge.parse_judge_scores(raw)
+            reranked.extend(repost_virality_judge.apply_scores(batch_rows, scores))
+            batches += 1
         if rows and not reranked:
             raise EmptyJudgeResponseError(
                 f"judge scored 0 of {len(rows)} candidates — empty/over-truncated "
@@ -138,6 +153,7 @@ def neutral_repost_judge(
                     "candidates": len(rows),
                     "scored": len(reranked),
                     "dropped": len(rows) - len(reranked),
+                    "batches": batches,
                 },
                 ensure_ascii=True,
                 sort_keys=True,
@@ -387,6 +403,30 @@ def _raw_path(artifacts_dir: pathlib.Path, vod_id: str) -> pathlib.Path:
     return pathlib.Path(artifacts_dir) / f"{vod_id}.raw.txt"
 
 
+def _batch_raw_path(artifacts_dir: pathlib.Path, vod_id: str, batch: int) -> pathlib.Path:
+    """The persisted-raw path for one judge batch. Batch 0 keeps the back-compat
+    ``<vod>.raw.txt`` (a single-batch VOD looks exactly like the pre-chunk layout, and the
+    replay-gap check still keys on it); later batches get ``<vod>.batch_NN.raw.txt``."""
+    if batch == 0:
+        return _raw_path(artifacts_dir, vod_id)
+    return pathlib.Path(artifacts_dir) / f"{vod_id}.batch_{batch:02d}.raw.txt"
+
+
+def _read_all_batch_raws(artifacts_dir: pathlib.Path, vod_id: str) -> list[str]:
+    """Every persisted batch raw for a VOD, in batch order — ``<vod>.raw.txt`` then
+    ``<vod>.batch_01..`` until one is missing. The replay feeds these back to the judge
+    in the same order the paid run produced them."""
+    raws: list[str] = []
+    batch = 0
+    while True:
+        path = _batch_raw_path(artifacts_dir, vod_id, batch)
+        if not path.exists():
+            break
+        raws.append(path.read_text(encoding="utf-8"))
+        batch += 1
+    return raws
+
+
 def _write_text(path: pathlib.Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
@@ -398,25 +438,32 @@ def paid_make_judge(
     provider: CallProviderFn | None = None,
     pad_sec: float = EXCERPT_PAD_SEC,
     build_prompt: "Callable[[list[Row]], str] | None" = None,
+    chunk_size: "int | None" = None,
 ) -> MakeJudgeFn:
     """Per-VOD judge bound to the paid provider, persisting each raw response.
 
-    Defaults the provider to gemini-2.5-pro (temp 0); tests inject a network-free
-    fake. The raw response is persisted (``{vod_id}.raw.txt``) BEFORE parsing — the
-    re-evaluable artifact a ``--replay`` re-reads. ``run_arm`` calls the judge once
-    per VOD, so this is a single paid call per VOD. ``build_prompt`` selects the rubric:
-    omitted = Arm A (neutral); ``archetype_prompt_builder(archetypes)`` = Arm B.
+    Defaults the provider to gemini-2.5-pro (temp 0); tests inject a network-free fake.
+    Each batch's raw response is persisted BEFORE parsing — the re-evaluable artifacts a
+    ``--replay`` re-reads (batch 0 → ``{vod_id}.raw.txt``, later batches → ``.batch_NN``).
+    ``chunk_size`` splits an oversized pool into reliable batches (#101). ``build_prompt``
+    selects the rubric: omitted = Arm A (neutral); ``archetype_prompt_builder`` = Arm B.
     """
     call_provider = provider or gemini_pro_provider()
 
     def _make(vod_id: str, segments: list) -> RerankFn:
-        raw_path = _raw_path(artifacts_dir, vod_id)
+        counter = {"batch": 0}
+
+        def persist(text: str) -> None:
+            _write_text(_batch_raw_path(artifacts_dir, vod_id, counter["batch"]), text)
+            counter["batch"] += 1
+
         return neutral_repost_judge(
             call_provider=call_provider,
-            persist_raw=lambda text: _write_text(raw_path, text),
+            persist_raw=persist,
             segments=segments,
             pad_sec=pad_sec,
             build_prompt=build_prompt,
+            chunk_size=chunk_size,
         )
 
     return _make
@@ -427,23 +474,26 @@ def replay_make_judge(
     *,
     pad_sec: float = EXCERPT_PAD_SEC,
     build_prompt: "Callable[[list[Row]], str] | None" = None,
+    chunk_size: "int | None" = None,
 ) -> MakeJudgeFn:
-    """Per-VOD judge bound to the persisted raw response — re-scores without paying.
+    """Per-VOD judge bound to the persisted raw responses — re-scores without paying.
 
-    The provider seam is the persisted-raw fake, so the adapter's own parser decodes
-    it on the *same* path the paid run used — bit-for-bit, no network. ``build_prompt``
-    mirrors the paid arm's rubric (the persisted-raw fake ignores the prompt, but keeping
-    it identical means the replay code path matches the paid one exactly).
+    The provider seam returns each batch's persisted raw in order, so the adapter's own
+    parser decodes them on the *same* path the paid run used — bit-for-bit, no network.
+    ``chunk_size`` must match the paid run's so the rows split into the same batches the
+    persisted raws cover. ``build_prompt`` mirrors the paid arm's rubric (the fake ignores
+    the prompt, but keeping it identical means the replay code path matches the paid one).
     """
 
     def _make(vod_id: str, segments: list) -> RerankFn:
-        raw = _raw_path(artifacts_dir, vod_id).read_text(encoding="utf-8")
+        raws = iter(_read_all_batch_raws(artifacts_dir, vod_id))
         return neutral_repost_judge(
-            call_provider=fake_gemini_provider(raw),
+            call_provider=lambda _prompt: next(raws),
             persist_raw=lambda _t: None,
             segments=segments,
             pad_sec=pad_sec,
             build_prompt=build_prompt,
+            chunk_size=chunk_size,
         )
 
     return _make
@@ -818,6 +868,7 @@ def run_paid_verdict(
     provider: CallProviderFn | None = None,
     archetypes: "list | None" = None,
     exclude_vods: "list[str] | None" = None,
+    chunk_size: "int | None" = None,
     **verdict_kwargs,
 ) -> dict:
     """The paid two-arm run: gate on the #100 report, then judge both arms and persist.
@@ -837,9 +888,9 @@ def run_paid_verdict(
     load_inputs = _excluding(fresh_segment_load_inputs(storage, predictions_dir), exclude_vods)
     return run_verdict(
         anchor_ids, manifest,
-        make_judge_a=paid_make_judge(arm_a_dir, provider=provider),
+        make_judge_a=paid_make_judge(arm_a_dir, provider=provider, chunk_size=chunk_size),
         make_judge_b=paid_make_judge(
-            arm_b_dir, provider=provider,
+            arm_b_dir, provider=provider, chunk_size=chunk_size,
             build_prompt=archetype_prompt_builder(archetypes)),
         load_inputs_a=load_inputs,
         **verdict_kwargs,
@@ -867,6 +918,7 @@ def run_replay_verdict(
     artifacts_root: pathlib.Path,
     archetypes: "list | None" = None,
     exclude_vods: "list[str] | None" = None,
+    chunk_size: "int | None" = None,
     **verdict_kwargs,
 ) -> dict:
     """Reproduce the verdict free, network-free, from the persisted A and B raw responses.
@@ -882,9 +934,10 @@ def run_replay_verdict(
     base_load = _excluding(fresh_segment_load_inputs(storage, predictions_dir), exclude_vods)
     return run_verdict(
         anchor_ids, manifest,
-        make_judge_a=replay_make_judge(arm_a_dir),
+        make_judge_a=replay_make_judge(arm_a_dir, chunk_size=chunk_size),
         make_judge_b=replay_make_judge(
-            arm_b_dir, build_prompt=archetype_prompt_builder(archetypes)),
+            arm_b_dir, chunk_size=chunk_size,
+            build_prompt=archetype_prompt_builder(archetypes)),
         load_inputs_a=_gated_replay_inputs(arm_a_dir, base_load),
         load_inputs_b=_gated_replay_inputs(arm_b_dir, base_load),
         **verdict_kwargs,
@@ -1247,6 +1300,10 @@ def main(
     parser.add_argument("--video-source-root", default=None,
                         help="render: resolve vod_<id>.mp4 from here (e.g. the #100 staging "
                              "root) instead of the download cache")
+    parser.add_argument("--chunk-size", type=int, default=None,
+                        help="Score the pool in batches of this many candidates per call "
+                             "(gemini-2.5-pro is unreliable at ~1000 in one call). MUST match "
+                             "between run and replay/render so the persisted batches line up.")
     parser.add_argument("--top-k", type=int, default=DEFAULT_TOP_K)
     args = parser.parse_args(argv)
 
@@ -1261,7 +1318,7 @@ def main(
 
     common = dict(storage=storage, predictions_dir=storage,
                   artifacts_root=artifacts_root, top_k=args.top_k,
-                  exclude_vods=exclude_vods)
+                  exclude_vods=exclude_vods, chunk_size=args.chunk_size)
 
     if args.mode == "run":
         report = build_fresh_consistency_report(storage, anchors)
