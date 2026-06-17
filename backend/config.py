@@ -274,6 +274,17 @@ class Settings(BaseSettings):
     # separate process/batch. If eval-capture ever shares the serving process,
     # switch the trigger to a per-job signal (e.g. bound to the job id) instead.
     moment_finder_eval_recall: bool = False
+    # Archetype-Judge as the serving ranker (Slice 2, #104). Default OFF (opt-in):
+    # production keeps the composite ranker until this is flipped. When on AND the
+    # job's profile carries archetypes, the deduped pool is re-ranked by the
+    # gemini-2.5-pro repost-virality judge (full override); a profile with no
+    # archetypes, or a judge error/empty response, falls back to the composite —
+    # serving never raises. chunk_size mirrors the offline paid run (400/batch).
+    moment_finder_archetype_judge_enabled: bool = False
+    moment_finder_archetype_judge_model: str = "gemini-2.5-pro"
+    moment_finder_archetype_judge_chunk_size: int = 400
+    moment_finder_archetype_judge_max_retries: int = 3
+    moment_finder_archetype_judge_pad_sec: float = 12.0
 
     @field_validator("allowed_origins", mode="before")
     @classmethod

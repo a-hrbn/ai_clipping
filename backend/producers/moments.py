@@ -54,6 +54,14 @@ class MomentParams:
     # Off for serving: gates the raw-recall branch and the typed RankedCandidate in
     # find_moments (and the moments_raw.jsonl dump here). Eval/capture runs opt in.
     eval_recall: bool = False
+    # Archetype-Judge serving ranker (#104). Default OFF: find_moments ranks via the
+    # composite until this is flipped. ``model``/``chunk_size``/``max_retries``/``pad_sec``
+    # configure the judge; the provider itself is built inside find_moments.
+    archetype_judge: bool = False
+    judge_model: str = ""
+    judge_chunk_size: int = 0
+    judge_max_retries: int = 3
+    judge_pad_sec: float = 12.0
 
 
 class MomentFinding:
@@ -116,6 +124,11 @@ class MomentFinding:
                 retry_backoff_sec=p.retry_backoff_sec,
                 filter_transcript_noise=p.filter_transcript_noise,
                 eval_recall=p.eval_recall,
+                archetype_judge=p.archetype_judge,
+                judge_model=p.judge_model,
+                judge_chunk_size=p.judge_chunk_size,
+                judge_max_retries=p.judge_max_retries,
+                judge_pad_sec=p.judge_pad_sec,
             )
             if not result.post_processed_moments:
                 raise self._error("LLM moment finder returned no moments.")

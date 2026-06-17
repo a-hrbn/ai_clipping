@@ -6,6 +6,7 @@ from typing import Any, Callable, Mapping, Sequence
 from ml import llm_moment_finder as d0
 from services.timeline_types import Candidate, CandidateFeatures, RankedCandidate
 from . import _post_processor
+from ._archetype_judge import EXCERPT_PAD_SEC, archetype_judge_rank_score_fn, default_judge_provider
 from services.transcriber import RichSegment
 
 # rows -> rows. The pool-level ranking seam (ADR 0001): a fn receives the deduped
@@ -56,6 +57,12 @@ def find_moments(
     chunk_duration_sec: float = d0.DEFAULT_CHUNK_DURATION_SEC,
     chunk_overlap_sec: float = d0.DEFAULT_CHUNK_OVERLAP_SEC,
     eval_recall: bool = False,
+    archetype_judge: bool = False,
+    judge_provider: Callable[[str], str] | None = None,
+    judge_model: str = "",
+    judge_chunk_size: int = 0,
+    judge_max_retries: int = 3,
+    judge_pad_sec: float = EXCERPT_PAD_SEC,
 ) -> MomentFinderResult:
     profile_spec = d0.load_clip_profile(profile)
     streamer_name = str((profile_spec or {}).get("streamer") or "")
@@ -140,11 +147,33 @@ def find_moments(
     # Serving currency: the post-processed dict-rows the Clipping producer consumes.
     # find_moments and the offline replay converge on ONE shared post-processing
     # function — snap -> dedupe -> pool-level rank_score_fn -> diversity -> rank
-    # (ADR 0001). The identity rank_score_fn (here) keeps today's serving output;
-    # it is the seam the offline-validated Archetype-Judge plugs into (Slice 2).
-    # No top_k here: the Clipping producer truncates to clip_top_k downstream.
+    # (ADR 0001). The Archetype-Judge (Slice 2) plugs in here as the rank_score_fn,
+    # opt-in and profile-gated; otherwise the identity (None) keeps today's composite
+    # output. No top_k here: the Clipping producer truncates to clip_top_k downstream.
+    judge_stats: dict[str, Any] = {}
+    # The pool-level rank_score_fn (rows -> rows) the Archetype-Judge plugs into — kept
+    # distinct from the (disabled) per-LlmMoment cross-chunk ``rank_score_fn`` above, which
+    # the eval-recall raw branch still passes to llm_moments_to_post_processor_rows.
+    pool_rank_score_fn = None
+    if archetype_judge:
+        provider = judge_provider or default_judge_provider(
+            model=judge_model,
+            timeout_sec=timeout_sec,
+            retries=api_retries,
+            retry_backoff_sec=retry_backoff_sec,
+        )
+        pool_rank_score_fn = archetype_judge_rank_score_fn(
+            profile_spec=profile_spec,
+            segments=list(segments),
+            provider=provider,
+            model=judge_model,
+            chunk_size=judge_chunk_size,
+            max_retries=judge_max_retries,
+            pad_sec=judge_pad_sec,
+            stats=judge_stats,
+        )
     moment_rows = llm_moments_to_post_processor_rows(length_discipline.moments)
-    post_processed_rows = post_process_pool(moment_rows, list(segments))
+    post_processed_rows = post_process_pool(moment_rows, list(segments), rank_score_fn=pool_rank_score_fn)
 
     # Eval-only encodings, gated behind eval_recall (off for serving): the raw
     # pre-dedupe/pre-diversity branch (a second snap_boundaries pass measuring true
@@ -181,6 +210,9 @@ def find_moments(
         "prompt_chars": len(prompt),
         "chunk_count": len(chunks),
         "chunk_duration_sec": round(float(chunk_duration_sec), 3),
+        # Judge usage (provider/model/latency/degraded) when the Archetype-Judge ran;
+        # absent on the composite path so the summary mirrors what actually executed.
+        **judge_stats,
     }
     return MomentFinderResult(
         ranked_candidates=ranked_candidates,

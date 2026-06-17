@@ -180,6 +180,11 @@ def _moment_params() -> MomentParams:
         filter_transcript_noise=bool(getattr(settings, "moment_finder_filter_transcript_noise", True)),
         temperature=0.0,
         eval_recall=bool(getattr(settings, "moment_finder_eval_recall", False)),
+        archetype_judge=bool(getattr(settings, "moment_finder_archetype_judge_enabled", False)),
+        judge_model=str(getattr(settings, "moment_finder_archetype_judge_model", "") or ""),
+        judge_chunk_size=int(getattr(settings, "moment_finder_archetype_judge_chunk_size", 0) or 0),
+        judge_max_retries=int(getattr(settings, "moment_finder_archetype_judge_max_retries", 3) or 0),
+        judge_pad_sec=float(getattr(settings, "moment_finder_archetype_judge_pad_sec", 12.0) or 12.0),
     )
 
 
