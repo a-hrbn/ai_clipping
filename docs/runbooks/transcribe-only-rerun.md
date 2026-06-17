@@ -51,8 +51,12 @@ Behandle den non-zero Exit **nicht** als Fehler. Erfolgskriterium ist stattdesse
 3. `excluded` == genau die bekannten **6** IDs oben.
 
 Ein FLAG auf einer der **20** (`schema_mismatch` / `late_start` / `truncated` /
-`density_outlier` / `unreplayable`) ist ein **echtes** Drift-Signal → einzeln
-surfacen und dokumentieren (PRD #95 / AC #100), nicht still als Miss folden.
+`over_run` / `density_outlier` / `unreplayable`) ist ein **echtes** Drift-Signal →
+einzeln surfacen und dokumentieren (PRD #95 / AC #100), nicht still als Miss folden.
+
+`over_run` (span_end > VOD-Länge × 1,05) und das chunk-granularitäts-bewusste
+`late_start` (Default 4 × chunk_seconds = 720 s, statt flat 120 s) kamen während
+dieses Laufs dazu — s. „Ergebnis des Laufs".
 
 ## Voraussetzungen
 
@@ -236,3 +240,32 @@ Die extrahierten `.wav` (nicht die `segments.jsonl`!) wegräumen:
 docker exec ai-clipping-backend sh -c \
   "rm -f tmp/storage/transcribe_only_sources/transcribe_only_*.wav"
 ```
+
+---
+
+## Ergebnis des Laufs (ausgeführt 2026-06-16/17)
+
+**Verdikt: 20/20 PASS, 0 Drops, Report clean modulo der 6 dokumentierten
+Exclusions.** Compute ~**11,5 h** über die 20 (GTX 1660, `large-v3-turbo`,
+int8_float16). Die frischen `segments.jsonl` sind die Transkript-Basis für #101.
+
+Der Lauf legte zwei Bugs offen (beide gefixt, TDD):
+
+1. **Chunk-Bleed (Korrektheit) — `fix(transcriber)` `7899899`.** Alle 20 `.wav`
+   teilen sich einen Staging-Dir, also einen `chunks/`-Dir. `transcribe_with_progress`
+   globt *alle* `chunk_*.wav`; ffmpegs Segment-Muxer (`-y`) überschreibt aber nur,
+   was er schreibt — eine **kürzere** VOD nach einer **längeren** erbte deren
+   Rest-Chunks und transkribierte fremde Stream-Audio auf ihre Timeline (end_cov bis
+   299 %). Fix: stale `chunk_*.wav` vor dem Re-Segmentieren löschen. Erst-Lauf war
+   davon zu 14/20 betroffen → komplett neu transkribiert.
+2. **Report-Lücken (fail-closed) — `feat(ml)` `50c10fa`.** (a) Kein oberes
+   Coverage-Limit → der Over-Run oben lief *durch*. Neuer `over_run`-Flag
+   (span_end > Länge × 1,05). (b) `late_start` war flat 120 s < 180 s Chunk → jede
+   VOD mit kurzem Intro flaggte (11/20, alle benigne „starting soon"-Musik, per
+   Inhalt verifiziert). Jetzt chunk-granularitäts-bewusst (Default 4 × chunk = 720 s).
+
+**Infra-Hinweise fürs nächste Mal:** der GPU-Lauf brach einmal mit `CUDA failed
+with error unknown error` ab (frischer Prozess = frischer CUDA-Context behebt es,
+Driver ist resumebar) und Docker Desktop verlor einmal die WSL-Integration
+(`Start-Process 'Docker Desktop.exe'`, Container kam per restart-policy zurück).
+Beide Male ging **kein** Fortschritt verloren (Resume-Skip pro fertiger VOD).
