@@ -100,6 +100,7 @@ def normalize_strategy(strategy: dict | None) -> dict[str, Any]:
     clip_style = _normalize_style(raw.get("clip_style"))
     variant_count = _coerce_variant_count(raw.get("variant_count"))
     time_range = _normalize_time_range(raw.get("time_range"))
+    archetype_judge = _coerce_optional_bool(raw.get("archetype_judge"))
     return {
         "platform": platform,
         "goal": goal,
@@ -111,6 +112,10 @@ def normalize_strategy(strategy: dict | None) -> dict[str, Any]:
         "time_range": time_range,
         "clip_style": clip_style,
         "variant_count": variant_count,
+        # Per-job Archetype-Judge opt-out (#105): None inherits the global default,
+        # False turns the judge off for this job, True forces it on. The Conductor
+        # resolves it against ``moment_finder_archetype_judge_enabled``.
+        "archetype_judge": archetype_judge,
         "goal_family": infer_goal_family(goal, clip_style, topic),
         "keywords": strategy_keywords(
             {
@@ -309,6 +314,15 @@ def _coerce_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _coerce_optional_bool(value: Any) -> bool | None:
+    """Tri-state per-job toggle: ``None`` (absent → inherit the global default),
+    else the explicit truthiness. The Conductor reads this to opt a single job out
+    of (or into) the Archetype-Judge without a code change."""
+    if value is None:
+        return None
+    return bool(value)
 
 
 def _clean_text(value: Any) -> str:

@@ -162,9 +162,21 @@ def _probe_media_duration_sec(video_path: pathlib.Path) -> float | None:
     return duration if duration > 0 else None
 
 
-def _moment_params() -> MomentParams:
+def _resolve_archetype_judge(strategy: dict | None) -> bool:
+    """The effective Archetype-Judge flag for one job: the global default unless the
+    job's normalized ``strategy`` opts out (or in). ``moment_finder_archetype_judge_enabled``
+    is the master switch (default ON since Go-Live, #105); a per-job ``archetype_judge``
+    of ``True``/``False`` overrides it, ``None`` (absent) inherits — so an operator can
+    turn the judge off for a single job's cost/latency without a code change."""
+    global_default = bool(getattr(settings, "moment_finder_archetype_judge_enabled", False))
+    override = (strategy or {}).get("archetype_judge")
+    return global_default if override is None else bool(override)
+
+
+def _moment_params(strategy: dict | None = None) -> MomentParams:
     """Snapshot the ~17 ``moment_finder_*`` settings once, so the MomentFinding
-    Producer is handed plain values and never reads ``config.settings``."""
+    Producer is handed plain values and never reads ``config.settings``. The
+    per-job normalized ``strategy`` resolves the Archetype-Judge opt-out (#105)."""
     return MomentParams(
         provider=str(getattr(settings, "moment_finder_provider", "gemini") or "gemini"),
         model=str(getattr(settings, "moment_finder_model", "") or ""),
@@ -180,7 +192,7 @@ def _moment_params() -> MomentParams:
         filter_transcript_noise=bool(getattr(settings, "moment_finder_filter_transcript_noise", True)),
         temperature=0.0,
         eval_recall=bool(getattr(settings, "moment_finder_eval_recall", False)),
-        archetype_judge=bool(getattr(settings, "moment_finder_archetype_judge_enabled", False)),
+        archetype_judge=_resolve_archetype_judge(strategy),
         judge_model=str(getattr(settings, "moment_finder_archetype_judge_model", "") or ""),
         judge_chunk_size=int(getattr(settings, "moment_finder_archetype_judge_chunk_size", 0) or 0),
         judge_max_retries=int(getattr(settings, "moment_finder_archetype_judge_max_retries", 3) or 0),
@@ -363,7 +375,7 @@ async def run_pipeline(
             vod_id=_source_twitch_vod_id(url) or job_id,
             job_id=job_id,
             store=store,
-            params=_moment_params(),
+            params=_moment_params(normalized_strategy),
             find=moment_finder.find_moments,
             error=moment_finder.MomentFinderError,
         )

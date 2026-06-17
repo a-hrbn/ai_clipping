@@ -58,6 +58,9 @@ class JobRequest(BaseModel):
     time_range: TimeRange | None = None
     clip_style: ClipStyle | None = None
     variant_count: int | None = Field(default=None, ge=1, le=4)
+    # Per-job Archetype-Judge opt-out (#105): None inherits the default-on global,
+    # False turns the judge off for this one job (cost/latency) without a code change.
+    archetype_judge: bool | None = None
 
     @field_validator("url")
     @classmethod

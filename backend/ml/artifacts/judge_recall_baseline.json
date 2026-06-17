@@ -1,0 +1,988 @@
+{
+  "ks": [
+    5,
+    10,
+    20,
+    50
+  ],
+  "gold_tiers": [
+    "gold"
+  ],
+  "anchor_restricted": true,
+  "gold_vods": 23,
+  "scored_vods": 17,
+  "missing_prediction_vods": [
+    "2756055866",
+    "2764976309",
+    "2770356205",
+    "2771207666",
+    "2773650615",
+    "2774440901"
+  ],
+  "headline_min_views": 100000,
+  "floor": {
+    "min_views": 0.0,
+    "vods": 17,
+    "gt_count": 47,
+    "hit_count": 10,
+    "miss_count": 37,
+    "recall": {
+      "5": 0.085106,
+      "10": 0.12766,
+      "20": 0.212766,
+      "50": 0.212766
+    },
+    "avg_rank": 9.1,
+    "miss_rate": 0.787234
+  },
+  "headline": {
+    "min_views": 100000,
+    "vods": 12,
+    "gt_count": 21,
+    "hit_count": 5,
+    "miss_count": 16,
+    "recall": {
+      "5": 0.047619,
+      "10": 0.142857,
+      "20": 0.238095,
+      "50": 0.238095
+    },
+    "avg_rank": 9.8,
+    "miss_rate": 0.761905
+  },
+  "generation": {
+    "floor": {
+      "min_views": 0.0,
+      "gt_count": 47,
+      "covered": 29,
+      "recall_any": 0.617021
+    },
+    "headline": {
+      "min_views": 100000,
+      "gt_count": 21,
+      "covered": 13,
+      "recall_any": 0.619048
+    }
+  },
+  "coverage_threshold": 0.5,
+  "per_vod": [
+    {
+      "vod_id": "2745548882",
+      "has_gt": true,
+      "gt_count": 1,
+      "pred_count": 20,
+      "recall": {
+        "5": 1.0,
+        "10": 1.0,
+        "20": 1.0,
+        "50": 1.0
+      },
+      "avg_rank": 2.0,
+      "miss_rate": 0.0,
+      "hit_count": 1,
+      "miss_count": 0,
+      "gt_hits": [
+        {
+          "gt_index": 0,
+          "gt_start": 1193.98,
+          "gt_end": 1233.12,
+          "desc": "Jynxzi’s Mod HIvise Takes Over His PC and Resigns His Game Mid 1v1 In Chess! 😭♟",
+          "views": 227410.0,
+          "source_url": "https://www.youtube.com/watch?v=m4CLC8Kq9NI",
+          "hit": true,
+          "hit_rank": 2,
+          "coverage": 0.7458,
+          "pred_start_time": 1191.89,
+          "pred_end_time": 1223.17
+        }
+      ]
+    },
+    {
+      "vod_id": "2747242788",
+      "has_gt": true,
+      "gt_count": 2,
+      "pred_count": 20,
+      "recall": {
+        "5": 0.0,
+        "10": 0.0,
+        "20": 0.0,
+        "50": 0.0
+      },
+      "avg_rank": null,
+      "miss_rate": 1.0,
+      "hit_count": 0,
+      "miss_count": 2,
+      "gt_hits": [
+        {
+          "gt_index": 0,
+          "gt_start": 1829.98,
+          "gt_end": 1838.7,
+          "desc": "Jynxzi Hits a Rare \"Balright\"! 💀😭",
+          "views": 93652.0,
+          "source_url": "https://www.youtube.com/watch?v=J_RopWKpB_0",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        },
+        {
+          "gt_index": 1,
+          "gt_start": 10207.74,
+          "gt_end": 10231.1,
+          "desc": "Jynxzi Reacts To Mooda Potentially Cheating In R6! 😱👀",
+          "views": 347856.0,
+          "source_url": "https://www.youtube.com/watch?v=H34WBscrmtc",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        }
+      ]
+    },
+    {
+      "vod_id": "2748008198",
+      "has_gt": true,
+      "gt_count": 1,
+      "pred_count": 20,
+      "recall": {
+        "5": 0.0,
+        "10": 0.0,
+        "20": 1.0,
+        "50": 1.0
+      },
+      "avg_rank": 19.0,
+      "miss_rate": 0.0,
+      "hit_count": 1,
+      "miss_count": 0,
+      "gt_hits": [
+        {
+          "gt_index": 0,
+          "gt_start": 3767.9,
+          "gt_end": 3784.66,
+          "desc": "Jynxzi Is Shocked After Reacting To Mooda’s Sus R6 Clips! 😱👀",
+          "views": 18807.0,
+          "source_url": "https://www.youtube.com/watch?v=gijMYEFibmo",
+          "hit": true,
+          "hit_rank": 19,
+          "coverage": 0.4827,
+          "pred_start_time": 3775.29,
+          "pred_end_time": 3783.38
+        }
+      ]
+    },
+    {
+      "vod_id": "2748783535",
+      "has_gt": true,
+      "gt_count": 1,
+      "pred_count": 20,
+      "recall": {
+        "5": 0.0,
+        "10": 0.0,
+        "20": 0.0,
+        "50": 0.0
+      },
+      "avg_rank": null,
+      "miss_rate": 1.0,
+      "hit_count": 0,
+      "miss_count": 1,
+      "gt_hits": [
+        {
+          "gt_index": 0,
+          "gt_start": 11939.34,
+          "gt_end": 11952.28,
+          "desc": "KSI Kicks Out Jynxzi for Making a Joke About Arsenal Never Winning the Champions League 😭",
+          "views": 855633.0,
+          "source_url": "https://www.youtube.com/watch?v=ZrRNM6VWpb4",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        }
+      ]
+    },
+    {
+      "vod_id": "2751373742",
+      "has_gt": true,
+      "gt_count": 5,
+      "pred_count": 20,
+      "recall": {
+        "5": 0.4,
+        "10": 0.4,
+        "20": 0.6,
+        "50": 0.6
+      },
+      "avg_rank": 6.0,
+      "miss_rate": 0.4,
+      "hit_count": 3,
+      "miss_count": 2,
+      "gt_hits": [
+        {
+          "gt_index": 0,
+          "gt_start": 1526.44,
+          "gt_end": 1559.66,
+          "desc": "Jynxzi Reacts To His First Goal In The Sidemen Charity Match! 💀🔥",
+          "views": 38675.0,
+          "source_url": "https://www.youtube.com/watch?v=TNDhuEZWldg",
+          "hit": true,
+          "hit_rank": 3,
+          "coverage": 0.829,
+          "pred_start_time": 1532.12,
+          "pred_end_time": 1575.12
+        },
+        {
+          "gt_index": 1,
+          "gt_start": 2659.9,
+          "gt_end": 2690.84,
+          "desc": "Jynxzi On xQc's Pen Performance On Sidemen Charity Match... 😭🥀",
+          "views": 120993.0,
+          "source_url": "https://www.youtube.com/watch?v=fEtAJnHIciQ",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        },
+        {
+          "gt_index": 2,
+          "gt_start": 3232.72,
+          "gt_end": 3245.16,
+          "desc": "Jynxzi Reacts to OhnePixel Watching Him Score His First Goal In Sidemen Charity Match! ❤️‍🩹🥹",
+          "views": 136109.0,
+          "source_url": "https://www.youtube.com/watch?v=-IVllaDBvng",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        },
+        {
+          "gt_index": 3,
+          "gt_start": 3393.78,
+          "gt_end": 3403.28,
+          "desc": "Jynxzi Reacts to His Mod Hivise Watching Him Score His First Goal In Sidemen Charity Match! ❤️‍🩹🥹",
+          "views": 77943.0,
+          "source_url": "https://www.youtube.com/watch?v=gjjPixY6RvA",
+          "hit": true,
+          "hit_rank": 13,
+          "coverage": 1.0,
+          "pred_start_time": 3392.45,
+          "pred_end_time": 3403.45
+        },
+        {
+          "gt_index": 4,
+          "gt_start": 3467.84,
+          "gt_end": 3476.88,
+          "desc": "Jynxzi Reacts To His Dad Watching Him Score His First Goal In The Sidemen Charity Match! ❤️‍🩹🥹",
+          "views": 32187.0,
+          "source_url": "https://www.youtube.com/watch?v=vCO30vSiFTA",
+          "hit": true,
+          "hit_rank": 2,
+          "coverage": 1.0,
+          "pred_start_time": 3454.33,
+          "pred_end_time": 3494.67
+        }
+      ]
+    },
+    {
+      "vod_id": "2752903388",
+      "has_gt": true,
+      "gt_count": 3,
+      "pred_count": 20,
+      "recall": {
+        "5": 0.0,
+        "10": 0.0,
+        "20": 0.0,
+        "50": 0.0
+      },
+      "avg_rank": null,
+      "miss_rate": 1.0,
+      "hit_count": 0,
+      "miss_count": 3,
+      "gt_hits": [
+        {
+          "gt_index": 0,
+          "gt_start": 3907.02,
+          "gt_end": 3926.72,
+          "desc": "Jynxzi Lists Every Game Mooda Cheated On! 💀👀",
+          "views": 638256.0,
+          "source_url": "https://www.youtube.com/watch?v=SXR5CyjyRiI",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        },
+        {
+          "gt_index": 1,
+          "gt_start": 4855.88,
+          "gt_end": 4887.3,
+          "desc": "Jynxzi Reacts to Mooda Admitting to Cheating in Video Games! 😱👀",
+          "views": 487159.0,
+          "source_url": "https://www.youtube.com/watch?v=EaZ0GGoXD3A",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        },
+        {
+          "gt_index": 2,
+          "gt_start": 21129.8,
+          "gt_end": 21138.18,
+          "desc": "Jynxzi Hits Two Rarest “Balright” In One Day! 😭🥀",
+          "views": 356562.0,
+          "source_url": "https://www.youtube.com/watch?v=o2tQc509OPI",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        }
+      ]
+    },
+    {
+      "vod_id": "2754503460",
+      "has_gt": true,
+      "gt_count": 2,
+      "pred_count": 20,
+      "recall": {
+        "5": 0.0,
+        "10": 0.0,
+        "20": 0.0,
+        "50": 0.0
+      },
+      "avg_rank": null,
+      "miss_rate": 1.0,
+      "hit_count": 0,
+      "miss_count": 2,
+      "gt_hits": [
+        {
+          "gt_index": 0,
+          "gt_start": 7633.02,
+          "gt_end": 7647.28,
+          "desc": "Jynxzi Quits Console After Playing R6 On Pc! 😭💀",
+          "views": 263917.0,
+          "source_url": "https://www.youtube.com/watch?v=I-Kqb5ru3XU",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        },
+        {
+          "gt_index": 1,
+          "gt_start": 20858.82,
+          "gt_end": 20872.02,
+          "desc": "Jynxzi Is Insanely Good In PC Ranked Lobbies! 😱👀",
+          "views": 74721.0,
+          "source_url": "https://www.youtube.com/watch?v=bgZ67Ookc2w",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        }
+      ]
+    },
+    {
+      "vod_id": "2757793134",
+      "has_gt": true,
+      "gt_count": 3,
+      "pred_count": 20,
+      "recall": {
+        "5": 0.0,
+        "10": 0.333333,
+        "20": 0.333333,
+        "50": 0.333333
+      },
+      "avg_rank": 7.0,
+      "miss_rate": 0.666667,
+      "hit_count": 1,
+      "miss_count": 2,
+      "gt_hits": [
+        {
+          "gt_index": 0,
+          "gt_start": 6996.78,
+          "gt_end": 7042.32,
+          "desc": "Jynxzi Shocks Tyler1 by Saying He Enjoys League of Legends 💀😭",
+          "views": 412428.0,
+          "source_url": "https://www.youtube.com/watch?v=CrkPxoQ6AYA",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        },
+        {
+          "gt_index": 1,
+          "gt_start": 7734.24,
+          "gt_end": 7775.42,
+          "desc": "Jynxzi Doesn’t Know Where the Shift Key Is on His Keyboard! 😭🥀",
+          "views": 361875.0,
+          "source_url": "https://www.youtube.com/watch?v=OaXy0jvuL6k",
+          "hit": true,
+          "hit_rank": 7,
+          "coverage": 0.6438,
+          "pred_start_time": 7748.91,
+          "pred_end_time": 7786.28
+        },
+        {
+          "gt_index": 2,
+          "gt_start": 8341.08,
+          "gt_end": 8362.2,
+          "desc": "Jynxzi Asks Tyler1 What the Easiest & Hardest Role in League of Legends Is! 🤔👀",
+          "views": 217621.0,
+          "source_url": "https://www.youtube.com/watch?v=slDbHL3aEZI",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        }
+      ]
+    },
+    {
+      "vod_id": "2758541573",
+      "has_gt": true,
+      "gt_count": 5,
+      "pred_count": 20,
+      "recall": {
+        "5": 0.0,
+        "10": 0.0,
+        "20": 0.2,
+        "50": 0.2
+      },
+      "avg_rank": 15.0,
+      "miss_rate": 0.8,
+      "hit_count": 1,
+      "miss_count": 4,
+      "gt_hits": [
+        {
+          "gt_index": 0,
+          "gt_start": 605.46,
+          "gt_end": 640.54,
+          "desc": "Jynxzi Reacts To Hero Dark Prince In Clash Royale! 💀😭",
+          "views": 28840.0,
+          "source_url": "https://www.youtube.com/watch?v=xnrH3zprMCQ",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        },
+        {
+          "gt_index": 1,
+          "gt_start": 6620.8,
+          "gt_end": 6640.06,
+          "desc": "Jynxzi Makes Dantes Crash Out After 1 Minute of Coaching 💀😭",
+          "views": 56051.0,
+          "source_url": "https://www.youtube.com/watch?v=j0kagI9UEEQ",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        },
+        {
+          "gt_index": 2,
+          "gt_start": 7896.78,
+          "gt_end": 7935.56,
+          "desc": "Jynxzi Learns Rule 1 in League of Legends! 💀😭",
+          "views": 1027362.0,
+          "source_url": "https://www.youtube.com/watch?v=FG2tg6TUNWs",
+          "hit": true,
+          "hit_rank": 15,
+          "coverage": 0.9763,
+          "pred_start_time": 7896.78,
+          "pred_end_time": 7934.64
+        },
+        {
+          "gt_index": 3,
+          "gt_start": 8030.06,
+          "gt_end": 8056.44,
+          "desc": "Jynxzi Wants to Be As Greedy As Possible In League of Legends! 💀😭",
+          "views": 84498.0,
+          "source_url": "https://www.youtube.com/watch?v=dO5hAwem4NM",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        },
+        {
+          "gt_index": 4,
+          "gt_start": 10634.62,
+          "gt_end": 10672.92,
+          "desc": "Jynxzi Gets the Lowest Rank in League of Legends... 💀😭",
+          "views": 320108.0,
+          "source_url": "https://www.youtube.com/watch?v=-gIMLvEYR60",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        }
+      ]
+    },
+    {
+      "vod_id": "2759304833",
+      "has_gt": true,
+      "gt_count": 4,
+      "pred_count": 20,
+      "recall": {
+        "5": 0.25,
+        "10": 0.5,
+        "20": 0.5,
+        "50": 0.5
+      },
+      "avg_rank": 7.5,
+      "miss_rate": 0.5,
+      "hit_count": 2,
+      "miss_count": 2,
+      "gt_hits": [
+        {
+          "gt_index": 0,
+          "gt_start": 14250.64,
+          "gt_end": 14273.54,
+          "desc": "Why Does Jynxzi Writes This Down? 💀😭",
+          "views": 15598.0,
+          "source_url": "https://www.youtube.com/watch?v=klizQA7HwOc",
+          "hit": true,
+          "hit_rank": 5,
+          "coverage": 0.8773,
+          "pred_start_time": 14201.38,
+          "pred_end_time": 14270.73
+        },
+        {
+          "gt_index": 1,
+          "gt_start": 14278.6,
+          "gt_end": 14303.02,
+          "desc": "Jynxzi Finds Out How Every League of Legends Game Can Be Winnable... 💀😭",
+          "views": 204363.0,
+          "source_url": "https://www.youtube.com/watch?v=fpUPrtuw47Q",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        },
+        {
+          "gt_index": 2,
+          "gt_start": 15420.06,
+          "gt_end": 15447.58,
+          "desc": "Jynxzi Meets Kadeem & Finds Out He’s Challenger in League of Legends... 💀😭",
+          "views": 120951.0,
+          "source_url": "https://www.youtube.com/watch?v=OHfKE0wgXZw",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        },
+        {
+          "gt_index": 3,
+          "gt_start": 19875.18,
+          "gt_end": 19898.16,
+          "desc": "Jynxzi Gets Pushed To His Limits While Getting Coached By Dantes! 💀😭",
+          "views": 308448.0,
+          "source_url": "https://www.youtube.com/watch?v=FUxAhrS0pR8",
+          "hit": true,
+          "hit_rank": 10,
+          "coverage": 0.7363,
+          "pred_start_time": 19878.3,
+          "pred_end_time": 19895.22
+        }
+      ]
+    },
+    {
+      "vod_id": "2768134699",
+      "has_gt": true,
+      "gt_count": 1,
+      "pred_count": 20,
+      "recall": {
+        "5": 0.0,
+        "10": 0.0,
+        "20": 0.0,
+        "50": 0.0
+      },
+      "avg_rank": null,
+      "miss_rate": 1.0,
+      "hit_count": 0,
+      "miss_count": 1,
+      "gt_hits": [
+        {
+          "gt_index": 0,
+          "gt_start": 5698.42,
+          "gt_end": 5730.04,
+          "desc": "Jynxzi Gets Sent a Darth Maul Funko Pop From Fanmail! 💀😭",
+          "views": 7992.0,
+          "source_url": "https://www.youtube.com/watch?v=HQ6FT2vl8Kc",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        }
+      ]
+    },
+    {
+      "vod_id": "2769594798",
+      "has_gt": true,
+      "gt_count": 6,
+      "pred_count": 20,
+      "recall": {
+        "5": 0.0,
+        "10": 0.0,
+        "20": 0.0,
+        "50": 0.0
+      },
+      "avg_rank": null,
+      "miss_rate": 1.0,
+      "hit_count": 0,
+      "miss_count": 6,
+      "gt_hits": [
+        {
+          "gt_index": 0,
+          "gt_start": 5971.56,
+          "gt_end": 5987.58,
+          "desc": "Jynxzi Has Twitch Drops For His LoL Tournament — Free Emote & Master Yi Skin! 😱🔥",
+          "views": 58205.0,
+          "source_url": "https://www.youtube.com/watch?v=4gnVj73mYHs",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        },
+        {
+          "gt_index": 1,
+          "gt_start": 6115.11,
+          "gt_end": 6167.29,
+          "desc": "LosPollos Thinks Jynxzi’s Mod HIvise Is An AI Robot! 💀😭",
+          "views": 8212.0,
+          "source_url": "https://www.youtube.com/watch?v=5jFUDbMU2G4",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        },
+        {
+          "gt_index": 2,
+          "gt_start": 7407.36,
+          "gt_end": 7439.74,
+          "desc": "Jynxzi Breaks His All-Time Viewer Record for the First Time in 7 Years! 😱🔥",
+          "views": 14952.0,
+          "source_url": "https://www.youtube.com/watch?v=npqSGvHErmY",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        },
+        {
+          "gt_index": 3,
+          "gt_start": 10469.98,
+          "gt_end": 10482.12,
+          "desc": "LosPollos Asks Jynxzi Where Does Darth Maul Get His Sneakers! 💀😭",
+          "views": 98090.0,
+          "source_url": "https://www.youtube.com/watch?v=7FR11vOygKQ",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        },
+        {
+          "gt_index": 4,
+          "gt_start": 13498.4,
+          "gt_end": 13520.76,
+          "desc": "Jynxzi Reaches 400,000 Live Viewers For The First Time Ever! 😱🔥",
+          "views": 43288.0,
+          "source_url": "https://www.youtube.com/watch?v=e_4EsWB9aes",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        },
+        {
+          "gt_index": 5,
+          "gt_start": 19798.9,
+          "gt_end": 19817.16,
+          "desc": "Jynxzi Reacts To Marlon Playing League of Legends... 😭🥀",
+          "views": 19820.0,
+          "source_url": "https://www.youtube.com/watch?v=TpOUVyz3lws",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        }
+      ]
+    },
+    {
+      "vod_id": "2771989634",
+      "has_gt": true,
+      "gt_count": 3,
+      "pred_count": 20,
+      "recall": {
+        "5": 0.0,
+        "10": 0.0,
+        "20": 0.0,
+        "50": 0.0
+      },
+      "avg_rank": null,
+      "miss_rate": 1.0,
+      "hit_count": 0,
+      "miss_count": 3,
+      "gt_hits": [
+        {
+          "gt_index": 0,
+          "gt_start": 559.64,
+          "gt_end": 580.4,
+          "desc": "Jynxzi Reacts to Ranked 3.0 Being Revealed! 😱🔥",
+          "views": 45744.0,
+          "source_url": "https://www.youtube.com/watch?v=JqzlXKke8Ts",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        },
+        {
+          "gt_index": 1,
+          "gt_start": 733.56,
+          "gt_end": 767.08,
+          "desc": "Jynxzi Reacts To Fortnite's No Fall Damage Update! 👀🤯",
+          "views": 2695494.0,
+          "source_url": "https://www.youtube.com/watch?v=DYKWM0-HQcI",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        },
+        {
+          "gt_index": 2,
+          "gt_start": 18271.38,
+          "gt_end": 18284.22,
+          "desc": "Jynxzi Improved WAY Too Fast After Only Playing For 2 Weeks! 🤯🔥",
+          "views": 21928.0,
+          "source_url": "https://www.youtube.com/watch?v=A2CKvWvV-9U",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        }
+      ]
+    },
+    {
+      "vod_id": "2772745645",
+      "has_gt": true,
+      "gt_count": 3,
+      "pred_count": 20,
+      "recall": {
+        "5": 0.0,
+        "10": 0.0,
+        "20": 0.0,
+        "50": 0.0
+      },
+      "avg_rank": null,
+      "miss_rate": 1.0,
+      "hit_count": 0,
+      "miss_count": 3,
+      "gt_hits": [
+        {
+          "gt_index": 0,
+          "gt_start": 15284.78,
+          "gt_end": 15323.14,
+          "desc": "Jynxzi Explains the Difference Between Messi & Ronaldo! 👀🐐",
+          "views": 11669.0,
+          "source_url": "https://www.youtube.com/watch?v=gaWWdpV5_YQ",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        },
+        {
+          "gt_index": 1,
+          "gt_start": 22950.7,
+          "gt_end": 22994.56,
+          "desc": "Jynxzi Reacts to ChainsFR's Face Reveal! 😱👀",
+          "views": 1434649.0,
+          "source_url": "https://www.youtube.com/watch?v=PxpZBY5d2wU",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.3721,
+          "pred_start_time": null,
+          "pred_end_time": null
+        },
+        {
+          "gt_index": 2,
+          "gt_start": 25475.38,
+          "gt_end": 25485.32,
+          "desc": "Jynxzi Finds Out Faker Hit His Head Against a Wall After Losing in League of Legends! 💀😭",
+          "views": 139421.0,
+          "source_url": "https://www.youtube.com/watch?v=tQK0lxBapCg",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        }
+      ]
+    },
+    {
+      "vod_id": "2777621798",
+      "has_gt": true,
+      "gt_count": 3,
+      "pred_count": 20,
+      "recall": {
+        "5": 0.0,
+        "10": 0.0,
+        "20": 0.333333,
+        "50": 0.333333
+      },
+      "avg_rank": 15.0,
+      "miss_rate": 0.666667,
+      "hit_count": 1,
+      "miss_count": 2,
+      "gt_hits": [
+        {
+          "gt_index": 0,
+          "gt_start": 432.55,
+          "gt_end": 452.7,
+          "desc": "Jynxzi Reacts to GTA 6 Officially Not Getting Delayed! 😱🔥",
+          "views": 16012.0,
+          "source_url": "https://www.youtube.com/watch?v=3d9xTqT392I",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        },
+        {
+          "gt_index": 1,
+          "gt_start": 3304.0,
+          "gt_end": 3329.85,
+          "desc": "Jynxzi Puts On a Kitten Costume From Fanmail! 💀😭",
+          "views": 46095.0,
+          "source_url": "https://www.youtube.com/watch?v=GpJCPP3Lyug",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        },
+        {
+          "gt_index": 2,
+          "gt_start": 4601.54,
+          "gt_end": 4620.84,
+          "desc": "Jynxzi Gets $20K Worth of Pokémon Cards From Fanmail! 😳🔥",
+          "views": 212942.0,
+          "source_url": "https://www.youtube.com/watch?v=LUoDDkpzxAc",
+          "hit": true,
+          "hit_rank": 15,
+          "coverage": 0.8197,
+          "pred_start_time": 4605.02,
+          "pred_end_time": 4633.44
+        }
+      ]
+    },
+    {
+      "vod_id": "2780984594",
+      "has_gt": true,
+      "gt_count": 3,
+      "pred_count": 20,
+      "recall": {
+        "5": 0.0,
+        "10": 0.0,
+        "20": 0.0,
+        "50": 0.0
+      },
+      "avg_rank": null,
+      "miss_rate": 1.0,
+      "hit_count": 0,
+      "miss_count": 3,
+      "gt_hits": [
+        {
+          "gt_index": 0,
+          "gt_start": 446.53,
+          "gt_end": 461.53,
+          "desc": "Jynxzi Says The Darth Maul Joke As Darth Maul! 😭💀",
+          "views": 28270.0,
+          "source_url": "https://www.youtube.com/watch?v=QSvFBBBQZhQ",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        },
+        {
+          "gt_index": 1,
+          "gt_start": 5012.09,
+          "gt_end": 5019.66,
+          "desc": "Jynxzi Says a Rare Darth Maul “Balright” Variation! 😱💀",
+          "views": 98693.0,
+          "source_url": "https://www.youtube.com/watch?v=Vpcj-xE7Shg",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        },
+        {
+          "gt_index": 2,
+          "gt_start": 8497.99,
+          "gt_end": 8508.83,
+          "desc": "Jynxzi Finds Himself In Star Wars Battlefront 2! 😭💀",
+          "views": 92624.0,
+          "source_url": "https://www.youtube.com/watch?v=bqYaU9lpRwU",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        }
+      ]
+    },
+    {
+      "vod_id": "2787844740",
+      "has_gt": true,
+      "gt_count": 1,
+      "pred_count": 20,
+      "recall": {
+        "5": 0.0,
+        "10": 0.0,
+        "20": 0.0,
+        "50": 0.0
+      },
+      "avg_rank": null,
+      "miss_rate": 1.0,
+      "hit_count": 0,
+      "miss_count": 1,
+      "gt_hits": [
+        {
+          "gt_index": 0,
+          "gt_start": 444.15,
+          "gt_end": 454.58,
+          "desc": "Jynxzi, Marlon & Ron Are Going To Stream The World Cup Quarterfinals! 😱🔥",
+          "views": 66372.0,
+          "source_url": "https://www.youtube.com/watch?v=lAESSGMG6vE",
+          "hit": false,
+          "hit_rank": null,
+          "coverage": 0.0,
+          "pred_start_time": null,
+          "pred_end_time": null
+        }
+      ]
+    }
+  ],
+  "computed_at": "2026-06-17T21:33:10.836766Z"
+}

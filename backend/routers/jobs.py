@@ -800,6 +800,7 @@ def _request_strategy(
     time_range: dict | None = None,
     clip_style: str | None = None,
     variant_count: int | None = None,
+    archetype_judge: bool | None = None,
 ) -> dict:
     return clip_strategy.normalize_strategy(
         {
@@ -813,6 +814,7 @@ def _request_strategy(
             "time_range": time_range,
             "clip_style": clip_style,
             "variant_count": variant_count,
+            "archetype_judge": archetype_judge,
         }
     )
 
@@ -823,6 +825,12 @@ def _coerce_optional_text(value) -> str | None:
 
 def _coerce_optional_number(value) -> float | int | None:
     return value if isinstance(value, (int, float)) else None
+
+
+def _coerce_optional_bool(value) -> bool | None:
+    # Tri-state: a real bool passes through; anything else (an unset Form sentinel when the
+    # endpoint is called directly, a stray string) becomes None → inherit the global default.
+    return value if isinstance(value, bool) else None
 
 
 def _coerce_csv_list(value) -> list[str]:
@@ -848,6 +856,7 @@ async def submit_job(request: JobRequest):
         time_range=request.time_range.model_dump(exclude_none=True) if request.time_range else None,
         clip_style=request.clip_style,
         variant_count=request.variant_count,
+        archetype_judge=request.archetype_judge,
     )
     _write_job_request_metadata(
         job_id,
@@ -865,6 +874,7 @@ async def submit_job(request: JobRequest):
             "time_range": request.time_range.model_dump(exclude_none=True) if request.time_range else None,
             "clip_style": request.clip_style,
             "variant_count": request.variant_count,
+            "archetype_judge": request.archetype_judge,
         },
     )
 
@@ -896,6 +906,7 @@ async def upload_job(
     time_range_end: float | None = Form(None),
     clip_style: str | None = Form(None),
     variant_count: int | None = Form(None),
+    archetype_judge: bool | None = Form(None),
 ):
     suffix = pathlib.Path(file.filename or "").suffix.lower()
     allowed_suffixes = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".ts", ".flv"}
@@ -927,6 +938,7 @@ async def upload_job(
     time_range_start = _coerce_optional_number(time_range_start)
     time_range_end = _coerce_optional_number(time_range_end)
     variant_count = _coerce_optional_number(variant_count)
+    archetype_judge = _coerce_optional_bool(archetype_judge)
     effective_profile = profile or settings.clip_profile
     job = create_job(job_id, profile=effective_profile)
     bind_job_session(job_id, session_id)
@@ -948,6 +960,7 @@ async def upload_job(
         } or None,
         clip_style=clip_style,
         variant_count=variant_count,
+        archetype_judge=archetype_judge,
     )
 
     job_dir = pathlib.Path(settings.storage_dir) / job_id
@@ -976,6 +989,7 @@ async def upload_job(
             } or None,
             "clip_style": clip_style,
             "variant_count": variant_count,
+            "archetype_judge": archetype_judge,
             "original_filename": file.filename,
         },
     )

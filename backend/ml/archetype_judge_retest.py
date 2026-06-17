@@ -966,6 +966,71 @@ def run_replay_verdict(
     )
 
 
+# The canonical replay batch size: the paid run scored the full pool in 400-candidate
+# batches (#101 fix #2). The replay MUST use the same size so the persisted batch raws
+# line up — chunk_size=None makes one call per VOD and desyncs every multi-batch VOD,
+# under-scoring it (combined floor r@20 0.206→ a wrong lower number).
+REPLAY_CHUNK_SIZE = 400
+
+
+def gold_baseline_from_verdict(
+    verdict: dict,
+    manifest: dict[str, list[dict]],
+    anchor_ids: list[str],
+    *,
+    ks: tuple[int, ...] = directional_eval.DEFAULT_KS,
+    headline_min_views: float = directional_eval.DEFAULT_HEADLINE_MIN_VIEWS,
+) -> dict:
+    """The gold-only ``directional_eval`` over Arm B's judged predictions — the committed
+    ``judge_recall_baseline.json`` shape, re-scored from an already-run verdict.
+
+    Pure given the verdict: it re-scores Arm B's served + raw predictions
+    (``final_by_vod``/``raw_by_vod``) through ``directional_eval`` over the **gold** tier
+    only (mirroring the composite ``finder_recall_baseline.json`` shape), with no replay or
+    paid call — so it is network-free testable from a hand-built verdict.
+    """
+    arm_b = verdict["arm_b"]
+    return directional_eval.run(
+        manifest, arm_b["final_by_vod"], arm_b["raw_by_vod"],
+        anchor_vod_ids=list(anchor_ids), ks=ks,
+        headline_min_views=headline_min_views, gold_tiers=("gold",),
+    )
+
+
+def replay_gold_baseline(
+    anchor_ids: list[str],
+    manifest: dict[str, list[dict]],
+    *,
+    storage: pathlib.Path,
+    predictions_dir: pathlib.Path,
+    artifacts_root: pathlib.Path,
+    chunk_size: int = REPLAY_CHUNK_SIZE,
+    top_k: int = DEFAULT_TOP_K,
+    ks: tuple[int, ...] = directional_eval.DEFAULT_KS,
+    headline_min_views: float = directional_eval.DEFAULT_HEADLINE_MIN_VIEWS,
+) -> dict:
+    """The gold-only ``directional_eval`` of the Archetype-Judge — the dict
+    ``judge_recall_baseline.json`` holds (Go-Live, #105 / ADR 0001).
+
+    Replays Arm B (the archetype judge, the production ranker) net-free from the persisted
+    raw responses at the SAME full-pool depth + 400-batch chunking the paid run used, scores
+    it through the SAME shared serving post-processing as ``find_moments``, and re-scores its
+    served + raw predictions over the **gold** tier — the same shape as the composite
+    ``finder_recall_baseline.json``. This dedicated judge baseline (separate from the composite
+    one, which stays the input to the gap_decomposition/oof drift-gate framework) is what
+    future serving changes prove their recall delta against. The combined (gold∪silver)
+    verdict is unchanged; only the tier scored for this artifact differs.
+    """
+    verdict = run_replay_verdict(
+        anchor_ids, manifest,
+        storage=storage, predictions_dir=predictions_dir, artifacts_root=artifacts_root,
+        chunk_size=chunk_size, top_k=top_k, ks=ks, headline_min_views=headline_min_views,
+    )
+    return gold_baseline_from_verdict(
+        verdict, manifest, anchor_ids, ks=ks, headline_min_views=headline_min_views,
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Render-Step (#99) — each arm's gated top-20 as raw 16:9 cuts → frontend jobs
 #
@@ -1327,6 +1392,11 @@ def main(
                              "(gemini-2.5-pro is unreliable at ~1000 in one call). MUST match "
                              "between run and replay/render so the persisted batches line up.")
     parser.add_argument("--top-k", type=int, default=DEFAULT_TOP_K)
+    parser.add_argument("--baseline-out", default=None,
+                        help="replay: also write the gold-only judge directional_eval to this "
+                             "path — the committed judge_recall_baseline.json the production "
+                             "regression guard pins (#105). Use --chunk-size 400 so the "
+                             "persisted batches line up with the paid run.")
     args = parser.parse_args(argv)
 
     storage = pathlib.Path(args.storage)
@@ -1356,6 +1426,15 @@ def main(
     if args.mode == "replay":
         verdict = run_replay_verdict(anchors, manifest, **common)
         print(format_verdict_table(verdict))
+        if args.baseline_out:
+            import datetime
+            baseline = gold_baseline_from_verdict(verdict, manifest, anchors)
+            baseline["computed_at"] = (
+                datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00", "Z"))
+            pathlib.Path(args.baseline_out).write_text(
+                json.dumps(baseline, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            print(f"wrote gold-only judge baseline → {args.baseline_out} "
+                  f"(floor r@20={baseline['floor']['recall']['20']})")
         return 0
 
     # render: reconstruct both arms' served top-20s free (replay), then cut + register.
