@@ -232,6 +232,54 @@ def test_report_flags_late_start_and_truncation_against_duration() -> None:
     assert "truncated" in by["trunc"]
 
 
+def test_report_flags_over_run_past_vod_length() -> None:
+    # AC3 (coverage-span, upper bound): a transcript whose last segment ends far
+    # PAST the VOD length — e.g. stale leftover chunks of a longer VOD spliced onto
+    # this timeline — is flagged over_run; one ending at ~the real length passes.
+    # This is the contamination class the report previously let through silently.
+    clean = _records(
+        RichSegment(start=0.0, end=3580.0, text="a", words_per_second=2.0),
+    )
+    over = _records(
+        RichSegment(start=0.0, end=3580.0, text="a", words_per_second=2.0),
+        RichSegment(start=7000.0, end=9000.0, text="leftover-other-stream", words_per_second=2.0),
+    )
+
+    report = tor.build_consistency_report(
+        {"clean": (clean, 3600.0), "over": (over, 3600.0)},
+        min_vods_for_density=99,  # isolate the coverage check from density
+    )
+
+    by = {r.vod_id: r.flags for r in report.vod_reports}
+    assert "over_run" not in by["clean"]
+    assert "over_run" in by["over"]
+
+
+def test_late_start_default_is_chunk_granularity_aware() -> None:
+    # A speechless intro/standby chunk lands the first segment ~one chunk in
+    # (chunk_seconds), so a flat sub-chunk threshold would flag every VOD with a
+    # brief intro. By default the late-start threshold sits above the chunk
+    # granularity: a brief multi-chunk intro must NOT flag, while a transcript
+    # starting many chunks in (likely dropped head audio) still does.
+    intro = _records(  # first speech ~one 180s intro chunk in — benign
+        RichSegment(start=181.0, end=185.0, text="a", words_per_second=2.0),
+        RichSegment(start=185.0, end=3590.0, text="b", words_per_second=2.0),
+    )
+    dropped_head = _records(  # first speech ~10 chunks in — suspicious
+        RichSegment(start=1800.0, end=1805.0, text="a", words_per_second=2.0),
+        RichSegment(start=1805.0, end=3590.0, text="b", words_per_second=2.0),
+    )
+
+    report = tor.build_consistency_report(
+        {"intro": (intro, 3600.0), "dropped": (dropped_head, 3600.0)},
+        min_vods_for_density=99,
+    )
+
+    by = {r.vod_id: r.flags for r in report.vod_reports}
+    assert "late_start" not in by["intro"]
+    assert "late_start" in by["dropped"]
+
+
 def _evenly_spread_vod(n_segments: int, wps: float, duration: float = 3600.0) -> tuple[list[dict], float]:
     """A VOD whose segments span ~the full duration (no coverage confound)."""
     step = duration / n_segments
@@ -300,7 +348,8 @@ def test_report_is_fail_closed_on_any_flag_or_exclusion() -> None:
         RichSegment(start=305.0, end=1000.0, text="b", words_per_second=2.0),
     )
     flagged = tor.build_consistency_report(
-        {"a": (good, 3600.0), "bad": (late_and_truncated, 3600.0)}, min_vods_for_density=99)
+        {"a": (good, 3600.0), "bad": (late_and_truncated, 3600.0)},
+        late_start_max_sec=120.0, min_vods_for_density=99)
     assert flagged.clean is False
     bad = next(r for r in flagged.vod_reports if r.vod_id == "bad")
     assert "late_start" in bad.flags and "truncated" in bad.flags

@@ -390,8 +390,15 @@ def _coverage_flags(
     *,
     late_start_max_sec: float,
     coverage_floor: float,
+    coverage_ceiling: float,
 ) -> list[str]:
-    """Flag a late transcript start and/or a transcript truncated before VOD end."""
+    """Flag a late start, a truncated transcript, or one running past the VOD end.
+
+    ``over_run`` is the upper-bound counterpart to ``truncated``: a transcript whose
+    last segment ends well *past* the VOD length means another recording's audio was
+    spliced onto this timeline (e.g. stale leftover chunks of a longer VOD) — the
+    contamination class this report must surface, not silently pass.
+    """
     if not records:
         return []
     span_start, span_end = _span(records)
@@ -400,6 +407,8 @@ def _coverage_flags(
         flags.append("late_start")
     if duration_sec > 0 and span_end < duration_sec * coverage_floor:
         flags.append("truncated")
+    if duration_sec > 0 and span_end > duration_sec * coverage_ceiling:
+        flags.append("over_run")
     return flags
 
 
@@ -458,8 +467,11 @@ def build_consistency_report(
     per_vod: dict[str, tuple[list[dict], float]],
     *,
     excluded: list[str] | None = None,
-    late_start_max_sec: float = 120.0,
+    late_start_max_sec: float | None = None,
+    chunk_seconds: float = 180.0,
+    late_start_max_chunks: float = 4.0,
     coverage_floor: float = 0.95,
+    coverage_ceiling: float = 1.05,
     density_band_ratio: float = 2.5,
     min_vods_for_density: int = 3,
 ) -> ConsistencyReport:
@@ -471,6 +483,12 @@ def build_consistency_report(
     local video) is carried through so it is surfaced, never silently dropped.
     """
     excluded = list(excluded or [])
+    # Late-start threshold defaults to a few chunks, not a flat sub-chunk value: a
+    # speechless intro/standby chunk lands the first segment at ~chunk_seconds, so a
+    # threshold below the chunk granularity would flag every VOD with a brief intro.
+    # An explicit late_start_max_sec still overrides this.
+    if late_start_max_sec is None:
+        late_start_max_sec = late_start_max_chunks * chunk_seconds
     density_outliers = _density_outlier_ids(
         per_vod, band_ratio=density_band_ratio, min_vods=min_vods_for_density)
 
@@ -482,6 +500,7 @@ def build_consistency_report(
         flags.extend(_coverage_flags(
             records, float(duration_sec),
             late_start_max_sec=late_start_max_sec, coverage_floor=coverage_floor,
+            coverage_ceiling=coverage_ceiling,
         ))
         if vod_id in density_outliers:
             flags.append("density_outlier")
