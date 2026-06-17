@@ -1211,6 +1211,32 @@ def test_run_paid_verdict_aborts_with_no_paid_calls_when_a_judged_vod_is_flagged
     assert not (artifacts / "arm_a" / "v1.raw.txt").exists()
 
 
+def test_run_paid_verdict_surfaces_excluded_vods_as_gaps_without_paying(tmp_path) -> None:
+    storage = _retest_storage(tmp_path)
+    artifacts = tmp_path / "artifacts"
+    report = _consistency_report(["v1"])
+
+    calls: list[str] = []
+
+    def provider(prompt: str) -> str:
+        calls.append("call")
+        return _SERVE_GOLDS
+
+    # v1 is the only VOD and it is EXCLUDED (e.g. a pool too large for a reliable single
+    # judge call) — it must surface as a coverage gap, never judged, never paid for.
+    verdict = arm_a.run_paid_verdict(
+        ["v1"], _VERDICT_MANIFEST,
+        storage=storage, predictions_dir=storage, artifacts_root=artifacts,
+        report=report, provider=provider, archetypes=_ARCHETYPES, top_k=2,
+        exclude_vods=["v1"])
+
+    assert calls == []  # excluded → no paid call
+    assert not (artifacts / "arm_a" / "v1.raw.txt").exists()
+    # Surfaced as a coverage gap in BOTH arms, never silently folded as a miss.
+    assert verdict["arm_a"]["coverage_gap_vods"] == ["v1"]
+    assert verdict["arm_b"]["coverage_gap_vods"] == ["v1"]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Slice 101-5 — render_verdict renders BOTH arms straight from a verdict's served
 # top-20s (arm_a/arm_b final_by_vod) → one frontend job per (VOD, arm), so what the

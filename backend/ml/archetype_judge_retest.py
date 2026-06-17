@@ -782,6 +782,21 @@ def _arm_dirs(artifacts_root: pathlib.Path) -> "tuple[pathlib.Path, pathlib.Path
     return root / "arm_a", root / "arm_b"
 
 
+def _excluding(load_inputs: LoadInputsFn, exclude_vods: "list[str] | None") -> LoadInputsFn:
+    """Wrap a loader so excluded VODs return ``None`` — a SURFACED coverage gap, never
+    judged and never paid for. Used to drop VODs whose deduped pool is too large for a
+    single reliable gemini-2.5-pro judge call (#101 — over-generation / empty response at
+    ~1000 candidates), so they are documented out, not silently folded as misses."""
+    excluded = set(exclude_vods or [])
+    if not excluded:
+        return load_inputs
+
+    def _load(vod_id: str):
+        return None if vod_id in excluded else load_inputs(vod_id)
+
+    return _load
+
+
 def _judged_in_report(
     anchor_ids: list[str], report: "transcribe_only_rerun.ConsistencyReport"
 ) -> list[str]:
@@ -802,6 +817,7 @@ def run_paid_verdict(
     report: "transcribe_only_rerun.ConsistencyReport",
     provider: CallProviderFn | None = None,
     archetypes: "list | None" = None,
+    exclude_vods: "list[str] | None" = None,
     **verdict_kwargs,
 ) -> dict:
     """The paid two-arm run: gate on the #100 report, then judge both arms and persist.
@@ -818,7 +834,7 @@ def run_paid_verdict(
     assert_transcripts_consistent(report, _judged_in_report(anchor_ids, report))
     archetypes = load_jynxzi_archetypes() if archetypes is None else archetypes
     arm_a_dir, arm_b_dir = _arm_dirs(artifacts_root)
-    load_inputs = fresh_segment_load_inputs(storage, predictions_dir)
+    load_inputs = _excluding(fresh_segment_load_inputs(storage, predictions_dir), exclude_vods)
     return run_verdict(
         anchor_ids, manifest,
         make_judge_a=paid_make_judge(arm_a_dir, provider=provider),
@@ -850,6 +866,7 @@ def run_replay_verdict(
     predictions_dir: pathlib.Path,
     artifacts_root: pathlib.Path,
     archetypes: "list | None" = None,
+    exclude_vods: "list[str] | None" = None,
     **verdict_kwargs,
 ) -> dict:
     """Reproduce the verdict free, network-free, from the persisted A and B raw responses.
@@ -862,7 +879,7 @@ def run_replay_verdict(
     """
     archetypes = load_jynxzi_archetypes() if archetypes is None else archetypes
     arm_a_dir, arm_b_dir = _arm_dirs(artifacts_root)
-    base_load = fresh_segment_load_inputs(storage, predictions_dir)
+    base_load = _excluding(fresh_segment_load_inputs(storage, predictions_dir), exclude_vods)
     return run_verdict(
         anchor_ids, manifest,
         make_judge_a=replay_make_judge(arm_a_dir),
@@ -1207,6 +1224,9 @@ def main(
     parser.add_argument("--anchor-csv", default=str(eval_clip_finder.DEFAULT_ANCHOR_CSV))
     parser.add_argument("--only", default=None,
                         help="Restrict to one VOD id — the 1-VOD smoke (both arms)")
+    parser.add_argument("--exclude-vods", default=None,
+                        help="Comma-separated VOD ids to surface as coverage gaps (never "
+                             "judged) — e.g. pools too large for one reliable judge call")
     parser.add_argument("--top-k", type=int, default=DEFAULT_TOP_K)
     args = parser.parse_args(argv)
 
@@ -1217,9 +1237,11 @@ def main(
     anchors = eval_clip_finder.read_anchor_vod_ids(pathlib.Path(args.anchor_csv))
     if args.only:
         anchors = [v for v in anchors if v == args.only]
+    exclude_vods = [v.strip() for v in (args.exclude_vods or "").split(",") if v.strip()]
 
     common = dict(storage=storage, predictions_dir=storage,
-                  artifacts_root=artifacts_root, top_k=args.top_k)
+                  artifacts_root=artifacts_root, top_k=args.top_k,
+                  exclude_vods=exclude_vods)
 
     if args.mode == "run":
         report = build_fresh_consistency_report(storage, anchors)
