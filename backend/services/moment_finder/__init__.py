@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from ml import llm_moment_finder as d0
 from services.timeline_types import Candidate, CandidateFeatures, RankedCandidate
 from . import _post_processor
 from services.transcriber import RichSegment
+
+# rows -> rows. The pool-level ranking seam (ADR 0001): a fn receives the deduped
+# pool (every candidate that survived dedupe, in snap order) and returns rows with
+# a possibly-overridden ``composite_score`` and/or reordered. Default identity
+# keeps the current composite order. This is where the Archetype-Judge plugs in.
+RankScoreFn = Callable[[list[dict[str, Any]]], list[dict[str, Any]]]
 
 # Composite-score weights (must sum to 1.0). Tune against Holdout-Eval.
 _COMPOSITE_W_VIRALITY = 0.45
@@ -132,12 +138,13 @@ def find_moments(
     rank_key = _llm_moment_composite
 
     # Serving currency: the post-processed dict-rows the Clipping producer consumes.
-    deduped_moments, duplicate_moments = d0.dedupe_moments_by_overlap(length_discipline.moments)
-    ranked_moments = sorted(deduped_moments, key=rank_key, reverse=True)
-    moment_rows = llm_moments_to_post_processor_rows(ranked_moments, rank_score_fn=rank_score_fn)
-    snapped_rows = _post_processor.snap_boundaries(moment_rows, list(segments))
-    diverse_rows = _post_processor.enforce_diversity(snapped_rows)
-    post_processed_rows = _rank_post_processed_rows(diverse_rows)
+    # find_moments and the offline replay converge on ONE shared post-processing
+    # function — snap -> dedupe -> pool-level rank_score_fn -> diversity -> rank
+    # (ADR 0001). The identity rank_score_fn (here) keeps today's serving output;
+    # it is the seam the offline-validated Archetype-Judge plugs into (Slice 2).
+    # No top_k here: the Clipping producer truncates to clip_top_k downstream.
+    moment_rows = llm_moments_to_post_processor_rows(length_discipline.moments)
+    post_processed_rows = post_process_pool(moment_rows, list(segments))
 
     # Eval-only encodings, gated behind eval_recall (off for serving): the raw
     # pre-dedupe/pre-diversity branch (a second snap_boundaries pass measuring true
@@ -158,8 +165,7 @@ def find_moments(
         "vod_id": vod_id,
         "raw_moment_count": len(raw_post_processed_rows),
         "timestamp_repaired_moment_count": timestamp_repair.repaired_moment_count,
-        "moment_count_after_length_policy": len(ranked_moments),
-        "duplicate_moment_count": len(duplicate_moments),
+        "moment_count_after_length_policy": len(length_discipline.moments),
         "post_processed_moment_count": len(post_processed_rows),
         "ranked_candidate_count": len(ranked_candidates),
         "input_moment_count": length_discipline.input_moment_count,
@@ -388,6 +394,94 @@ def _rank_post_processed_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[st
     for index, row in enumerate(ranked_rows, start=1):
         row["rank"] = index
     return ranked_rows
+
+
+def _identity_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return rows
+
+
+def _row_to_moment(row: Mapping[str, Any]) -> d0.LlmMoment:
+    """Rebuild the LlmMoment the dedupe step consumes from a post-processed row.
+
+    The inverse of ``llm_moments_to_post_processor_rows`` for the fields
+    ``dedupe_moments_by_overlap`` reads (window + virality), so the shared
+    post-processing calls the real dedupe instead of copying its overlap logic.
+    """
+    return d0.LlmMoment(
+        start=float(row.get("start_time") or 0.0),
+        end=float(row.get("end_time") or 0.0),
+        hook=float(row.get("hook") or 0.0),
+        flow=float(row.get("flow") or 0.0),
+        value=float(row.get("value") or 0.0),
+        trend=float(row.get("trend") or 0.0),
+        virality=float(row.get("llm_virality") or 0.0),
+        rationale=str(row.get("reason") or ""),
+    )
+
+
+def _dedupe_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Drop overlap-duplicate rows via the real dedupe, preserving input order.
+
+    Reconstructs one LlmMoment per row, asks ``dedupe_moments_by_overlap`` which
+    survive, and keeps the surviving rows in their incoming (snap) order — the
+    order the downstream diversity/ranking expect. Survivors are matched back by
+    object identity, so two distinct rows that snapped to the same window are
+    deduped correctly (a window-key match would keep both).
+    """
+    moments = [_row_to_moment(row) for row in rows]
+    kept, _ = d0.dedupe_moments_by_overlap(moments)
+    kept_ids = {id(moment) for moment in kept}
+    return [dict(row) for row, moment in zip(rows, moments) if id(moment) in kept_ids]
+
+
+def snap_dedupe_rescore(
+    raw_rows: Sequence[Mapping[str, Any]],
+    segments: Sequence[RichSegment],
+    rank_score_fn: RankScoreFn | None,
+) -> list[dict[str, Any]]:
+    """snap -> dedupe -> rank_score_fn: the shared pre-ranking base.
+
+    The point where the rank-only pool (snap -> dedupe -> rank, the judge-shortlist
+    currency) and the full ``post_process_pool`` (+ diversity + rank + top_k)
+    diverge — every step a call into the real serving function, so both stay free
+    of eval/serving skew.
+    """
+    snapped = _post_processor.snap_boundaries(list(raw_rows), list(segments))
+    deduped = _dedupe_rows(snapped)
+    return (rank_score_fn or _identity_rows)(deduped)
+
+
+def post_process_pool(
+    raw_rows: Sequence[Mapping[str, Any]],
+    segments: Sequence[RichSegment],
+    *,
+    rank_score_fn: RankScoreFn | None = None,
+    top_k: int = 0,
+) -> list[dict[str, Any]]:
+    """snap -> dedupe -> rank_score_fn(pool) -> diversity -> rank -> top_k.
+
+    The single shared serving post-processing path: both ``find_moments`` and the
+    offline ``replay_harness.replay_postprocess`` call it, so the offline number
+    equals the serving number (no eval/serving skew) and the pool-level
+    ``rank_score_fn`` seam (ADR 0001) steers both. Under the identity
+    ``rank_score_fn`` the output equals today's serving output.
+
+    ``rank_score_fn`` receives the deduped pool and may overwrite each row's
+    ``composite_score`` and/or reorder. ``top_k > 0`` truncates to the K
+    highest-ranked rows; ``top_k <= 0`` keeps the full ranked set (serving keeps
+    all and lets the Clipping producer truncate to clip_top_k downstream).
+
+    Note: dedupe runs on the *snapped* windows and ranks survivors by virality,
+    while diversity ranks by composite. On real finder output these agree; a
+    hand-crafted pool where the two orderings invert (a moment with high virality
+    but low composite snapping onto a higher-composite neighbour) can pick a
+    different survivor than the pre-snap dedupe order would — an accepted edge of
+    converging on the snap->dedupe order (ADR 0001).
+    """
+    rescored = snap_dedupe_rescore(raw_rows, segments, rank_score_fn)
+    diverse = _post_processor.enforce_diversity(rescored)
+    ranked = _rank_post_processed_rows(diverse)
+    return ranked[:top_k] if top_k > 0 else ranked
 
 
 def _candidate_features_from_row(

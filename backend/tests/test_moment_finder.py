@@ -6,6 +6,129 @@ from services import moment_finder
 from services.transcriber import RichSegment
 
 
+def _row(start, end, composite, *, reason) -> dict:
+    """A post-processor input row (the dict currency snap_boundaries consumes)."""
+    virality = composite / 10.0
+    return {
+        "start_time": start,
+        "end_time": end,
+        "viral_score": composite,
+        "composite_score": composite,
+        "llm_virality": virality,
+        "hook": virality,
+        "flow": virality,
+        "value": virality,
+        "trend": virality,
+        "reason": reason,
+    }
+
+
+def test_find_moments_delivers_exactly_what_the_shared_pool_produces(monkeypatch) -> None:
+    # Convergence (#103, criterion 1): find_moments and the offline replay call
+    # ONE shared post-processing function. Driving find_moments with a fake
+    # provider and feeding the SAME moments straight through post_process_pool
+    # must yield the identical delivered set — the parity the offline-validated
+    # judge (Slice 2) relies on. (No length-discipline edits in this fixture, so
+    # the pool find_moments builds equals the one constructed here.)
+    raw = [
+        {"start": 10, "end": 35, "hook": 0.8, "flow": 0.7, "value": 0.9,
+         "trend": 0.6, "virality": 0.95, "rationale": "strong payoff"},
+        {"start": 60, "end": 85, "hook": 0.5, "flow": 0.6, "value": 0.4,
+         "trend": 0.3, "virality": 0.5, "rationale": "mid moment"},
+        {"start": 200, "end": 225, "hook": 0.7, "flow": 0.7, "value": 0.7,
+         "trend": 0.7, "virality": 0.7, "rationale": "late strong"},
+    ]
+
+    def fake_call(prompt: str, **kwargs):
+        return (json.dumps({"moments": raw}), {"provider": "fake"})
+
+    monkeypatch.setattr(moment_finder.d0, "call_moment_finder_provider", fake_call)
+    segments = [
+        RichSegment(start=10.0, end=20.0, text="actual hook starts."),
+        RichSegment(start=20.0, end=35.0, text="clear payoff!"),
+        RichSegment(start=60.0, end=75.0, text="a mid moment begins."),
+        RichSegment(start=75.0, end=90.0, text="and it wraps up here!"),
+        RichSegment(start=200.0, end=215.0, text="a late strong beat."),
+        RichSegment(start=215.0, end=230.0, text="that finishes cleanly!"),
+    ]
+
+    moments = [
+        moment_finder.d0.LlmMoment(
+            start=m["start"], end=m["end"], hook=m["hook"], flow=m["flow"],
+            value=m["value"], trend=m["trend"], virality=m["virality"],
+            rationale=m["rationale"],
+        )
+        for m in raw
+    ]
+    pool_rows = moment_finder.llm_moments_to_post_processor_rows(moments)
+    expected = moment_finder.post_process_pool(pool_rows, segments)
+
+    result = moment_finder.find_moments(
+        segments, profile="jynxzi", vod_id="vod-1", max_tokens=1000
+    )
+
+    assert result.post_processed_moments == expected
+
+
+def test_post_process_pool_rank_score_fn_steers_the_delivered_order() -> None:
+    # The pool-level seam (ADR 0001): a non-identity rank_score_fn receives the
+    # deduped pool and overrides composite_score, flipping the delivered order.
+    # This is the hook the Archetype-Judge plugs into (Slice 2).
+    segments = [
+        RichSegment(start=0.0, end=8.0, text="An opening statement that ends here."),
+        RichSegment(start=100.0, end=108.0, text="A separate later topic ending here."),
+    ]
+    rows = [
+        _row(0.0, 8.0, 8.0, reason="A"),     # higher composite -> leads under identity
+        _row(100.0, 108.0, 7.0, reason="B"),
+    ]
+
+    def by_start_time(deduped: list[dict]) -> list[dict]:
+        return [dict(r, composite_score=r["start_time"]) for r in deduped]
+
+    baseline = moment_finder.post_process_pool(rows, segments)
+    rescored = moment_finder.post_process_pool(rows, segments, rank_score_fn=by_start_time)
+
+    assert baseline[0]["reason"] == "A"
+    assert rescored[0]["reason"] == "B"  # later start now wins
+
+
+def test_post_process_pool_top_k_truncates_to_the_k_highest_ranked() -> None:
+    segments = [
+        RichSegment(start=0.0, end=8.0, text="An opening statement that ends here."),
+        RichSegment(start=100.0, end=108.0, text="A separate later topic ending here."),
+    ]
+    rows = [
+        _row(0.0, 8.0, 8.0, reason="A"),
+        _row(100.0, 108.0, 7.0, reason="B"),
+    ]
+
+    kept = moment_finder.post_process_pool(rows, segments, top_k=1)
+
+    assert [r["reason"] for r in kept] == ["A"]  # the higher-composite moment
+
+
+def test_post_process_pool_snaps_dedupes_diversifies_and_ranks() -> None:
+    # The shared serving post-processing: snap -> dedupe -> rank_score_fn ->
+    # diversity -> rank. Two rows snap onto the same window (a >=0.8-overlap
+    # duplicate); the real dedupe drops the lower-composite one. A far-away row
+    # survives. The delivered set is ranked by composite (keep above far).
+    segments = [
+        RichSegment(start=0.0, end=30.0, text="A long opening statement that ends here."),
+        RichSegment(start=200.0, end=230.0, text="A far away separate topic ending here."),
+    ]
+    rows = [
+        _row(2.0, 25.0, 8.0, reason="keep"),
+        _row(5.0, 28.0, 7.0, reason="drop"),  # snaps onto "keep" -> duplicate
+        _row(205.0, 225.0, 6.0, reason="far"),
+    ]
+
+    delivered = moment_finder.post_process_pool(rows, segments)
+
+    assert [r["reason"] for r in delivered] == ["keep", "far"]
+    assert "drop" not in {r["reason"] for r in delivered}
+
+
 def test_find_moments_reuses_d0_prompt_filters_noise_and_builds_ranked_candidates(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
@@ -79,6 +202,55 @@ def test_find_moments_reuses_d0_prompt_filters_noise_and_builds_ranked_candidate
     assert ranked.features.has_llm_semantics is True
     assert ranked.features.projected_hook_score == 1.0
     assert "llm_moment_finder" in ranked.rationale
+
+
+def test_find_moments_serving_output_is_bit_equal_to_today(monkeypatch) -> None:
+    # Regression guard (#103): converging find_moments onto the shared
+    # snap -> dedupe -> rank_score_fn -> diversity -> rank post-processing must
+    # leave the delivered serving currency (post_processed_moments) byte-for-byte
+    # unchanged on a fixed pool+segments fixture. The two mid moments overlap
+    # after snapping (a real dedupe drop); the rest survive and rank by composite.
+    def fake_call(prompt: str, **kwargs):
+        return (
+            json.dumps({"moments": [
+                {"start": 10, "end": 35, "hook": 0.8, "flow": 0.7, "value": 0.9,
+                 "trend": 0.6, "virality": 0.95, "rationale": "strong payoff"},
+                {"start": 60, "end": 85, "hook": 0.5, "flow": 0.6, "value": 0.4,
+                 "trend": 0.3, "virality": 0.5, "rationale": "mid moment"},
+                {"start": 62, "end": 88, "hook": 0.4, "flow": 0.5, "value": 0.3,
+                 "trend": 0.2, "virality": 0.45, "rationale": "near-dup of mid"},
+                {"start": 200, "end": 225, "hook": 0.7, "flow": 0.7, "value": 0.7,
+                 "trend": 0.7, "virality": 0.7, "rationale": "late strong"},
+            ]}),
+            {"provider": "fake"},
+        )
+
+    monkeypatch.setattr(moment_finder.d0, "call_moment_finder_provider", fake_call)
+    segments = [
+        RichSegment(start=0.0, end=5.0, text="Intro sentence one."),
+        RichSegment(start=10.0, end=20.0, text="actual hook starts."),
+        RichSegment(start=20.0, end=35.0, text="clear payoff!"),
+        RichSegment(start=60.0, end=75.0, text="a mid moment begins."),
+        RichSegment(start=75.0, end=90.0, text="and it wraps up here!"),
+        RichSegment(start=200.0, end=215.0, text="a late strong beat."),
+        RichSegment(start=215.0, end=230.0, text="that finishes cleanly!"),
+    ]
+
+    result = moment_finder.find_moments(
+        segments, profile="jynxzi", vod_id="vod-1", max_tokens=1000
+    )
+
+    assert result.post_processed_moments == [
+        {"rank": 1, "start_time": 10.0, "end_time": 35.0, "viral_score": 9.5,
+         "composite_score": 8.625, "llm_virality": 0.95, "hook": 0.8, "flow": 0.7,
+         "value": 0.9, "trend": 0.6, "reason": "strong payoff"},
+        {"rank": 2, "start_time": 200.0, "end_time": 230.0, "viral_score": 7.0,
+         "composite_score": 7.0, "llm_virality": 0.7, "hook": 0.7, "flow": 0.7,
+         "value": 0.7, "trend": 0.7, "reason": "late strong"},
+        {"rank": 3, "start_time": 60.0, "end_time": 90.0, "viral_score": 5.0,
+         "composite_score": 4.85, "llm_virality": 0.5, "hook": 0.5, "flow": 0.6,
+         "value": 0.4, "trend": 0.3, "reason": "mid moment"},
+    ]
 
 
 def test_rich_segments_map_streamer_role_to_streamer_name() -> None:

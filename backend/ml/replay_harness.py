@@ -30,15 +30,15 @@ import datetime
 import json
 import pathlib
 import sys
-from typing import Callable, Sequence
+from typing import Sequence
 
 BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from ml import directional_eval, eval_clip_finder
-from ml import llm_moment_finder as d0
-from services.moment_finder import _post_processor, _rank_post_processed_rows
+from services import moment_finder
+from services.moment_finder import _rank_post_processed_rows
 from services.transcriber import RichSegment
 
 # The product's clip_top_k. Replaying the same K keeps the offline final set the
@@ -62,48 +62,12 @@ STAGE_ARTIFACT = "llm_moment_finder_stage.json"
 # product-rank order — the control set the window-probe rates the gold against.
 FINAL_MOMENTS_ARTIFACT = "final_moments.json"
 
-# rows -> rows. The single variation point; default identity keeps the current
-# composite order. A fn may overwrite each row's composite_score and/or reorder.
-RankScoreFn = Callable[[list[dict]], list[dict]]
-
-
-def _identity(rows: list[dict]) -> list[dict]:
-    return rows
-
-
-def _row_to_moment(row: dict) -> d0.LlmMoment:
-    """Rebuild the LlmMoment the dedupe step consumes from a post-processed row.
-
-    The raw artifact rows are the dict form produced by
-    ``llm_moments_to_post_processor_rows``; this is its faithful inverse for the
-    fields ``dedupe_moments_by_overlap`` reads (window + virality), so the harness
-    calls the real dedupe instead of copying its overlap logic.
-    """
-    return d0.LlmMoment(
-        start=float(row.get("start_time") or 0.0),
-        end=float(row.get("end_time") or 0.0),
-        hook=float(row.get("hook") or 0.0),
-        flow=float(row.get("flow") or 0.0),
-        value=float(row.get("value") or 0.0),
-        trend=float(row.get("trend") or 0.0),
-        virality=float(row.get("llm_virality") or 0.0),
-        rationale=str(row.get("reason") or ""),
-    )
-
-
-def _dedupe_rows(rows: list[dict]) -> list[dict]:
-    """Drop overlap-duplicate rows via the real dedupe, preserving input order.
-
-    Reconstructs one LlmMoment per row, asks ``dedupe_moments_by_overlap`` which
-    survive, and keeps the surviving rows in their incoming (snap) order — the
-    order the downstream diversity/ranking expect. Survivors are matched back by
-    object identity, so two distinct rows that snapped to the same window are
-    deduped correctly (a window-key match would keep both).
-    """
-    moments = [_row_to_moment(row) for row in rows]
-    kept, _ = d0.dedupe_moments_by_overlap(moments)
-    kept_ids = {id(moment) for moment in kept}
-    return [row for row, moment in zip(rows, moments) if id(moment) in kept_ids]
+# rows -> rows. The pool-level ranking seam, owned by ``services.moment_finder``
+# (the serving side, ADR 0001); re-exported here so offline callers keep importing
+# it from the harness. ``replay_postprocess`` / ``replay_ranked_pool`` below
+# delegate to the shared serving functions, so the offline number equals the
+# serving number (no eval/serving skew).
+RankScoreFn = moment_finder.RankScoreFn
 
 
 def _resolve_replay_job_dir(storage: pathlib.Path, vod_id: str) -> pathlib.Path | None:
@@ -226,22 +190,6 @@ def load_final_moments(vod_id: str, storage: pathlib.Path) -> list[dict] | None:
     return eval_clip_finder._read_final_moments_json(job_dir / "debug" / FINAL_MOMENTS_ARTIFACT)
 
 
-def _snap_dedupe_rescore(
-    raw_rows: Sequence[dict],
-    segments: Sequence[RichSegment],
-    rank_score_fn: RankScoreFn | None,
-) -> list[dict]:
-    """snap_boundaries -> dedupe -> rank_score_fn: the shared pre-ranking base.
-
-    The point where ``replay_ranked_pool`` (rank only) and ``replay_postprocess``
-    (enforce_diversity + rank + top_k) diverge — every step a call into the real
-    serving function, so both stay free of eval/serving skew.
-    """
-    snapped = _post_processor.snap_boundaries(list(raw_rows), list(segments))
-    deduped = _dedupe_rows(snapped)
-    return (rank_score_fn or _identity)(deduped)
-
-
 def replay_ranked_pool(
     raw_rows: Sequence[dict],
     segments: Sequence[RichSegment],
@@ -250,13 +198,15 @@ def replay_ranked_pool(
 ) -> list[dict]:
     """The deduped pool, rescored and rank-ordered — no diversity, no top_k.
 
-    snap_boundaries -> dedupe -> rank_score_fn -> rank. This is the candidate
-    currency a re-rank/judge operates on (every candidate that survives dedupe,
-    in rank order), the seam where the buried-real gold actually sit (median
-    rank ~141). ``replay_postprocess`` is enforce_diversity + top_k layered on
-    top of this pool.
+    snap_boundaries -> dedupe -> rank_score_fn -> rank, via the shared serving
+    base ``moment_finder.snap_dedupe_rescore``. This is the candidate currency a
+    re-rank/judge operates on (every candidate that survives dedupe, in rank
+    order), the seam where the buried-real gold actually sit (median rank ~141).
+    ``replay_postprocess`` is enforce_diversity + top_k layered on top of this pool.
     """
-    return _rank_post_processed_rows(_snap_dedupe_rescore(raw_rows, segments, rank_score_fn))
+    return _rank_post_processed_rows(
+        moment_finder.snap_dedupe_rescore(raw_rows, segments, rank_score_fn)
+    )
 
 
 def replay_postprocess(
@@ -268,15 +218,16 @@ def replay_postprocess(
 ) -> list[dict]:
     """Replay the serving post-processing over raw finder rows.
 
-    snap_boundaries -> dedupe -> rank_score_fn -> enforce_diversity -> rank ->
-    top_k, every step a call into the real serving function. Under the identity
-    ``rank_score_fn`` (the default) the output is bit-equal to the serving path on
-    the same input. ``top_k > 0`` truncates to the K highest-ranked rows.
+    Delegates to the shared ``moment_finder.post_process_pool`` (snap_boundaries ->
+    dedupe -> rank_score_fn -> enforce_diversity -> rank -> top_k) — the exact
+    function the serving ``find_moments`` calls, so the offline number equals the
+    serving number. Under the identity ``rank_score_fn`` (the default) the output
+    is bit-equal to the serving path on the same input. ``top_k > 0`` truncates to
+    the K highest-ranked rows.
     """
-    rescored = _snap_dedupe_rescore(raw_rows, segments, rank_score_fn)
-    diverse = _post_processor.enforce_diversity(rescored)
-    ranked = _rank_post_processed_rows(diverse)
-    return ranked[:top_k] if top_k > 0 else ranked
+    return moment_finder.post_process_pool(
+        raw_rows, segments, rank_score_fn=rank_score_fn, top_k=top_k
+    )
 
 
 def run_replay(
