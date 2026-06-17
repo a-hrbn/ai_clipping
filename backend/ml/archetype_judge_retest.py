@@ -1147,6 +1147,23 @@ def cached_twitch_video(vod_id: str, storage_dir: pathlib.Path) -> "pathlib.Path
     return path if path.exists() else None
 
 
+def staged_video_resolver(video_source_root: pathlib.Path) -> ResolveVideoFn:
+    """Resolve ``vod_<id>.mp4`` from a source root instead of the download cache.
+
+    The anchor videos live in their ``pipeline_debug_*`` dirs, surfaced via the #100
+    staging root (``transcribe_only_sources/vod_<id>.mp4`` — relative symlinks). The
+    render reads through those in place (``Path.exists`` follows the symlink, ffmpeg cuts
+    the real file). A VOD with no staged source surfaces as ``None`` — a render gap, not a
+    silent drop."""
+    root = pathlib.Path(video_source_root)
+
+    def _resolve(vod_id: str) -> "pathlib.Path | None":
+        path = root / f"vod_{vod_id}.mp4"
+        return path if path.exists() else None
+
+    return _resolve
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Issue #101 — the copy-paste CLI: `run` (gate + paid + persist), `replay` (free
 # verdict), `render` (both arms → frontend jobs). The runbook drives these; the heavy
@@ -1227,6 +1244,9 @@ def main(
     parser.add_argument("--exclude-vods", default=None,
                         help="Comma-separated VOD ids to surface as coverage gaps (never "
                              "judged) — e.g. pools too large for one reliable judge call")
+    parser.add_argument("--video-source-root", default=None,
+                        help="render: resolve vod_<id>.mp4 from here (e.g. the #100 staging "
+                             "root) instead of the download cache")
     parser.add_argument("--top-k", type=int, default=DEFAULT_TOP_K)
     args = parser.parse_args(argv)
 
@@ -1266,9 +1286,12 @@ def main(
         store = store or d_store
         cut_segment = cut_segment or d_cut
         register_job = register_job or d_register
+    resolve_video = (staged_video_resolver(pathlib.Path(args.video_source_root))
+                     if args.video_source_root
+                     else (lambda vod_id: cached_twitch_video(vod_id, storage)))
     summary = render_verdict(
         verdict, storage_dir=storage, store=store,
-        resolve_video=lambda vod_id: cached_twitch_video(vod_id, storage),
+        resolve_video=resolve_video,
         cut_segment=cut_segment, register_job=register_job)
     print(f"rendered {len(summary['registered_job_ids'])} arm jobs; "
           f"{len(summary['render_gap_jobs'])} render gaps (no local video)")

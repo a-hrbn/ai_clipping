@@ -1023,6 +1023,20 @@ def test_cached_twitch_video_resolves_the_download_cache_or_surfaces_absence(tmp
     assert arm_a.cached_twitch_video("missing", tmp_path) is None
 
 
+def test_staged_video_resolver_reads_vod_id_mp4_from_a_source_root(tmp_path) -> None:
+    # The anchor videos live in their pipeline_debug dirs, surfaced via the #100 staging
+    # root as vod_<id>.mp4 symlinks — NOT the download cache. The render resolves them from
+    # that root so the gated top-20 can be cut in place (Path.exists follows the symlink).
+    root = tmp_path / "transcribe_only_sources"
+    root.mkdir()
+    (root / "vod_v1.mp4").write_bytes(b"x")
+
+    resolve = arm_a.staged_video_resolver(root)
+    assert resolve("v1") == root / "vod_v1.mp4"
+    # A VOD with no staged source surfaces as None — the renderer turns that into a gap.
+    assert resolve("missing") is None
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # Issue #101 — the paid-run driver: read #100's fresh re-transcribed segments,
 # gate on the consistency report, run paid → replay → render, read the verdict.
