@@ -59,6 +59,16 @@ EXCERPT_PAD_SEC = 12.0
 # The Sonnet-class provider both arms run on, over the existing Gemini seam.
 GEMINI_PRO_MODEL = "gemini-2.5-pro"
 
+# The output-token cap for the judge. gemini-2.5-pro is a REASONING model: it spends a
+# (hidden) thinking budget out of ``max_tokens`` BEFORE emitting visible content, so the
+# 8k judge default let thinking eat the whole budget and return an EMPTY response
+# (finish_reason=length, completion content 0) on a full-pool judge — a fake 0.000
+# verdict. The full deduped pool runs to ~1300 candidates, whose compact score JSON alone
+# is ~26k tokens; the model's max output (65535) leaves room for both the thinking budget
+# and that JSON. The largest pool still tail-truncates — the truncation-salvage parser
+# recovers the complete items (the buried golds sit near the top, far from the dropped tail).
+GEMINI_JUDGE_MAX_TOKENS = 65535
+
 # The deduped top-`depth` the judge scores (the seam the buried-real gold sit in) and
 # the served final-set size — both reused from the existing harness, no new numbers.
 DEFAULT_SHORTLIST_DEPTH = judge_spike.DEFAULT_SHORTLIST_DEPTH
@@ -74,6 +84,14 @@ NEUTRAL_GOLD_TIERS = ("gold", "silver")
 MakeJudgeFn = Callable[[str, list], RerankFn]
 # vod_id -> (raw_rows, segments) or None when the VOD has no replayable artifacts.
 LoadInputsFn = Callable[[str], "tuple[list[dict], list] | None"]
+
+
+class EmptyJudgeResponseError(RuntimeError):
+    """The judge scored ZERO of N real candidates — an empty / over-truncated response (e.g.
+    gemini-2.5-pro's thinking budget ate the whole ``max_tokens`` cap). Raised so a failed
+    paid call aborts the run LOUDLY instead of silently scoring recall to 0 — a fake NO-GO
+    that reads like a valid verdict. With ``GEMINI_JUDGE_MAX_TOKENS`` this should never fire;
+    it is the integrity net the 8k-cap empty-response failure (#101 smoke) revealed."""
 
 
 def neutral_repost_judge(
@@ -108,6 +126,11 @@ def neutral_repost_judge(
         persist_raw(raw)
         scores = repost_virality_judge.parse_judge_scores(raw)
         reranked = repost_virality_judge.apply_scores(rows, scores)
+        if rows and not reranked:
+            raise EmptyJudgeResponseError(
+                f"judge scored 0 of {len(rows)} candidates — empty/over-truncated "
+                "response (raise max_tokens / check the provider), not a real 0.0 verdict"
+            )
         logger.info(
             json.dumps(
                 {
@@ -129,7 +152,7 @@ def gemini_pro_provider(
     *,
     model: str = GEMINI_PRO_MODEL,
     temperature: float = 0.0,
-    max_tokens: int = repost_virality_judge.DEFAULT_JUDGE_MAX_TOKENS,
+    max_tokens: int = GEMINI_JUDGE_MAX_TOKENS,
     timeout_sec: float = d0.DEFAULT_TIMEOUT_SEC,
     retries: int = d0.DEFAULT_API_RETRIES,
     retry_backoff_sec: float = d0.DEFAULT_RETRY_BACKOFF_SEC,

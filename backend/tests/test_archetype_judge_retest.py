@@ -171,6 +171,23 @@ def test_truncated_response_drops_the_unscored_candidate_and_surfaces_the_drop(c
     assert {"candidates": 3, "scored": 2, "dropped": 1}.items() <= events[-1].items()
 
 
+def test_judge_aborts_loudly_when_zero_of_n_candidates_is_scored() -> None:
+    # A cap-starved / empty response (gemini-2.5-pro's thinking budget ate the whole cap)
+    # parses to ZERO scores; scoring a real candidate set as 0/N would silently corrupt
+    # recall to 0 — a fake NO-GO that READS like a valid verdict. The judge must fail LOUD
+    # so a cap-hit aborts the run instead (the failure the #101 smoke surfaced).
+    rows = [_row(start=10.0, end=20.0), _row(start=40.0, end=50.0)]
+    judge = arm_a.neutral_repost_judge(
+        call_provider=lambda _p: "", persist_raw=lambda _t: None, segments=[])
+
+    with pytest.raises(arm_a.EmptyJudgeResponseError):
+        judge(rows)
+
+    # An EMPTY candidate set is not an error — zero scored from zero rows is vacuously fine.
+    assert arm_a.neutral_repost_judge(
+        call_provider=lambda _p: "", persist_raw=lambda _t: None, segments=[])([]) == []
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Slice 4 — the Gemini provider seam binds gemini-2.5-pro at temp 0, text only
 # ─────────────────────────────────────────────────────────────────────────────
@@ -195,6 +212,24 @@ def test_gemini_pro_provider_targets_gemini_2_5_pro_at_temp_zero(monkeypatch) ->
     assert captured["temperature"] == 0.0
     assert captured["prompt"] == "PROMPT"
     assert raw == '{"scores": []}'
+
+
+def test_gemini_pro_provider_requests_reasoning_headroom_max_tokens(monkeypatch) -> None:
+    # gemini-2.5-pro is a REASONING model: an 8k output cap let internal thinking eat the
+    # whole budget and return EMPTY content (finish_reason=length) on a full-pool judge —
+    # a fake 0.000 verdict. The provider must request enough output headroom for the
+    # thinking budget PLUS the score JSON of the largest pool (≈1300 candidates).
+    captured: dict = {}
+
+    def fake_call(prompt, *, model, temperature, max_tokens, **kwargs):
+        captured["max_tokens"] = max_tokens
+        return '{"scores": []}', {}
+
+    monkeypatch.setattr(arm_a.d0, "call_gemini_moment_finder", fake_call)
+    arm_a.gemini_pro_provider()("PROMPT")
+
+    assert captured["max_tokens"] == arm_a.GEMINI_JUDGE_MAX_TOKENS
+    assert arm_a.GEMINI_JUDGE_MAX_TOKENS >= 32000  # well above the strangling 8k default
 
 
 # ─────────────────────────────────────────────────────────────────────────────
