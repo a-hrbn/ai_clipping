@@ -65,6 +65,8 @@ PY
 
 start_ngrok_remote() {
   local ngrok_bin="${AI_CLIPPING_NGROK_BIN:-}"
+  local ngrok_authtoken="${AI_CLIPPING_NGROK_AUTHTOKEN:-}"
+  local ngrok_args=(http 3000 --log=stdout --log-format=json)
   if [ -z "$ngrok_bin" ]; then
     if command -v ngrok >/dev/null 2>&1; then
       ngrok_bin="$(command -v ngrok)"
@@ -89,7 +91,11 @@ start_ngrok_remote() {
   wait_for_http http://127.0.0.1:3000 frontend
   wait_for_http http://127.0.0.1:3000/api/status "frontend API rewrite"
 
-  setsid "$ngrok_bin" http 3000 --authtoken=3El1UbJidwhXM0HCnZeTEG5F1RV_2sCREn9WeKQ47RnnA8g9i --log=stdout --log-format=json \
+  if [ -n "$ngrok_authtoken" ]; then
+    ngrok_args+=(--authtoken="$ngrok_authtoken")
+  fi
+
+  setsid "$ngrok_bin" "${ngrok_args[@]}" \
     > backend/tmp/ngrok/ngrok.log 2>&1 < /dev/null &
   echo "$!" > backend/tmp/ngrok/ngrok.pid
 
@@ -242,6 +248,8 @@ Frontend: http://localhost:3000
 Backend:  http://localhost:8000
 
 Remote ngrok tunnel starts by default.
+Set token via:
+  export AI_CLIPPING_NGROK_AUTHTOKEN=...
 Disable it with:
   AI_CLIPPING_REMOTE=none ./scripts/start_containerized.sh
 
