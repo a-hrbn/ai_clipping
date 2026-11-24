@@ -17,6 +17,8 @@ import logging
 import pathlib
 from typing import TYPE_CHECKING
 
+from services.feedback_store import initial_feedback_rows
+
 from .seam import CutClipsFn, Progress
 
 if TYPE_CHECKING:
@@ -109,44 +111,5 @@ class Clipping:
                 progress(min(max(done / total, 0.0), 1.0))
 
         clips = self._cut(video_path, moments, self._job_id, progress_cb=on_cut)
-        self._store.write_feedback(self._job_id, _feedback_rows(self._job_id, moments, clips))
+        self._store.write_feedback(self._job_id, initial_feedback_rows(self._job_id, moments, clips))
         return clips
-
-
-_SCORE_FIELDS = (
-    "viral_score",
-    "composite_score",
-    "projected_hook_score",
-    "projected_retention_score",
-    "value_score",
-    "trend_score",
-)
-
-
-def _feedback_rows(job_id: str, moments: list[dict], clips: "list[ClipResult]") -> list[dict]:
-    """One feedback row per *delivered* clip — the row the feedback/gold-eval
-    routes update and the review list reads. A moment whose cut failed has no
-    clip and therefore no row."""
-    rank_by_id = {m["candidate_id"]: (rank, m) for rank, m in enumerate(moments, start=1)}
-    rows: list[dict] = []
-    for clip in clips:
-        rank, moment = rank_by_id[clip.candidate_id]
-        rows.append({
-            "job_id": job_id,
-            "candidate_id": clip.candidate_id,
-            "selected": True,
-            "exported": False,
-            "rank": rank,
-            "rank_score": moment["composite_score"],
-            "proposed_start": moment["start_time"],
-            "proposed_end": moment["end_time"],
-            "final_start": clip.start_time,
-            "final_end": clip.end_time,
-            "publish_platform": moment["platform"],
-            "ranking_mode": moment["ranking_mode"],
-            **{field: moment.get(field) for field in _SCORE_FIELDS},
-            "feedback_rating": None,
-            "feedback_tags": [],
-            "feedback_notes": None,
-        })
-    return rows
