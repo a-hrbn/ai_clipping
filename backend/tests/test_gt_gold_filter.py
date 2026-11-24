@@ -2,8 +2,11 @@
 
 ``gt_pipeline`` (step 5) and the weekly flywheel core
 (``gt_match_verify.match_and_verify``) are fed the same matcher output; the
-moments that reach the manifest must be identical. Canonical rule: audio
-fallback matches are kept, transcript matches need ``min_similarity``.
+moments that reach the manifest must be identical. Canonical rule is the weekly
+path's: whatever the matcher accepted is a candidate — audio fallback matches and
+transcript matches at or above the row's own acceptance threshold (view-weighted
+accepts go below ``min_similarity``). Rows without a recorded threshold fall back
+to ``min_similarity``.
 """
 import pathlib
 import tempfile
@@ -17,8 +20,8 @@ from ml.row_identity import read_jsonl
 MIN_SIM = 0.58
 
 
-def _row(start: float, *, url: str, sim: float, kind: str) -> dict:
-    return {
+def _row(start: float, *, url: str, sim: float, kind: str, threshold: float | None = MIN_SIM) -> dict:
+    row = {
         "vod_id": "V1",
         "window_start": start,
         "window_end": start + 20.0,
@@ -28,14 +31,19 @@ def _row(start: float, *, url: str, sim: float, kind: str) -> dict:
         "transcript_similarity": sim,
         "transcript_match_kind": kind,
     }
+    if threshold is not None:
+        row["transcript_acceptance_threshold"] = threshold
+    return row
 
 
 MATCHES = [
     _row(100.0, url="u-transcript", sim=0.9, kind="single_window"),
     # Low-speech clip found by audio: transcript similarity is near zero.
     _row(400.0, url="u-audio", sim=0.12, kind="audio_fingerprint_fallback"),
-    # View-weighted transcript accept below the floor.
-    _row(700.0, url="u-weak", sim=0.45, kind="single_window"),
+    # View-weighted transcript accept below the floor: the matcher accepted it.
+    _row(700.0, url="u-viewweighted", sim=0.45, kind="single_window", threshold=0.45),
+    # Legacy row without a recorded acceptance threshold, below the floor.
+    _row(1000.0, url="u-legacy-weak", sim=0.45, kind="single_window", threshold=None),
 ]
 
 
@@ -79,9 +87,17 @@ class SharedGoldFilterTests(unittest.TestCase):
         expected = {
             ("V1", 100.0, 120.0, "u-transcript"),
             ("V1", 400.0, 420.0, "u-audio"),
+            ("V1", 700.0, 720.0, "u-viewweighted"),
         }
         self.assertEqual(self._pipeline_gold(), expected)
         self.assertEqual(self._weekly_gold(), expected)
+
+    def test_view_weighted_match_the_matcher_accepted_is_gold(self) -> None:
+        gold = gt_match_verify.filter_gold_candidates(
+            [_row(700.0, url="u-vw", sim=0.45, kind="single_window", threshold=0.45)],
+            min_similarity=MIN_SIM,
+        )
+        self.assertEqual([r["source_url"] for r in gold], ["u-vw"])
 
 
 if __name__ == "__main__":

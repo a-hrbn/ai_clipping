@@ -102,15 +102,20 @@ def filter_gold_candidates(match_rows: list[dict], *, min_similarity: float) -> 
     """The one rule for which match rows may become GT moments (#130).
 
     Shared by ``gt_pipeline`` and the weekly flywheel so recall does not depend
-    on the path that minted the gold: audio-fingerprint fallback matches are
-    kept (low-speech clips score near zero on transcripts), transcript matches
-    need ``transcript_similarity >= min_similarity``.
+    on the path that minted the gold. Canonical is the weekly path: trust what
+    the matcher accepted — audio-fingerprint fallback matches (low-speech clips
+    score near zero on transcripts) and transcript matches at or above the row's
+    own ``transcript_acceptance_threshold`` (view-weighted accepts go down to
+    ~0.42). Rows without a recorded threshold need ``min_similarity``.
     """
-    return [
-        row for row in match_rows
-        if row.get("transcript_match_kind") == "audio_fingerprint_fallback"
-        or float(row.get("transcript_similarity") or 0) >= float(min_similarity)
-    ]
+    def _accepted(row: dict) -> bool:
+        if row.get("transcript_match_kind") == "audio_fingerprint_fallback":
+            return True
+        threshold = row.get("transcript_acceptance_threshold")
+        floor = float(min_similarity if threshold is None else threshold)
+        return float(row.get("transcript_similarity") or 0) >= floor
+
+    return [row for row in match_rows if _accepted(row)]
 
 
 def build_manifest_from_matches(match_rows: list[dict]) -> list[dict]:
