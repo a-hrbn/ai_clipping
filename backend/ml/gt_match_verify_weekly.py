@@ -34,7 +34,7 @@ import json
 import logging
 import pathlib
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
@@ -62,6 +62,10 @@ SILVER = gt_match_verify.SILVER
 # the midpoint so accrual reads as "% of the way there".
 TARGET_GOLD = 175
 TARGET_VODS = 25
+
+# A repost without a match row stays open (re-matched against newly captured
+# VODs each run) until it is older than this, then it is done for good.
+OPEN_REPOST_DAYS = 14
 
 
 # ---------------------------------------------------------------------------
@@ -333,6 +337,8 @@ def run_weekly_match_verify(
     (url -> local path, raises on failure) to :func:`download_short_form`; both
     are injectable for tests. Each new repost is downloaded before matching; a
     repost whose download fails is not marked done, so the next run retries it.
+    A repost is marked done only once it produced a match row or has been open
+    longer than ``OPEN_REPOST_DAYS``; until then each run re-matches it.
     State and both manifests are persisted; a zeroed scan returns a summary with
     ``scan_zeroed=True`` and mutates nothing, so next week simply retries.
     """
@@ -384,10 +390,24 @@ def run_weekly_match_verify(
     gold_manifest = gt_match_verify.filter_gold_manifest(merged)
     write_jsonl(gold_manifest_path, gold_manifest)
 
-    # Only reposts that actually reached the matcher with media count as done.
+    # A repost is done once it produced a match row, or after OPEN_REPOST_DAYS
+    # without one (its VOD may only be captured after this run). Failed
+    # downloads never reached the matcher, so they never count.
+    hit_urls = {
+        str(m.get("source_url") or "").strip()
+        for row in result.manifest
+        for m in (row.get("gt_moments") or [])
+    }
+    pending = state.setdefault("pending", {})
+    now = datetime.fromisoformat(matched_at)
     for repost in downloaded:
         rid = _repost_id(repost)
-        if rid:
+        if not rid:
+            continue
+        first_tried = pending.setdefault(rid, matched_at)
+        expired = now - datetime.fromisoformat(first_tried) > timedelta(days=OPEN_REPOST_DAYS)
+        if str(repost.get("source_url") or "").strip() in hit_urls or expired:
+            pending.pop(rid)
             state.setdefault("matched", {})[rid] = {
                 "clip_id": repost.get("clip_id", ""),
                 "source_url": repost.get("source_url", ""),
