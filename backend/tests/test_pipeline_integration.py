@@ -203,6 +203,35 @@ class ConductorOrchestrationTests(_PipelineStubTestCase):
             self.assertEqual(done["progress_pct"], 100)
             self.assertEqual(done["clips"], clips)
 
+    async def test_run_writes_nothing_outside_storage_dir(self) -> None:
+        # The run's only transcript copy is segments.jsonl in the job artifact
+        # store; nothing lands in a repo-level transcripts/ dir nobody reads.
+        pipeline = _import_pipeline_with_stubs()
+        job_id = "no-stray-writes-job"
+        stray_dir = Path(pipeline.__file__).resolve().parents[1] / "transcripts"
+        stray = [stray_dir / f"{job_id}.txt", stray_dir / f"{job_id}.jsonl"]
+        for path in stray:
+            path.unlink(missing_ok=True)
+        self.addCleanup(lambda: [path.unlink(missing_ok=True) for path in stray])
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            video_path = tmp_path / "video.mp4"
+            video_path.write_bytes(b"video")
+            job_updates: list[dict] = []
+
+            with ExitStack() as stack:
+                _conductor_stack(stack, pipeline, tmp_path, job_updates)
+                stack.enter_context(patch.object(pipeline, "_cleanup_later", side_effect=_noop_cleanup_later))
+                _patch_conductor_producers(
+                    stack, pipeline,
+                    result=types.SimpleNamespace(post_processed_moments=[]), clips=[],
+                )
+
+                await pipeline.run_pipeline(job_id, video_path=video_path, profile="jynxzi")
+
+            self.assertEqual(job_updates[-1].get("status"), "done")
+            self.assertEqual([path for path in stray if path.exists()], [])
+
     async def test_normal_job_schedules_cleanup_later(self) -> None:
         pipeline = _import_pipeline_with_stubs()
         with tempfile.TemporaryDirectory() as tmp:
@@ -302,67 +331,14 @@ class ConductorOrchestrationTests(_PipelineStubTestCase):
             self.assertNotIn("done", statuses)
 
 
-class ConductorCleanupAndCacheSourceTests(_PipelineStubTestCase):
-    """Verify the Conductor-owned cleanup + cache-source helpers directly; these
-    survive the Producer extraction unchanged."""
-
-    async def test_serving_source_media_cleanup_preserves_training_vod(self) -> None:
-        pipeline = _import_pipeline_with_stubs()
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            job_dir = tmp_path / "twitch_vod_123"
-            job_dir.mkdir(parents=True)
-            video_path = job_dir / "video.mp4"
-            audio_path = job_dir / "audio.wav"
-            video_path.write_bytes(b"video")
-            audio_path.write_bytes(b"audio")
-
-            with patch.object(pipeline.settings, "storage_dir", str(tmp_path)), \
-                 patch.object(pipeline.settings, "frontend_job_cache_enabled", False):
-                pipeline._cleanup_serving_source_media(
-                    job_id="twitch_vod_123",
-                    video_path=video_path,
-                    audio_path=audio_path,
-                )
-
-            self.assertTrue(video_path.exists())
-            self.assertTrue(audio_path.exists())
-
-    async def test_serving_source_media_cleanup_preserves_pipeline_debug_job(self) -> None:
-        pipeline = _import_pipeline_with_stubs()
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            job_id = "pipeline_debug_wf1_vod123"
-            job_dir = tmp_path / job_id
-            job_dir.mkdir(parents=True)
-            video_path = job_dir / "video.mp4"
-            audio_path = job_dir / "audio.wav"
-            video_path.write_bytes(b"video")
-            audio_path.write_bytes(b"audio")
-
-            with patch.object(pipeline.settings, "storage_dir", str(tmp_path)), \
-                 patch.object(pipeline.settings, "frontend_job_cache_enabled", False):
-                pipeline._cleanup_serving_source_media(
-                    job_id=job_id,
-                    video_path=video_path,
-                    audio_path=audio_path,
-                )
-
-            self.assertTrue(video_path.exists())
-            self.assertTrue(audio_path.exists())
-
-    async def test_frontend_cache_setting_disables_serving_job_cache_keys(self) -> None:
-        pipeline = _import_pipeline_with_stubs()
-        with patch.object(pipeline.settings, "frontend_job_cache_enabled", False):
-            self.assertFalse(pipeline._frontend_cache_enabled_for_job("frontend-job"))
-            self.assertTrue(pipeline._frontend_cache_enabled_for_job("twitch_vod_123"))
-            self.assertTrue(pipeline._frontend_cache_enabled_for_job("pipeline_debug_wf1_vod123"))
+class ConductorCacheSourceTests(_PipelineStubTestCase):
+    """Verify the Conductor-owned cache-source helpers directly; these survive
+    the Producer extraction unchanged."""
 
     async def test_frontend_transcript_cache_uses_stable_twitch_vod_key_without_media_cache(self) -> None:
         pipeline = _import_pipeline_with_stubs()
         with patch.object(pipeline.settings, "frontend_job_cache_enabled", False), \
              patch.object(pipeline.settings, "frontend_transcript_cache_enabled", True):
-            self.assertFalse(pipeline._frontend_cache_enabled_for_job("frontend-job"))
             self.assertTrue(
                 pipeline._transcript_cache_enabled_for_job(
                     "frontend-job",
@@ -416,7 +392,6 @@ def _import_pipeline_with_stubs():
         save_voice_energy=lambda *_args, **_kwargs: None,
         apply_chat_enrichment=lambda *_args, **_kwargs: None,
         save_chat_enrichment=lambda *_args, **_kwargs: None,
-        format_transcript=lambda segments: "",
         format_jsonl=lambda segments: "",
     )
     _stub_module(

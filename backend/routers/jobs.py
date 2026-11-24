@@ -21,7 +21,7 @@ import session_lease
 from job_lifecycle import is_terminal
 from job_manager import bind_job_session, cancel_job, create_job, delete_job, get_job, touch_job_session
 from job_manager import update_job
-from pipeline_runner import run_job_subprocess, writable_cache_dir
+from pipeline_runner import keeps_source_media, run_job_subprocess, writable_cache_dir
 from services import clip_strategy, feedback_store
 from services.job_artifact_store import JobArtifactStore, RealFsJobArtifactStore
 
@@ -301,7 +301,7 @@ def _write_job_request_metadata(job_id: str, payload: dict) -> None:
 
 
 def _cleanup_serving_job_source_media(job_id: str) -> None:
-    if str(job_id or "").startswith(("twitch_vod", "judge_backfill_", "pipeline_debug_")):
+    if keeps_source_media(job_id):
         return
 
     job_dir = pathlib.Path(settings.storage_dir) / job_id

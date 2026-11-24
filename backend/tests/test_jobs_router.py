@@ -266,6 +266,7 @@ class JobsRouterTests(unittest.TestCase):
             chunk_path.write_bytes(b"chunk")
 
             with patch.object(jobs.settings, "storage_dir", str(storage_dir)), \
+                 patch.object(jobs.settings, "frontend_job_cache_enabled", False), \
                  patch.object(jobs, "run_job_subprocess", side_effect=fake_run_job_subprocess):
                 asyncio.run(
                     jobs._run_pipeline_subprocess(
@@ -282,21 +283,57 @@ class JobsRouterTests(unittest.TestCase):
             self.assertTrue(clip_path.exists())
             self.assertTrue(debug_path.exists())
 
-    def test_subprocess_parent_cleanup_preserves_training_source_media(self) -> None:
+    def test_run_pipeline_subprocess_keeps_source_video_when_frontend_job_cache_enabled(self) -> None:
+        async def fake_run_job_subprocess(**_kwargs):
+            return 0
+
         with tempfile.TemporaryDirectory() as tmp:
             storage_dir = Path(tmp)
-            job_dir = storage_dir / "twitch_vod_123"
+            job_dir = storage_dir / "job-1"
             job_dir.mkdir(parents=True)
             video_path = job_dir / "video.mp4"
-            audio_path = job_dir / "audio.wav"
             video_path.write_bytes(b"video")
-            audio_path.write_bytes(b"audio")
 
-            with patch.object(jobs.settings, "storage_dir", str(storage_dir)):
-                jobs._cleanup_serving_job_source_media("twitch_vod_123")
+            with patch.object(jobs.settings, "storage_dir", str(storage_dir)), \
+                 patch.object(jobs.settings, "frontend_job_cache_enabled", True), \
+                 patch.object(jobs, "run_job_subprocess", side_effect=fake_run_job_subprocess):
+                asyncio.run(
+                    jobs._run_pipeline_subprocess(
+                        job_id="job-1",
+                        url="https://www.twitch.tv/videos/123",
+                        profile="general",
+                        strategy={},
+                    )
+                )
 
             self.assertTrue(video_path.exists())
-            self.assertTrue(audio_path.exists())
+
+    def test_run_pipeline_subprocess_preserves_debug_training_backfill_source_media(self) -> None:
+        async def fake_run_job_subprocess(**_kwargs):
+            return 0
+
+        for job_id in ("twitch_vod_123", "pipeline_debug_wf1_vod123", "judge_backfill_abc"):
+            with self.subTest(job_id=job_id), tempfile.TemporaryDirectory() as tmp:
+                storage_dir = Path(tmp)
+                job_dir = storage_dir / job_id
+                (job_dir / "chunks").mkdir(parents=True)
+                video_path = job_dir / "video.mp4"
+                audio_path = job_dir / "audio.wav"
+                video_path.write_bytes(b"video")
+                audio_path.write_bytes(b"audio")
+
+                with patch.object(jobs.settings, "storage_dir", str(storage_dir)), \
+                     patch.object(jobs.settings, "frontend_job_cache_enabled", False), \
+                     patch.object(jobs, "run_job_subprocess", side_effect=fake_run_job_subprocess):
+                    asyncio.run(
+                        jobs._run_pipeline_subprocess(
+                            job_id=job_id, url=None, profile="general", strategy={},
+                        )
+                    )
+
+                self.assertTrue(video_path.exists())
+                self.assertTrue(audio_path.exists())
+                self.assertTrue((job_dir / "chunks").exists())
 
     def test_face_detection_probe_env_uses_writable_matplotlib_and_headless_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, \
