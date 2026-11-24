@@ -210,5 +210,45 @@ class RunDailyCaptureTests(unittest.TestCase):
         self.assertEqual(seen["vod_date"], "2026-06-10T20:00:00Z")
 
 
+# --------------------------------------------------------------------------
+# CLI entrypoint: exit code surfaces failures to cron/monitoring (#128)
+# --------------------------------------------------------------------------
+class MainExitCodeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.cache_root = pathlib.Path(self._tmp.name) / "vod_cache"
+        self.state_path = self.cache_root / gt_capture_daily.STATE_FILENAME
+
+    def _main(self, capture) -> int:
+        return gt_capture_daily.main(
+            ["--cache-root", str(self.cache_root)],
+            list_vods=lambda: [{"id": "C"}, {"id": "D"}],
+            capture=capture,
+        )
+
+    def test_run_with_a_failed_vod_exits_1_and_keeps_the_successful_one(self) -> None:
+        def capture(vod_id, *, cache_dir, vod_date, captured_at):
+            if vod_id == "D":
+                raise RuntimeError("fpcalc not found")
+            return _FakeCaptureResult(str(vod_id), {"vod_id": str(vod_id)})
+
+        self.assertEqual(self._main(capture), 1)
+        self.assertEqual(
+            gt_capture_daily.captured_ids(gt_capture_daily.load_captured_state(self.state_path)),
+            {"C"},
+        )
+
+    def test_clean_run_exits_0(self) -> None:
+        def capture(vod_id, *, cache_dir, vod_date, captured_at):
+            return _FakeCaptureResult(str(vod_id), {"vod_id": str(vod_id)})
+
+        self.assertEqual(self._main(capture), 0)
+        self.assertEqual(
+            gt_capture_daily.captured_ids(gt_capture_daily.load_captured_state(self.state_path)),
+            {"C", "D"},
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

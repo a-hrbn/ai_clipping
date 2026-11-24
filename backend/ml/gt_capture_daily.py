@@ -281,7 +281,10 @@ def run_daily_capture(
 # ---------------------------------------------------------------------------
 # CLI entrypoint (driven by the daily cron wrapper)
 # ---------------------------------------------------------------------------
-def main(argv=None) -> int:
+def main(argv=None, *, list_vods=None, capture=None) -> int:
+    """CLI entrypoint. ``list_vods``/``capture`` are injectable for tests; by
+    default VODs come from Helix and capture is the real core. Returns 1 when
+    any VOD failed so cron/monitoring sees it (successes are still committed)."""
     parser = argparse.ArgumentParser(
         description="GT flywheel daily capture job — poll Helix archives and capture new VODs."
     )
@@ -303,22 +306,25 @@ def main(argv=None) -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-7s  %(name)s  %(message)s")
 
-    from config import settings
-    from ml.collect_twitch_clip_labels import TwitchClient
+    if list_vods is None:
+        from config import settings
+        from ml.collect_twitch_clip_labels import TwitchClient
 
-    if not settings.twitch_client_id or not settings.twitch_client_secret:
-        print("TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET must be configured.")
-        return 1
+        if not settings.twitch_client_id or not settings.twitch_client_secret:
+            print("TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET must be configured.")
+            return 1
+        client = TwitchClient(settings.twitch_client_id, settings.twitch_client_secret)
+        list_vods = lambda: list_archive_vods(client, args.broadcaster, max_vods=args.max_vods)  # noqa: E731
 
     cache_root = pathlib.Path(args.cache_root)
     state_path = pathlib.Path(args.state) if args.state else cache_root / STATE_FILENAME
-    client = TwitchClient(settings.twitch_client_id, settings.twitch_client_secret)
 
     try:
         summary = run_daily_capture(
-            list_vods=lambda: list_archive_vods(client, args.broadcaster, max_vods=args.max_vods),
+            list_vods=list_vods,
             state_path=state_path,
             cache_root=cache_root,
+            capture=capture or gt_capture.capture_vod,
             limit=args.limit,
         )
     except CaptureAlreadyRunning as exc:
@@ -334,7 +340,7 @@ def main(argv=None) -> int:
             f"skipped {summary['skipped']}, failed {len(summary['failed'])}; "
             f"total captured VODs: {summary['total_captured']}"
         )
-    return 0
+    return 1 if summary["failed"] else 0
 
 
 if __name__ == "__main__":
