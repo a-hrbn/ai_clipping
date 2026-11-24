@@ -73,6 +73,17 @@ def build_subprocess_env() -> dict[str, str]:
     return env
 
 
+def keeps_source_media(job_id: str) -> bool:
+    """True if a job's source media (video, audio, chunks) outlives its run.
+
+    Debug/training/backfill workflows manage their own media; serving jobs keep
+    it only with ``frontend_job_cache_enabled``.
+    """
+    if bool(getattr(settings, "frontend_job_cache_enabled", False)):
+        return True
+    return str(job_id or "").startswith(("twitch_vod", "judge_backfill_", "pipeline_debug_"))
+
+
 async def run_job_subprocess(
     *,
     job_id: str,

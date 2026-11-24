@@ -199,15 +199,29 @@ def update_job_gold_eval(
         if str(row.get("candidate_id") or "").strip()
     }
     feature_row = features_by_id.get(payload.candidate_id)
-    if feature_row is None:
-        raise KeyError(payload.candidate_id)
-
-    windows_by_id = {
-        str(row.get("id") or "").strip(): row
-        for row in _read_feedback_rows(debug_dir / "candidates_normalized.jsonl")
-        if str(row.get("id") or "").strip()
-    }
-    window_row = windows_by_id.get(payload.candidate_id) or {}
+    if feature_row is not None:
+        windows_by_id = {
+            str(row.get("id") or "").strip(): row
+            for row in _read_feedback_rows(debug_dir / "candidates_normalized.jsonl")
+            if str(row.get("id") or "").strip()
+        }
+        window_row = windows_by_id.get(payload.candidate_id) or {}
+    else:
+        # Legacy candidate artifacts are gone since the old ML services were
+        # removed: fall back to the clip's feedback row (written by Clipping).
+        clip_row = next(
+            (row for row in _read_feedback_rows(debug_dir / "feedback.jsonl")
+             if row.get("candidate_id") == payload.candidate_id),
+            None,
+        )
+        if clip_row is None:
+            raise KeyError(payload.candidate_id)
+        feature_row = {
+            key: value for key, value in clip_row.items()
+            if key == "rank" or key.endswith("_score")
+        }
+        feature_row["source"] = clip_row.get("ranking_mode")
+        window_row = {"start": clip_row.get("final_start"), "end": clip_row.get("final_end")}
     heuristic_rank_score = _heuristic_rank_score(debug_dir, payload.candidate_id)
     validate_gold_notes(
         int(payload.gold_grade or 0),
