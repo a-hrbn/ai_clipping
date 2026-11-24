@@ -98,6 +98,21 @@ def build_captured_vod_rows(captured_vod_ids, cache_root: pathlib.Path) -> list[
     return rows
 
 
+def filter_gold_candidates(match_rows: list[dict], *, min_similarity: float) -> list[dict]:
+    """The one rule for which match rows may become GT moments (#130).
+
+    Shared by ``gt_pipeline`` and the weekly flywheel so recall does not depend
+    on the path that minted the gold: audio-fingerprint fallback matches are
+    kept (low-speech clips score near zero on transcripts), transcript matches
+    need ``transcript_similarity >= min_similarity``.
+    """
+    return [
+        row for row in match_rows
+        if row.get("transcript_match_kind") == "audio_fingerprint_fallback"
+        or float(row.get("transcript_similarity") or 0) >= float(min_similarity)
+    ]
+
+
 def build_manifest_from_matches(match_rows: list[dict]) -> list[dict]:
     """Group accepted match rows by VOD and dedup near-overlapping windows.
 
@@ -230,7 +245,7 @@ def match_and_verify(
         verify_moment = _make_default_verify(fpcalc)
 
     vod_rows = build_captured_vod_rows(captured_vod_ids, cache_root)
-    match_rows = match_reposts(vod_rows, reposts)
+    match_rows = filter_gold_candidates(match_reposts(vod_rows, reposts), min_similarity=min_similarity)
     manifest = build_manifest_from_matches(match_rows)
 
     verifications: list[dict] = []

@@ -92,6 +92,16 @@ class MergeManifestsTests(unittest.TestCase):
         self.assertEqual(moments[0]["gt_tier"], "gold")  # new wins
 
 
+    def test_overlapping_moment_from_another_repost_keeps_the_better_verdict(self) -> None:
+        # #130: cross-week dedup must not let a higher-view "review" duplicate
+        # push a confirmed gold moment out of the gold manifest.
+        existing = [_manifest_row("V1", [_moment(10, 20, url="a", tier="gold", views=10)])]
+        new = [_manifest_row("V1", [_moment(11, 21, url="b", tier="review", views=99)])]
+        merged = weekly.merge_manifests(existing, new)
+
+        self.assertEqual([(m["source_url"], m["gt_tier"]) for m in merged[0]["gt_moments"]], [("a", "gold")])
+
+
 # --------------------------------------------------------------------------
 # Pure decision seam: gold-accrual vs target (AC-4)
 # --------------------------------------------------------------------------
@@ -168,13 +178,16 @@ class RunWeeklyMatchVerifyTests(unittest.TestCase):
             manifest = []
             verifications = []
             counts: dict = {}
-            for r in reposts:
+            for i, r in enumerate(reposts):
                 url = r["source_url"]
                 tier = tier_by_url.get(url)
                 if tier is None:
                     continue
                 vod_id = r.get("vod_id", "V1")
-                manifest.append(_manifest_row(vod_id, [_moment(10, 20, url=url, tier=tier, views=r.get("views", 0))]))
+                # Distinct VOD position per repost in a batch, unless the test pins one ("at").
+                start = r.get("at", 10 + 100 * i)
+                manifest.append(_manifest_row(
+                    vod_id, [_moment(start, start + 10, url=url, tier=tier, views=r.get("views", 0))]))
                 verifications.append({"vod_id": vod_id, "gt_tier": tier})
                 counts[tier] = counts.get(tier, 0) + 1
             gold_manifest = gt_match_verify.filter_gold_manifest(manifest)
@@ -312,6 +325,20 @@ class RunWeeklyMatchVerifyTests(unittest.TestCase):
         self.assertEqual([r["clip_id"] for r in seen_by_matcher], ["bad"])
         self.assertEqual(second["accrual"]["gold"], 2)
         self.assertEqual(second["download_failed"], 0)
+
+    def test_same_moment_from_two_weeks_appears_once_in_gold_manifest(self) -> None:
+        # #130: two different reposts of the same VOD moment, matched a week apart.
+        match = self._fake_match_and_verify_factory({"u-week1": "gold", "u-week2": "gold"})
+        self._run([dict(_repost("w1", url="u-week1", views=50_000), vod_id="V1", at=100)], ["V1"],
+                  match=match, matched_at="2026-06-11T00:00:00+00:00")
+        summary = self._run([dict(_repost("w2", url="u-week2", views=90_000), vod_id="V1", at=102)], ["V1"],
+                            match=match, matched_at="2026-06-18T00:00:00+00:00")
+
+        gold_rows = [json.loads(line) for line in self.gold_path.read_text().splitlines() if line]
+        self.assertEqual([len(r["gt_moments"]) for r in gold_rows], [1])
+        self.assertEqual(summary["accrual"]["gold"], 1)
+        # Both reposts produced a match, so neither is retried.
+        self.assertEqual(weekly.matched_ids(weekly.load_match_state(self.state_path)), {"w1", "w2"})
 
     def _captured_only_match(self):
         """Fake matcher that, like the real one, only hits a repost once its VOD is captured."""

@@ -42,7 +42,8 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from ml import gt_capture_daily
 from ml import gt_match_verify
-from ml.row_identity import read_jsonl, write_jsonl  # noqa: E402
+from ml.build_eval_manifest import _OVERLAP_DEDUP_RATIO
+from ml.row_identity import read_jsonl, window_overlap_ratio, write_jsonl  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +124,11 @@ def merge_manifests(existing: list[dict], new: list[dict]) -> list[dict]:
     in place. VODs are emitted sorted (deterministic, matching the core), moments
     sorted by start. This is what makes the gold manifest *accumulate* week over
     week instead of being clobbered by each run's small new batch.
+
+    Different reposts of the same moment (often matched weeks apart) are then
+    collapsed with the batch dedup's overlap rule (#130), so each moment counts
+    once in the recall denominator: the better verdict wins (gold > silver >
+    rest), then the higher-view repost.
     """
     by_vod: dict[str, dict[str, dict]] = {}
     for row in list(existing) + list(new):
@@ -133,9 +139,29 @@ def merge_manifests(existing: list[dict], new: list[dict]) -> list[dict]:
         for moment in row.get("gt_moments") or []:
             bucket[_moment_key(moment)] = moment
     return [
-        {"vod_id": vod_id, "gt_moments": sorted(bucket.values(), key=lambda m: float(m.get("start") or 0))}
+        {"vod_id": vod_id, "gt_moments": _dedup_overlapping(list(bucket.values()))}
         for vod_id, bucket in sorted(by_vod.items())
     ]
+
+
+_TIER_RANK = {GOLD: 0, SILVER: 1}
+
+
+def _dedup_overlapping(moments: list[dict]) -> list[dict]:
+    ranked = sorted(
+        moments,
+        key=lambda m: (_TIER_RANK.get(str(m.get("gt_tier") or ""), 2), -float(m.get("views") or 0)),
+    )
+    kept: list[dict] = []
+    for candidate in ranked:
+        start, end = float(candidate.get("start") or 0), float(candidate.get("end") or 0)
+        if not any(
+            window_overlap_ratio(start, end, float(k.get("start") or 0), float(k.get("end") or 0))
+            >= _OVERLAP_DEDUP_RATIO
+            for k in kept
+        ):
+            kept.append(candidate)
+    return sorted(kept, key=lambda m: float(m.get("start") or 0))
 
 
 # ---------------------------------------------------------------------------
