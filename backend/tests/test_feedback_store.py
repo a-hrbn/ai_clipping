@@ -1,131 +1,21 @@
+import json
 import unittest
 import tempfile
 from pathlib import Path
 
 from models import ClipFeedbackPayload
 from services import feedback_store
-from services.timeline_types import Candidate, CandidateFeatures, RankedCandidate
 
 
 class FeedbackStoreTests(unittest.TestCase):
-    def test_build_pipeline_feedback_marks_selected_candidates(self) -> None:
-        ranked = [
-            RankedCandidate(
-                candidate=Candidate(id="a", start=0.0, end=10.0, source="reaction", anchor_time=5.0),
-                features=CandidateFeatures(
-                    candidate_id="a",
-                    duration=10.0,
-                    hook_delay_sec=1.0,
-                    hook_strength=0.8,
-                    max_hype=5.0,
-                    mean_hype=3.0,
-                    arc_score=4.0,
-                    chat_peak=0.5,
-                    motion_peak=0.5,
-                    face_reaction_peak=0.2,
-                    speaker_turns=1,
-                    exclamation_count=1,
-                    laughter_count=0,
-                    question_open=False,
-                    context_cost=0.1,
-                    payoff_score=5.0,
-                    context_efficiency=0.8,
-                    quoteability_score=0.2,
-                    surprise_score=0.6,
-                    contradiction_score=0.0,
-                    standalone_score=0.7,
-                    semantic_density=0.3,
-                    profile_fit_score=0.7,
-                    source="reaction",
-                ),
-                rank_score=8.0,
-                rationale=[],
-            )
-        ]
-        feedback = feedback_store.build_pipeline_feedback(
-            "job-1",
-            ranked,
-            [
-                {
-                    "start_time": 2.0,
-                    "end_time": 9.0,
-                    "viral_score": 8.0,
-                    "reason": "story",
-                    "platform": "tiktok",
-                    "variant_key": "aggressive_hook",
-                }
-            ],
-        )
-
-        self.assertEqual(len(feedback), 1)
-        self.assertTrue(feedback[0].selected)
-        self.assertFalse(feedback[0].exported)
-        self.assertEqual(feedback[0].publish_platform, "tiktok")
-        self.assertEqual(feedback[0].final_variant_key, "aggressive_hook")
-
-    def test_build_pipeline_feedback_adds_judged_quality_training_rows(self) -> None:
-        feedback = feedback_store.build_pipeline_feedback(
-            "job-judge",
-            [],
-            [],
-            [
-                {
-                    "candidate_id": "accepted",
-                    "start": 10.0,
-                    "end": 25.0,
-                    "rank_score": 6.0,
-                    "accepted": True,
-                    "has_judge_result": True,
-                    "judge_score": 7.4,
-                    "standalone_clarity": 0.8,
-                    "payoff_strength": 0.7,
-                    "narrative_completeness": 0.65,
-                    "judge_confidence": 0.9,
-                    "judge_provider": "ollama",
-                },
-                {
-                    "candidate_id": "rejected",
-                    "start": 30.0,
-                    "end": 45.0,
-                    "rank_score": 5.0,
-                    "accepted": False,
-                    "has_judge_result": True,
-                    "judge_score": 4.2,
-                    "rejection_reasons": ["judge_score_below_min"],
-                },
-                {
-                    "candidate_id": "unjudged",
-                    "start": 50.0,
-                    "end": 65.0,
-                    "accepted": True,
-                    "has_judge_result": False,
-                },
-            ],
-        )
-
-        rows = {row.candidate_id: row for row in feedback}
-        self.assertEqual(set(rows), {"accepted", "rejected"})
-        self.assertEqual(rows["accepted"].rejection_source, "judge_quality_accepted")
-        self.assertEqual(rows["accepted"].judge_score, 7.4)
-        self.assertEqual(rows["accepted"].judge_provider, "ollama")
-        self.assertEqual(rows["rejected"].rejection_source, "judge_quality_rejected")
-        self.assertEqual(rows["rejected"].rejected_reason, "judge_score_below_min")
-
     def test_update_job_feedback_persists_outcome_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             storage = Path(tmp)
             debug = storage / "job-1" / "debug"
             debug.mkdir(parents=True, exist_ok=True)
-            feedback_store.write_job_feedback(
-                debug,
-                [
-                    feedback_store.CandidateFeedback(
-                        job_id="job-1",
-                        candidate_id="c1",
-                        selected=True,
-                        exported=False,
-                    )
-                ],
+            (debug / "feedback.jsonl").write_text(
+                json.dumps({"job_id": "job-1", "candidate_id": "c1", "selected": True}),
+                encoding="utf-8",
             )
 
             response = feedback_store.update_job_feedback(

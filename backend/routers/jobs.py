@@ -21,7 +21,7 @@ import session_lease
 from job_lifecycle import is_terminal
 from job_manager import bind_job_session, cancel_job, create_job, delete_job, get_job, touch_job_session
 from job_manager import update_job
-from pipeline_runner import run_job_subprocess, writable_cache_dir
+from pipeline_runner import keeps_source_media, run_job_subprocess, writable_cache_dir
 from services import clip_strategy, feedback_store
 from services.job_artifact_store import JobArtifactStore, RealFsJobArtifactStore
 
@@ -41,6 +41,9 @@ _face_detection_cache: dict[str, str | bool | None] | None = None
 _SENTENCE_TRANSFORMERS_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
 _PYANNOTE_MODEL = "speaker-diarization-3.1"
 _BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
+# Status-poll diagnostics of terminal jobs, keyed by job_id (see _cached_pipeline_diagnostics).
+# shortcut: unbounded; entries are a few KB and only dropped on delete — add eviction if job volume grows.
+_diagnostics_cache: dict[str, tuple[tuple, dict]] = {}
 
 
 def _metric(label: str, value) -> dict:
@@ -204,8 +207,10 @@ def _job_pipeline_diagnostics(
             clip_details,
         ),
     ]
-    # GT matches stage — only shown for Twitch VOD jobs that have a match in the eval manifest
-    request_meta = store.read_request_metadata(job_id)
+    # GT matches stage — only shown for terminal Twitch VOD jobs that have a match in
+    # the eval manifest. Scanning every gt_runs manifest is too slow for the 2 s poll
+    # of a running job; terminal jobs compute it once (see _cached_pipeline_diagnostics).
+    request_meta = store.read_request_metadata(job_id) if is_terminal(job_status) else None
     source_url = request_meta.get("url") if isinstance(request_meta, dict) else None
     vod_id = _vod_id_from_url(source_url)
     if vod_id:
@@ -301,7 +306,7 @@ def _write_job_request_metadata(job_id: str, payload: dict) -> None:
 
 
 def _cleanup_serving_job_source_media(job_id: str) -> None:
-    if str(job_id or "").startswith(("twitch_vod", "judge_backfill_", "pipeline_debug_")):
+    if keeps_source_media(job_id):
         return
 
     job_dir = pathlib.Path(settings.storage_dir) / job_id
@@ -1025,6 +1030,23 @@ async def upload_job(
     return job
 
 
+def _cached_pipeline_diagnostics(job_id: str, job: JobStatus | dict) -> dict:
+    """Diagnostics for the status poll: a terminal job's artifacts no longer change,
+    so its diagnostics are computed once and reused until status/clips change."""
+    status = job.get("status") if isinstance(job, dict) else job.status
+    if not is_terminal(status):
+        _diagnostics_cache.pop(job_id, None)
+        return _job_pipeline_diagnostics(job_id, job)
+    clips = job.get("clips") if isinstance(job, dict) else job.clips
+    key = (status, len(clips or []))
+    cached = _diagnostics_cache.get(job_id)
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    diagnostics = _job_pipeline_diagnostics(job_id, job)
+    _diagnostics_cache[job_id] = (key, diagnostics)
+    return diagnostics
+
+
 @router.get("/{job_id}", response_model=JobStatus)
 async def get_job_status(job_id: str, session_id: str | None = None):
     job = touch_job_session(job_id, session_id)
@@ -1036,7 +1058,7 @@ async def get_job_status(job_id: str, session_id: str | None = None):
         job = get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
-    diagnostics = _job_pipeline_diagnostics(job_id, job)
+    diagnostics = _cached_pipeline_diagnostics(job_id, job)
     if isinstance(job, dict):
         payload = dict(job)
         payload["pipeline_diagnostics"] = diagnostics
@@ -1062,6 +1084,7 @@ async def delete_job_run(job_id: str):
     if not is_terminal(job.status):
         raise HTTPException(status_code=409, detail="Job is still running — cancel it first")
     deleted = delete_job(job_id)
+    _diagnostics_cache.pop(job_id, None)
     if not deleted:
         raise HTTPException(status_code=404, detail="Job not found")
     job_dir = pathlib.Path(settings.storage_dir) / job_id
