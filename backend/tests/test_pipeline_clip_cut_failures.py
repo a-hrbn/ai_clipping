@@ -66,6 +66,7 @@ class ClipCutFailureTests(_PipelineStubTestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         tmp_path = Path(tmp.name)
+        self.storage_dir = tmp_path
         job_dir = tmp_path / "clip-job"
         job_dir.mkdir()
         video_path = job_dir / "video.mp4"
@@ -115,6 +116,15 @@ class ClipCutFailureTests(_PipelineStubTestCase):
         self.assertIn("start=200.0", failure_log)
         self.assertIn("end=230.0", failure_log)
         self.assertIn("missing VOD fragment", failure_log)
+
+        # Feedback (#119) only covers clips that were actually cut.
+        from services.job_artifact_store import RealFsJobArtifactStore
+
+        rows = RealFsJobArtifactStore(self.storage_dir).read_feedback("clip-job")
+        self.assertEqual(
+            sorted((r["candidate_id"], r["rank"]) for r in rows),
+            [("llm_moment_01", 1), ("llm_moment_03", 3)],
+        )
 
     async def test_all_clips_failing_fails_job_with_clear_message(self) -> None:
         job_updates, statuses, _cut_calls, _logs = await self._run(
