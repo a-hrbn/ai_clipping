@@ -49,6 +49,10 @@ def _video_output_kwargs(video_path: pathlib.Path) -> dict:
     return {"vcodec": "libx264", "preset": "ultrafast", "acodec": "aac", "movflags": "+faststart"}
 
 
+class ClipCuttingError(RuntimeError):
+    """Not a single clip of a job could be cut."""
+
+
 def cut_raw_segment(
     video_path: pathlib.Path, start: float, end: float, output_path: pathlib.Path
 ) -> None:
@@ -83,6 +87,7 @@ def cut_clips(
     total = len(moments)
 
     slot: list[ClipResult | None] = [None] * total
+    failures: list[str] = []
     done_count = 0
     _lock = threading.Lock()
 
@@ -101,13 +106,24 @@ def cut_clips(
         rank = idx + 1
         filename = f"clip_{rank:02d}.mp4"
         output_path = clips_dir / filename
-        (
-            ffmpeg
-            .input(str(video_path), ss=start, t=end - start)
-            .output(str(output_path), **_video_output_kwargs(video_path))
-            .overwrite_output()
-            .run(quiet=True)
-        )
+        try:
+            cut_raw_segment(video_path, start, end, output_path)
+        except Exception as exc:
+            # One broken cut (e.g. missing VOD fragments) must not sink the job:
+            # log it and keep the other clips. Survivors keep their rank/filename.
+            error = _decode_ffmpeg_error(exc)
+            logger.warning(
+                "clip_cut_failed job_id=%s index=%s rank=%s start=%s end=%s error=%s",
+                job_id, idx, rank, start, end, error,
+            )
+            with _lock:
+                failures.append(error)
+                done_count += 1
+                d = done_count
+                so_far = [r for r in slot if r is not None]
+            if progress_cb is not None:
+                progress_cb(so_far, d, total)
+            return
         result = ClipResult(
             candidate_id=str(moment.get("candidate_id") or f"clip_{rank:02d}"),
             filename=filename,
@@ -140,6 +156,10 @@ def cut_clips(
         for fut in concurrent.futures.as_completed(futures):
             fut.result()
 
+    if total and len(failures) == total:
+        raise ClipCuttingError(
+            f"All {total} clips failed to cut (first error: {failures[0]})"
+        )
     return [r for r in slot if r is not None]
 
 
@@ -200,7 +220,7 @@ def _as_float(value) -> float:
         return 0.0
 
 
-def _decode_ffmpeg_error(exc: ffmpeg.Error) -> str:
+def _decode_ffmpeg_error(exc: Exception) -> str:
     stderr = getattr(exc, "stderr", b"") or b""
     if isinstance(stderr, bytes):
         message = stderr.decode("utf-8", errors="replace")
