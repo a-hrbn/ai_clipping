@@ -267,6 +267,40 @@ def list_iboclipss_reposts(channel: str = DEFAULT_CHANNEL, *, max_candidates: in
     return reposts
 
 
+def download_short_form(url: str) -> pathlib.Path:
+    """Fetch one repost through the short-form download cache (bot-protection sleeps included).
+
+    Same call the ``gt_pipeline`` download step uses; a cache hit returns at once.
+    """
+    from services.downloader import ensure_cached_download
+
+    return ensure_cached_download(url, cache_namespace="short_form", cache_ttl_sec=-1)
+
+
+def attach_media(reposts: list[dict], download_repost) -> tuple[list[dict], list[dict]]:
+    """Download each repost; return ``(with_video_path, failed)``.
+
+    The matcher skips a repost without ``video_path`` (``missing_media``), so
+    only the downloaded ones are worth matching. A failed download is logged and
+    handed back so the caller leaves it un-done and retries it next run.
+    """
+    downloaded: list[dict] = []
+    failed: list[dict] = []
+    for repost in reposts:
+        url = str(repost.get("source_url") or "").strip()
+        try:
+            if not url:
+                raise ValueError("no source_url")
+            video_path = download_repost(url)
+        except Exception as exc:  # noqa: BLE001 — any failure just means "retry next run"
+            logger.warning("gt_match_verify_weekly: download failed for %s (%s) — will retry next run",
+                           _repost_id(repost) or url, exc)
+            failed.append(repost)
+            continue
+        downloaded.append(dict(repost, video_path=str(video_path)))
+    return downloaded, failed
+
+
 def load_captured_vod_ids(capture_state_path: pathlib.Path) -> list[str]:
     """The VOD ids captured by the daily job — the corpus to match reposts against."""
     state = gt_capture_daily.load_captured_state(capture_state_path)
@@ -285,6 +319,7 @@ def run_weekly_match_verify(
     manifest_path: pathlib.Path,
     gold_manifest_path: pathlib.Path,
     match_and_verify=None,
+    download_repost=None,
     matched_at: str | None = None,
     target_gold: int = TARGET_GOLD,
     target_vods: int = TARGET_VODS,
@@ -294,7 +329,10 @@ def run_weekly_match_verify(
 
     ``scan_reposts`` is a zero-arg callable returning repost records (it raises
     :class:`RepostDiscoveryZeroed` on a bot-protection-zeroed listing);
-    ``match_and_verify`` defaults to the real #7 core but is injectable for tests.
+    ``match_and_verify`` defaults to the real #7 core and ``download_repost``
+    (url -> local path, raises on failure) to :func:`download_short_form`; both
+    are injectable for tests. Each new repost is downloaded before matching; a
+    repost whose download fails is not marked done, so the next run retries it.
     State and both manifests are persisted; a zeroed scan returns a summary with
     ``scan_zeroed=True`` and mutates nothing, so next week simply retries.
     """
@@ -303,6 +341,8 @@ def run_weekly_match_verify(
     gold_manifest_path = pathlib.Path(gold_manifest_path)
     if match_and_verify is None:
         match_and_verify = gt_match_verify.match_and_verify
+    if download_repost is None:
+        download_repost = download_short_form
     if matched_at is None:
         matched_at = datetime.now(timezone.utc).isoformat()
 
@@ -319,6 +359,7 @@ def run_weekly_match_verify(
             "scan_zeroed": True,
             "reposts_scanned": 0,
             "new_reposts": 0,
+            "download_failed": 0,
             "new_vods": new_vods,
             "total_captured_vods": len(captured),
             "run_counts": {},
@@ -335,14 +376,16 @@ def run_weekly_match_verify(
         len(reposts), len(new_reposts), len(already), len(captured), len(new_vods),
     )
 
-    result = match_and_verify(new_reposts, captured, cache_root=cache_root)
+    downloaded, failed = attach_media(new_reposts, download_repost)
+    result = match_and_verify(downloaded, captured, cache_root=cache_root)
 
     merged = merge_manifests(read_jsonl(manifest_path), result.manifest)
     write_jsonl(manifest_path, merged)
     gold_manifest = gt_match_verify.filter_gold_manifest(merged)
     write_jsonl(gold_manifest_path, gold_manifest)
 
-    for repost in new_reposts:
+    # Only reposts that actually reached the matcher with media count as done.
+    for repost in downloaded:
         rid = _repost_id(repost)
         if rid:
             state.setdefault("matched", {})[rid] = {
@@ -358,6 +401,7 @@ def run_weekly_match_verify(
         "scan_zeroed": False,
         "reposts_scanned": len(reposts),
         "new_reposts": len(new_reposts),
+        "download_failed": len(failed),
         "matched_moments": len(result.verifications),
         "new_vods": new_vods,
         "total_captured_vods": len(captured),
@@ -423,7 +467,8 @@ def main(argv=None) -> int:
     else:
         acc = summary["accrual"]
         print(
-            f"Matched {summary['new_reposts']} new repost(s) → {summary['run_counts']}; "
+            f"Matched {summary['new_reposts'] - summary['download_failed']} new repost(s) → {summary['run_counts']} "
+            f"({summary['download_failed']} download(s) failed, retry next run); "
             f"new VODs: {summary['new_vods']}; gold-accrual {acc['gold']}/{acc['target_gold']} "
             f"over {acc['vods']}/{acc['target_vods']} VODs ({acc['gold_pct']}%)"
             + ("  — TARGET REACHED" if acc["target_reached"] else "")
