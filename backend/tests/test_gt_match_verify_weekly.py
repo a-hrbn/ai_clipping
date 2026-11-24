@@ -101,6 +101,18 @@ class MergeManifestsTests(unittest.TestCase):
 
         self.assertEqual([(m["source_url"], m["gt_tier"]) for m in merged[0]["gt_moments"]], [("a", "gold")])
 
+    def test_overlapping_repost_does_not_replace_a_refined_boundary(self) -> None:
+        # Same tier: a manual_edit/audio_refined moment beats a higher-view
+        # unrefined duplicate, so the refined boundaries survive the rewrite.
+        for source in ("manual_edit", "audio_refined"):
+            with self.subTest(boundary_source=source):
+                refined = dict(_moment(10, 20, url="a", tier="gold", views=10), boundary_source=source)
+                existing = [_manifest_row("V1", [refined])]
+                new = [_manifest_row("V1", [_moment(11, 21, url="b", tier="gold", views=99)])]
+                merged = weekly.merge_manifests(existing, new)
+
+                self.assertEqual([m["source_url"] for m in merged[0]["gt_moments"]], ["a"])
+
 
 # --------------------------------------------------------------------------
 # Pure decision seam: gold-accrual vs target (AC-4)
@@ -176,6 +188,7 @@ class RunWeeklyMatchVerifyTests(unittest.TestCase):
         def _fake(reposts, captured_vod_ids, *, cache_root, **kwargs):
             self.match_calls.append([r.get("clip_id") or r.get("source_url") for r in reposts])
             manifest = []
+            match_rows = []
             verifications = []
             counts: dict = {}
             for i, r in enumerate(reposts):
@@ -186,6 +199,7 @@ class RunWeeklyMatchVerifyTests(unittest.TestCase):
                 vod_id = r.get("vod_id", "V1")
                 # Distinct VOD position per repost in a batch, unless the test pins one ("at").
                 start = r.get("at", 10 + 100 * i)
+                match_rows.append({"vod_id": vod_id, "source_url": url})
                 manifest.append(_manifest_row(
                     vod_id, [_moment(start, start + 10, url=url, tier=tier, views=r.get("views", 0))]))
                 verifications.append({"vod_id": vod_id, "gt_tier": tier})
@@ -196,6 +210,7 @@ class RunWeeklyMatchVerifyTests(unittest.TestCase):
                 gold_manifest=gold_manifest,
                 verifications=verifications,
                 counts=counts,
+                match_rows=match_rows,
             )
         return _fake
 
@@ -376,6 +391,33 @@ class RunWeeklyMatchVerifyTests(unittest.TestCase):
         self.match_calls.clear()
         self._run(never, ["V1"], match=self._captured_only_match(), matched_at="2026-06-23T00:00:00+00:00")
         self.assertEqual(self.match_calls, [[]])
+
+    def test_repost_whose_match_lost_the_batch_dedup_is_still_done(self) -> None:
+        # #127: "done" is decided on match rows, not the post-dedup manifest.
+        def _dedup_match(reposts, captured_vod_ids, *, cache_root, **kwargs):
+            manifest = [_manifest_row("V1", [_moment(100, 110, url="u-winner", tier="gold")])]
+            return gt_match_verify.MatchVerifyResult(
+                manifest=manifest,
+                gold_manifest=gt_match_verify.filter_gold_manifest(manifest),
+                verifications=[{"vod_id": "V1", "gt_tier": "gold"}],
+                counts={"gold": 1},
+                match_rows=[{"vod_id": "V1", "source_url": "u-winner"},
+                            {"vod_id": "V1", "source_url": "u-loser"}],
+            )
+
+        reposts = [dict(_repost("winner", url="u-winner"), vod_id="V1"),
+                   dict(_repost("loser", url="u-loser"), vod_id="V1")]
+        self._run(reposts, ["V1"], match=_dedup_match)
+
+        self.assertEqual(weekly.matched_ids(weekly.load_match_state(self.state_path)), {"winner", "loser"})
+
+    def test_repost_uploaded_more_than_14_days_ago_without_a_hit_is_done_on_first_try(self) -> None:
+        # #127: "älter als 14 Tage" is the repost's age, not time since first attempt.
+        old = [dict(_repost("old", url="u-old"), vod_id="V9", upload_date="20260520")]
+        fresh = [dict(_repost("fresh", url="u-fresh"), vod_id="V9", upload_date="20260605")]
+        self._run(old + fresh, ["V1"], match=self._captured_only_match(), matched_at="2026-06-11T00:00:00+00:00")
+
+        self.assertEqual(weekly.matched_ids(weekly.load_match_state(self.state_path)), {"old"})
 
 
 if __name__ == "__main__":

@@ -42,8 +42,8 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from ml import gt_capture_daily
 from ml import gt_match_verify
-from ml.build_eval_manifest import _OVERLAP_DEDUP_RATIO
-from ml.row_identity import read_jsonl, window_overlap_ratio, write_jsonl  # noqa: E402
+from ml.build_eval_manifest import keep_non_overlapping
+from ml.row_identity import read_jsonl, write_jsonl  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +128,8 @@ def merge_manifests(existing: list[dict], new: list[dict]) -> list[dict]:
     Different reposts of the same moment (often matched weeks apart) are then
     collapsed with the batch dedup's overlap rule (#130), so each moment counts
     once in the recall denominator: the better verdict wins (gold > silver >
-    rest), then the higher-view repost.
+    rest), then a refined boundary (manual_edit/audio_refined), then the
+    higher-view repost.
     """
     by_vod: dict[str, dict[str, dict]] = {}
     for row in list(existing) + list(new):
@@ -145,23 +146,20 @@ def merge_manifests(existing: list[dict], new: list[dict]) -> list[dict]:
 
 
 _TIER_RANK = {GOLD: 0, SILVER: 1}
+_REFINED_BOUNDARIES = {"manual_edit", "audio_refined"}
 
 
 def _dedup_overlapping(moments: list[dict]) -> list[dict]:
-    ranked = sorted(
+    # Priority: tier, then a refined boundary over an unrefined one (so the
+    # rewrite never loses manual/audio-refined edges), then views.
+    return keep_non_overlapping(sorted(
         moments,
-        key=lambda m: (_TIER_RANK.get(str(m.get("gt_tier") or ""), 2), -float(m.get("views") or 0)),
-    )
-    kept: list[dict] = []
-    for candidate in ranked:
-        start, end = float(candidate.get("start") or 0), float(candidate.get("end") or 0)
-        if not any(
-            window_overlap_ratio(start, end, float(k.get("start") or 0), float(k.get("end") or 0))
-            >= _OVERLAP_DEDUP_RATIO
-            for k in kept
-        ):
-            kept.append(candidate)
-    return sorted(kept, key=lambda m: float(m.get("start") or 0))
+        key=lambda m: (
+            _TIER_RANK.get(str(m.get("gt_tier") or ""), 2),
+            m.get("boundary_source") not in _REFINED_BOUNDARIES,
+            -float(m.get("views") or 0),
+        ),
+    ))
 
 
 # ---------------------------------------------------------------------------
@@ -293,8 +291,23 @@ def list_iboclipss_reposts(channel: str = DEFAULT_CHANNEL, *, max_candidates: in
             "title": str(entry.get("title") or "").strip(),
             "views": int(entry.get("view_count") or 0),
             "duration": int(entry.get("duration") or 0),
+            "upload_date": str(entry.get("upload_date") or ""),
+            "timestamp": entry.get("timestamp"),
         })
     return reposts
+
+
+def _published_at(repost: dict) -> datetime | None:
+    """The repost's upload time from the scan (``upload_date`` YYYYMMDD or epoch
+    ``timestamp``), or ``None`` when the listing carried neither."""
+    raw = str(repost.get("upload_date") or "").strip()
+    if len(raw) == 8 and raw.isdigit():
+        return datetime.strptime(raw, "%Y%m%d").replace(tzinfo=timezone.utc)
+    try:
+        ts = int(repost.get("timestamp") or 0)
+    except (TypeError, ValueError):
+        ts = 0
+    return datetime.fromtimestamp(ts, tz=timezone.utc) if ts > 0 else None
 
 
 def download_short_form(url: str) -> pathlib.Path:
@@ -363,8 +376,9 @@ def run_weekly_match_verify(
     (url -> local path, raises on failure) to :func:`download_short_form`; both
     are injectable for tests. Each new repost is downloaded before matching; a
     repost whose download fails is not marked done, so the next run retries it.
-    A repost is marked done only once it produced a match row or has been open
-    longer than ``OPEN_REPOST_DAYS``; until then each run re-matches it.
+    A repost is marked done only once it produced a match row or is older than
+    ``OPEN_REPOST_DAYS`` (upload date, else first attempt); until then each run
+    re-matches it.
     State and both manifests are persisted; a zeroed scan returns a summary with
     ``scan_zeroed=True`` and mutates nothing, so next week simply retries.
     """
@@ -416,14 +430,11 @@ def run_weekly_match_verify(
     gold_manifest = gt_match_verify.filter_gold_manifest(merged)
     write_jsonl(gold_manifest_path, gold_manifest)
 
-    # A repost is done once it produced a match row, or after OPEN_REPOST_DAYS
-    # without one (its VOD may only be captured after this run). Failed
-    # downloads never reached the matcher, so they never count.
-    hit_urls = {
-        str(m.get("source_url") or "").strip()
-        for row in result.manifest
-        for m in (row.get("gt_moments") or [])
-    }
+    # A repost is done once it produced a match row (even one that lost the
+    # dedup), or once it is older than OPEN_REPOST_DAYS without one (its VOD may
+    # only be captured after this run). Failed downloads never reached the
+    # matcher, so they never count.
+    hit_urls = {str(row.get("source_url") or "").strip() for row in result.match_rows}
     pending = state.setdefault("pending", {})
     now = datetime.fromisoformat(matched_at)
     for repost in downloaded:
@@ -431,7 +442,8 @@ def run_weekly_match_verify(
         if not rid:
             continue
         first_tried = pending.setdefault(rid, matched_at)
-        expired = now - datetime.fromisoformat(first_tried) > timedelta(days=OPEN_REPOST_DAYS)
+        born = _published_at(repost) or datetime.fromisoformat(first_tried)
+        expired = now - born > timedelta(days=OPEN_REPOST_DAYS)
         if str(repost.get("source_url") or "").strip() in hit_urls or expired:
             pending.pop(rid)
             state.setdefault("matched", {})[rid] = {

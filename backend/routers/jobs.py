@@ -42,7 +42,7 @@ _SENTENCE_TRANSFORMERS_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
 _PYANNOTE_MODEL = "speaker-diarization-3.1"
 _BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 # Status-poll diagnostics of terminal jobs, keyed by job_id (see _cached_pipeline_diagnostics).
-# shortcut: unbounded; entries are a few KB and only dropped on delete — add eviction if job volume grows.
+# Entries of jobs gone from the registry (deleted or evicted) are pruned on every write.
 _diagnostics_cache: dict[str, tuple[tuple, dict]] = {}
 
 
@@ -131,7 +131,7 @@ def _job_pipeline_diagnostics(
             "stages": [],
         }
 
-    segments_count = len(store.read_segments(job_id))
+    segments_count = store.count_segments(job_id)
     transcript_status = "pending"
     transcript_details: list[str] = []
     if segments_count > 0:
@@ -306,18 +306,8 @@ def _write_job_request_metadata(job_id: str, payload: dict) -> None:
 
 
 def _cleanup_serving_job_source_media(job_id: str) -> None:
-    if keeps_source_media(job_id):
-        return
-
-    job_dir = pathlib.Path(settings.storage_dir) / job_id
-    for path in (job_dir / "video.mp4", job_dir / "audio.wav"):
-        try:
-            path.unlink(missing_ok=True)
-        except OSError:
-            pass
-    chunks_dir = job_dir / "chunks"
-    if chunks_dir.exists():
-        shutil.rmtree(chunks_dir, ignore_errors=True)
+    if not keeps_source_media(job_id):
+        RealFsJobArtifactStore(settings.storage_dir).delete_source_media(job_id)
 
 
 async def _run_pipeline_subprocess(
@@ -1043,6 +1033,8 @@ def _cached_pipeline_diagnostics(job_id: str, job: JobStatus | dict) -> dict:
     if cached is not None and cached[0] == key:
         return cached[1]
     diagnostics = _job_pipeline_diagnostics(job_id, job)
+    for gone in [jid for jid in _diagnostics_cache if get_job(jid) is None]:
+        _diagnostics_cache.pop(gone, None)
     _diagnostics_cache[job_id] = (key, diagnostics)
     return diagnostics
 
@@ -1087,9 +1079,7 @@ async def delete_job_run(job_id: str):
     _diagnostics_cache.pop(job_id, None)
     if not deleted:
         raise HTTPException(status_code=404, detail="Job not found")
-    job_dir = pathlib.Path(settings.storage_dir) / job_id
-    if job_dir.exists():
-        shutil.rmtree(job_dir, ignore_errors=True)
+    RealFsJobArtifactStore(settings.storage_dir).delete_job(job_id)
     return {"deleted": job_id}
 
 

@@ -7,8 +7,7 @@ import re
 import subprocess
 import threading
 from config import settings
-from job_manager import is_job_cancelled, update_job
-from pipeline_runner import keeps_source_media
+from job_manager import is_job_cancelled, is_self_managed_job, update_job
 from producers.adapters import FsAudioCache
 from producers.audio import AudioResource
 from producers.chat import ChatEnrichment
@@ -43,7 +42,13 @@ def _raise_if_cancelled(job_id: str) -> None:
 
 
 def _transcript_cache_enabled_for_job(job_id: str, url: str | None) -> bool:
-    if keeps_source_media(job_id):
+    """Whether this job's transcript goes into the shared transcript cache.
+
+    Always for self-managed workflows and when the frontend job cache is on;
+    otherwise only for Twitch-VOD serving jobs, unless the transcript cache is
+    switched off. Independent of whether the source *media* is kept.
+    """
+    if is_self_managed_job(job_id) or bool(getattr(settings, "frontend_job_cache_enabled", False)):
         return True
     if not bool(getattr(settings, "frontend_transcript_cache_enabled", True)):
         return False

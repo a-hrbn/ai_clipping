@@ -539,7 +539,7 @@ def step_build_eval_manifest(
         return
 
     filtered = filter_gold_candidates(matches, min_similarity=min_similarity)
-    logger.info("[5/5] eval_manifest: %d/%d matches pass the gold filter (audio fallback or sim >= %.2f)",
+    logger.info("[5/5] eval_manifest: %d/%d matches pass the gold filter (matcher-accepted; legacy rows need sim >= %.2f)",
                 len(filtered), len(matches), min_similarity)
 
     by_vod: dict[str, list[dict]] = {}

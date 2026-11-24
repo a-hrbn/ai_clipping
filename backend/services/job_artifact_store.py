@@ -28,6 +28,7 @@ import abc
 import json
 import os
 import pathlib
+import shutil
 from datetime import datetime, timezone
 from typing import Any
 
@@ -50,6 +51,14 @@ _ROLE_PATHS: dict[str, str] = {
     "progress": "progress.json",
 }
 _JOBS_REGISTRY = "jobs.json"
+# Source media a run downloads/extracts; dropped after the run unless kept.
+_SOURCE_MEDIA_FILES = ("video.mp4", "audio.wav")
+_SOURCE_MEDIA_DIRS = ("chunks",)
+
+
+def _safe_job_id(job_id: str) -> bool:
+    """A job id that names exactly one folder under storage (no ``..``/``/``)."""
+    return bool(job_id) and job_id not in {".", ".."} and pathlib.Path(job_id).name == job_id
 
 
 class JobArtifactStore(abc.ABC):
@@ -78,6 +87,14 @@ class JobArtifactStore(abc.ABC):
     @abc.abstractmethod
     def debug_last_modified(self, job_id: str) -> str | None:
         """ISO-8601 stamp of the most recently touched debug artifact, or ``None``."""
+
+    @abc.abstractmethod
+    def delete_job(self, job_id: str) -> None:
+        """Delete every artifact of the job (its whole folder). Unsafe ids are ignored."""
+
+    @abc.abstractmethod
+    def delete_source_media(self, job_id: str) -> None:
+        """Delete the job's source media (video, audio, chunks), keep the rest."""
 
     @abc.abstractmethod
     def jobs_registry_path(self) -> pathlib.Path:
@@ -163,6 +180,12 @@ class JobArtifactStore(abc.ABC):
     def read_segments(self, job_id: str) -> list[dict]:
         return self._read_jsonl(job_id, _ROLE_PATHS["segments"])
 
+    def count_segments(self, job_id: str) -> int:
+        """Number of segment rows, counted by line — no JSON decode, so the
+        status poll stays cheap on long VODs."""
+        text = self._read_text(job_id, _ROLE_PATHS["segments"])
+        return sum(1 for line in (text or "").splitlines() if line.strip())
+
     def write_segments(self, job_id: str, rows: list[dict]) -> None:
         self._write_jsonl(job_id, _ROLE_PATHS["segments"], rows)
 
@@ -236,6 +259,22 @@ class RealFsJobArtifactStore(JobArtifactStore):
             return None
         return datetime.fromtimestamp(max(mtimes), tz=timezone.utc).isoformat()
 
+    def delete_job(self, job_id: str) -> None:
+        if _safe_job_id(job_id):
+            shutil.rmtree(self._storage_dir / job_id, ignore_errors=True)
+
+    def delete_source_media(self, job_id: str) -> None:
+        if not _safe_job_id(job_id):
+            return
+        job_dir = self._storage_dir / job_id
+        for name in _SOURCE_MEDIA_FILES:
+            try:
+                (job_dir / name).unlink(missing_ok=True)
+            except OSError:
+                pass
+        for name in _SOURCE_MEDIA_DIRS:
+            shutil.rmtree(job_dir / name, ignore_errors=True)
+
     def jobs_registry_path(self) -> pathlib.Path:
         return self._storage_dir / _JOBS_REGISTRY
 
@@ -256,6 +295,16 @@ class InMemoryJobArtifactStore(JobArtifactStore):
     def debug_artifacts_present(self, job_id: str) -> bool:
         prefix = f"{_DEBUG}/"
         return any(jid == job_id and rel.startswith(prefix) for (jid, rel) in self._store)
+
+    def delete_job(self, job_id: str) -> None:
+        for key in [k for k in self._store if k[0] == job_id]:
+            del self._store[key]
+
+    def delete_source_media(self, job_id: str) -> None:
+        for key in [k for k in self._store if k[0] == job_id]:
+            rel = key[1]
+            if rel in _SOURCE_MEDIA_FILES or rel.split("/", 1)[0] in _SOURCE_MEDIA_DIRS:
+                del self._store[key]
 
     def debug_last_modified(self, job_id: str) -> str | None:
         # No wall-clock mtimes in memory; the contract allows None and the only
