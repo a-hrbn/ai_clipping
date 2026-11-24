@@ -557,3 +557,108 @@ class JobsRouterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FeedbackRoundtripTests(unittest.TestCase):
+    """Feedback/gold-eval/review list over HTTP, against rows the REAL Clipping
+    producer wrote to a temp storage dir (only the ffmpeg cutter is faked)."""
+
+    def setUp(self) -> None:
+        import types
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from models import ClipResult
+        from producers.clipping import Clipping
+        from services.job_artifact_store import RealFsJobArtifactStore
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.storage = Path(self._tmp.name)
+
+        def cut(_video, moments, job_id, *, progress_cb=None):
+            return [
+                ClipResult(
+                    candidate_id=m["candidate_id"], filename="c.mp4", download_url="/x",
+                    start_time=m["start_time"], end_time=m["end_time"],
+                    viral_score=m["viral_score"], reason=m["reason"],
+                )
+                for m in moments
+            ]
+
+        Clipping(
+            job_id="job-1", store=RealFsJobArtifactStore(self.storage),
+            top_k=0, platform="general", cut=cut,
+        ).run(Path("/v.mp4"), types.SimpleNamespace(post_processed_moments=[
+            {"start_time": 10.0, "end_time": 30.0, "viral_score": 9.0, "reason": "a"},
+            {"start_time": 40.0, "end_time": 55.0, "viral_score": 6.0, "reason": "b"},
+        ]))
+
+        app = FastAPI()
+        app.include_router(jobs.router)
+        self.client = TestClient(app)
+        self._patches = [
+            patch.object(jobs.settings, "storage_dir", str(self.storage)),
+            patch.object(jobs, "get_job", return_value=JobStatus(job_id="job-1", status="done")),
+        ]
+        for p in self._patches:
+            p.start()
+        self.prefix = "/api/jobs"
+
+    def tearDown(self) -> None:
+        for p in self._patches:
+            p.stop()
+        self._tmp.cleanup()
+
+    def test_training_feedback_roundtrip_shows_in_review_list_and_snapshot_log(self) -> None:
+        resp = self.client.post(f"{self.prefix}/job-1/feedback", json={
+            "candidate_id": "llm_moment_02", "rating": "good",
+            "feedback_tags": ["good_clip"], "notes": "nice",
+        })
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(resp.json()["rating"], "good")
+
+        review = self.client.get(f"{self.prefix}/job-1/review-candidates")
+        self.assertEqual(review.status_code, 200, review.text)
+        by_id = {c["candidate_id"]: c for c in review.json()["candidates"]}
+        self.assertEqual(sorted(by_id), ["llm_moment_01", "llm_moment_02"])
+        rated = by_id["llm_moment_02"]
+        self.assertEqual(rated["feedback_rating"], "good")
+        self.assertEqual(rated["feedback_tags"], ["good_clip"])
+        self.assertEqual(rated["feedback_notes"], "nice")
+        self.assertEqual((rated["start_time"], rated["end_time"]), (40.0, 55.0))
+        self.assertTrue(rated["selected"])
+        self.assertIsNone(by_id["llm_moment_01"]["feedback_rating"])
+
+        snapshots = (self.storage / "feedback" / "feedback_updates.jsonl").read_text().splitlines()
+        self.assertEqual(len(snapshots), 1)
+        self.assertIn('"candidate_id": "llm_moment_02"', snapshots[0])
+
+    def test_gold_eval_works_without_legacy_candidate_artifacts(self) -> None:
+        import json
+
+        resp = self.client.post(f"{self.prefix}/job-1/feedback", json={
+            "candidate_id": "llm_moment_01", "mode": "gold_eval", "gold_grade": 3,
+            "notes": "clean payoff",
+        })
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(resp.json()["gold_grade"], 3)
+
+        rows = (self.storage / "job-1" / "debug" / "gold_eval.jsonl").read_text().splitlines()
+        self.assertEqual(len(rows), 1)
+        gold = json.loads(rows[0])
+        self.assertEqual(gold["candidate_id"], "llm_moment_01")
+        self.assertEqual((gold["window_start"], gold["window_end"]), (10.0, 30.0))
+        self.assertEqual(gold["label"], 1)
+        self.assertEqual(gold["gold_grade"], 3)
+        self.assertEqual(gold["candidate_source"], "llm_moment_finder")
+        self.assertEqual(gold["features"]["viral_score"], 9.0)
+        self.assertTrue((self.storage / "feedback" / "gold_eval_updates.jsonl").exists())
+
+    def test_unknown_candidate_id_is_404_in_both_modes(self) -> None:
+        training = self.client.post(f"{self.prefix}/job-1/feedback", json={
+            "candidate_id": "nope", "rating": "good",
+        })
+        gold = self.client.post(f"{self.prefix}/job-1/feedback", json={
+            "candidate_id": "nope", "mode": "gold_eval", "gold_grade": 1,
+        })
+        self.assertEqual(training.status_code, 404)
+        self.assertEqual(gold.status_code, 404)
