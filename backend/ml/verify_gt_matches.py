@@ -24,7 +24,8 @@ Tier policy (--apply writes gt_tier into the manifest):
 
 --apply-boundaries additionally replaces start/end of gold moments on anchor
 VODs with the audio-refined window (~0.12s granularity); the transcript window
-is preserved in transcript_start/transcript_end.
+is preserved in transcript_start/transcript_end. Moments already refined
+(boundary_source == "audio_refined") are skipped, so a re-run keeps that window.
 
 Usage (inside the Docker container):
   python -m ml.verify_gt_matches [--limit N] [--vod-id ID ...]
@@ -47,7 +48,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from ml import match_cross_platform_audio_fingerprints as audio_matcher
-from ml.row_identity import read_jsonl  # noqa: E402
+from ml.row_identity import read_jsonl, write_jsonl  # noqa: E402
 
 DEFAULT_MANIFEST = BACKEND_ROOT / "ml" / "artifacts" / "jynxzi_eval_manifest.jsonl"
 DEFAULT_OUTPUT = BACKEND_ROOT / "ml" / "artifacts" / "gt_match_verification.jsonl"
@@ -318,12 +319,6 @@ def _short_error(exc: BaseException, *, limit: int = 200) -> str:
     return text if len(text) <= limit else f"{text[:limit - 3]}..."
 
 
-def _append_jsonl(path: pathlib.Path, row: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(row, ensure_ascii=True) + "\n")
-
-
 def summarize(rows: list[dict]) -> dict:
     by_tier: dict[str, int] = {}
     by_kind: dict[str, dict[str, int]] = {}
@@ -358,7 +353,7 @@ def apply_tiers(
     apply_boundaries: bool,
 ) -> dict:
     by_key = {str(row.get("key")): row for row in verification_rows}
-    manifest_rows = read_jsonl(manifest_path, strict=False)
+    manifest_rows = read_jsonl(manifest_path)
     tiers_applied = 0
     boundaries_applied = 0
     for vod_row in manifest_rows:
@@ -372,6 +367,7 @@ def apply_tiers(
             if (
                 apply_boundaries
                 and not moment.get("manual_edit")
+                and moment.get("boundary_source") != "audio_refined"
                 and verification.get("gt_tier") == GOLD
                 and verification.get("boundary_basis") == "full_fingerprint"
             ):
@@ -381,8 +377,7 @@ def apply_tiers(
                 moment["end"] = float(verification["refined_end"])
                 moment["boundary_source"] = "audio_refined"
                 boundaries_applied += 1
-    payload = "\n".join(json.dumps(row, ensure_ascii=True) for row in manifest_rows)
-    manifest_path.write_text(payload + "\n", encoding="utf-8")
+    write_jsonl(manifest_path, manifest_rows)
     return {"tiers_applied": tiers_applied, "boundaries_applied": boundaries_applied}
 
 
@@ -434,17 +429,15 @@ def main(argv: list[str] | None = None) -> int:
                         help="Recompute verdict/gt_tier of stored rows under the current confirm rule (no downloads)")
     args = parser.parse_args(argv)
 
-    manifest_rows = read_jsonl(args.manifest, strict=False)
+    manifest_rows = read_jsonl(args.manifest)
     if not manifest_rows:
         print(f"no manifest rows at {args.manifest}", file=sys.stderr)
         return 1
 
-    existing = {str(row.get("key")): row for row in read_jsonl(args.output, strict=False)}
+    existing = {str(row.get("key")): row for row in read_jsonl(args.output)}
     if args.rejudge and existing:
-        rejudged = [judge_row(dict(row)) for row in existing.values()]
-        existing = {str(row.get("key")): row for row in rejudged}
-        payload = "\n".join(json.dumps(row, ensure_ascii=True) for row in rejudged)
-        args.output.write_text(payload + "\n", encoding="utf-8")
+        existing = {key: judge_row(dict(row)) for key, row in existing.items()}
+        write_jsonl(args.output, existing.values())
 
     fpcalc = shutil.which("fpcalc")
     if fpcalc is None:
@@ -486,7 +479,7 @@ def main(argv: list[str] | None = None) -> int:
                 if row.get("verdict") == "vod_unavailable" and "does not exist" in str(row.get("error") or ""):
                     vod_dead_error = str(row.get("error"))
             existing[str(row["key"])] = row
-            _append_jsonl(args.output, row)
+            write_jsonl(args.output, existing.values())  # atomic rewrite per row: crash-safe progress
             verified_new += 1
             print(json.dumps({k: row.get(k) for k in ("key", "verdict", "gt_tier", "confirm_confidence", "null_confidence", "refined_offset_sec")}, ensure_ascii=True), flush=True)
         if args.limit and verified_new >= args.limit:
