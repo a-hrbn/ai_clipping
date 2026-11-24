@@ -306,18 +306,8 @@ def _write_job_request_metadata(job_id: str, payload: dict) -> None:
 
 
 def _cleanup_serving_job_source_media(job_id: str) -> None:
-    if keeps_source_media(job_id):
-        return
-
-    job_dir = pathlib.Path(settings.storage_dir) / job_id
-    for path in (job_dir / "video.mp4", job_dir / "audio.wav"):
-        try:
-            path.unlink(missing_ok=True)
-        except OSError:
-            pass
-    chunks_dir = job_dir / "chunks"
-    if chunks_dir.exists():
-        shutil.rmtree(chunks_dir, ignore_errors=True)
+    if not keeps_source_media(job_id):
+        RealFsJobArtifactStore(settings.storage_dir).delete_source_media(job_id)
 
 
 async def _run_pipeline_subprocess(
@@ -1089,9 +1079,7 @@ async def delete_job_run(job_id: str):
     _diagnostics_cache.pop(job_id, None)
     if not deleted:
         raise HTTPException(status_code=404, detail="Job not found")
-    job_dir = pathlib.Path(settings.storage_dir) / job_id
-    if job_dir.exists():
-        shutil.rmtree(job_dir, ignore_errors=True)
+    RealFsJobArtifactStore(settings.storage_dir).delete_job(job_id)
     return {"deleted": job_id}
 
 

@@ -3,7 +3,6 @@ import json
 import logging
 import os
 import pathlib
-import shutil
 import tempfile
 import threading
 import time
@@ -14,6 +13,7 @@ import session_lease
 from config import settings
 from job_lifecycle import is_terminal
 from models import JobStatus
+from services.job_artifact_store import RealFsJobArtifactStore
 
 logger = logging.getLogger(__name__)
 
@@ -84,11 +84,10 @@ def _evict_expired(now: float | None = None) -> list[str]:
 
 def _delete_job_folders(job_ids: list[str]) -> None:
     """Delete the storage folders of evicted serving jobs (#117)."""
-    storage = _jobs_file.parent
+    store = RealFsJobArtifactStore(_jobs_file.parent)
     for jid in job_ids:
-        if is_self_managed_job(jid) or not jid or pathlib.Path(jid).name != jid or jid in {".", ".."}:
-            continue
-        shutil.rmtree(storage / jid, ignore_errors=True)
+        if not is_self_managed_job(jid):
+            store.delete_job(jid)
 
 
 def _apply_update(job_id: str, kwargs: dict, now: float) -> JobStatus | None:
