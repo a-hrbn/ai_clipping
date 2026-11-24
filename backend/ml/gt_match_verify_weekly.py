@@ -34,7 +34,7 @@ import json
 import logging
 import pathlib
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
@@ -42,6 +42,7 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from ml import gt_capture_daily
 from ml import gt_match_verify
+from ml.build_eval_manifest import keep_non_overlapping
 from ml.row_identity import read_jsonl, write_jsonl  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,10 @@ SILVER = gt_match_verify.SILVER
 # the midpoint so accrual reads as "% of the way there".
 TARGET_GOLD = 175
 TARGET_VODS = 25
+
+# A repost without a match row stays open (re-matched against newly captured
+# VODs each run) until it is older than this, then it is done for good.
+OPEN_REPOST_DAYS = 14
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +124,12 @@ def merge_manifests(existing: list[dict], new: list[dict]) -> list[dict]:
     in place. VODs are emitted sorted (deterministic, matching the core), moments
     sorted by start. This is what makes the gold manifest *accumulate* week over
     week instead of being clobbered by each run's small new batch.
+
+    Different reposts of the same moment (often matched weeks apart) are then
+    collapsed with the batch dedup's overlap rule (#130), so each moment counts
+    once in the recall denominator: the better verdict wins (gold > silver >
+    rest), then a refined boundary (manual_edit/audio_refined), then the
+    higher-view repost.
     """
     by_vod: dict[str, dict[str, dict]] = {}
     for row in list(existing) + list(new):
@@ -129,9 +140,26 @@ def merge_manifests(existing: list[dict], new: list[dict]) -> list[dict]:
         for moment in row.get("gt_moments") or []:
             bucket[_moment_key(moment)] = moment
     return [
-        {"vod_id": vod_id, "gt_moments": sorted(bucket.values(), key=lambda m: float(m.get("start") or 0))}
+        {"vod_id": vod_id, "gt_moments": _dedup_overlapping(list(bucket.values()))}
         for vod_id, bucket in sorted(by_vod.items())
     ]
+
+
+_TIER_RANK = {GOLD: 0, SILVER: 1}
+_REFINED_BOUNDARIES = {"manual_edit", "audio_refined"}
+
+
+def _dedup_overlapping(moments: list[dict]) -> list[dict]:
+    # Priority: tier, then a refined boundary over an unrefined one (so the
+    # rewrite never loses manual/audio-refined edges), then views.
+    return keep_non_overlapping(sorted(
+        moments,
+        key=lambda m: (
+            _TIER_RANK.get(str(m.get("gt_tier") or ""), 2),
+            m.get("boundary_source") not in _REFINED_BOUNDARIES,
+            -float(m.get("views") or 0),
+        ),
+    ))
 
 
 # ---------------------------------------------------------------------------
@@ -263,8 +291,57 @@ def list_iboclipss_reposts(channel: str = DEFAULT_CHANNEL, *, max_candidates: in
             "title": str(entry.get("title") or "").strip(),
             "views": int(entry.get("view_count") or 0),
             "duration": int(entry.get("duration") or 0),
+            "upload_date": str(entry.get("upload_date") or ""),
+            "timestamp": entry.get("timestamp"),
         })
     return reposts
+
+
+def _published_at(repost: dict) -> datetime | None:
+    """The repost's upload time from the scan (``upload_date`` YYYYMMDD or epoch
+    ``timestamp``), or ``None`` when the listing carried neither."""
+    raw = str(repost.get("upload_date") or "").strip()
+    if len(raw) == 8 and raw.isdigit():
+        return datetime.strptime(raw, "%Y%m%d").replace(tzinfo=timezone.utc)
+    try:
+        ts = int(repost.get("timestamp") or 0)
+    except (TypeError, ValueError):
+        ts = 0
+    return datetime.fromtimestamp(ts, tz=timezone.utc) if ts > 0 else None
+
+
+def download_short_form(url: str) -> pathlib.Path:
+    """Fetch one repost through the short-form download cache (bot-protection sleeps included).
+
+    Same call the ``gt_pipeline`` download step uses; a cache hit returns at once.
+    """
+    from services.downloader import ensure_cached_download
+
+    return ensure_cached_download(url, cache_namespace="short_form", cache_ttl_sec=-1)
+
+
+def attach_media(reposts: list[dict], download_repost) -> tuple[list[dict], list[dict]]:
+    """Download each repost; return ``(with_video_path, failed)``.
+
+    The matcher skips a repost without ``video_path`` (``missing_media``), so
+    only the downloaded ones are worth matching. A failed download is logged and
+    handed back so the caller leaves it un-done and retries it next run.
+    """
+    downloaded: list[dict] = []
+    failed: list[dict] = []
+    for repost in reposts:
+        url = str(repost.get("source_url") or "").strip()
+        try:
+            if not url:
+                raise ValueError("no source_url")
+            video_path = download_repost(url)
+        except Exception as exc:  # noqa: BLE001 — any failure just means "retry next run"
+            logger.warning("gt_match_verify_weekly: download failed for %s (%s) — will retry next run",
+                           _repost_id(repost) or url, exc)
+            failed.append(repost)
+            continue
+        downloaded.append(dict(repost, video_path=str(video_path)))
+    return downloaded, failed
 
 
 def load_captured_vod_ids(capture_state_path: pathlib.Path) -> list[str]:
@@ -285,6 +362,7 @@ def run_weekly_match_verify(
     manifest_path: pathlib.Path,
     gold_manifest_path: pathlib.Path,
     match_and_verify=None,
+    download_repost=None,
     matched_at: str | None = None,
     target_gold: int = TARGET_GOLD,
     target_vods: int = TARGET_VODS,
@@ -294,7 +372,13 @@ def run_weekly_match_verify(
 
     ``scan_reposts`` is a zero-arg callable returning repost records (it raises
     :class:`RepostDiscoveryZeroed` on a bot-protection-zeroed listing);
-    ``match_and_verify`` defaults to the real #7 core but is injectable for tests.
+    ``match_and_verify`` defaults to the real #7 core and ``download_repost``
+    (url -> local path, raises on failure) to :func:`download_short_form`; both
+    are injectable for tests. Each new repost is downloaded before matching; a
+    repost whose download fails is not marked done, so the next run retries it.
+    A repost is marked done only once it produced a match row or is older than
+    ``OPEN_REPOST_DAYS`` (upload date, else first attempt); until then each run
+    re-matches it.
     State and both manifests are persisted; a zeroed scan returns a summary with
     ``scan_zeroed=True`` and mutates nothing, so next week simply retries.
     """
@@ -303,6 +387,8 @@ def run_weekly_match_verify(
     gold_manifest_path = pathlib.Path(gold_manifest_path)
     if match_and_verify is None:
         match_and_verify = gt_match_verify.match_and_verify
+    if download_repost is None:
+        download_repost = download_short_form
     if matched_at is None:
         matched_at = datetime.now(timezone.utc).isoformat()
 
@@ -319,6 +405,7 @@ def run_weekly_match_verify(
             "scan_zeroed": True,
             "reposts_scanned": 0,
             "new_reposts": 0,
+            "download_failed": 0,
             "new_vods": new_vods,
             "total_captured_vods": len(captured),
             "run_counts": {},
@@ -335,16 +422,30 @@ def run_weekly_match_verify(
         len(reposts), len(new_reposts), len(already), len(captured), len(new_vods),
     )
 
-    result = match_and_verify(new_reposts, captured, cache_root=cache_root)
+    downloaded, failed = attach_media(new_reposts, download_repost)
+    result = match_and_verify(downloaded, captured, cache_root=cache_root)
 
     merged = merge_manifests(read_jsonl(manifest_path), result.manifest)
     write_jsonl(manifest_path, merged)
     gold_manifest = gt_match_verify.filter_gold_manifest(merged)
     write_jsonl(gold_manifest_path, gold_manifest)
 
-    for repost in new_reposts:
+    # A repost is done once it produced a match row (even one that lost the
+    # dedup), or once it is older than OPEN_REPOST_DAYS without one (its VOD may
+    # only be captured after this run). Failed downloads never reached the
+    # matcher, so they never count.
+    hit_urls = {str(row.get("source_url") or "").strip() for row in result.match_rows}
+    pending = state.setdefault("pending", {})
+    now = datetime.fromisoformat(matched_at)
+    for repost in downloaded:
         rid = _repost_id(repost)
-        if rid:
+        if not rid:
+            continue
+        first_tried = pending.setdefault(rid, matched_at)
+        born = _published_at(repost) or datetime.fromisoformat(first_tried)
+        expired = now - born > timedelta(days=OPEN_REPOST_DAYS)
+        if str(repost.get("source_url") or "").strip() in hit_urls or expired:
+            pending.pop(rid)
             state.setdefault("matched", {})[rid] = {
                 "clip_id": repost.get("clip_id", ""),
                 "source_url": repost.get("source_url", ""),
@@ -358,6 +459,7 @@ def run_weekly_match_verify(
         "scan_zeroed": False,
         "reposts_scanned": len(reposts),
         "new_reposts": len(new_reposts),
+        "download_failed": len(failed),
         "matched_moments": len(result.verifications),
         "new_vods": new_vods,
         "total_captured_vods": len(captured),
@@ -423,7 +525,8 @@ def main(argv=None) -> int:
     else:
         acc = summary["accrual"]
         print(
-            f"Matched {summary['new_reposts']} new repost(s) → {summary['run_counts']}; "
+            f"Matched {summary['new_reposts'] - summary['download_failed']} new repost(s) → {summary['run_counts']} "
+            f"({summary['download_failed']} download(s) failed, retry next run); "
             f"new VODs: {summary['new_vods']}; gold-accrual {acc['gold']}/{acc['target_gold']} "
             f"over {acc['vods']}/{acc['target_vods']} VODs ({acc['gold_pct']}%)"
             + ("  — TARGET REACHED" if acc["target_reached"] else "")

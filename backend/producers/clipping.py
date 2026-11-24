@@ -17,6 +17,8 @@ import logging
 import pathlib
 from typing import TYPE_CHECKING
 
+from services.feedback_store import initial_feedback_rows
+
 from .seam import CutClipsFn, Progress
 
 if TYPE_CHECKING:
@@ -108,4 +110,6 @@ class Clipping:
             if total > 0:
                 progress(min(max(done / total, 0.0), 1.0))
 
-        return self._cut(video_path, moments, self._job_id, progress_cb=on_cut)
+        clips = self._cut(video_path, moments, self._job_id, progress_cb=on_cut)
+        self._store.write_feedback(self._job_id, initial_feedback_rows(self._job_id, moments, clips))
+        return clips

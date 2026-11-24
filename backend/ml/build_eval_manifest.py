@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MATCHES_IN = BACKEND_ROOT / "ml" / "artifacts" / "iboclipss_matches.jsonl"
 DEFAULT_MANIFEST_OUT = BACKEND_ROOT / "ml" / "artifacts" / "jynxzi_eval_manifest.jsonl"
-_OVERLAP_DEDUP_RATIO = 0.5
+OVERLAP_DEDUP_RATIO = 0.5
 
 
 def main() -> int:
@@ -83,7 +83,7 @@ def dedup_moments(rows: list[dict]) -> list[dict]:
     Projects each match row into the eval-manifest **moment** schema
     (``repost_title``/``views``/``source_url``/``match_kind``), then collapses
     near-overlapping windows: highest views wins a slot, a candidate is dropped
-    when it covers >= ``_OVERLAP_DEDUP_RATIO`` of an already-kept window. Output
+    when it covers >= ``OVERLAP_DEDUP_RATIO`` of an already-kept window. Output
     is sorted by ``start``. The pure geometry is delegated to
     :func:`ml.row_identity.window_overlap_ratio`; this function owns the
     eval-manifest schema knowledge, so it stays in the manifest builder.
@@ -108,17 +108,22 @@ def dedup_moments(rows: list[dict]) -> list[dict]:
         moments.append(moment)
 
     moments.sort(key=lambda m: m["views"], reverse=True)
+    return keep_non_overlapping(moments)
 
+
+def keep_non_overlapping(ranked: list[dict]) -> list[dict]:
+    """Walk moments in priority order; drop one that covers >= ``OVERLAP_DEDUP_RATIO``
+    of an already-kept window. Returns the survivors sorted by ``start``."""
     kept: list[dict] = []
-    for candidate in moments:
+    for candidate in ranked:
+        start, end = float(candidate.get("start") or 0), float(candidate.get("end") or 0)
         if not any(
-            window_overlap_ratio(candidate["start"], candidate["end"], k["start"], k["end"])
-            >= _OVERLAP_DEDUP_RATIO
+            window_overlap_ratio(start, end, float(k.get("start") or 0), float(k.get("end") or 0))
+            >= OVERLAP_DEDUP_RATIO
             for k in kept
         ):
             kept.append(candidate)
-
-    return sorted(kept, key=lambda m: m["start"])
+    return sorted(kept, key=lambda m: float(m.get("start") or 0))
 
 
 if __name__ == "__main__":

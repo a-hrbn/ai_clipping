@@ -266,6 +266,7 @@ class JobsRouterTests(unittest.TestCase):
             chunk_path.write_bytes(b"chunk")
 
             with patch.object(jobs.settings, "storage_dir", str(storage_dir)), \
+                 patch.object(jobs.settings, "frontend_job_cache_enabled", False), \
                  patch.object(jobs, "run_job_subprocess", side_effect=fake_run_job_subprocess):
                 asyncio.run(
                     jobs._run_pipeline_subprocess(
@@ -282,21 +283,57 @@ class JobsRouterTests(unittest.TestCase):
             self.assertTrue(clip_path.exists())
             self.assertTrue(debug_path.exists())
 
-    def test_subprocess_parent_cleanup_preserves_training_source_media(self) -> None:
+    def test_run_pipeline_subprocess_keeps_source_video_when_frontend_job_cache_enabled(self) -> None:
+        async def fake_run_job_subprocess(**_kwargs):
+            return 0
+
         with tempfile.TemporaryDirectory() as tmp:
             storage_dir = Path(tmp)
-            job_dir = storage_dir / "twitch_vod_123"
+            job_dir = storage_dir / "job-1"
             job_dir.mkdir(parents=True)
             video_path = job_dir / "video.mp4"
-            audio_path = job_dir / "audio.wav"
             video_path.write_bytes(b"video")
-            audio_path.write_bytes(b"audio")
 
-            with patch.object(jobs.settings, "storage_dir", str(storage_dir)):
-                jobs._cleanup_serving_job_source_media("twitch_vod_123")
+            with patch.object(jobs.settings, "storage_dir", str(storage_dir)), \
+                 patch.object(jobs.settings, "frontend_job_cache_enabled", True), \
+                 patch.object(jobs, "run_job_subprocess", side_effect=fake_run_job_subprocess):
+                asyncio.run(
+                    jobs._run_pipeline_subprocess(
+                        job_id="job-1",
+                        url="https://www.twitch.tv/videos/123",
+                        profile="general",
+                        strategy={},
+                    )
+                )
 
             self.assertTrue(video_path.exists())
-            self.assertTrue(audio_path.exists())
+
+    def test_run_pipeline_subprocess_preserves_debug_training_backfill_source_media(self) -> None:
+        async def fake_run_job_subprocess(**_kwargs):
+            return 0
+
+        for job_id in ("twitch_vod_123", "pipeline_debug_wf1_vod123", "judge_backfill_abc"):
+            with self.subTest(job_id=job_id), tempfile.TemporaryDirectory() as tmp:
+                storage_dir = Path(tmp)
+                job_dir = storage_dir / job_id
+                (job_dir / "chunks").mkdir(parents=True)
+                video_path = job_dir / "video.mp4"
+                audio_path = job_dir / "audio.wav"
+                video_path.write_bytes(b"video")
+                audio_path.write_bytes(b"audio")
+
+                with patch.object(jobs.settings, "storage_dir", str(storage_dir)), \
+                     patch.object(jobs.settings, "frontend_job_cache_enabled", False), \
+                     patch.object(jobs, "run_job_subprocess", side_effect=fake_run_job_subprocess):
+                    asyncio.run(
+                        jobs._run_pipeline_subprocess(
+                            job_id=job_id, url=None, profile="general", strategy={},
+                        )
+                    )
+
+                self.assertTrue(video_path.exists())
+                self.assertTrue(audio_path.exists())
+                self.assertTrue((job_dir / "chunks").exists())
 
     def test_face_detection_probe_env_uses_writable_matplotlib_and_headless_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, \
@@ -557,3 +594,198 @@ class JobsRouterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FeedbackRoundtripTests(unittest.TestCase):
+    """Feedback/gold-eval/review list over HTTP, against rows the REAL Clipping
+    producer wrote to a temp storage dir (only the ffmpeg cutter is faked)."""
+
+    def setUp(self) -> None:
+        import types
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from models import ClipResult
+        from producers.clipping import Clipping
+        from services.job_artifact_store import RealFsJobArtifactStore
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.storage = Path(self._tmp.name)
+
+        def cut(_video, moments, job_id, *, progress_cb=None):
+            return [
+                ClipResult(
+                    candidate_id=m["candidate_id"], filename="c.mp4", download_url="/x",
+                    start_time=m["start_time"], end_time=m["end_time"],
+                    viral_score=m["viral_score"], reason=m["reason"],
+                )
+                for m in moments
+            ]
+
+        Clipping(
+            job_id="job-1", store=RealFsJobArtifactStore(self.storage),
+            top_k=0, platform="general", cut=cut,
+        ).run(Path("/v.mp4"), types.SimpleNamespace(post_processed_moments=[
+            {"start_time": 10.0, "end_time": 30.0, "viral_score": 9.0, "reason": "a"},
+            {"start_time": 40.0, "end_time": 55.0, "viral_score": 6.0, "reason": "b"},
+        ]))
+
+        app = FastAPI()
+        app.include_router(jobs.router)
+        self.client = TestClient(app)
+        self._patches = [
+            patch.object(jobs.settings, "storage_dir", str(self.storage)),
+            patch.object(jobs, "get_job", return_value=JobStatus(job_id="job-1", status="done")),
+        ]
+        for p in self._patches:
+            p.start()
+        self.prefix = "/api/jobs"
+
+    def tearDown(self) -> None:
+        for p in self._patches:
+            p.stop()
+        self._tmp.cleanup()
+
+    def test_training_feedback_roundtrip_shows_in_review_list_and_snapshot_log(self) -> None:
+        resp = self.client.post(f"{self.prefix}/job-1/feedback", json={
+            "candidate_id": "llm_moment_02", "rating": "good",
+            "feedback_tags": ["good_clip"], "notes": "nice",
+        })
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(resp.json()["rating"], "good")
+
+        review = self.client.get(f"{self.prefix}/job-1/review-candidates")
+        self.assertEqual(review.status_code, 200, review.text)
+        by_id = {c["candidate_id"]: c for c in review.json()["candidates"]}
+        self.assertEqual(sorted(by_id), ["llm_moment_01", "llm_moment_02"])
+        rated = by_id["llm_moment_02"]
+        self.assertEqual(rated["feedback_rating"], "good")
+        self.assertEqual(rated["feedback_tags"], ["good_clip"])
+        self.assertEqual(rated["feedback_notes"], "nice")
+        self.assertEqual((rated["start_time"], rated["end_time"]), (40.0, 55.0))
+        self.assertTrue(rated["selected"])
+        self.assertIsNone(by_id["llm_moment_01"]["feedback_rating"])
+
+        snapshots = (self.storage / "feedback" / "feedback_updates.jsonl").read_text().splitlines()
+        self.assertEqual(len(snapshots), 1)
+        self.assertIn('"candidate_id": "llm_moment_02"', snapshots[0])
+
+    def test_gold_eval_works_without_legacy_candidate_artifacts(self) -> None:
+        import json
+
+        resp = self.client.post(f"{self.prefix}/job-1/feedback", json={
+            "candidate_id": "llm_moment_01", "mode": "gold_eval", "gold_grade": 3,
+            "notes": "clean payoff",
+        })
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(resp.json()["gold_grade"], 3)
+
+        rows = (self.storage / "job-1" / "debug" / "gold_eval.jsonl").read_text().splitlines()
+        self.assertEqual(len(rows), 1)
+        gold = json.loads(rows[0])
+        self.assertEqual(gold["candidate_id"], "llm_moment_01")
+        self.assertEqual((gold["window_start"], gold["window_end"]), (10.0, 30.0))
+        self.assertEqual(gold["label"], 1)
+        self.assertEqual(gold["gold_grade"], 3)
+        self.assertEqual(gold["candidate_source"], "llm_moment_finder")
+        self.assertEqual(gold["features"]["viral_score"], 9.0)
+        self.assertTrue((self.storage / "feedback" / "gold_eval_updates.jsonl").exists())
+
+    def test_unknown_candidate_id_is_404_in_both_modes(self) -> None:
+        training = self.client.post(f"{self.prefix}/job-1/feedback", json={
+            "candidate_id": "nope", "rating": "good",
+        })
+        gold = self.client.post(f"{self.prefix}/job-1/feedback", json={
+            "candidate_id": "nope", "mode": "gold_eval", "gold_grade": 1,
+        })
+        self.assertEqual(training.status_code, 404)
+        self.assertEqual(gold.status_code, 404)
+
+
+class JobStatusPollDiagnosticsTests(unittest.TestCase):
+    """GET /api/jobs/{id} is polled every 2 s — the diagnostics must stay cheap (#122)."""
+
+    VOD = "2100000001"
+
+    def setUp(self) -> None:
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        jobs._diagnostics_cache.clear()
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.storage = root / "storage"
+        self.backend_root = root / "backend"
+        debug_dir = self.storage / "job-1" / "debug"
+        debug_dir.mkdir(parents=True)
+        (debug_dir / "segments.jsonl").write_text(
+            '{"start":0.0,"end":5.0,"text":"a"}\n{"start":5.0,"end":9.0,"text":"b"}\n',
+            encoding="utf-8",
+        )
+        (self.storage / "job-1" / "request.json").write_text(
+            jobs.json.dumps({"url": f"https://www.twitch.tv/videos/{self.VOD}"}), encoding="utf-8"
+        )
+        self.manifest = self.backend_root / "tmp" / "gt_runs" / "run-1" / "eval_manifest.jsonl"
+        self.manifest.parent.mkdir(parents=True)
+        self.manifest.write_text(
+            jobs.json.dumps({"vod_id": self.VOD, "gt_moments": [
+                {"start": 120, "end": 150, "match_similarity": 0.9, "views": 42000, "desc": "clutch"}
+            ]}) + "\n",
+            encoding="utf-8",
+        )
+        self.job = JobStatus(job_id="job-1", status="done", clips=[])
+        app = FastAPI()
+        app.include_router(jobs.router)
+        self.client = TestClient(app)
+        for p in (
+            patch.object(jobs.settings, "storage_dir", str(self.storage)),
+            patch.object(jobs, "_BACKEND_ROOT", self.backend_root),
+            patch.object(jobs, "touch_job_session", side_effect=lambda *_: self.job),
+            patch.object(jobs, "get_job", side_effect=lambda *_: self.job),
+            patch.object(jobs.session_lease, "drive_expiry", return_value=False),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(self._tmp.cleanup)
+        self.addCleanup(jobs._diagnostics_cache.clear)
+
+    def _stages(self) -> dict:
+        resp = self.client.get("/api/jobs/job-1")
+        self.assertEqual(resp.status_code, 200)
+        diag = resp.json()["pipeline_diagnostics"]
+        return {s["id"]: s for s in diag["stages"]}
+
+    def test_terminal_job_reports_gt_matches_stage(self) -> None:
+        stages = self._stages()
+        self.assertEqual(stages["transcript"]["summary"], "2 Transcript-Segmente.")
+        gt = stages["gt_matches"]
+        self.assertEqual(gt["summary"], f"1 verifizierte GT-Momente für VOD {self.VOD}.")
+        self.assertIn("t=120s–150s  sim=0.90  42k views — clutch", gt["details"][0])
+
+    def test_poll_on_running_job_does_not_read_gt_manifests(self) -> None:
+        self.job = JobStatus(job_id="job-1", status="clipping", clips=[])
+        stages = self._stages()
+        self.assertEqual(stages["transcript"]["summary"], "2 Transcript-Segmente.")
+        self.assertNotIn("gt_matches", stages)
+
+    def test_terminal_job_diagnostics_are_computed_once_and_reused(self) -> None:
+        first = self._stages()
+        # Artifacts change on disk after the job is terminal: later polls must not
+        # rescan them, so the response stays identical to the first one.
+        self.manifest.unlink()
+        (self.storage / "job-1" / "debug" / "segments.jsonl").write_text("", encoding="utf-8")
+        self.assertEqual(self._stages(), first)
+
+    def test_diagnostics_are_recomputed_after_the_job_leaves_running_state(self) -> None:
+        self.job = JobStatus(job_id="job-1", status="clipping", clips=[])
+        self.assertNotIn("gt_matches", self._stages())
+        self.job = JobStatus(job_id="job-1", status="done", clips=[])
+        self.assertIn("gt_matches", self._stages())
+
+    def test_diagnostics_of_a_job_gone_from_the_registry_are_dropped(self) -> None:
+        # #117 evicts old jobs without going through DELETE; their cached
+        # diagnostics must not outlive them.
+        jobs._diagnostics_cache["job-evicted"] = (("done", 0), {"available": True})
+        with patch.object(jobs, "get_job", side_effect=lambda jid: self.job if jid == "job-1" else None):
+            self._stages()
+        self.assertNotIn("job-evicted", jobs._diagnostics_cache)
+        self.assertIn("job-1", jobs._diagnostics_cache)

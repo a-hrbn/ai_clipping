@@ -19,12 +19,15 @@ def read_jsonl(path: pathlib.Path, *, strict: bool = True) -> list[dict]:
     if not path.exists():
         return []
     rows: list[dict] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         line = line.strip()
         if not line:
             continue
         if strict:
-            rows.append(json.loads(line))
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError as exc:
+                raise json.JSONDecodeError(f"{path}:{line_no}: malformed JSONL line: {exc.msg}", exc.doc, exc.pos) from exc
             continue
         try:
             rows.append(json.loads(line))

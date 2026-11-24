@@ -256,8 +256,8 @@ class MomentFinding:
 ## Clipping (`producers/clipping.py`)
 
 Absorbs pipeline.py:353–372 + 594–627 (`_moments_from_post_processed`, top-K,
-`final_moments.json`). The `segments.jsonl` + repo-level `transcripts/` dumps
-stay in the Conductor (they're not clip-specific).
+`final_moments.json`). The `segments.jsonl` write stays in the Conductor (it's
+not clip-specific); the repo-level `transcripts/` dumps are gone (#118).
 
 ```python
 class Clipping:
@@ -323,7 +323,7 @@ async def run_pipeline(job_id, url=None, video_path=None, profile=None, strategy
             transcript = await run(lambda *, progress: ChatEnrichment(cache_source=cache_source, chat_source=chat_src(chat), …).apply(transcript),
                                    status="downloading_chat", band=(60, 72))
 
-        _write_transcript_files(job_id, transcript)                # transcripts/*.txt|jsonl + segments.jsonl
+        store.write_segments(job_id, _segment_records(transcript)) # segments only, via the Job-Artifact-Store
         result = await run(lambda *, progress: MomentFinding(profile=cfg.profile, vod_id=cfg.vod_id(url, job_id),
                                                              debug_dir=debug_dir, params=cfg.moment_params,
                                                              find=moment_finder.find_moments).find(transcript, progress=progress),
@@ -335,7 +335,7 @@ async def run_pipeline(job_id, url=None, video_path=None, profile=None, strategy
 
         audio.teardown(); audio = None
         update_job(job_id, status="done", progress_pct=100, clips=clips)
-        if not _debug_job(job_id): asyncio.create_task(_cleanup_later(job_id))
+        # no timed cleanup: the job folder goes when the registry evicts the job (#117)
 
     except (PipelineCancelledError, downloader.DownloadCancelledError):
         logger.info("Pipeline cancelled for job %s", job_id)        # NO failed status
@@ -344,7 +344,7 @@ async def run_pipeline(job_id, url=None, video_path=None, profile=None, strategy
         update_job(job_id, status="failed", error=str(e))
     finally:
         if audio is not None: audio.teardown()
-        _cleanup_serving_source_media(job_id=job_id, video_path=video_path, audio_path=None)
+        # source media (video/audio/chunks) is dropped by the serving router after the run (store.delete_source_media)
 ```
 
 ### Progress-band map (preserves current UX)

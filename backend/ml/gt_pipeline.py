@@ -59,6 +59,7 @@ from ml.discover_iboclipss_clips import (  # noqa: E402
 )
 from ml.build_gt_vod_transcripts import _process_vod  # noqa: E402
 from ml.build_eval_manifest import dedup_moments  # noqa: E402
+from ml.gt_match_verify import filter_gold_candidates  # noqa: E402
 from ml.row_identity import read_jsonl, write_jsonl  # noqa: E402
 
 _DEFAULT_VOD_CSV = BACKEND_ROOT / "ml" / "jynxzi_gt_vods.csv"
@@ -172,6 +173,13 @@ def _is_done(state: dict, step: str) -> bool:
 
 def _mark_done(state: dict, step: str) -> None:
     state.setdefault("steps_done", {})[step] = True
+
+
+def _inputs_complete(state: dict) -> bool:
+    """Matching/eval_manifest may only be cached once every repost is downloaded
+    and every VOD transcribed — otherwise the next run must re-match with the
+    data that arrived in between."""
+    return _is_done(state, "iboclipss_downloaded") and _is_done(state, "vod_transcripts_all")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -504,7 +512,10 @@ def step_run_matcher(
 
     _write_diagnostics(run_dir / "match_diagnostics.json", diag)
     write_jsonl(matches_path, output_rows)
-    _mark_done(state, "matching")
+    if _inputs_complete(state):
+        _mark_done(state, "matching")
+    else:
+        logger.warning("      matching not cached — downloads/transcripts incomplete, will re-match next run")
     _log_match_summary(output_rows)
     return output_rows
 
@@ -527,18 +538,9 @@ def step_build_eval_manifest(
         _log_eval_summary(rows)
         return
 
-    filtered = [
-        r for r in matches
-        if float(r.get("transcript_similarity") or 0) >= min_similarity
-        and r.get("transcript_match_kind") != "audio_fingerprint_fallback"
-    ]
-    audio_dropped = sum(
-        1 for r in matches
-        if r.get("transcript_match_kind") == "audio_fingerprint_fallback"
-    )
-    if audio_dropped:
-        logger.info("      Dropped %d audio_fingerprint_fallback match(es) — transcript-only GT", audio_dropped)
-    logger.info("[5/5] eval_manifest: %d matches pass sim >= %.2f", len(filtered), min_similarity)
+    filtered = filter_gold_candidates(matches, min_similarity=min_similarity)
+    logger.info("[5/5] eval_manifest: %d/%d matches pass the gold filter (matcher-accepted; legacy rows need sim >= %.2f)",
+                len(filtered), len(matches), min_similarity)
 
     by_vod: dict[str, list[dict]] = {}
     for row in filtered:
@@ -555,7 +557,8 @@ def step_build_eval_manifest(
         logger.info("      VOD %s: %d raw → %d moments after dedup", vod_id, len(vod_rows), len(gt_moments))
 
     write_jsonl(manifest_path, output_rows)
-    _mark_done(state, "eval_manifest")
+    if _inputs_complete(state):
+        _mark_done(state, "eval_manifest")
     logger.info("[5/5] eval_manifest DONE: %d VODs  %d gt_moments → %s",
                 len(output_rows), total_moments, manifest_path.name)
 

@@ -20,7 +20,12 @@ def _result(rows: list) -> types.SimpleNamespace:
 
 def _echo_cut(_video_path, moments, _job_id, *, progress_cb=None):
     """Fake CutClipsFn: returns one stub clip per moment it was handed."""
-    return [{"clip_for": m["candidate_id"]} for m in moments]
+    return [
+        types.SimpleNamespace(
+            candidate_id=m["candidate_id"], start_time=m["start_time"], end_time=m["end_time"]
+        )
+        for m in moments
+    ]
 
 
 class ClippingTests(unittest.TestCase):
@@ -49,7 +54,7 @@ class ClippingTests(unittest.TestCase):
         self.assertEqual(final["moments"][0]["ranking_mode"], "llm_moment_finder")
         self.assertEqual(len(cut_calls[0]), 2)  # cutter only sees the top-2
         self.assertEqual(len(out), 2)
-        self.assertEqual(out[0]["clip_for"], "llm_moment_01")
+        self.assertEqual(out[0].candidate_id, "llm_moment_01")
 
     def test_top_k_zero_keeps_all_moments(self) -> None:
         store = InMemoryJobArtifactStore()

@@ -92,6 +92,28 @@ class MergeManifestsTests(unittest.TestCase):
         self.assertEqual(moments[0]["gt_tier"], "gold")  # new wins
 
 
+    def test_overlapping_moment_from_another_repost_keeps_the_better_verdict(self) -> None:
+        # #130: cross-week dedup must not let a higher-view "review" duplicate
+        # push a confirmed gold moment out of the gold manifest.
+        existing = [_manifest_row("V1", [_moment(10, 20, url="a", tier="gold", views=10)])]
+        new = [_manifest_row("V1", [_moment(11, 21, url="b", tier="review", views=99)])]
+        merged = weekly.merge_manifests(existing, new)
+
+        self.assertEqual([(m["source_url"], m["gt_tier"]) for m in merged[0]["gt_moments"]], [("a", "gold")])
+
+    def test_overlapping_repost_does_not_replace_a_refined_boundary(self) -> None:
+        # Same tier: a manual_edit/audio_refined moment beats a higher-view
+        # unrefined duplicate, so the refined boundaries survive the rewrite.
+        for source in ("manual_edit", "audio_refined"):
+            with self.subTest(boundary_source=source):
+                refined = dict(_moment(10, 20, url="a", tier="gold", views=10), boundary_source=source)
+                existing = [_manifest_row("V1", [refined])]
+                new = [_manifest_row("V1", [_moment(11, 21, url="b", tier="gold", views=99)])]
+                merged = weekly.merge_manifests(existing, new)
+
+                self.assertEqual([m["source_url"] for m in merged[0]["gt_moments"]], ["a"])
+
+
 # --------------------------------------------------------------------------
 # Pure decision seam: gold-accrual vs target (AC-4)
 # --------------------------------------------------------------------------
@@ -166,15 +188,20 @@ class RunWeeklyMatchVerifyTests(unittest.TestCase):
         def _fake(reposts, captured_vod_ids, *, cache_root, **kwargs):
             self.match_calls.append([r.get("clip_id") or r.get("source_url") for r in reposts])
             manifest = []
+            match_rows = []
             verifications = []
             counts: dict = {}
-            for r in reposts:
+            for i, r in enumerate(reposts):
                 url = r["source_url"]
                 tier = tier_by_url.get(url)
                 if tier is None:
                     continue
                 vod_id = r.get("vod_id", "V1")
-                manifest.append(_manifest_row(vod_id, [_moment(10, 20, url=url, tier=tier, views=r.get("views", 0))]))
+                # Distinct VOD position per repost in a batch, unless the test pins one ("at").
+                start = r.get("at", 10 + 100 * i)
+                match_rows.append({"vod_id": vod_id, "source_url": url})
+                manifest.append(_manifest_row(
+                    vod_id, [_moment(start, start + 10, url=url, tier=tier, views=r.get("views", 0))]))
                 verifications.append({"vod_id": vod_id, "gt_tier": tier})
                 counts[tier] = counts.get(tier, 0) + 1
             gold_manifest = gt_match_verify.filter_gold_manifest(manifest)
@@ -183,6 +210,7 @@ class RunWeeklyMatchVerifyTests(unittest.TestCase):
                 gold_manifest=gold_manifest,
                 verifications=verifications,
                 counts=counts,
+                match_rows=match_rows,
             )
         return _fake
 
@@ -198,6 +226,7 @@ class RunWeeklyMatchVerifyTests(unittest.TestCase):
             target_gold=10,
             target_vods=2,
             matched_at="2026-06-11T00:00:00+00:00",
+            download_repost=lambda url: self.cache_root / "short_form" / "clip.mp4",
         )
         kwargs.update(overrides)
         return weekly.run_weekly_match_verify(**kwargs)
@@ -267,6 +296,128 @@ class RunWeeklyMatchVerifyTests(unittest.TestCase):
         # State + gold manifest untouched: next week retries the same scan.
         self.assertEqual(self.gold_path.read_text(), gold_before)
         self.assertEqual(weekly.matched_ids(weekly.load_match_state(self.state_path)), {"g1"})
+
+    def test_reposts_are_downloaded_before_matching_and_failed_downloads_retry_next_run(self) -> None:
+        # #126: the matcher (like the real one) yields nothing for a repost
+        # without video_path, so each new repost must be downloaded first; a
+        # repost whose download fails is not marked done and is retried.
+        seen_by_matcher: list[dict] = []
+
+        def _media_only_match(reposts, captured_vod_ids, *, cache_root, **kwargs):
+            seen_by_matcher.extend(reposts)
+            with_media = [r for r in reposts if r.get("video_path")]
+            return self._fake_match_and_verify_factory({r["source_url"]: "gold" for r in with_media})(
+                with_media, captured_vod_ids, cache_root=cache_root
+            )
+
+        down_urls = {"u-bad"}
+        download_calls: list[str] = []
+
+        def _download(url):
+            download_calls.append(url)
+            if url in down_urls:
+                raise RuntimeError("HTTP Error 429: try again later")
+            return pathlib.Path(f"/cache/short_form/{url}.mp4")
+
+        reposts = [dict(_repost("ok", url="u-ok"), vod_id="V1"),
+                   dict(_repost("bad", url="u-bad"), vod_id="V2")]
+        first = self._run(reposts, ["V1", "V2"], match=_media_only_match, download_repost=_download)
+
+        self.assertEqual(
+            [(r["clip_id"], r.get("video_path")) for r in seen_by_matcher],
+            [("ok", "/cache/short_form/u-ok.mp4")],
+        )
+        self.assertEqual(first["accrual"]["gold"], 1)
+        self.assertEqual(first["download_failed"], 1)
+
+        # Next week the download works: only the previously failed repost is retried and matched.
+        down_urls.clear()
+        download_calls.clear()
+        seen_by_matcher.clear()
+        second = self._run(reposts, ["V1", "V2"], match=_media_only_match, download_repost=_download)
+
+        self.assertEqual(download_calls, ["u-bad"])
+        self.assertEqual([r["clip_id"] for r in seen_by_matcher], ["bad"])
+        self.assertEqual(second["accrual"]["gold"], 2)
+        self.assertEqual(second["download_failed"], 0)
+
+    def test_same_moment_from_two_weeks_appears_once_in_gold_manifest(self) -> None:
+        # #130: two different reposts of the same VOD moment, matched a week apart.
+        match = self._fake_match_and_verify_factory({"u-week1": "gold", "u-week2": "gold"})
+        self._run([dict(_repost("w1", url="u-week1", views=50_000), vod_id="V1", at=100)], ["V1"],
+                  match=match, matched_at="2026-06-11T00:00:00+00:00")
+        summary = self._run([dict(_repost("w2", url="u-week2", views=90_000), vod_id="V1", at=102)], ["V1"],
+                            match=match, matched_at="2026-06-18T00:00:00+00:00")
+
+        gold_rows = [json.loads(line) for line in self.gold_path.read_text().splitlines() if line]
+        self.assertEqual([len(r["gt_moments"]) for r in gold_rows], [1])
+        self.assertEqual(summary["accrual"]["gold"], 1)
+        # Both reposts produced a match, so neither is retried.
+        self.assertEqual(weekly.matched_ids(weekly.load_match_state(self.state_path)), {"w1", "w2"})
+
+    def _captured_only_match(self):
+        """Fake matcher that, like the real one, only hits a repost once its VOD is captured."""
+        def _match(reposts, captured_vod_ids, *, cache_root, **kwargs):
+            hits = {r["source_url"]: "gold" for r in reposts if r.get("vod_id") in set(captured_vod_ids)}
+            return self._fake_match_and_verify_factory(hits)(reposts, captured_vod_ids, cache_root=cache_root)
+        return _match
+
+    def test_repost_without_a_hit_stays_open_and_is_retried_against_newly_captured_vods(self) -> None:
+        # #127: the repost's VOD is only captured the day after the weekly run.
+        late = [dict(_repost("late", url="u-late"), vod_id="V2")]
+        first = self._run(late, ["V1"], match=self._captured_only_match(),
+                          matched_at="2026-06-11T00:00:00+00:00")
+
+        self.assertEqual(first["accrual"]["gold"], 0)
+        self.assertNotIn("late", weekly.matched_ids(weekly.load_match_state(self.state_path)))
+
+        second = self._run(late, ["V1", "V2"], match=self._captured_only_match(),
+                           matched_at="2026-06-18T00:00:00+00:00")
+
+        self.assertEqual(self.match_calls[-1], ["late"])
+        self.assertEqual(second["accrual"]["gold"], 1)
+        self.assertIn("late", weekly.matched_ids(weekly.load_match_state(self.state_path)))
+
+    def test_repost_without_a_hit_is_finally_done_after_14_days(self) -> None:
+        never = [dict(_repost("never", url="u-never"), vod_id="V9")]
+        self._run(never, ["V1"], match=self._captured_only_match(), matched_at="2026-06-01T00:00:00+00:00")
+        self._run(never, ["V1"], match=self._captured_only_match(), matched_at="2026-06-14T00:00:00+00:00")
+        self.assertNotIn("never", weekly.matched_ids(weekly.load_match_state(self.state_path)))
+
+        self._run(never, ["V1"], match=self._captured_only_match(), matched_at="2026-06-16T00:00:00+00:00")
+        self.assertIn("never", weekly.matched_ids(weekly.load_match_state(self.state_path)))
+
+        # Done for good: a later run no longer hands it to the matcher.
+        self.match_calls.clear()
+        self._run(never, ["V1"], match=self._captured_only_match(), matched_at="2026-06-23T00:00:00+00:00")
+        self.assertEqual(self.match_calls, [[]])
+
+    def test_repost_whose_match_lost_the_batch_dedup_is_still_done(self) -> None:
+        # #127: "done" is decided on match rows, not the post-dedup manifest.
+        def _dedup_match(reposts, captured_vod_ids, *, cache_root, **kwargs):
+            manifest = [_manifest_row("V1", [_moment(100, 110, url="u-winner", tier="gold")])]
+            return gt_match_verify.MatchVerifyResult(
+                manifest=manifest,
+                gold_manifest=gt_match_verify.filter_gold_manifest(manifest),
+                verifications=[{"vod_id": "V1", "gt_tier": "gold"}],
+                counts={"gold": 1},
+                match_rows=[{"vod_id": "V1", "source_url": "u-winner"},
+                            {"vod_id": "V1", "source_url": "u-loser"}],
+            )
+
+        reposts = [dict(_repost("winner", url="u-winner"), vod_id="V1"),
+                   dict(_repost("loser", url="u-loser"), vod_id="V1")]
+        self._run(reposts, ["V1"], match=_dedup_match)
+
+        self.assertEqual(weekly.matched_ids(weekly.load_match_state(self.state_path)), {"winner", "loser"})
+
+    def test_repost_uploaded_more_than_14_days_ago_without_a_hit_is_done_on_first_try(self) -> None:
+        # #127: "älter als 14 Tage" is the repost's age, not time since first attempt.
+        old = [dict(_repost("old", url="u-old"), vod_id="V9", upload_date="20260520")]
+        fresh = [dict(_repost("fresh", url="u-fresh"), vod_id="V9", upload_date="20260605")]
+        self._run(old + fresh, ["V1"], match=self._captured_only_match(), matched_at="2026-06-11T00:00:00+00:00")
+
+        self.assertEqual(weekly.matched_ids(weekly.load_match_state(self.state_path)), {"old"})
 
 
 if __name__ == "__main__":
