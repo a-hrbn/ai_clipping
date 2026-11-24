@@ -22,7 +22,6 @@ from tests.test_pipeline_integration import (
     _PipelineStubTestCase,
     _conductor_stack,
     _import_pipeline_with_stubs,
-    _noop_cleanup_later,
 )
 
 _ROWS = [
@@ -76,7 +75,6 @@ class ClipCutFailureTests(_PipelineStubTestCase):
         with ExitStack() as stack:
             _conductor_stack(stack, pipeline, tmp_path, job_updates)
             stack.enter_context(patch.object(pipeline.settings, "clip_top_k", 0))
-            stack.enter_context(patch.object(pipeline, "_cleanup_later", side_effect=_noop_cleanup_later))
             stack.enter_context(patch.object(pipeline, "AudioResource", _FakeAudioResource))
             stack.enter_context(patch.object(pipeline, "TranscriptResource", _FakeTranscriptResource))
             stack.enter_context(patch.object(pipeline, "VoiceEnergy", _Passthrough))

@@ -4,7 +4,6 @@ import json
 import logging
 import pathlib
 import re
-import shutil
 import subprocess
 import threading
 from config import settings
@@ -41,10 +40,6 @@ class PipelineCancelledError(RuntimeError):
 def _raise_if_cancelled(job_id: str) -> None:
     if is_job_cancelled(job_id):
         raise PipelineCancelledError(f"Job {job_id} cancelled by client")
-
-
-def _debug_job(job_id: str) -> bool:
-    return str(job_id or "").startswith("pipeline_debug_")
 
 
 def _transcript_cache_enabled_for_job(job_id: str, url: str | None) -> bool:
@@ -364,11 +359,7 @@ async def run_pipeline(
         audio = None
 
         update_job(job_id, status="done", progress_pct=100, clips=clips)
-
-        # Debug workflows manage their artifacts via the workflow delete
-        # endpoint; auto-expiry would pull clips out from under the review UI.
-        if not _debug_job(job_id):
-            asyncio.create_task(_cleanup_later(job_id))
+        # The job folder is deleted when the registry evicts the job (#117).
 
     except (PipelineCancelledError, downloader.DownloadCancelledError):
         logger.info("Pipeline cancelled for job %s", job_id)
@@ -380,14 +371,6 @@ async def run_pipeline(
         # after the worker subprocess exits, so it also runs after an OOM kill.
         if audio is not None:
             audio.teardown()
-
-
-async def _cleanup_later(job_id: str) -> None:
-    ttl = 7 * 24 * 3600 if _debug_job(job_id) else 3600
-    await asyncio.sleep(ttl)
-    job_dir = pathlib.Path(settings.storage_dir) / job_id
-    if job_dir.exists():
-        shutil.rmtree(job_dir)
 
 
 def _segment_records(transcript) -> list[dict]:

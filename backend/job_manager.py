@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import pathlib
+import shutil
 import tempfile
 import threading
 import time
@@ -58,9 +59,19 @@ def _expired_job_ids(now: float | None = None) -> list[str]:
     ]
 
 
-def _evict_expired(now: float | None = None) -> bool:
-    """Remove terminal jobs older than _JOB_TTL_SECONDS from the in-memory store.
-    Runs inside every `_registry_write`; read paths only check `_expired_job_ids`."""
+# Debug, training and backfill workflows manage their own job folders (and
+# source media); eviction and source-media cleanup leave them alone.
+SELF_MANAGED_JOB_PREFIXES = ("pipeline_debug_", "twitch_vod", "judge_backfill_")
+
+
+def is_self_managed_job(job_id: str) -> bool:
+    return str(job_id or "").startswith(SELF_MANAGED_JOB_PREFIXES)
+
+
+def _evict_expired(now: float | None = None) -> list[str]:
+    """Remove terminal jobs older than _JOB_TTL_SECONDS from the in-memory store
+    and return their ids. Runs inside every `_registry_write`; read paths only
+    check `_expired_job_ids`."""
     expired = _expired_job_ids(now)
     for jid in expired:
         _jobs.pop(jid, None)
@@ -68,7 +79,16 @@ def _evict_expired(now: float | None = None) -> bool:
         _cancelled_jobs.discard(jid)
         _pending_updates.pop(jid, None)
         session_lease.clear(jid)
-    return bool(expired)
+    return expired
+
+
+def _delete_job_folders(job_ids: list[str]) -> None:
+    """Delete the storage folders of evicted serving jobs (#117)."""
+    storage = _jobs_file.parent
+    for jid in job_ids:
+        if is_self_managed_job(jid) or not jid or pathlib.Path(jid).name != jid or jid in {".", ".."}:
+            continue
+        shutil.rmtree(storage / jid, ignore_errors=True)
 
 
 def _apply_update(job_id: str, kwargs: dict, now: float) -> JobStatus | None:
@@ -186,7 +206,10 @@ def _registry_write() -> Iterator[None]:
         try:
             with _lock:
                 _load_jobs()
-                _evict_expired()
+                evicted = _evict_expired()
+            # Still under the flock, so no other process can recreate the job
+            # in between; outside `_lock` so readers don't wait on rmtree.
+            _delete_job_folders(evicted)
             yield
             _persist_jobs_locked()
         finally:

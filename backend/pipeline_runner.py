@@ -10,7 +10,7 @@ import tempfile
 
 from config import settings
 from job_lifecycle import is_terminal
-from job_manager import get_job, update_job
+from job_manager import get_job, is_self_managed_job, update_job
 
 _BACKEND_ROOT = pathlib.Path(__file__).resolve().parent
 
@@ -81,7 +81,7 @@ def keeps_source_media(job_id: str) -> bool:
     """
     if bool(getattr(settings, "frontend_job_cache_enabled", False)):
         return True
-    return str(job_id or "").startswith(("twitch_vod", "judge_backfill_", "pipeline_debug_"))
+    return is_self_managed_job(job_id)
 
 
 async def run_job_subprocess(
