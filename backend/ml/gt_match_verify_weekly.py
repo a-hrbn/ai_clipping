@@ -42,8 +42,8 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from ml import gt_capture_daily
 from ml import gt_match_verify
-from ml.build_eval_manifest import _OVERLAP_DEDUP_RATIO
-from ml.row_identity import read_jsonl, window_overlap_ratio, write_jsonl  # noqa: E402
+from ml.build_eval_manifest import keep_non_overlapping
+from ml.row_identity import read_jsonl, write_jsonl  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +128,8 @@ def merge_manifests(existing: list[dict], new: list[dict]) -> list[dict]:
     Different reposts of the same moment (often matched weeks apart) are then
     collapsed with the batch dedup's overlap rule (#130), so each moment counts
     once in the recall denominator: the better verdict wins (gold > silver >
-    rest), then the higher-view repost.
+    rest), then a refined boundary (manual_edit/audio_refined), then the
+    higher-view repost.
     """
     by_vod: dict[str, dict[str, dict]] = {}
     for row in list(existing) + list(new):
@@ -145,23 +146,20 @@ def merge_manifests(existing: list[dict], new: list[dict]) -> list[dict]:
 
 
 _TIER_RANK = {GOLD: 0, SILVER: 1}
+_REFINED_BOUNDARIES = {"manual_edit", "audio_refined"}
 
 
 def _dedup_overlapping(moments: list[dict]) -> list[dict]:
-    ranked = sorted(
+    # Priority: tier, then a refined boundary over an unrefined one (so the
+    # rewrite never loses manual/audio-refined edges), then views.
+    return keep_non_overlapping(sorted(
         moments,
-        key=lambda m: (_TIER_RANK.get(str(m.get("gt_tier") or ""), 2), -float(m.get("views") or 0)),
-    )
-    kept: list[dict] = []
-    for candidate in ranked:
-        start, end = float(candidate.get("start") or 0), float(candidate.get("end") or 0)
-        if not any(
-            window_overlap_ratio(start, end, float(k.get("start") or 0), float(k.get("end") or 0))
-            >= _OVERLAP_DEDUP_RATIO
-            for k in kept
-        ):
-            kept.append(candidate)
-    return sorted(kept, key=lambda m: float(m.get("start") or 0))
+        key=lambda m: (
+            _TIER_RANK.get(str(m.get("gt_tier") or ""), 2),
+            m.get("boundary_source") not in _REFINED_BOUNDARIES,
+            -float(m.get("views") or 0),
+        ),
+    ))
 
 
 # ---------------------------------------------------------------------------

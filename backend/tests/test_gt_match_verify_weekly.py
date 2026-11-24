@@ -101,6 +101,18 @@ class MergeManifestsTests(unittest.TestCase):
 
         self.assertEqual([(m["source_url"], m["gt_tier"]) for m in merged[0]["gt_moments"]], [("a", "gold")])
 
+    def test_overlapping_repost_does_not_replace_a_refined_boundary(self) -> None:
+        # Same tier: a manual_edit/audio_refined moment beats a higher-view
+        # unrefined duplicate, so the refined boundaries survive the rewrite.
+        for source in ("manual_edit", "audio_refined"):
+            with self.subTest(boundary_source=source):
+                refined = dict(_moment(10, 20, url="a", tier="gold", views=10), boundary_source=source)
+                existing = [_manifest_row("V1", [refined])]
+                new = [_manifest_row("V1", [_moment(11, 21, url="b", tier="gold", views=99)])]
+                merged = weekly.merge_manifests(existing, new)
+
+                self.assertEqual([m["source_url"] for m in merged[0]["gt_moments"]], ["a"])
+
 
 # --------------------------------------------------------------------------
 # Pure decision seam: gold-accrual vs target (AC-4)
