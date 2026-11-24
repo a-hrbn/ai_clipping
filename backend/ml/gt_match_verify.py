@@ -33,7 +33,7 @@ from __future__ import annotations
 import logging
 import pathlib
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ml import gt_capture
 from ml import match_cross_platform_audio_fingerprints as audio_matcher
@@ -61,13 +61,16 @@ class MatchVerifyResult:
     ``manifest`` carries every matched moment with its ``gt_tier``;
     ``gold_manifest`` is the gold(+silver)-filtered subset that becomes the eval
     ground truth. ``verifications`` is one verdict row per moment, and ``counts``
-    aggregates tiers for the run summary.
+    aggregates tiers for the run summary. ``match_rows`` are the accepted match
+    rows *before* the per-VOD dedup — a repost whose window lost the dedup still
+    produced a match.
     """
 
     manifest: list[dict]
     gold_manifest: list[dict]
     verifications: list[dict]
     counts: dict
+    match_rows: list[dict] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -284,4 +287,5 @@ def match_and_verify(
         gold_manifest=gold_manifest,
         verifications=verifications,
         counts=counts,
+        match_rows=match_rows,
     )

@@ -293,8 +293,23 @@ def list_iboclipss_reposts(channel: str = DEFAULT_CHANNEL, *, max_candidates: in
             "title": str(entry.get("title") or "").strip(),
             "views": int(entry.get("view_count") or 0),
             "duration": int(entry.get("duration") or 0),
+            "upload_date": str(entry.get("upload_date") or ""),
+            "timestamp": entry.get("timestamp"),
         })
     return reposts
+
+
+def _published_at(repost: dict) -> datetime | None:
+    """The repost's upload time from the scan (``upload_date`` YYYYMMDD or epoch
+    ``timestamp``), or ``None`` when the listing carried neither."""
+    raw = str(repost.get("upload_date") or "").strip()
+    if len(raw) == 8 and raw.isdigit():
+        return datetime.strptime(raw, "%Y%m%d").replace(tzinfo=timezone.utc)
+    try:
+        ts = int(repost.get("timestamp") or 0)
+    except (TypeError, ValueError):
+        ts = 0
+    return datetime.fromtimestamp(ts, tz=timezone.utc) if ts > 0 else None
 
 
 def download_short_form(url: str) -> pathlib.Path:
@@ -363,8 +378,9 @@ def run_weekly_match_verify(
     (url -> local path, raises on failure) to :func:`download_short_form`; both
     are injectable for tests. Each new repost is downloaded before matching; a
     repost whose download fails is not marked done, so the next run retries it.
-    A repost is marked done only once it produced a match row or has been open
-    longer than ``OPEN_REPOST_DAYS``; until then each run re-matches it.
+    A repost is marked done only once it produced a match row or is older than
+    ``OPEN_REPOST_DAYS`` (upload date, else first attempt); until then each run
+    re-matches it.
     State and both manifests are persisted; a zeroed scan returns a summary with
     ``scan_zeroed=True`` and mutates nothing, so next week simply retries.
     """
@@ -416,14 +432,11 @@ def run_weekly_match_verify(
     gold_manifest = gt_match_verify.filter_gold_manifest(merged)
     write_jsonl(gold_manifest_path, gold_manifest)
 
-    # A repost is done once it produced a match row, or after OPEN_REPOST_DAYS
-    # without one (its VOD may only be captured after this run). Failed
-    # downloads never reached the matcher, so they never count.
-    hit_urls = {
-        str(m.get("source_url") or "").strip()
-        for row in result.manifest
-        for m in (row.get("gt_moments") or [])
-    }
+    # A repost is done once it produced a match row (even one that lost the
+    # dedup), or once it is older than OPEN_REPOST_DAYS without one (its VOD may
+    # only be captured after this run). Failed downloads never reached the
+    # matcher, so they never count.
+    hit_urls = {str(row.get("source_url") or "").strip() for row in result.match_rows}
     pending = state.setdefault("pending", {})
     now = datetime.fromisoformat(matched_at)
     for repost in downloaded:
@@ -431,7 +444,8 @@ def run_weekly_match_verify(
         if not rid:
             continue
         first_tried = pending.setdefault(rid, matched_at)
-        expired = now - datetime.fromisoformat(first_tried) > timedelta(days=OPEN_REPOST_DAYS)
+        born = _published_at(repost) or datetime.fromisoformat(first_tried)
+        expired = now - born > timedelta(days=OPEN_REPOST_DAYS)
         if str(repost.get("source_url") or "").strip() in hit_urls or expired:
             pending.pop(rid)
             state.setdefault("matched", {})[rid] = {
