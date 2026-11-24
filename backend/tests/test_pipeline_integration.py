@@ -33,10 +33,6 @@ class _FFmpegStub:
 sys.modules.setdefault("ffmpeg", _FFmpegStub())
 
 
-async def _noop_cleanup_later(_job_id: str) -> None:
-    return None
-
-
 # An opaque, torch-free transcript handed between the faked Producers — its
 # element type is irrelevant because every Producer that reads it is a fake.
 _SEGMENTS = [types.SimpleNamespace(start=0.0, end=5.0, text="segment")]
@@ -183,7 +179,6 @@ class ConductorOrchestrationTests(_PipelineStubTestCase):
 
             with ExitStack() as stack:
                 _conductor_stack(stack, pipeline, tmp_path, job_updates)
-                stack.enter_context(patch.object(pipeline, "_cleanup_later", side_effect=_noop_cleanup_later))
                 _patch_conductor_producers(stack, pipeline, result=result, clips=clips)
 
                 await pipeline.run_pipeline("lean-job", video_path=video_path, profile="jynxzi")
@@ -221,7 +216,6 @@ class ConductorOrchestrationTests(_PipelineStubTestCase):
 
             with ExitStack() as stack:
                 _conductor_stack(stack, pipeline, tmp_path, job_updates)
-                stack.enter_context(patch.object(pipeline, "_cleanup_later", side_effect=_noop_cleanup_later))
                 _patch_conductor_producers(
                     stack, pipeline,
                     result=types.SimpleNamespace(post_processed_moments=[]), clips=[],
@@ -269,9 +263,6 @@ class ConductorOrchestrationTests(_PipelineStubTestCase):
             with ExitStack() as stack:
                 _conductor_stack(stack, pipeline, tmp_path, job_updates)
                 stack.enter_context(patch.object(pipeline.settings, "clip_top_k", 0))
-                stack.enter_context(
-                    patch.object(pipeline, "_cleanup_later", side_effect=_noop_cleanup_later, create=True)
-                )
                 stack.enter_context(patch.object(pipeline, "AudioResource", _FakeAudioResource))
                 stack.enter_context(patch.object(pipeline, "TranscriptResource", _FakeTranscriptResource))
                 stack.enter_context(patch.object(pipeline, "VoiceEnergy", _Passthrough))
@@ -298,52 +289,6 @@ class ConductorOrchestrationTests(_PipelineStubTestCase):
             self.assertEqual(first["projected_hook_score"], 7.0)
             self.assertEqual(by_id["llm_moment_03"]["rank"], 3)
 
-    async def test_normal_job_schedules_cleanup_later(self) -> None:
-        pipeline = _import_pipeline_with_stubs()
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            video_path = tmp_path / "video.mp4"
-            video_path.write_bytes(b"video")
-            job_updates: list[dict] = []
-
-            with ExitStack() as stack:
-                _conductor_stack(stack, pipeline, tmp_path, job_updates)
-                cleanup_mock = stack.enter_context(
-                    patch.object(pipeline, "_cleanup_later", side_effect=_noop_cleanup_later)
-                )
-                _patch_conductor_producers(
-                    stack, pipeline,
-                    result=types.SimpleNamespace(post_processed_moments=[]), clips=[],
-                )
-
-                await pipeline.run_pipeline("lean-job", video_path=video_path, profile="jynxzi")
-
-            cleanup_mock.assert_called_once_with("lean-job")
-
-    async def test_debug_job_skips_cleanup_later(self) -> None:
-        pipeline = _import_pipeline_with_stubs()
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            video_path = tmp_path / "video.mp4"
-            video_path.write_bytes(b"video")
-            job_updates: list[dict] = []
-
-            with ExitStack() as stack:
-                _conductor_stack(stack, pipeline, tmp_path, job_updates)
-                cleanup_mock = stack.enter_context(
-                    patch.object(pipeline, "_cleanup_later", side_effect=_noop_cleanup_later)
-                )
-                _patch_conductor_producers(
-                    stack, pipeline,
-                    result=types.SimpleNamespace(post_processed_moments=[]), clips=[],
-                )
-
-                await pipeline.run_pipeline(
-                    "pipeline_debug_wf1_vod123", video_path=video_path, profile="jynxzi"
-                )
-
-            cleanup_mock.assert_not_called()
-
     async def test_producer_failure_sets_failed_status(self) -> None:
         pipeline = _import_pipeline_with_stubs()
         with tempfile.TemporaryDirectory() as tmp:
@@ -354,7 +299,6 @@ class ConductorOrchestrationTests(_PipelineStubTestCase):
 
             with ExitStack() as stack:
                 _conductor_stack(stack, pipeline, tmp_path, job_updates)
-                stack.enter_context(patch.object(pipeline, "_cleanup_later", side_effect=_noop_cleanup_later))
                 _patch_conductor_producers(
                     stack, pipeline, result=None, clips=[],
                     moments_raises=pipeline.moment_finder.MomentFinderError("boom"),
@@ -383,7 +327,6 @@ class ConductorOrchestrationTests(_PipelineStubTestCase):
 
             with ExitStack() as stack:
                 _conductor_stack(stack, pipeline, tmp_path, job_updates)
-                stack.enter_context(patch.object(pipeline, "_cleanup_later", side_effect=_noop_cleanup_later))
                 stack.enter_context(patch.object(pipeline, "is_job_cancelled", side_effect=_cancelled))
                 _patch_conductor_producers(
                     stack, pipeline,
