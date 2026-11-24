@@ -74,12 +74,17 @@ def _evict_expired(now: float | None = None) -> list[str]:
     check `_expired_job_ids`."""
     expired = _expired_job_ids(now)
     for jid in expired:
-        _jobs.pop(jid, None)
-        _job_created_at.pop(jid, None)
-        _cancelled_jobs.discard(jid)
-        _pending_updates.pop(jid, None)
-        session_lease.clear(jid)
+        _forget_job(jid)
     return expired
+
+
+def _forget_job(jid: str) -> None:
+    """Drop every in-memory trace of a job (caller holds `_lock`)."""
+    _jobs.pop(jid, None)
+    _job_created_at.pop(jid, None)
+    _cancelled_jobs.discard(jid)
+    _pending_updates.pop(jid, None)
+    session_lease.clear(jid)
 
 
 def _delete_job_folders(job_ids: list[str]) -> None:
@@ -139,10 +144,7 @@ def _load_jobs() -> None:
 
     for job_id in list(_jobs):
         if job_id not in seen_job_ids:
-            _jobs.pop(job_id, None)
-            _job_created_at.pop(job_id, None)
-            _cancelled_jobs.discard(job_id)
-            session_lease.clear(job_id)
+            _forget_job(job_id)
 
     now = time.monotonic()
     for job_id, kwargs in list(_pending_updates.items()):
@@ -243,12 +245,18 @@ def create_job(job_id: str, profile: str = "general") -> JobStatus:
     return job
 
 
-def get_job(job_id: str) -> JobStatus | None:
+def _refresh_for_read() -> None:
+    """Read-path refresh: reload if jobs.json changed, then persist a due
+    eviction. Callers re-take `_lock` afterwards to read."""
     with _lock:
         _reload_jobs_from_disk_if_changed()
         eviction_due = bool(_expired_job_ids())
     if eviction_due:
         _persist_jobs()
+
+
+def get_job(job_id: str) -> JobStatus | None:
+    _refresh_for_read()
     with _lock:
         return _jobs.get(job_id)
 
@@ -346,20 +354,12 @@ def delete_job(job_id: str) -> bool:
         job = _jobs.get(job_id)
         if job is None or not is_terminal(job.status):
             return False
-        _jobs.pop(job_id, None)
-        _job_created_at.pop(job_id, None)
-        _cancelled_jobs.discard(job_id)
-        _pending_updates.pop(job_id, None)
-        session_lease.clear(job_id)
+        _forget_job(job_id)
         return True
 
 
 def touch_job_session(job_id: str, session_id: str | None) -> JobStatus | None:
-    with _lock:
-        _reload_jobs_from_disk_if_changed()
-        eviction_due = bool(_expired_job_ids())
-    if eviction_due:
-        _persist_jobs()
+    _refresh_for_read()
     with _lock:
         job = _jobs.get(job_id)
         if job is not None and not is_terminal(job.status):
