@@ -5,6 +5,9 @@ import { getJobStatus } from "@/lib/api";
 import { JobStatus as JobStatusType, ClipResult, PipelineDiagnostics } from "@/lib/types";
 import PipelineDiagnosticsPanel from "@/components/PipelineDiagnosticsPanel";
 
+// Tolerate a short backend outage (e.g. a `--reload` restart) before giving up.
+const MAX_CONSECUTIVE_POLL_FAILURES = 5;
+
 const STAGES = [
   "queued",
   "downloading",
@@ -63,11 +66,13 @@ export default function JobStatus({ jobId, onDone, onError, onDiagnostics }: Pro
 
   useEffect(() => {
     let stopped = false;
+    let failures = 0;
 
     const poll = async () => {
       try {
         const job: JobStatusType = await getJobStatus(jobId);
         if (stopped) return;
+        failures = 0;
         setStatus(job.status);
         setPct(job.progress_pct);
         setSpeed(job.download_speed ?? null);
@@ -89,6 +94,8 @@ export default function JobStatus({ jobId, onDone, onError, onDiagnostics }: Pro
         }
       } catch {
         if (stopped) return;
+        failures += 1;
+        if (failures < MAX_CONSECUTIVE_POLL_FAILURES) return;
         stopped = true;
         onError("Verbindung zum Server verloren");
       }
