@@ -780,3 +780,12 @@ class JobStatusPollDiagnosticsTests(unittest.TestCase):
         self.assertNotIn("gt_matches", self._stages())
         self.job = JobStatus(job_id="job-1", status="done", clips=[])
         self.assertIn("gt_matches", self._stages())
+
+    def test_diagnostics_of_a_job_gone_from_the_registry_are_dropped(self) -> None:
+        # #117 evicts old jobs without going through DELETE; their cached
+        # diagnostics must not outlive them.
+        jobs._diagnostics_cache["job-evicted"] = (("done", 0), {"available": True})
+        with patch.object(jobs, "get_job", side_effect=lambda jid: self.job if jid == "job-1" else None):
+            self._stages()
+        self.assertNotIn("job-evicted", jobs._diagnostics_cache)
+        self.assertIn("job-1", jobs._diagnostics_cache)

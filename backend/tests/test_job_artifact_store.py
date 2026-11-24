@@ -101,6 +101,18 @@ class MissingArtifactTests(unittest.TestCase):
             self.assertIsNone(store.read_stage(_JOB))
 
 
+class SegmentCountTests(unittest.TestCase):
+    def test_count_segments_matches_rows_written_and_zero_when_missing(self) -> None:
+        # The running-job status poll counts segments without parsing them (#122).
+        for label, store, tmp in _both_stores():
+            with self.subTest(adapter=label):
+                self.assertEqual(store.count_segments(_JOB), 0)
+                store.write_segments(_JOB, [{"start": 0.0}, {"start": 5.0}, {"start": 9.0}])
+                self.assertEqual(store.count_segments(_JOB), 3)
+            if tmp:
+                tmp.cleanup()
+
+
 class DebugPresenceTests(unittest.TestCase):
     def test_debug_artifacts_present_tracks_debug_writes_only(self) -> None:
         for label, store, tmp in _both_stores():

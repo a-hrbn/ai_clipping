@@ -163,6 +163,12 @@ class JobArtifactStore(abc.ABC):
     def read_segments(self, job_id: str) -> list[dict]:
         return self._read_jsonl(job_id, _ROLE_PATHS["segments"])
 
+    def count_segments(self, job_id: str) -> int:
+        """Number of segment rows, counted by line — no JSON decode, so the
+        status poll stays cheap on long VODs."""
+        text = self._read_text(job_id, _ROLE_PATHS["segments"])
+        return sum(1 for line in (text or "").splitlines() if line.strip())
+
     def write_segments(self, job_id: str, rows: list[dict]) -> None:
         self._write_jsonl(job_id, _ROLE_PATHS["segments"], rows)
 

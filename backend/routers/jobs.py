@@ -42,7 +42,7 @@ _SENTENCE_TRANSFORMERS_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
 _PYANNOTE_MODEL = "speaker-diarization-3.1"
 _BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 # Status-poll diagnostics of terminal jobs, keyed by job_id (see _cached_pipeline_diagnostics).
-# shortcut: unbounded; entries are a few KB and only dropped on delete — add eviction if job volume grows.
+# Entries of jobs gone from the registry (deleted or evicted) are pruned on every write.
 _diagnostics_cache: dict[str, tuple[tuple, dict]] = {}
 
 
@@ -131,7 +131,7 @@ def _job_pipeline_diagnostics(
             "stages": [],
         }
 
-    segments_count = len(store.read_segments(job_id))
+    segments_count = store.count_segments(job_id)
     transcript_status = "pending"
     transcript_details: list[str] = []
     if segments_count > 0:
@@ -1043,6 +1043,8 @@ def _cached_pipeline_diagnostics(job_id: str, job: JobStatus | dict) -> dict:
     if cached is not None and cached[0] == key:
         return cached[1]
     diagnostics = _job_pipeline_diagnostics(job_id, job)
+    for gone in [jid for jid in _diagnostics_cache if get_job(jid) is None]:
+        _diagnostics_cache.pop(gone, None)
     _diagnostics_cache[job_id] = (key, diagnostics)
     return diagnostics
 
