@@ -59,6 +59,7 @@ from ml.discover_iboclipss_clips import (  # noqa: E402
 )
 from ml.build_gt_vod_transcripts import _process_vod  # noqa: E402
 from ml.build_eval_manifest import dedup_moments  # noqa: E402
+from ml.gt_match_verify import filter_gold_candidates  # noqa: E402
 from ml.row_identity import read_jsonl, write_jsonl  # noqa: E402
 
 _DEFAULT_VOD_CSV = BACKEND_ROOT / "ml" / "jynxzi_gt_vods.csv"
@@ -537,18 +538,9 @@ def step_build_eval_manifest(
         _log_eval_summary(rows)
         return
 
-    filtered = [
-        r for r in matches
-        if float(r.get("transcript_similarity") or 0) >= min_similarity
-        and r.get("transcript_match_kind") != "audio_fingerprint_fallback"
-    ]
-    audio_dropped = sum(
-        1 for r in matches
-        if r.get("transcript_match_kind") == "audio_fingerprint_fallback"
-    )
-    if audio_dropped:
-        logger.info("      Dropped %d audio_fingerprint_fallback match(es) — transcript-only GT", audio_dropped)
-    logger.info("[5/5] eval_manifest: %d matches pass sim >= %.2f", len(filtered), min_similarity)
+    filtered = filter_gold_candidates(matches, min_similarity=min_similarity)
+    logger.info("[5/5] eval_manifest: %d/%d matches pass the gold filter (audio fallback or sim >= %.2f)",
+                len(filtered), len(matches), min_similarity)
 
     by_vod: dict[str, list[dict]] = {}
     for row in filtered:
