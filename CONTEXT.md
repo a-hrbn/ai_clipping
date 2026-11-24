@@ -57,9 +57,10 @@ Chat-Prefetch und das Ressourcen-Teardown. Enthält selbst keine Clip-Finding-Lo
 **Terminal status**: Ein Job-Status, der einen abgeschlossenen Lauf markiert (`done`,
 `failed`, `cancelled`); danach läuft der Job nicht mehr. Das Vokabular lebt an genau
 einer Stelle — `job_lifecycle` (`TERMINAL` + `is_terminal()`); Eviction, Cancel und
-Delete konsultieren dasselbe Prädikat. Bewusst ohne Transition-Enforcement: der
-Conductor ist der einzige Schreiber von `status`, und `jobs.json` wird Cross-Process
-neu geladen, sodass ein Guard legitime Catch-ups abweisen würde. _Avoid_: final state,
+Delete und Update konsultieren dasselbe Prädikat. Terminal ist **sticky**: `update_job`
+ignoriert jedes Update an einem terminalen Job, sodass ein später Fortschritts-Tick oder
+ein später `failed` einen Abbruch weder zurücksetzt noch umetikettiert; nur `create_job`
+startet einen neuen Lauf. Darüber hinaus keine Transition-Tabelle. _Avoid_: final state,
 end status.
 
 **Producer**: Ein deep module, das seine Inputs hinter einer kleinen Schnittstelle in

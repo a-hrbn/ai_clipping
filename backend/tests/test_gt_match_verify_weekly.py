@@ -198,6 +198,7 @@ class RunWeeklyMatchVerifyTests(unittest.TestCase):
             target_gold=10,
             target_vods=2,
             matched_at="2026-06-11T00:00:00+00:00",
+            download_repost=lambda url: self.cache_root / "short_form" / "clip.mp4",
         )
         kwargs.update(overrides)
         return weekly.run_weekly_match_verify(**kwargs)
@@ -267,6 +268,50 @@ class RunWeeklyMatchVerifyTests(unittest.TestCase):
         # State + gold manifest untouched: next week retries the same scan.
         self.assertEqual(self.gold_path.read_text(), gold_before)
         self.assertEqual(weekly.matched_ids(weekly.load_match_state(self.state_path)), {"g1"})
+
+    def test_reposts_are_downloaded_before_matching_and_failed_downloads_retry_next_run(self) -> None:
+        # #126: the matcher (like the real one) yields nothing for a repost
+        # without video_path, so each new repost must be downloaded first; a
+        # repost whose download fails is not marked done and is retried.
+        seen_by_matcher: list[dict] = []
+
+        def _media_only_match(reposts, captured_vod_ids, *, cache_root, **kwargs):
+            seen_by_matcher.extend(reposts)
+            with_media = [r for r in reposts if r.get("video_path")]
+            return self._fake_match_and_verify_factory({r["source_url"]: "gold" for r in with_media})(
+                with_media, captured_vod_ids, cache_root=cache_root
+            )
+
+        down_urls = {"u-bad"}
+        download_calls: list[str] = []
+
+        def _download(url):
+            download_calls.append(url)
+            if url in down_urls:
+                raise RuntimeError("HTTP Error 429: try again later")
+            return pathlib.Path(f"/cache/short_form/{url}.mp4")
+
+        reposts = [dict(_repost("ok", url="u-ok"), vod_id="V1"),
+                   dict(_repost("bad", url="u-bad"), vod_id="V2")]
+        first = self._run(reposts, ["V1", "V2"], match=_media_only_match, download_repost=_download)
+
+        self.assertEqual(
+            [(r["clip_id"], r.get("video_path")) for r in seen_by_matcher],
+            [("ok", "/cache/short_form/u-ok.mp4")],
+        )
+        self.assertEqual(first["accrual"]["gold"], 1)
+        self.assertEqual(first["download_failed"], 1)
+
+        # Next week the download works: only the previously failed repost is retried and matched.
+        down_urls.clear()
+        download_calls.clear()
+        seen_by_matcher.clear()
+        second = self._run(reposts, ["V1", "V2"], match=_media_only_match, download_repost=_download)
+
+        self.assertEqual(download_calls, ["u-bad"])
+        self.assertEqual([r["clip_id"] for r in seen_by_matcher], ["bad"])
+        self.assertEqual(second["accrual"]["gold"], 2)
+        self.assertEqual(second["download_failed"], 0)
 
 
 if __name__ == "__main__":

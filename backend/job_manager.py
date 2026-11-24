@@ -175,10 +175,15 @@ def update_job(job_id: str, **kwargs) -> None:
         if job is None:
             logger.debug("Ignoring update for missing job %s", job_id)
             return
-        previous_status = job.status
+        if is_terminal(job.status):
+            # Terminal is sticky: the run is over (done/failed/cancelled), so late
+            # progress ticks or a late `failed` must not resurrect or relabel it.
+            # Only create_job starts a fresh run.
+            logger.debug("Ignoring update for terminal job %s (%s)", job_id, job.status)
+            return
         for k, v in kwargs.items():
             setattr(job, k, v)
-        if is_terminal(job.status) and not is_terminal(previous_status):
+        if is_terminal(job.status):
             # Retain completed jobs for the full TTL after they reach a terminal state,
             # even if the job itself ran longer than _JOB_TTL_SECONDS.
             _job_created_at[job_id] = now

@@ -5,15 +5,14 @@ terminal?". Das `JobState`-`Literal` selbst bleibt der pydantic-Validierungstyp
 in `models` (die bestehende Validierungs-seam); dieses Modul ergänzt es um das
 Lifecycle-Prädikat, ersetzt es nicht.
 
-Bewusst KEINE Transition-Tabelle und KEINE Enforcement: der Conductor ist der
-einzige Schreiber von `status` (Invariante durch Konstruktion gehalten),
-`update_job` läuft überwiegend mit Nicht-Status-Kwargs, und `jobs.json` wird
-Cross-Process neu geladen — ein Guard würde legitime Catch-ups abweisen. Es
-existiert kein beobachteter Illegal-Transition-Bug.
+Genau eine Regel wird erzwungen: terminal ist sticky. `job_manager.update_job`
+ignoriert jedes Update an einem Job, der bereits terminal ist — sonst überschrieb
+der nächste Fortschritts-Tick des Workers ein `cancelled` mit einem laufenden
+Status und der Job lief weiter (#115). Nur `create_job` setzt einen Job für
+einen neuen Lauf zurück.
 
-Eskalationspfad (dokumentiert, nicht implementiert): Sollten illegale Übergänge
-je real auftreten, ist der nächste Schritt *advisory logging* — Übergänge
-protokollieren, nie raisen — und nicht eine erzwingende State-Machine.
+Bewusst KEINE volle Transition-Tabelle / State-Machine: zwischen den laufenden
+Stati ist jede Reihenfolge erlaubt.
 """
 
 # Benannte terminal-Status-Konstanten. Ein Serving-Job erreicht genau einen
