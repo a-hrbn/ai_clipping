@@ -313,6 +313,43 @@ class RunWeeklyMatchVerifyTests(unittest.TestCase):
         self.assertEqual(second["accrual"]["gold"], 2)
         self.assertEqual(second["download_failed"], 0)
 
+    def _captured_only_match(self):
+        """Fake matcher that, like the real one, only hits a repost once its VOD is captured."""
+        def _match(reposts, captured_vod_ids, *, cache_root, **kwargs):
+            hits = {r["source_url"]: "gold" for r in reposts if r.get("vod_id") in set(captured_vod_ids)}
+            return self._fake_match_and_verify_factory(hits)(reposts, captured_vod_ids, cache_root=cache_root)
+        return _match
+
+    def test_repost_without_a_hit_stays_open_and_is_retried_against_newly_captured_vods(self) -> None:
+        # #127: the repost's VOD is only captured the day after the weekly run.
+        late = [dict(_repost("late", url="u-late"), vod_id="V2")]
+        first = self._run(late, ["V1"], match=self._captured_only_match(),
+                          matched_at="2026-06-11T00:00:00+00:00")
+
+        self.assertEqual(first["accrual"]["gold"], 0)
+        self.assertNotIn("late", weekly.matched_ids(weekly.load_match_state(self.state_path)))
+
+        second = self._run(late, ["V1", "V2"], match=self._captured_only_match(),
+                           matched_at="2026-06-18T00:00:00+00:00")
+
+        self.assertEqual(self.match_calls[-1], ["late"])
+        self.assertEqual(second["accrual"]["gold"], 1)
+        self.assertIn("late", weekly.matched_ids(weekly.load_match_state(self.state_path)))
+
+    def test_repost_without_a_hit_is_finally_done_after_14_days(self) -> None:
+        never = [dict(_repost("never", url="u-never"), vod_id="V9")]
+        self._run(never, ["V1"], match=self._captured_only_match(), matched_at="2026-06-01T00:00:00+00:00")
+        self._run(never, ["V1"], match=self._captured_only_match(), matched_at="2026-06-14T00:00:00+00:00")
+        self.assertNotIn("never", weekly.matched_ids(weekly.load_match_state(self.state_path)))
+
+        self._run(never, ["V1"], match=self._captured_only_match(), matched_at="2026-06-16T00:00:00+00:00")
+        self.assertIn("never", weekly.matched_ids(weekly.load_match_state(self.state_path)))
+
+        # Done for good: a later run no longer hands it to the matcher.
+        self.match_calls.clear()
+        self._run(never, ["V1"], match=self._captured_only_match(), matched_at="2026-06-23T00:00:00+00:00")
+        self.assertEqual(self.match_calls, [[]])
+
 
 if __name__ == "__main__":
     unittest.main()
