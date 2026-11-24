@@ -9,6 +9,7 @@ import subprocess
 import threading
 from config import settings
 from job_manager import is_job_cancelled, update_job
+from pipeline_runner import keeps_source_media
 from producers.adapters import FsAudioCache
 from producers.audio import AudioResource
 from producers.chat import ChatEnrichment
@@ -42,74 +43,17 @@ def _raise_if_cancelled(job_id: str) -> None:
         raise PipelineCancelledError(f"Job {job_id} cancelled by client")
 
 
-def _frontend_cache_enabled_for_job(job_id: str) -> bool:
-    if bool(getattr(settings, "frontend_job_cache_enabled", False)):
-        return True
-    job_id = str(job_id or "")
-    return job_id.startswith(("twitch_vod", "judge_backfill_", "pipeline_debug_"))
-
-
 def _debug_job(job_id: str) -> bool:
     return str(job_id or "").startswith("pipeline_debug_")
 
 
 def _transcript_cache_enabled_for_job(job_id: str, url: str | None) -> bool:
-    if _frontend_cache_enabled_for_job(job_id):
+    if keeps_source_media(job_id):
         return True
     if not bool(getattr(settings, "frontend_transcript_cache_enabled", True)):
         return False
     return bool(_source_twitch_vod_id(url))
 
-
-
-def _path_is_relative_to(path: pathlib.Path, parent: pathlib.Path) -> bool:
-    try:
-        path.resolve(strict=False).relative_to(parent.resolve(strict=False))
-    except ValueError:
-        return False
-    return True
-
-
-def _cleanup_audio_artifacts(audio_path: pathlib.Path | None) -> None:
-    if audio_path is None:
-        return
-    try:
-        audio_path.unlink(missing_ok=True)
-    except OSError:
-        logger.warning("pipeline_audio_cleanup_failed path=%s", audio_path, exc_info=True)
-    chunks_dir = audio_path.parent / "chunks"
-    if chunks_dir.exists():
-        try:
-            shutil.rmtree(chunks_dir)
-        except OSError:
-            logger.warning("pipeline_audio_chunks_cleanup_failed path=%s", chunks_dir, exc_info=True)
-
-
-def _cleanup_serving_source_media(
-    *,
-    job_id: str,
-    video_path: pathlib.Path | None,
-    audio_path: pathlib.Path | None,
-) -> None:
-    if _frontend_cache_enabled_for_job(job_id):
-        return
-
-    job_dir = pathlib.Path(settings.storage_dir) / job_id
-    _cleanup_audio_artifacts(audio_path)
-
-    if video_path is None or not _path_is_relative_to(video_path, job_dir):
-        return
-
-    try:
-        video_path.unlink(missing_ok=True)
-        logger.info("pipeline_source_video_deleted job_id=%s path=%s", job_id, video_path)
-    except OSError:
-        logger.warning(
-            "pipeline_source_video_cleanup_failed job_id=%s path=%s",
-            job_id,
-            video_path,
-            exc_info=True,
-        )
 
 
 def _transcript_cache_source(url: str | None, video_path: pathlib.Path | None) -> str | None:
@@ -385,10 +329,6 @@ async def run_pipeline(
             band=(73, 87),
         )
 
-        transcripts_dir = pathlib.Path(__file__).parents[1] / "transcripts"
-        transcripts_dir.mkdir(exist_ok=True)
-        (transcripts_dir / f"{job_id}.txt").write_text(transcriber.format_transcript(transcript), encoding="utf-8")
-        (transcripts_dir / f"{job_id}.jsonl").write_text(transcriber.format_jsonl(transcript), encoding="utf-8")
         store.write_segments(job_id, _segment_records(transcript))
 
         # Clipping post-processes the moment rows, selects top-K, writes
@@ -436,13 +376,10 @@ async def run_pipeline(
         logger.exception("Pipeline failed for job %s", job_id)
         update_job(job_id, status="failed", error=str(e))
     finally:
+        # Source media (video/audio/chunks) is cleaned up by the jobs router
+        # after the worker subprocess exits, so it also runs after an OOM kill.
         if audio is not None:
             audio.teardown()
-        _cleanup_serving_source_media(
-            job_id=job_id,
-            video_path=video_path,
-            audio_path=None,
-        )
 
 
 async def _cleanup_later(job_id: str) -> None:

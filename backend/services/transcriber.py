@@ -1393,47 +1393,6 @@ def _deduplicate(segments: list[RichSegment]) -> list[RichSegment]:
 # Formatting
 # ---------------------------------------------------------------------------
 
-def format_transcript(
-    segments: list[RichSegment] | list[Segment],
-    use_seconds: bool = False,
-) -> str:
-    """Format segments as a transcript string.
-
-    Args:
-        segments: List of RichSegment or legacy (start, end, text) tuples.
-        use_seconds: When True, emit timestamps as raw float seconds so the
-            LLM can copy them directly into JSON without any conversion.
-            When False (default), emit HH:MM:SS for human readability.
-    """
-    lines = []
-    for seg in segments:
-        if isinstance(seg, RichSegment):
-            if use_seconds:
-                ts = f"[{seg.start:.2f} - {seg.end:.2f}]"
-            else:
-                ts = f"[{_fmt(seg.start)} - {_fmt(seg.end)}]"
-            parts = [ts]
-            if seg.speaker != "UNKNOWN":
-                parts.append(f"[{seg.speaker}]")
-            if seg.emotions:
-                parts.append(f"[{','.join(seg.emotions).upper()}]")
-            if seg.words_per_second:
-                parts.append(f"[{seg.words_per_second:.1f}w/s]")
-            if seg.chat_spike_score > 0:
-                parts.append(f"[CHAT:{seg.chat_spike_score:.2f}]")
-            parts.append(seg.text)
-            lines.append(" ".join(parts))
-        else:
-            # Legacy tuple support
-            start, end, text = seg
-            if use_seconds:
-                ts = f"[{start:.2f} - {end:.2f}]"
-            else:
-                ts = f"[{_fmt(start)} - {_fmt(end)}]"
-            lines.append(f"{ts} {text}")
-    return "\n".join(lines)
-
-
 def format_jsonl(segments: list[RichSegment]) -> str:
     """Return one JSON object per line, preserving all numerical features."""
     lines = []
@@ -1455,13 +1414,6 @@ def format_jsonl(segments: list[RichSegment]) -> str:
             "voice_energy_burst_score": seg.voice_energy_burst_score,
         }))
     return "\n".join(lines)
-
-
-def _fmt(seconds: float) -> str:
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    return f"{h:02d}:{m:02d}:{s:02d}"
 
 
 if __name__ == "__main__":
