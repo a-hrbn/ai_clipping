@@ -699,3 +699,84 @@ class FeedbackRoundtripTests(unittest.TestCase):
         })
         self.assertEqual(training.status_code, 404)
         self.assertEqual(gold.status_code, 404)
+
+
+class JobStatusPollDiagnosticsTests(unittest.TestCase):
+    """GET /api/jobs/{id} is polled every 2 s — the diagnostics must stay cheap (#122)."""
+
+    VOD = "2100000001"
+
+    def setUp(self) -> None:
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        jobs._diagnostics_cache.clear()
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.storage = root / "storage"
+        self.backend_root = root / "backend"
+        debug_dir = self.storage / "job-1" / "debug"
+        debug_dir.mkdir(parents=True)
+        (debug_dir / "segments.jsonl").write_text(
+            '{"start":0.0,"end":5.0,"text":"a"}\n{"start":5.0,"end":9.0,"text":"b"}\n',
+            encoding="utf-8",
+        )
+        (self.storage / "job-1" / "request.json").write_text(
+            jobs.json.dumps({"url": f"https://www.twitch.tv/videos/{self.VOD}"}), encoding="utf-8"
+        )
+        self.manifest = self.backend_root / "tmp" / "gt_runs" / "run-1" / "eval_manifest.jsonl"
+        self.manifest.parent.mkdir(parents=True)
+        self.manifest.write_text(
+            jobs.json.dumps({"vod_id": self.VOD, "gt_moments": [
+                {"start": 120, "end": 150, "match_similarity": 0.9, "views": 42000, "desc": "clutch"}
+            ]}) + "\n",
+            encoding="utf-8",
+        )
+        self.job = JobStatus(job_id="job-1", status="done", clips=[])
+        app = FastAPI()
+        app.include_router(jobs.router)
+        self.client = TestClient(app)
+        for p in (
+            patch.object(jobs.settings, "storage_dir", str(self.storage)),
+            patch.object(jobs, "_BACKEND_ROOT", self.backend_root),
+            patch.object(jobs, "touch_job_session", side_effect=lambda *_: self.job),
+            patch.object(jobs, "get_job", side_effect=lambda *_: self.job),
+            patch.object(jobs.session_lease, "drive_expiry", return_value=False),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(self._tmp.cleanup)
+        self.addCleanup(jobs._diagnostics_cache.clear)
+
+    def _stages(self) -> dict:
+        resp = self.client.get("/api/jobs/job-1")
+        self.assertEqual(resp.status_code, 200)
+        diag = resp.json()["pipeline_diagnostics"]
+        return {s["id"]: s for s in diag["stages"]}
+
+    def test_terminal_job_reports_gt_matches_stage(self) -> None:
+        stages = self._stages()
+        self.assertEqual(stages["transcript"]["summary"], "2 Transcript-Segmente.")
+        gt = stages["gt_matches"]
+        self.assertEqual(gt["summary"], f"1 verifizierte GT-Momente für VOD {self.VOD}.")
+        self.assertIn("t=120s–150s  sim=0.90  42k views — clutch", gt["details"][0])
+
+    def test_poll_on_running_job_does_not_read_gt_manifests(self) -> None:
+        self.job = JobStatus(job_id="job-1", status="clipping", clips=[])
+        stages = self._stages()
+        self.assertEqual(stages["transcript"]["summary"], "2 Transcript-Segmente.")
+        self.assertNotIn("gt_matches", stages)
+
+    def test_terminal_job_diagnostics_are_computed_once_and_reused(self) -> None:
+        first = self._stages()
+        # Artifacts change on disk after the job is terminal: later polls must not
+        # rescan them, so the response stays identical to the first one.
+        self.manifest.unlink()
+        (self.storage / "job-1" / "debug" / "segments.jsonl").write_text("", encoding="utf-8")
+        self.assertEqual(self._stages(), first)
+
+    def test_diagnostics_are_recomputed_after_the_job_leaves_running_state(self) -> None:
+        self.job = JobStatus(job_id="job-1", status="clipping", clips=[])
+        self.assertNotIn("gt_matches", self._stages())
+        self.job = JobStatus(job_id="job-1", status="done", clips=[])
+        self.assertIn("gt_matches", self._stages())
