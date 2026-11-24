@@ -104,6 +104,8 @@ def cut_clips(
         rank = idx + 1
         filename = f"clip_{rank:02d}.mp4"
         output_path = clips_dir / filename
+        error: str | None = None
+        result: ClipResult | None = None
         try:
             cut_raw_segment(video_path, start, end, output_path)
         except Exception as exc:
@@ -114,35 +116,31 @@ def cut_clips(
                 "clip_cut_failed job_id=%s index=%s rank=%s start=%s end=%s error=%s",
                 job_id, idx, rank, start, end, error,
             )
-            with _lock:
-                failures.append(error)
-                done_count += 1
-                d = done_count
-                so_far = [r for r in slot if r is not None]
-            if progress_cb is not None:
-                progress_cb(so_far, d, total)
-            return
-        result = ClipResult(
-            candidate_id=str(moment.get("candidate_id") or f"clip_{rank:02d}"),
-            filename=filename,
-            download_url=f"/static/{job_id}/clips/{filename}",
-            start_time=start,
-            end_time=end,
-            viral_score=moment["viral_score"],
-            reason=moment["reason"],
-            selection_reasons=list(moment.get("selection_reasons") or []),
-            ranking_mode=moment.get("ranking_mode", "heuristic"),
-            platform=moment.get("platform", "general"),
-            variant_key=str(moment.get("variant_key") or "balanced"),
-            variant_label=moment.get("variant_label"),
-            projected_hook_score=moment.get("projected_hook_score"),
-            projected_retention_score=moment.get("projected_retention_score"),
-            composite_score=moment.get("composite_score"),
-            value_score=moment.get("value_score"),
-            trend_score=moment.get("trend_score"),
-        )
+        else:
+            result = ClipResult(
+                candidate_id=str(moment.get("candidate_id") or f"clip_{rank:02d}"),
+                filename=filename,
+                download_url=f"/static/{job_id}/clips/{filename}",
+                start_time=start,
+                end_time=end,
+                viral_score=moment["viral_score"],
+                reason=moment["reason"],
+                selection_reasons=list(moment.get("selection_reasons") or []),
+                ranking_mode=moment.get("ranking_mode", "heuristic"),
+                platform=moment.get("platform", "general"),
+                variant_key=str(moment.get("variant_key") or "balanced"),
+                variant_label=moment.get("variant_label"),
+                projected_hook_score=moment.get("projected_hook_score"),
+                projected_retention_score=moment.get("projected_retention_score"),
+                composite_score=moment.get("composite_score"),
+                value_score=moment.get("value_score"),
+                trend_score=moment.get("trend_score"),
+            )
         with _lock:
-            slot[idx] = result
+            if result is None:
+                failures.append(error)
+            else:
+                slot[idx] = result
             done_count += 1
             d = done_count
             so_far = [r for r in slot if r is not None]
