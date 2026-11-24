@@ -137,6 +137,86 @@ class ApplyTiersTests(unittest.TestCase):
         self.assertEqual(review["start"], 100.0)
         self.assertNotIn("boundary_source", review)
 
+    def test_second_boundary_run_keeps_transcript_window_of_refined_moment(self) -> None:
+        # A second verification run re-verifies the already refined window
+        # (its key changed with start/end) and confirms it as gold again.
+        first_pass = [{
+            "key": "123:495.00:521.00", "gt_tier": "gold", "boundary_basis": "full_fingerprint",
+            "refined_start": 500.0, "refined_end": 520.0,
+        }]
+        second_pass = first_pass + [{
+            "key": "123:500.00:520.00", "gt_tier": "gold", "boundary_basis": "full_fingerprint",
+            "refined_start": 500.12, "refined_end": 520.12,
+        }]
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_path = pathlib.Path(tmp) / "manifest.jsonl"
+            manifest_path.write_text(json.dumps({
+                "vod_id": "123",
+                "gt_moments": [{"start": 495.0, "end": 521.0, "source_url": "https://youtu.be/a"}],
+            }) + "\n", encoding="utf-8")
+
+            verifier.apply_tiers(manifest_path, first_pass, apply_boundaries=True)
+            result = verifier.apply_tiers(manifest_path, second_pass, apply_boundaries=True)
+            moment = json.loads(manifest_path.read_text(encoding="utf-8"))["gt_moments"][0]
+
+        self.assertEqual(result["boundaries_applied"], 0)
+        self.assertEqual((moment["start"], moment["end"]), (500.0, 520.0))
+        self.assertEqual((moment["transcript_start"], moment["transcript_end"]), (495.0, 521.0))
+        self.assertEqual(moment["boundary_source"], "audio_refined")
+
+    def test_malformed_manifest_line_aborts_instead_of_being_dropped(self) -> None:
+        good = json.dumps({"vod_id": "123", "gt_moments": [{"start": 495.0, "end": 521.0}]})
+        original = good + "\n" + '{"vod_id": "456", "gt_moments": [' + "\n"
+        verification_rows = [{"key": "123:495.00:521.00", "gt_tier": "gold"}]
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_path = pathlib.Path(tmp) / "manifest.jsonl"
+            manifest_path.write_text(original, encoding="utf-8")
+
+            with self.assertRaises(ValueError) as caught:
+                verifier.apply_tiers(manifest_path, verification_rows, apply_boundaries=False)
+            after = manifest_path.read_text(encoding="utf-8")
+
+        self.assertIn(f"{manifest_path}:2", str(caught.exception))
+        self.assertEqual(after, original)
+
+
+class MainVerificationFileTests(unittest.TestCase):
+    def test_rejudge_aborts_on_malformed_verification_line_without_rewriting(self) -> None:
+        manifest = json.dumps({"vod_id": "123", "gt_moments": [{"start": 495.0, "end": 521.0}]}) + "\n"
+        verification = json.dumps({"key": "123:495.00:521.00", "verdict": "not_confirmed"}) + "\n" + '{"key": "123:1' + "\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_path = pathlib.Path(tmp) / "manifest.jsonl"
+            output_path = pathlib.Path(tmp) / "verification.jsonl"
+            manifest_path.write_text(manifest, encoding="utf-8")
+            output_path.write_text(verification, encoding="utf-8")
+
+            with self.assertRaises(ValueError) as caught:
+                verifier.main(["--manifest", str(manifest_path), "--output", str(output_path), "--rejudge"])
+            after = output_path.read_text(encoding="utf-8")
+
+        self.assertIn(f"{output_path}:2", str(caught.exception))
+        self.assertEqual(after, verification)
+
+    def test_rejudge_rewrites_verification_rows_under_current_rule(self) -> None:
+        manifest = json.dumps({"vod_id": "123", "gt_moments": [{"start": 495.0, "end": 521.0}]}) + "\n"
+        stale = {
+            "key": "123:495.00:521.00", "verdict": "not_confirmed", "gt_tier": "review",
+            "confirm_confidence": 0.9, "null_confidence": 0.5, "refined_offset_sec": 1.0,
+            "boundary_basis": "full_fingerprint", "match_similarity": 0.4,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_path = pathlib.Path(tmp) / "manifest.jsonl"
+            output_path = pathlib.Path(tmp) / "verification.jsonl"
+            manifest_path.write_text(manifest, encoding="utf-8")
+            output_path.write_text(json.dumps(stale) + "\n", encoding="utf-8")
+
+            with patch.object(verifier.shutil, "which", return_value=None):
+                with self.assertRaises(RuntimeError):  # stops at the fpcalc check, after rejudging
+                    verifier.main(["--manifest", str(manifest_path), "--output", str(output_path), "--rejudge"])
+            rows = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
+
+        self.assertEqual([(r["verdict"], r["gt_tier"]) for r in rows], [("confirmed", "gold")])
+
 
 if __name__ == "__main__":
     unittest.main()
